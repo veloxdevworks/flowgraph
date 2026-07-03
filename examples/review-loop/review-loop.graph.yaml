@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: review-loop
+  description: >
+    Draft content, pause for human review, revise and loop back on rejection until
+    approved — demonstrates conditional branching and cyclic control flow.
+
+state:
+  channels:
+    topic: { type: string, default: "Product launch announcement" }
+    draft: { type: string }
+    approval: { type: object }
+    revision: { type: number, default: 0 }
+    final: { type: string }
+
+nodes:
+  - id: draft
+    type: code
+    with:
+      fn: draftContent
+      input:
+        topic: "{{ state.topic }}"
+        revision: "{{ state.revision }}"
+      output: { to: draft }
+
+  - id: review
+    type: hitl
+    with:
+      mode: approve
+      message: "Approve this draft? (revision {{ state.revision }})"
+      output: { to: approval }
+
+  - id: revise
+    type: intelligent
+    when: "{{ state.approval.approved == false }}"
+    with:
+      prompt: >
+        Reviewer rejected the draft. Improve clarity and tone, then prepare
+        for another review cycle.
+      maxSteps: 2
+      output: { to: draft }
+
+  - id: finalize
+    type: code
+    when: "{{ state.approval.approved }}"
+    with:
+      fn: finalizeContent
+      input: { draft: "{{ state.draft }}" }
+      output: { to: final }
+
+edges:
+  - { from: START, to: draft }
+  - { from: draft, to: review }
+  - from: review
+    branch:
+      - when: "{{ state.approval.approved }}"
+        to: finalize
+      - default: true
+        to: revise
+  - { from: revise, to: draft }
+  - { from: finalize, to: END }
+
+runtime:
+  checkpoint:
+    enabled: true
+    backend: sqlite
+    path: ".flowgraph/review-loop.db"

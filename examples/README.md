@@ -10,6 +10,7 @@ Runnable vertical slices demonstrating flowgraph features. Each example includes
 | [triage-issue](./triage-issue/) | `code` + `router` + `skill` (north-star) | None | [README](./triage-issue/README.md) |
 | [release-notes](./release-notes/) | HITL interrupt + durable resume | `register.ts` | [README](./release-notes/README.md) |
 | [hitl](./hitl/) | `hitl` node + interactive/CI resume | None | [README](./hitl/README.md) |
+| [review-loop](./review-loop/) | Branching + revise loop until approved | None | — |
 | [composition](./composition/) | `map` + `subgraph` fan-out | `register.ts` | [README](./composition/README.md) |
 | [reducers](./reducers/) | Custom reducers + parallel fan-out | `register.ts` | [README](./reducers/README.md) |
 | [skill-pack](./skill-pack/) | Portable skill packaging | None | [README](./skill-pack/README.md) |
@@ -41,6 +42,7 @@ cd examples/quickstart && pnpm start
 | Run something with no TypeScript | [quickstart](./quickstart/) |
 | Register custom functions | [triage-issue](./triage-issue/) |
 | Pause for human approval | [release-notes](./release-notes/) or [hitl](./hitl/) |
+| Loop until human approves | [review-loop](./review-loop/) |
 | Run an LLM agent | [claude-agent](./claude-agent/) or [cursor-agent](./cursor-agent/) |
 | Fan out work in parallel | [composition](./composition/) or [reducers](./reducers/) |
 | Write automated tests | [composition/composition.test.ts](./composition/composition.test.ts) |
