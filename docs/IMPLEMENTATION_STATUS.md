@@ -81,6 +81,6 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 | `docs/13`–`15` | User-facing operational guides |
 | `docs/adr/` | Locked architecture decisions |
 | `examples/*/README.md` | Runnable walkthroughs |
-| `apps/docs/` | Public docs website (Vite + React) |
+| Hosted docs site | `@velox/flowgraph-docs` in private `flowgraph-app` repo (markdown source stays in `docs/`) |
 
 When adding features, update this file and the relevant CLI/spec doc in the same PR.

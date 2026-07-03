@@ -83,7 +83,7 @@ flowgraph wraps LangGraph.js with a low-code/no-code packaging layer so that:
 - **[Examples](./examples/README.md)** — runnable vertical slices
 - **[Implementation status](./docs/IMPLEMENTATION_STATUS.md)** — shipped vs planned
 
-Public docs site (when deployed): [veloxdevworks.com/flowgraph](https://veloxdevworks.com/flowgraph/)
+Public docs site: [veloxdevworks.com/flowgraph](https://veloxdevworks.com/flowgraph/) (built from the private [`flowgraph-app`](https://github.com/veloxdevworks/flowgraph-app) repo; markdown source lives here in `docs/`).
 
 ## Status
 

@@ -51,6 +51,3 @@ jobs:
             node packages/cli/dist/bin.js validate "$f"
           done
         continue-on-error: true
-
-      - name: Build docs site
-        run: pnpm --filter @velox/flowgraph-docs build

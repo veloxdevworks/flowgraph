@@ -22,7 +22,7 @@ Rename the project to **flowgraph**, published under the shared **`@veloxdevwork
 - local state directory: `.flowgraph/` (checkpoints, MCP OAuth tokens, TUI history)
 - docs site path: `veloxdevworks.com/flowgraph/`; hosted schema: `veloxdevworks.com/flowgraph/schema/v1.json`
 - GitHub org/repo: `veloxdevworks/flowgraph`
-- docs-site-only (private, unpublished) package: `@velox/flowgraph-docs`, matching the `@velox/formulas-docs` / `@velox/i18n-docs` convention for docs apps
+- docs-site-only (private, unpublished) package: `@velox/flowgraph-docs` in repo `veloxdevworks/flowgraph-app`, matching the `@velox/formulas-docs` / `@velox/i18n-docs` convention for docs apps
 
 The `flowgraph migrate` command already generically rewrites any `apiVersion` value to the current token, so existing `ai-graph/v1` specs migrate forward with no special-cased logic.
 
