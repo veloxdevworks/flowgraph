@@ -186,7 +186,7 @@ When a skill is listed under an `intelligent` node's `with.tools`, flowgraph wra
 - Invocation runs the skill through the normal runtime (events/traces/contract validation), and the result is returned to the agent.
 - `sideEffecting` skills can require `permission: ask`, turning a tool call into a HITL approval.
 
-This is the mechanism behind hub-and-spoke ([ADR-0003](./adr/0003-intelligent-node-hub-and-spoke.md)): the agent is the hub, skills/nodes are the spokes, and the contract + preflight keep those calls safe.
+This is the hub-and-spoke pattern in practice: the agent is the hub, skills/nodes are the spokes, and the contract + preflight keep those calls safe.
 
 ## 8. Authoring guidelines
 

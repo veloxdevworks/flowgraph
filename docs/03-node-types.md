@@ -72,7 +72,7 @@ An LLM-driven agent that runs a tool-calling loop. **This is the hub in hub-and-
       to: implementation           # or map: { ... }
 ```
 
-### Hub & spoke semantics ([ADR-0003](./adr/0003-intelligent-node-hub-and-spoke.md))
+### Hub & spoke semantics
 
 - The agent runs **inside a single graph node**. Its internal tool-calls do **not** create graph edges; they are intra-node steps. This keeps the graph topology readable while allowing rich agent behavior.
 - A tool that is a **skill** or **node** is invoked through flowgraph's runtime, so tool-calls still emit events/traces (nested spans under the agent span) and respect contracts.
@@ -180,7 +180,7 @@ nodes:
 - Emits `mcp.tool.call` / `mcp.tool.result` or `mcp.resource.read` events.
 - Requires an `McpHub` at run time (CLI builds it automatically from `mcpServers`; programmatic runs pass `compileGraph({ mcp })`).
 
-See [ADR-0011](./adr/0011-mcp-first-integrations.md) and `examples/mcp/`.
+See `examples/mcp/` for a runnable walkthrough.
 
 ### `http` — make an outbound request
 
@@ -261,7 +261,9 @@ Composes a child graph as a single node. Enables modular libraries of graphs and
       out: { summary: testResults }
 ```
 
-The child graph runs with its own channels; `stateMap` projects parent state in and child state out. Child events are nested under the parent's span. Subgraphs may have their own checkpoint namespace.
+The child graph runs with its own channels; `stateMap` projects parent state in and child state out. Child events are nested under the parent's span. The parent must use checkpointing (`runtime.checkpoint`) for nested HITL inside the child to pause and resume correctly — the child inherits the parent's LangGraph checkpointer.
+
+On resume, the parent `subgraph` node re-executes from the top (recomputing `stateMap.in`). Side effects reached before a nested interrupt should use `ctx.once()` so they do not re-fire on replay (same pattern as top-level HITL nodes).
 
 ---
 

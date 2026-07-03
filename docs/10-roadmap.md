@@ -13,7 +13,7 @@ A phased plan from empty repo → community-ready v1.0. Each phase ends with a *
 | 2 — Skills | **Done** | `skills doctor`, skill packs, preflight |
 | 3 — Durability & HITL | **Mostly done** | `release-notes` + `resume`; `dev --step` / `resumeFrom` planned |
 | 4 — Intelligent + providers | **Done** | Claude, Cursor, LangChain adapters; MCP agent tools |
-| 5 — Composition & scale | **Partial** | `map` + `subgraph` shipped; `software-factory` example not built |
+| 5 — Composition & scale | **Partial** | `map` + `subgraph` + nested HITL shipped; `software-factory` example not built |
 | 6 — Observability (full) | **Partial** | OTel package exists; CLI `--otel` not wired; full hook surface partial |
 | 7 — DX & docs | **In progress** | Getting started, implementation status, docs site scaffold |
 

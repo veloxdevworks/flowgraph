@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, type RunOptions, type ResumeOptions, type InterruptInfo } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, type RunOptions, type ResumeOptions, type InterruptInfo } from "@veloxdevworks/flowgraph-core";
 import { isError, generateJsonSchema } from "@veloxdevworks/flowgraph-spec";
 import { buildSkillsCommand } from "./skills-command.js";
 import { checkpointerOption, promptResolver, serializePendingInterrupts } from "./interrupts.js";
@@ -73,8 +73,19 @@ program
     const allDiags = [...loadDiags];
 
     if (spec) {
-      await loadGraphImports(spec, { cwd });
+      const imported = await loadGraphImports(spec, { cwd });
       allDiags.push(...validateSpec(spec));
+
+      if (opts.preflight) {
+        const pf = await preflightGraphSkills(spec, {
+          cwd,
+          skillAliases: imported.skillAliases,
+        });
+        allDiags.push(...pf.diagnostics);
+        if (opts.format !== "json" && pf.report) {
+          console.log(pf.report);
+        }
+      }
     }
 
     const strict = opts.strict ?? false;
@@ -85,6 +96,9 @@ program
     } else {
       if (allDiags.length === 0) {
         printSuccess(`${graphPath} is valid`);
+      } else if (!hasError) {
+        printSuccess(`${graphPath} is valid`);
+        printDiagnostics(allDiags.filter((d) => d.severity === "warning"), graphPath);
       } else {
         console.log(pc.bold(`\nValidating ${graphPath}`));
         printDiagnostics(allDiags, graphPath);
@@ -131,13 +145,24 @@ program
 
     const graphDir = path.dirname(path.resolve(cwd, graphPath));
 
-    await loadGraphImports(spec, { cwd: graphDir });
+    const imported = await loadGraphImports(spec, { cwd: graphDir });
 
     const lintDiags = validateSpec(spec);
     const fatalDiags = [...loadDiags, ...lintDiags].filter(isError);
     if (fatalDiags.length > 0) {
       printError("Graph has errors:");
       printDiagnostics(fatalDiags, graphPath);
+      process.exit(2);
+    }
+
+    const preflight = await preflightGraphSkills(spec, {
+      cwd: graphDir,
+      skillAliases: imported.skillAliases,
+    });
+    if (!preflight.ok) {
+      printError("Skill preflight failed — fix environment before running:");
+      if (preflight.report) console.log(preflight.report);
+      else printDiagnostics(preflight.diagnostics, graphPath);
       process.exit(2);
     }
 
@@ -235,6 +260,19 @@ program
     if (!spec) {
       printError("Failed to load graph:");
       printDiagnostics(loadDiags, graphPath);
+      process.exit(2);
+    }
+
+    const graphDir = path.dirname(path.resolve(cwd, graphPath));
+    const imported = await loadGraphImports(spec, { cwd: graphDir });
+    const preflight = await preflightGraphSkills(spec, {
+      cwd: graphDir,
+      skillAliases: imported.skillAliases,
+    });
+    if (!preflight.ok) {
+      printError("Skill preflight failed:");
+      if (preflight.report) console.log(preflight.report);
+      else printDiagnostics(preflight.diagnostics, graphPath);
       process.exit(2);
     }
 

@@ -48,6 +48,9 @@ export { expandMcpTools, requireMcpHub, mcpToolName, parseMcpToolName, isMcpTool
 export type { McpToolRef } from "./mcp/expand.js";
 export { resolveSkillPath } from "./skill-resolver.js";
 export type { SkillAliasMap, SkillResolverOptions } from "./skill-resolver.js";
+export { discoverSkillUses } from "./discover-skills.js";
+export { preflightGraphSkills } from "./preflight-graph.js";
+export type { PreflightGraphOptions, PreflightGraphResult } from "./preflight-graph.js";
 
 // Hooks — lifecycle interception (mutate/veto/route/retry/interrupt)
 export { createHookBus } from "./hooks/bus.js";

@@ -1,0 +1,19 @@
+{
+  "name": "review-loop-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "flowgraph run review-loop.graph.yaml --stream --on-interrupt fail --thread review-loop",
+    "test": "vitest run",
+    "validate": "flowgraph validate review-loop.graph.yaml"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-testing": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

@@ -16,7 +16,7 @@ state:
     final: { type: string }
 
 nodes:
-  - id: draft
+  - id: write-draft
     type: code
     with:
       fn: draftContent
@@ -33,14 +33,16 @@ nodes:
       output: { to: approval }
 
   - id: revise
-    type: intelligent
+    type: code
     when: "{{ state.approval.approved == false }}"
     with:
-      prompt: >
-        Reviewer rejected the draft. Improve clarity and tone, then prepare
-        for another review cycle.
-      maxSteps: 2
-      output: { to: draft }
+      fn: reviseContent
+      input:
+        draft: "{{ state.draft }}"
+      output:
+        map:
+          draft: "{{ result }}"
+          revision: "{{ state.revision + 1 }}"
 
   - id: finalize
     type: code
@@ -51,19 +53,18 @@ nodes:
       output: { to: final }
 
 edges:
-  - { from: START, to: draft }
-  - { from: draft, to: review }
+  - { from: START, to: write-draft }
+  - { from: write-draft, to: review }
   - from: review
     branch:
       - when: "{{ state.approval.approved }}"
         to: finalize
       - default: true
         to: revise
-  - { from: revise, to: draft }
+  - { from: revise, to: review }
   - { from: finalize, to: END }
 
 runtime:
   checkpoint:
     enabled: true
-    backend: sqlite
-    path: ".flowgraph/review-loop.db"
+    backend: memory

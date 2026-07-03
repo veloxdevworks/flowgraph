@@ -3,7 +3,7 @@
  * plus run/resume/inspect with durability, HITL, and retry/timeout.
  */
 
-import { START, END, StateGraph, MemorySaver, InMemoryStore, Command, type BaseCheckpointSaver, type BaseStore } from "@langchain/langgraph";
+import { START, END, StateGraph, MemorySaver, InMemoryStore, Command, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import * as path from "node:path";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
@@ -109,7 +109,213 @@ export interface CompiledGraph {
   stream(opts?: RunOptions): AsyncIterable<FlowgraphEvent>;
 }
 
+/** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
+export interface EmbeddedCompiledGraph {
+  compiledLg: ReturnType<StateGraph<unknown>["compile"]>;
+}
+
+export async function compileGraphForEmbedding(
+  spec: GraphSpec,
+  opts: CompileOptions = {},
+): Promise<EmbeddedCompiledGraph> {
+  const { compiledLg } = await assembleCompiledLangGraph(spec, {
+    ...opts,
+    checkpointer: "none",
+    sinks: [],
+  });
+  return { compiledLg };
+}
+
+interface AssembledGraph {
+  spec: GraphSpec;
+  runId: string;
+  events: EventBus;
+  compiledLg: ReturnType<StateGraph<unknown>["compile"]>;
+  checkpointer: BaseCheckpointSaver | undefined;
+  hooks: HookBus;
+  baseCtx: Partial<RunContext>;
+  graphDir: string;
+  interruptBefore: string[];
+  interruptAfter: string[];
+  defaultPolicy: InterruptPolicy;
+}
+
 export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): Promise<CompiledGraph> {
+  const assembled = await assembleCompiledLangGraph(spec, opts);
+  const {
+    spec: graphSpec,
+    runId,
+    events,
+    compiledLg,
+    checkpointer,
+    hooks,
+    baseCtx,
+    interruptBefore,
+    interruptAfter,
+    defaultPolicy,
+  } = assembled;
+
+  const executeInvoke = async (
+    payload: Record<string, unknown> | Command,
+    runOpts: RunOptions | ResumeOptions,
+    isResume: boolean,
+  ): Promise<RunResult> => {
+    const startMs = Date.now();
+    const threadId = runOpts.threadId ?? `thread-${runId}`;
+    const startedAt = new Date().toISOString();
+    const runMeta: RunMeta = { runId, graph: graphSpec.metadata.name, startedAt, threadId };
+
+    (baseCtx as RunContext).meta = runMeta;
+    (baseCtx as RunContext).logger = createLogger(events, graphSpec.metadata.name);
+    if (runOpts.signal !== undefined) (baseCtx as RunContext).signal = runOpts.signal;
+
+    const unsubs = (runOpts.sinks ?? []).map((s) => events.subscribe(s));
+    const policy = runOpts.onInterrupt ?? defaultPolicy;
+    const cfg = buildInvokeConfig(threadId, graphSpec);
+
+    events.emit(isResume ? "interrupt.resumed" : "run.start", {
+      graphName: graphSpec.metadata.name,
+    });
+
+    try {
+      let current: Record<string, unknown> | Command = payload;
+
+      if (!isResume && !(payload instanceof Command) && hooks.has("run:before")) {
+        const r = await hooks.run("run:before", {
+          state: payload,
+          run: runMeta,
+          payload: { input: payload as Record<string, unknown> },
+        });
+        if (r.payload.input) current = r.payload.input;
+      }
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const result = ((await compiledLg.invoke(
+          current as Parameters<typeof compiledLg.invoke>[0],
+          { ...cfg, signal: runOpts.signal } as Parameters<typeof compiledLg.invoke>[1],
+        )) ?? {}) as Record<string, unknown>;
+
+        const interrupts = extractInterrupts(result);
+
+        if (interrupts.length === 0) {
+          if (checkpointer && (interruptBefore.length || interruptAfter.length)) {
+            const snap = await compiledLg.getState(cfg);
+            if (snap && Array.isArray(snap.next) && snap.next.length > 0) {
+              const clean = stripReserved(result);
+              const bp: InterruptInfo[] = [{ id: `breakpoint:${snap.next.join(",")}`, reason: `Paused before: ${snap.next.join(", ")}` }];
+              events.emit("interrupt.raised", { interrupts: bp });
+              if (policy === "fail" || policy === "webhook" || !runOpts.resolveInterrupt) {
+                return { status: "interrupted", state: clean, runId, threadId, interrupts: bp, durationMs: Date.now() - startMs };
+              }
+              await runOpts.resolveInterrupt(bp);
+              current = new Command({ resume: null });
+              continue;
+            }
+          }
+          const clean = stripReserved(result);
+          if (hooks.has("run:after")) {
+            await hooks.run("run:after", { state: clean, run: runMeta, payload: { update: clean } });
+          }
+          events.emit("run.end", { state: clean, durationMs: Date.now() - startMs });
+          return { status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs };
+        }
+
+        events.emit("interrupt.raised", { interrupts });
+
+        if (policy === "fail" || policy === "webhook") {
+          const clean = stripReserved(result);
+          return {
+            status: "interrupted",
+            state: clean,
+            runId,
+            threadId,
+            interrupts,
+            durationMs: Date.now() - startMs,
+          };
+        }
+
+        let resumeValue: unknown;
+        if (runOpts.resolveInterrupt) {
+          resumeValue = await runOpts.resolveInterrupt(interrupts);
+        } else if (policy === "approve") {
+          resumeValue = true;
+        } else {
+          const clean = stripReserved(result);
+          return {
+            status: "interrupted",
+            state: clean,
+            runId,
+            threadId,
+            interrupts,
+            durationMs: Date.now() - startMs,
+          };
+        }
+
+        events.emit("interrupt.resumed", { resume: resumeValue });
+        current = new Command({ resume: resumeValue });
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (hooks.has("run:error")) {
+        try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
+      }
+      events.emit("run.error", { error: error.message, durationMs: Date.now() - startMs });
+      return { status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs };
+    } finally {
+      for (const u of unsubs) u();
+    }
+  };
+
+  const toSnapshot = (
+    snap: { values: Record<string, unknown>; next: readonly string[]; config?: { configurable?: { checkpoint_id?: string } }; createdAt?: string; tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id: string; value?: unknown }> }> },
+  ): StateSnapshot => {
+    const interrupts: InterruptInfo[] = [];
+    for (const task of snap.tasks ?? []) {
+      for (const it of task.interrupts ?? []) {
+        interrupts.push(toInterruptInfo(it));
+      }
+    }
+    return {
+      values: stripReserved(snap.values),
+      next: [...snap.next],
+      checkpointId: snap.config?.configurable?.checkpoint_id,
+      createdAt: snap.createdAt,
+      interrupts,
+    };
+  };
+
+  return {
+    spec: graphSpec,
+    runId,
+    events,
+    run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, false),
+    resume: (resumeOpts: ResumeOptions) =>
+      executeInvoke(new Command({ resume: resumeOpts.resume }), resumeOpts, true),
+    getState: async (threadId: string) => {
+      if (!checkpointer) return null;
+      const snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return toSnapshot(snap as any);
+    },
+    getStateHistory: async (threadId: string) => {
+      if (!checkpointer) return [];
+      const snapshots: StateSnapshot[] = [];
+      for await (const snap of compiledLg.getStateHistory({ configurable: { thread_id: threadId } })) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        snapshots.push(toSnapshot(snap as any));
+      }
+      return snapshots;
+    },
+    stream: async function* (runOpts: RunOptions = {}) {
+      const streamP = events.stream();
+      executeInvoke(runOpts.input ?? {}, runOpts, false).catch(() => {});
+      yield* streamP;
+    },
+  };
+}
+
+async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions): Promise<AssembledGraph> {
   const cwd = opts.cwd ?? process.cwd();
   const graphDir =
     opts.graphPath != null
@@ -124,7 +330,6 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   }
   for (const provider of opts.providers ?? []) registerProvider(provider);
 
-  // Process imports: custom node/provider/reducer plugins + skill/subgraph aliases.
   const imported = await loadGraphImports(spec, { cwd: graphDir });
   const skillAliases: Record<string, string> = { ...(opts.runConfig?.skills ?? {}), ...imported.skillAliases };
   const subgraphAliases: Record<string, string> = { ...(opts.runConfig?.subgraphs ?? {}), ...imported.subgraphAliases };
@@ -132,7 +337,6 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   const StateAnnotation = buildStateAnnotation(spec);
   const graph = new StateGraph(StateAnnotation);
 
-  // Budget tracker (shared across intelligent nodes for the run)
   let budget: BudgetState | undefined;
   if (spec.runtime?.budget) {
     budget = {
@@ -144,11 +348,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     };
   }
 
-  // Tool wiring populated after all nodes are built (for node-as-tool).
   const toolWiring: ToolWiring = { mcp: opts.mcp };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();
 
-  // Hook bus: default guardrails (lowest priority), then YAML-bound, then programmatic.
   const hooks: HookBus = createHookBus(events);
   for (const h of defaultGuardrailHooks(spec)) hooks.register(h);
   for (const h of hooksFromSpec(spec)) hooks.register(h);
@@ -172,7 +374,6 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     store,
   };
 
-  // Resolve default retry/timeout from runtime config
   const defaultRetry = spec.runtime?.retry;
   const defaultTimeout = spec.runtime?.timeoutDefault;
 
@@ -201,10 +402,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const nsRecord = nodeSpec as unknown as Record<string, unknown>;
 
     type NodeRun = { res: NodeResult; ctx: NodeRunContext & { _onceUpdates: Record<string, unknown> } };
-    const runOnce = (state: Record<string, unknown>, inputOverride?: Record<string, unknown>): Promise<NodeRun> =>
+    const runOnce = (
+      state: Record<string, unknown>,
+      inputOverride?: Record<string, unknown>,
+      lgConfig?: LangGraphRunnableConfig,
+    ): Promise<NodeRun> =>
       runWithPolicy<NodeRun>(
         (attempt) => {
-          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphDir, attempt, inputOverride);
+          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphDir, attempt, inputOverride, lgConfig);
           return compiled.run(state, ctx).then((res) => ({ res, ctx }));
         },
         {
@@ -223,7 +428,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       return update;
     };
 
-    graph.addNode(nodeSpec.id, async (state: Record<string, unknown>) => {
+    graph.addNode(nodeSpec.id, async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
       const runMeta = (baseCtx.meta ?? { runId, graph: spec.metadata.name, startedAt: "" }) as RunMeta;
 
       // `when` guard
@@ -256,7 +461,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       events.emit("node.start", { nodeId: nodeSpec.id, type: nodeSpec.type }, scope);
 
       try {
-        const run = await runOnce(state, inputOverride);
+        const run = await runOnce(state, inputOverride, lgConfig);
         let update = finalizeUpdate(run);
 
         // node:after — mutate output / route
@@ -296,7 +501,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           }
           if (c?.kind === "retry") {
             events.emit("node.retry", { nodeId: nodeSpec.id, reason: "hook" }, scope);
-            const retried = await runOnce(state, inputOverride);
+            const retried = await runOnce(state, inputOverride, lgConfig);
             const update = finalizeUpdate(retried);
             events.emit("node.end", { nodeId: nodeSpec.id, update }, scope);
             return update;
@@ -363,174 +568,18 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
   const defaultPolicy: InterruptPolicy = spec.runtime?.hitl?.onInterrupt ?? "fail";
 
-  // -------------------------------------------------------------------------
-  // Execution helpers
-  // -------------------------------------------------------------------------
-
-  const executeInvoke = async (
-    payload: Record<string, unknown> | Command,
-    runOpts: RunOptions | ResumeOptions,
-    isResume: boolean,
-  ): Promise<RunResult> => {
-    const startMs = Date.now();
-    const threadId = runOpts.threadId ?? `thread-${runId}`;
-    const startedAt = new Date().toISOString();
-    const runMeta: RunMeta = { runId, graph: spec.metadata.name, startedAt, threadId };
-
-    (baseCtx as RunContext).meta = runMeta;
-    (baseCtx as RunContext).logger = createLogger(events, spec.metadata.name);
-    if (runOpts.signal !== undefined) (baseCtx as RunContext).signal = runOpts.signal;
-
-    const unsubs = (runOpts.sinks ?? []).map((s) => events.subscribe(s));
-    const policy = runOpts.onInterrupt ?? defaultPolicy;
-    const cfg = buildInvokeConfig(threadId, spec);
-
-    events.emit(isResume ? "interrupt.resumed" : "run.start", {
-      graphName: spec.metadata.name,
-    });
-
-    try {
-      let current: Record<string, unknown> | Command = payload;
-
-      // run:before — may mutate the initial input (skipped on resume).
-      if (!isResume && !(payload instanceof Command) && hooks.has("run:before")) {
-        const r = await hooks.run("run:before", {
-          state: payload,
-          run: runMeta,
-          payload: { input: payload as Record<string, unknown> },
-        });
-        if (r.payload.input) current = r.payload.input;
-      }
-
-      // Resume loop: keep going while interrupts can be auto-resolved
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const result = ((await compiledLg.invoke(
-          current as Parameters<typeof compiledLg.invoke>[0],
-          { ...cfg, signal: runOpts.signal } as Parameters<typeof compiledLg.invoke>[1],
-        )) ?? {}) as Record<string, unknown>;
-
-        const interrupts = extractInterrupts(result);
-
-        if (interrupts.length === 0) {
-          // Could still be paused at a static breakpoint (interruptBefore/After):
-          // such pauses have no __interrupt__ marker but leave `next` non-empty.
-          if (checkpointer && (interruptBefore.length || interruptAfter.length)) {
-            const snap = await compiledLg.getState(cfg);
-            if (snap && Array.isArray(snap.next) && snap.next.length > 0) {
-              const clean = stripReserved(result);
-              const bp: InterruptInfo[] = [{ id: `breakpoint:${snap.next.join(",")}`, reason: `Paused before: ${snap.next.join(", ")}` }];
-              events.emit("interrupt.raised", { interrupts: bp });
-              if (policy === "fail" || policy === "webhook" || !runOpts.resolveInterrupt) {
-                return { status: "interrupted", state: clean, runId, threadId, interrupts: bp, durationMs: Date.now() - startMs };
-              }
-              await runOpts.resolveInterrupt(bp);
-              current = new Command({ resume: null });
-              continue;
-            }
-          }
-          const clean = stripReserved(result);
-          if (hooks.has("run:after")) {
-            await hooks.run("run:after", { state: clean, run: runMeta, payload: { update: clean } });
-          }
-          events.emit("run.end", { state: clean, durationMs: Date.now() - startMs });
-          return { status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs };
-        }
-
-        // We have interrupt(s). Decide based on policy.
-        events.emit("interrupt.raised", { interrupts });
-
-        if (policy === "fail" || policy === "webhook") {
-          const clean = stripReserved(result);
-          return {
-            status: "interrupted",
-            state: clean,
-            runId,
-            threadId,
-            interrupts,
-            durationMs: Date.now() - startMs,
-          };
-        }
-
-        // prompt / approve: resolve a value and resume
-        let resumeValue: unknown;
-        if (runOpts.resolveInterrupt) {
-          resumeValue = await runOpts.resolveInterrupt(interrupts);
-        } else if (policy === "approve") {
-          resumeValue = true; // auto-approve default
-        } else {
-          // prompt with no resolver → cannot proceed; treat as interrupted
-          const clean = stripReserved(result);
-          return {
-            status: "interrupted",
-            state: clean,
-            runId,
-            threadId,
-            interrupts,
-            durationMs: Date.now() - startMs,
-          };
-        }
-
-        events.emit("interrupt.resumed", { resume: resumeValue });
-        current = new Command({ resume: resumeValue });
-      }
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      if (hooks.has("run:error")) {
-        try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
-      }
-      events.emit("run.error", { error: error.message, durationMs: Date.now() - startMs });
-      return { status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs };
-    } finally {
-      for (const u of unsubs) u();
-    }
-  };
-
-  const toSnapshot = (
-    snap: { values: Record<string, unknown>; next: readonly string[]; config?: { configurable?: { checkpoint_id?: string } }; createdAt?: string; tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id: string; value?: unknown }> }> },
-  ): StateSnapshot => {
-    const interrupts: InterruptInfo[] = [];
-    for (const task of snap.tasks ?? []) {
-      for (const it of task.interrupts ?? []) {
-        interrupts.push(toInterruptInfo(it));
-      }
-    }
-    return {
-      values: stripReserved(snap.values),
-      next: [...snap.next],
-      checkpointId: snap.config?.configurable?.checkpoint_id,
-      createdAt: snap.createdAt,
-      interrupts,
-    };
-  };
-
   return {
     spec,
     runId,
     events,
-    run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, false),
-    resume: (resumeOpts: ResumeOptions) =>
-      executeInvoke(new Command({ resume: resumeOpts.resume }), resumeOpts, true),
-    getState: async (threadId: string) => {
-      if (!checkpointer) return null;
-      const snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return toSnapshot(snap as any);
-    },
-    getStateHistory: async (threadId: string) => {
-      if (!checkpointer) return [];
-      const snapshots: StateSnapshot[] = [];
-      for await (const snap of compiledLg.getStateHistory({ configurable: { thread_id: threadId } })) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        snapshots.push(toSnapshot(snap as any));
-      }
-      return snapshots;
-    },
-    stream: async function* (runOpts: RunOptions = {}) {
-      const streamP = events.stream();
-      executeInvoke(runOpts.input ?? {}, runOpts, false).catch(() => {});
-      yield* streamP;
-    },
+    compiledLg,
+    checkpointer,
+    hooks,
+    baseCtx,
+    graphDir,
+    interruptBefore,
+    interruptAfter,
+    defaultPolicy,
   };
 }
 
@@ -628,6 +677,7 @@ function buildNodeCtx(
   workspace: string,
   attempt: number,
   inputOverride?: Record<string, unknown>,
+  lgConfig?: LangGraphRunnableConfig,
 ) {
   const scope = { state, config: base.config ?? {}, run: base.meta ?? {} };
   const _input = inputOverride
@@ -640,7 +690,11 @@ function buildNodeCtx(
   const onceState = (state[ONCE_CHANNEL] as Record<string, unknown> | undefined) ?? {};
   const _onceUpdates: Record<string, unknown> = {};
 
-  const ctx: NodeRunContext & { _input: Record<string, unknown>; _onceUpdates: Record<string, unknown> } = {
+  const ctx: NodeRunContext & {
+    _input: Record<string, unknown>;
+    _onceUpdates: Record<string, unknown>;
+    _lgConfig?: LangGraphRunnableConfig;
+  } = {
     ...(base as RunContext),
     meta: (base.meta ?? { runId: "", graph: "", startedAt: "" }) as RunContext["meta"],
     secrets: base.secrets!,
@@ -668,6 +722,7 @@ function buildNodeCtx(
       return value;
     },
   };
+  if (lgConfig !== undefined) ctx._lgConfig = lgConfig;
   if (base.signal !== undefined) ctx.signal = base.signal;
   return ctx;
 }

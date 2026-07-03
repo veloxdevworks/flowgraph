@@ -1,6 +1,6 @@
 # 15 — MCP operations
 
-Operational guide for Model Context Protocol integrations in flowgraph. For the design rationale, see [ADR-0011](./adr/0011-mcp-first-integrations.md) and [08 — Providers §MCP](./08-providers.md#mcp-first-integrations-v1).
+Operational guide for Model Context Protocol integrations in flowgraph. MCP is the primary way to connect external tools and APIs; see [08 — Providers §MCP](./08-providers.md#mcp-first-integrations-v1) for schema and configuration details.
 
 > **Install:** MCP support is provided by the optional `@veloxdevworks/flowgraph-mcp` package (`pnpm add @veloxdevworks/flowgraph-mcp`). It is not bundled in the default `@veloxdevworks/flowgraph-cli` install — see [09 — CLI §1.1](./09-cli.md#11-optional-cli-packages).
 

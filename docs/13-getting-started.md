@@ -85,7 +85,7 @@ Install the [YAML Language Server](https://marketplace.visualstudio.com/items?it
 
 ## Hybrid authoring — pick the right pattern
 
-flowgraph uses a **hybrid model**: YAML declares topology and config; logic lives in skills, registered functions, or LLM agents ([ADR-0002](./adr/0002-hybrid-authoring-model.md)).
+flowgraph uses a **hybrid model**: YAML declares topology and config; logic lives in skills, registered functions, or LLM agents.
 
 | Pattern | When to use | Registration required |
 |---------|-------------|----------------------|

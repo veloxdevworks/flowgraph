@@ -3,6 +3,9 @@
  *
  * Embeds another graph as a single node. `stateMap.in` projects parent state
  * into the child's channels; `stateMap.out` projects child results back.
+ *
+ * Nested HITL: the child graph is invoked with the parent's LangGraph RunnableConfig
+ * so interrupts propagate to the parent checkpoint (see LangGraph subgraph docs).
  */
 
 import { z } from "zod";
@@ -10,40 +13,52 @@ import { SubgraphWithSchema } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
 
 const configSchema = SubgraphWithSchema;
 type Config = z.infer<typeof configSchema>;
 
-interface CompiledChild {
-  run(opts: { input?: Record<string, unknown>; threadId?: string }): Promise<{ status: string; state: Record<string, unknown>; error?: Error }>;
+type NodeCtx = NodeRunContext & {
+  _input?: Record<string, unknown>;
+  _lgConfig?: import("@langchain/langgraph").LangGraphRunnableConfig;
+};
+
+interface EmbeddedChild {
+  invoke(
+    input: Record<string, unknown>,
+    lgConfig: import("@langchain/langgraph").LangGraphRunnableConfig,
+  ): Promise<Record<string, unknown>>;
 }
 
 export const subgraphNode = defineNode<Config>({
   type: "subgraph",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: {},
+  capabilities: { interruptible: true },
 
   build(_buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const uses = String(nodeSpec["uses"] ?? "");
-    let childPromise: Promise<CompiledChild> | undefined;
+    let childPromise: Promise<EmbeddedChild> | undefined;
 
     return {
       contract: {},
-      capabilities: {},
+      capabilities: { interruptible: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
+        const nodeCtx = ctx as NodeCtx;
+        const lgConfig = nodeCtx._lgConfig;
+        if (!lgConfig) {
+          throw new Error(`subgraph "${uses}": missing LangGraph runtime config (internal error).`);
+        }
+
         childPromise ??= loadChild(uses, ctx);
         const child = await childPromise;
 
-        // Project parent state into child input
-        const nodeInput =
-          (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {};
+        const nodeInput = nodeCtx._input ?? {};
         let childInput: Record<string, unknown>;
         if (config.stateMap?.in) {
           childInput = {};
           for (const [childChannel, parentExpr] of Object.entries(config.stateMap.in)) {
-            // value may be a plain channel name or a template
             childInput[childChannel] = resolveRef(parentExpr, state, nodeInput, ctx);
           }
         } else {
@@ -52,44 +67,37 @@ export const subgraphNode = defineNode<Config>({
 
         ctx.emit("node.output", { subgraph: uses, input: Object.keys(childInput) });
 
-        const result = await child.run({ input: childInput });
-        if (result.status === "error") {
-          throw new Error(`subgraph "${uses}" failed: ${result.error?.message ?? "unknown error"}`);
-        }
-        if (result.status === "interrupted") {
-          throw new Error(`subgraph "${uses}" interrupted; nested HITL is not yet supported.`);
-        }
+        const childState = await child.invoke(childInput, lgConfig);
+        const clean = stripSubgraphState(childState);
 
-        // Project child results back into parent channels
         if (config.stateMap?.out) {
           const update: Record<string, unknown> = {};
           for (const [parentChannel, childExpr] of Object.entries(config.stateMap.out)) {
-            update[parentChannel] = resolveRef(childExpr, result.state, {}, ctx);
+            update[parentChannel] = resolveRef(childExpr, clean, {}, ctx);
           }
           return { update };
         }
 
         if (config.output && "to" in config.output) {
-          return { update: { [config.output.to]: result.state } };
+          return { update: { [config.output.to]: clean } };
         }
         if (config.output && "map" in config.output) {
           const update: Record<string, unknown> = {};
           for (const [channel, expr] of Object.entries(config.output.map)) {
-            update[channel] = renderDeep(expr, { result: result.state, ...result.state });
+            update[channel] = renderDeep(expr, { result: clean, ...clean });
           }
           return { update };
         }
-        return { update: result.state };
+        return { update: clean };
       },
     };
   },
 });
 
-async function loadChild(uses: string, ctx: NodeRunContext): Promise<CompiledChild> {
+async function loadChild(uses: string, ctx: NodeRunContext): Promise<EmbeddedChild> {
   const { loadGraph } = await import("../loader.js");
-  const { compileGraph } = await import("../compiler.js");
+  const { compileGraphForEmbedding } = await import("../compiler.js");
 
-  // Resolve alias → path (from imports) or treat as a relative path.
   const aliases =
     (ctx.config as { subgraphs?: Record<string, string> }).subgraphs ?? {};
   const ref = aliases[uses] ?? uses;
@@ -98,25 +106,38 @@ async function loadChild(uses: string, ctx: NodeRunContext): Promise<CompiledChi
   if (!spec) {
     throw new Error(`subgraph: could not load "${uses}" (${ref}): ${diagnostics.map((d) => d.message).join("; ")}`);
   }
-  const compiled = await compileGraph(spec, { cwd: ctx.workspace, checkpointer: "none" });
-  return compiled as unknown as CompiledChild;
+
+  const { compiledLg } = await compileGraphForEmbedding(spec, { cwd: ctx.workspace });
+
+  return {
+    async invoke(input, lgConfig) {
+      const result = ((await compiledLg.invoke(
+        input as Parameters<typeof compiledLg.invoke>[0],
+        lgConfig as Parameters<typeof compiledLg.invoke>[1],
+      )) ?? {}) as Record<string, unknown>;
+      return result;
+    },
+  };
 }
 
-/**
- * A stateMap value may be a bare channel name (e.g. "repo") or a template
- * (e.g. "{{ state.repo }}"). Resolve accordingly.
- */
+function stripSubgraphState(state: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(state)) {
+    if (k === ONCE_CHANNEL || k === "__interrupt__") continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 function resolveRef(
   ref: unknown,
   primary: Record<string, unknown>,
   input: Record<string, unknown>,
   ctx: NodeRunContext,
 ): unknown {
-  // Already-resolved concrete value (e.g. pre-rendered by an enclosing map).
   if (typeof ref !== "string") return ref;
   if (ref.includes("{{")) {
     return renderDeep(ref, { state: primary, result: primary, input, config: ctx.config, run: ctx.meta });
   }
-  // bare name → read from the primary object
   return primary[ref];
 }

@@ -52,7 +52,9 @@ edges:
   - { from: writer, to: END }
 
 runtime:
-  checkpoint: { enabled: false }
+  checkpoint:
+    enabled: true
+    backend: memory
   hooks:
     - on: intelligent:beforeToolCall
       where: { tool: fs_write }

@@ -29,7 +29,7 @@ Under the hood flowgraph calls LangGraph's `invoke`/`stream` with `{ configurabl
 
 All three share the same compiled graph and emit the same events.
 
-## 3. Checkpointing & durability ([ADR-0005](./adr/0005-durability-and-hitl.md))
+## 3. Checkpointing & durability
 
 Checkpointing is **first-class in v1**. A checkpointer persists graph state at every superstep (LangGraph's model), keyed by `thread_id`, enabling resume, time-travel, fault tolerance, and HITL.
 
@@ -81,7 +81,7 @@ runtime: { retry: { maxAttempts: 2, backoff: exponential, baseMs: 500 }, timeout
 - **retryOn:** error classes / HTTP statuses; non-matching errors fail immediately.
 - **Idempotency:** nodes declare `sideEffecting`. On resume after an interrupt, LangGraph **re-runs the interrupted node from its start**, so side-effecting nodes must be idempotent or guarded. The runtime helps via an optional **idempotency key** (`ctx.once(key, fn)` runs `fn` at most once per key per thread, recorded in the checkpoint) so a "create ticket" doesn't double-fire on resume.
 
-## 5. Human-in-the-loop ([ADR-0005](./adr/0005-durability-and-hitl.md))
+## 5. Human-in-the-loop
 
 HITL is built on LangGraph's `interrupt()` + `Command({ resume })` + checkpointer model (verified against current LangGraph.js docs). Three ways a graph pauses:
 

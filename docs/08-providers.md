@@ -1,6 +1,6 @@
 # 08 — Providers (Intelligent-Node Backends)
 
-An **intelligent** node delegates its agent loop to a **provider**. Per [ADR-0004](./adr/0004-pluggable-providers.md), we define a **pluggable provider interface first**, then ship adapters. v1 targets three: **Claude Agent SDK**, **Cursor SDK**, and a generic **LangChain ChatModel** adapter. Each is its own package so users install only what they reference ([Architecture §5](./01-architecture.md#5-monorepo-layout)).
+An **intelligent** node delegates its agent loop to a **provider**. flowgraph defines a **pluggable provider interface** first, then ships adapters as optional packages so you install only the backends your graphs reference. v1 targets three: **Claude Agent SDK**, **Cursor SDK**, and a generic **LangChain ChatModel** adapter (LangChain is also built into `@veloxdevworks/flowgraph-core` for convenience).
 
 ## 1. Why an abstraction
 
@@ -96,7 +96,7 @@ Two consumption modes share one client (`@veloxdevworks/flowgraph-mcp`):
         tools: [create_issue, search_issues]   # optional allow-list
 ```
 
-CLI: `flowgraph mcp tools <graph>` lists discovered tools per server. Remote OAuth servers use `auth.type: oauth2` plus `flowgraph mcp auth login <graph> <server>` (tokens in `.flowgraph/mcp-oauth/`, auto-refresh on run). Header/env bearer tokens remain supported for M1-style auth (see [ADR-0011](./adr/0011-mcp-first-integrations.md)).
+CLI: `flowgraph mcp tools <graph>` lists discovered tools per server. Remote OAuth servers use `auth.type: oauth2` plus `flowgraph mcp auth login <graph> <server>` (tokens in `.flowgraph/mcp-oauth/`, auto-refresh on run). Header/env bearer tokens remain supported for simpler server auth.
 
 When a tool is invoked, the adapter calls back into flowgraph's runtime (`ctx.invokeTool`), so the call is contract-validated, event-emitting, and hook-able ([06](./06-events-and-hooks.md)).
 

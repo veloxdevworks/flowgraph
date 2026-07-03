@@ -105,6 +105,9 @@ importers:
         specifier: workspace:*
         version: link:../../packages/tools-fs
     devDependencies:
+      '@veloxdevworks/flowgraph-testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
       vitest:
         specifier: ^4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
@@ -156,6 +159,22 @@ importers:
 
   examples/release-notes:
     dependencies:
+      '@veloxdevworks/flowgraph-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@veloxdevworks/flowgraph-testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+    devDependencies:
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
+
+  examples/review-loop:
+    dependencies:
+      '@veloxdevworks/flowgraph-cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
       '@veloxdevworks/flowgraph-core':
         specifier: workspace:*
         version: link:../../packages/core

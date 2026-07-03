@@ -2,7 +2,7 @@
 
 This document tracks what is **shipped** in the monorepo today versus what the numbered design docs describe as the **target**. When in doubt, trust `packages/` and `examples/` over aspirational spec text.
 
-Last reviewed: Phase A documentation pass (Phases 1–4 largely complete).
+Last reviewed: Sprint A+B core hardening (nested subgraph HITL, upfront preflight, example integration tests).
 
 ## Summary
 
@@ -37,7 +37,7 @@ Last reviewed: Phase A documentation pass (Phases 1–4 largely complete).
 | `dev` | **Planned** | Watch/step mode |
 | Global `--config`, `--env-file`, `--otel`, `--quiet` | **Planned** | Dotenv loaded silently from cwd |
 | `run --checkpoint`, `--max-usd` | **Planned** | Use `runtime.checkpoint` / `runtime.budget` in YAML |
-| `validate --preflight` | **Partial** | Flag exists; handler ignores it |
+| `validate --preflight` | **Shipped** | Checks skill env/bin deps; `flowgraph run` also preflights before execution |
 | `validate` glob patterns | **Planned** | Single file path only |
 
 See [09 — CLI](./09-cli.md) for the authoritative command reference.
@@ -54,24 +54,26 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 
 ## Known limitations
 
-1. **Nested subgraph HITL** — Interrupts inside embedded subgraphs throw at runtime (`nested HITL is not yet supported`).
-2. **Skill preflight timing** — Env checks run when a skill node executes, not upfront on `flowgraph run`.
-3. **OTel CLI wiring** — `@veloxdevworks/flowgraph-observability-otel` exists; attach sinks programmatically or wait for `--otel`.
-4. **Schema hosting** — `https://veloxdevworks.com/flowgraph/schema/v1.json` published when docs site deploys; local via `flowgraph schema --out`.
-5. **README phase label** — Root README updated to reflect Phases 1–4 progress; some numbered docs still describe future targets inline.
+1. **Skill preflight scope** — Upfront preflight scans top-level `skill` nodes only; nested skill refs inside `map`/`subgraph`/agent tools are not scanned yet.
+2. **OTel CLI wiring** — `@veloxdevworks/flowgraph-observability-otel` exists; attach sinks programmatically or wait for `--otel`.
+3. **Schema hosting** — `https://veloxdevworks.com/flowgraph/schema/v1.json` published when docs site deploys; local via `flowgraph schema --out`.
+4. **README phase label** — Root README updated to reflect Phases 1–4 progress; some numbered docs still describe future targets inline.
 
 ## Examples
 
-| Example | README | Runnable |
-|---------|--------|----------|
-| quickstart | Yes | Yes (zero-code) |
-| triage-issue | Yes | Yes (requires `run.js`) |
-| release-notes | Yes | Yes (requires `register.ts`) |
-| composition | Yes | Yes (requires `register.ts`) |
-| skill-pack | Yes | Test-only |
-| mcp | Yes | Yes (mock + optional OAuth) |
-| hitl, fs-agent, claude-agent, cursor-agent, reducers | Yes | Yes |
-| software-factory | N/A | **Not built** |
+| Example | README | Runnable | Integration test |
+|---------|--------|----------|------------------|
+| quickstart | Yes | Yes (zero-code) | Yes |
+| triage-issue | Yes | Yes (requires `run.js`) | Yes |
+| release-notes | Yes | Yes (requires `register.ts`) | Yes |
+| composition | Yes | Yes (requires `register.ts`) | Yes |
+| skill-pack | Yes | Test-only | Yes |
+| review-loop | Yes | Yes (`register.ts`) | Yes |
+| hitl | Yes | Yes (scripted provider in test) | Yes |
+| fs-agent | Yes | Yes (API key for live run) | Yes |
+| mcp | Yes | Yes (mock + optional OAuth) | — |
+| claude-agent, cursor-agent, reducers | Yes | Yes | reducers: Yes |
+| software-factory | N/A | **Not built** | — |
 
 ## Documentation layers
 
@@ -79,7 +81,6 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 |-------|---------|
 | `docs/00`–`12` | Design specifications (target + shipped, mixed) |
 | `docs/13`–`15` | User-facing operational guides |
-| `docs/adr/` | Locked architecture decisions |
 | `examples/*/README.md` | Runnable walkthroughs |
 | Hosted docs site | `@velox/flowgraph-docs` in private `flowgraph-app` repo (markdown source stays in `docs/`) |
 

@@ -6,7 +6,8 @@
   "scripts": {
     "run": "flowgraph run fs-agent.graph.yaml --stream --on-interrupt approve",
     "run:prompt": "flowgraph run fs-agent.graph.yaml --stream --on-interrupt prompt",
-    "validate": "flowgraph validate fs-agent.graph.yaml"
+    "validate": "flowgraph validate fs-agent.graph.yaml",
+    "test": "vitest run"
   },
   "dependencies": {
     "@veloxdevworks/flowgraph-cli": "workspace:*",
@@ -15,6 +16,7 @@
     "@langchain/xai": "^1.0.0"
   },
   "devDependencies": {
+    "@veloxdevworks/flowgraph-testing": "workspace:*",
     "vitest": "^4.1.9"
   }
 }
