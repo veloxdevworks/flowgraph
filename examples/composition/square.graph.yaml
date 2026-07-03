@@ -1,0 +1,25 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: square
+  description: Child graph — squares a number.
+
+state:
+  channels:
+    n: { type: number }
+    squared: { type: number }
+
+nodes:
+  - id: sq
+    type: code
+    with:
+      fn: square
+      input: { n: "{{ state.n }}" }
+      output: { to: squared }
+
+edges:
+  - { from: START, to: sq }
+  - { from: sq, to: END }
+
+runtime:
+  checkpoint: { enabled: false }

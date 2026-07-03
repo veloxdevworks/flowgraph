@@ -1,0 +1,35 @@
+{
+  "name": "@veloxdevworks/flowgraph-tools-fs",
+  "version": "0.1.0",
+  "description": "Sandboxed local filesystem tools for flowgraph intelligent nodes",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "@veloxdevworks/flowgraph-core": "workspace:*"
+  },
+  "dependencies": {
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@types/node": "^26.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

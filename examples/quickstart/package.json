@@ -1,0 +1,19 @@
+{
+  "name": "quickstart-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "flowgraph run quickstart.graph.yaml --stream --input 'text=Hello, flowgraph World!'",
+    "validate": "flowgraph validate quickstart.graph.yaml",
+    "graph": "flowgraph graph quickstart.graph.yaml --format ascii",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

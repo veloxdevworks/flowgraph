@@ -1,0 +1,66 @@
+# Release-notes approval flow — demonstrates HITL interrupt + durable resume.
+#
+# Run to the approval gate (interrupts), then resume with an operator decision:
+#   flowgraph run release-notes.graph.yaml --thread rel-1 --on-interrupt fail --input version=1.4.0
+#   flowgraph resume release-notes.graph.yaml --thread rel-1 --resume '{"approved":true}'
+apiVersion: flowgraph/v1
+kind: Graph
+
+metadata:
+  name: release-notes
+  description: Draft release notes, pause for human approval, then publish.
+
+state:
+  channels:
+    version: { type: string }
+    draft: { type: string }
+    approved: { type: boolean, default: false }
+    notes: { type: string }
+    published: { type: object }
+
+runtime:
+  checkpoint:
+    enabled: true
+    backend: sqlite
+    path: ".flowgraph/release-notes.db"
+  hitl:
+    onInterrupt: prompt
+
+nodes:
+  - id: draft-notes
+    type: code
+    with:
+      fn: draftNotes
+      input: { version: "{{ state.version }}" }
+      output: { to: draft }
+
+  - id: approve
+    type: code
+    with:
+      fn: requestApproval
+      input: { draft: "{{ state.draft }}" }
+      output:
+        map:
+          approved: "{{ result.approved }}"
+          notes: "{{ result.notes }}"
+
+  - id: publish-notes
+    type: code
+    with:
+      fn: publishNotes
+      input: { notes: "{{ state.notes }}", version: "{{ state.version }}" }
+      output: { to: published }
+
+edges:
+  - from: START
+    to: draft-notes
+  - from: draft-notes
+    to: approve
+  - from: approve
+    branch:
+      - when: "{{ state.approved }}"
+        to: publish-notes
+      - default: true
+        to: END
+  - from: publish-notes
+    to: END

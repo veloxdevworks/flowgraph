@@ -1,0 +1,78 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: hitl-demo
+  description: >
+    Human-in-the-loop demo: approval gate + agent clarifying question via ask_human.
+
+providers:
+  main:
+    kind: langchain
+    vendor: openai
+    model: gpt-4o-mini
+    options:
+      temperature: 0
+
+config:
+  defaults:
+    provider: main
+
+state:
+  channels:
+    task:
+      type: string
+      default: "Summarize the quarterly report"
+    approval:
+      type: object
+    clarified:
+      type: object
+    result:
+      type: object
+
+nodes:
+  - id: approve-task
+    type: hitl
+    with:
+      mode: approve
+      message: "Proceed with task: {{ state.task }}?"
+      output:
+        to: approval
+
+  - id: clarify
+    type: intelligent
+    when: "{{ state.approval.approved }}"
+    with:
+      system: >
+        You help complete tasks. If anything is ambiguous, use ask_human once
+        before answering.
+      prompt: "{{ state.task }}"
+      tools:
+        - function: ask_human
+      maxSteps: 4
+      permission: auto
+      output:
+        to: clarified
+
+  - id: summarize
+    type: intelligent
+    when: "{{ state.approval.approved }}"
+    with:
+      prompt: >
+        Write a one-sentence summary incorporating this clarification:
+        {{ state.clarified.text }}
+      maxSteps: 1
+      output:
+        to: result
+
+edges:
+  - { from: START, to: approve-task }
+  - { from: approve-task, to: clarify }
+  - { from: clarify, to: summarize }
+  - { from: summarize, to: END }
+
+runtime:
+  checkpoint:
+    enabled: true
+    backend: sqlite
+    path: ".flowgraph/hitl-demo.db"

@@ -1,0 +1,53 @@
+{
+  "name": "@veloxdevworks/flowgraph-cli",
+  "version": "0.1.0",
+  "description": "CLI for flowgraph",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "flowgraph": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-expr": "workspace:*",
+    "@veloxdevworks/flowgraph-skills": "workspace:*",
+    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "commander": "^15.0.0",
+    "picocolors": "^1.1.1"
+  },
+  "peerDependencies": {
+    "@veloxdevworks/flowgraph-checkpoint-sqlite": "workspace:*",
+    "@veloxdevworks/flowgraph-tools-fs": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@veloxdevworks/flowgraph-checkpoint-sqlite": {
+      "optional": true
+    },
+    "@veloxdevworks/flowgraph-tools-fs": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@veloxdevworks/flowgraph-checkpoint-sqlite": "workspace:*",
+    "@veloxdevworks/flowgraph-provider-claude": "workspace:*",
+    "@veloxdevworks/flowgraph-provider-cursor": "workspace:*",
+    "@veloxdevworks/flowgraph-tools-fs": "workspace:*",
+    "@types/node": "^26.0.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

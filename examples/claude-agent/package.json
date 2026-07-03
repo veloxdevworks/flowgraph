@@ -1,0 +1,20 @@
+{
+  "name": "claude-agent-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run": "flowgraph run claude-agent.graph.yaml --stream --on-interrupt approve",
+    "run:prompt": "flowgraph run claude-agent.graph.yaml --stream --on-interrupt prompt",
+    "validate": "flowgraph validate claude-agent.graph.yaml"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-provider-claude": "workspace:*",
+    "@anthropic-ai/claude-agent-sdk": "^0.1.29"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

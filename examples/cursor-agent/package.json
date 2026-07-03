@@ -1,0 +1,19 @@
+{
+  "name": "cursor-agent-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run": "flowgraph run cursor-agent.graph.yaml --stream",
+    "validate": "flowgraph validate cursor-agent.graph.yaml"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-provider-cursor": "workspace:*",
+    "@cursor/sdk": "^1.0.16"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

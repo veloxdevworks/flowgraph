@@ -1,0 +1,20 @@
+{
+  "name": "fs-agent-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run": "flowgraph run fs-agent.graph.yaml --stream --on-interrupt approve",
+    "run:prompt": "flowgraph run fs-agent.graph.yaml --stream --on-interrupt prompt",
+    "validate": "flowgraph validate fs-agent.graph.yaml"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-tools-fs": "workspace:*",
+    "@langchain/xai": "^1.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

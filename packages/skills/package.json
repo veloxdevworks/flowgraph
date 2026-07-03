@@ -1,0 +1,33 @@
+{
+  "name": "@veloxdevworks/flowgraph-skills",
+  "version": "0.1.0",
+  "description": "SKILL.md loader, contract validation, and environment preflight for flowgraph",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "gray-matter": "^4.0.3",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

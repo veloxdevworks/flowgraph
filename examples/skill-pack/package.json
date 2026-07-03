@@ -1,0 +1,23 @@
+{
+  "name": "skill-pack-example",
+  "version": "0.1.0",
+  "description": "Example flowgraph skill pack (slugify + word-count) demonstrating portable, contract-bearing skills.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": [
+    "skills"
+  ],
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-skills": "workspace:*",
+    "vitest": "^4.1.9"
+  },
+  "keywords": [
+    "flowgraph",
+    "skills",
+    "skill-pack"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "@veloxdevworks/flowgraph-observability-otel",
+  "version": "0.1.0",
+  "description": "OpenTelemetry traces/metrics/logs sink for flowgraph",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "devDependencies": {
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@opentelemetry/sdk-trace-base": "^2.0.0",
+    "@types/node": "^26.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

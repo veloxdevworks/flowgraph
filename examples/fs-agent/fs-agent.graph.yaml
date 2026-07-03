@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: fs-agent
+  description: >
+    Intelligent agent with sandboxed local filesystem tools.
+    Mutating writes require human approval via runtime.hooks.
+
+localTools:
+  fs:
+    workspaceRoot: "./workspace"
+    operations: [read, list, write]
+
+providers:
+  main:
+    kind: langchain
+    vendor: xai
+    model: grok-3-fast
+    options:
+      temperature: 0
+
+config:
+  defaults:
+    provider: main
+
+state:
+  channels:
+    result:
+      type: object
+
+nodes:
+  - id: writer
+    type: intelligent
+    with:
+      system: >
+        You are a file assistant. Use fs_write to create files and fs_read to
+        verify them. Only write inside the workspace.
+      prompt: >
+        Write a short haiku about graphs to workspace/haiku.md, then read it
+        back and confirm the contents in your final answer.
+      tools:
+        - function: fs_read
+        - function: fs_write
+      maxSteps: 8
+      permission: auto
+      output:
+        to: result
+
+edges:
+  - { from: START, to: writer }
+  - { from: writer, to: END }
+
+runtime:
+  checkpoint: { enabled: false }
+  hooks:
+    - on: intelligent:beforeToolCall
+      where: { tool: fs_write }
+      do: interrupt
+      reason: "Approve filesystem write"

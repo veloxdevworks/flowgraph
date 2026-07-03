@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: quickstart
+  description: >
+    Zero-code demo. Takes a piece of text, turns it into a URL-safe slug and
+    computes word/sentence stats — entirely via on-disk skills, so it runs with
+    a single `flowgraph run` and no TypeScript or network access.
+
+state:
+  channels:
+    text: { type: string, reducer: lastWrite }
+    slug: { type: string, reducer: lastWrite }
+    words: { type: number, reducer: lastWrite }
+    sentences: { type: number, reducer: lastWrite }
+
+nodes:
+  - id: make-slug
+    type: skill
+    uses: ./skills/slugify
+    input:
+      text: "{{ state.text }}"
+    with:
+      output:
+        map:
+          slug: "{{ result.slug }}"
+
+  - id: count
+    type: skill
+    uses: ./skills/word-count
+    input:
+      text: "{{ state.text }}"
+    with:
+      output:
+        map:
+          words: "{{ result.words }}"
+          sentences: "{{ result.sentences }}"
+
+edges:
+  - { from: START, to: make-slug }
+  - { from: make-slug, to: count }
+  - { from: count, to: END }
+
+runtime:
+  checkpoint: { enabled: false }
+  observability:
+    logs: { level: info, format: pretty }

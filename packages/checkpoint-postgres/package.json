@@ -1,0 +1,36 @@
+{
+  "name": "@veloxdevworks/flowgraph-checkpoint-postgres",
+  "version": "0.1.0",
+  "description": "Durable Postgres checkpointer for flowgraph",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@langchain/langgraph-checkpoint-postgres": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@langchain/langgraph": "^1.4.7"
+  },
+  "devDependencies": {
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@langchain/langgraph": "^1.4.7",
+    "@types/node": "^26.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

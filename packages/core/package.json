@@ -1,0 +1,51 @@
+{
+  "name": "@veloxdevworks/flowgraph-core",
+  "version": "0.1.0",
+  "description": "Compiler, runtime, node registry, event bus, and built-in nodes for flowgraph",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-expr": "workspace:*",
+    "@veloxdevworks/flowgraph-skills": "workspace:*",
+    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "@langchain/core": "^1.2.0",
+    "@langchain/langgraph": "^1.4.7",
+    "yaml": "^2.9.0",
+    "zod": "^3.24.0"
+  },
+  "peerDependencies": {
+    "@langchain/anthropic": "^1.0.0",
+    "@langchain/google-genai": "^1.0.0",
+    "@langchain/ollama": "^1.0.0",
+    "@langchain/openai": "^1.0.0",
+    "@langchain/xai": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/anthropic": { "optional": true },
+    "@langchain/google-genai": { "optional": true },
+    "@langchain/ollama": { "optional": true },
+    "@langchain/openai": { "optional": true },
+    "@langchain/xai": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

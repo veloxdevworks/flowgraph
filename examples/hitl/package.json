@@ -1,0 +1,22 @@
+{
+  "name": "hitl-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run:local": "flowgraph run hitl-demo.graph.yaml --stream --on-interrupt prompt --thread hitl-demo",
+    "run:ci": "flowgraph run hitl-demo.graph.yaml --thread hitl-demo --on-interrupt fail",
+    "list": "flowgraph resume hitl-demo.graph.yaml --thread hitl-demo --list --json",
+    "resume:approve": "flowgraph resume hitl-demo.graph.yaml --thread hitl-demo --resume '{\"approved\":true}' --on-interrupt prompt",
+    "resume:answer": "flowgraph resume hitl-demo.graph.yaml --thread hitl-demo --resume '{\"answer\":\"Focus on revenue growth\"}' --on-interrupt prompt",
+    "validate": "flowgraph validate hitl-demo.graph.yaml"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@langchain/openai": "^1.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

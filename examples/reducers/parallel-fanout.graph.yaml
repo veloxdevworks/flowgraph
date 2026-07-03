@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: parallel-fanout-reducers
+  description: Parallel branches fan-in via reducer append (code fns + reducers from register.ts).
+
+imports:
+  - { reducers: ./register.ts }
+
+state:
+  channels:
+    tags: { type: array, reducer: append }
+
+nodes:
+  - id: branch-alpha
+    type: code
+    with:
+      fn: tagAlpha
+      output: { to: tags }
+
+  - id: branch-beta
+    type: code
+    with:
+      fn: tagBeta
+      output: { to: tags }
+
+edges:
+  - { from: START, to: [branch-alpha, branch-beta] }
+  - { from: branch-alpha, to: END }
+  - { from: branch-beta, to: END }
+
+runtime:
+  checkpoint: { enabled: false }

@@ -1,0 +1,74 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: triage-issue
+  description: >
+    Triage an inbound issue: classify it as bug/feature/question,
+    then create a ticket via the mock-create-ticket skill.
+
+state:
+  channels:
+    issue:
+      type: object
+      description: The inbound issue payload
+    label:
+      type: string
+      default: ""
+      description: Classified label (bug | feature | question)
+    ticket:
+      type: object
+      description: Created ticket
+
+config:
+  vars:
+    project: "DEMO"
+
+nodes:
+  - id: classify
+    type: code
+    with:
+      fn: classifyIssue
+      input:
+        title: "{{ state.issue.title }}"
+        body:  "{{ state.issue.body }}"
+      output: { to: label }
+
+  - id: route
+    type: router
+    with:
+      mode: rules
+      routes:
+        bug:
+          when: "{{ state.label == 'bug' }}"
+          to: create-ticket
+        feature:
+          when: "{{ state.label == 'feature' }}"
+          to: create-ticket
+        default:
+          default: true
+          to: create-ticket
+
+  - id: create-ticket
+    type: skill
+    uses: skills/mock-create-ticket
+    input:
+      project:     "{{ config.vars.project }}"
+      type:        "{{ state.label }}"
+      title:       "{{ state.issue.title }}"
+      description: "{{ state.issue.body }}"
+    with:
+      output: { to: ticket }
+
+edges:
+  - { from: START,          to: classify }
+  - { from: classify,       to: route }
+  - { from: route,          branch: [
+      { when: "{{ state.label == 'bug' }}",     to: create-ticket },
+      { when: "{{ state.label == 'feature' }}", to: create-ticket },
+      { default: true,                          to: create-ticket }
+    ]}
+  - { from: create-ticket, to: END }
+
+runtime:
+  checkpoint: { enabled: false }
+  observability: { logs: { level: info, format: pretty } }

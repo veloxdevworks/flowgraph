@@ -1,0 +1,4 @@
+{
+  "title": "Fix: auth token not refreshing on 401",
+  "body": "When the auth token expires, the client gets a 401 error but doesn't automatically refresh. This causes users to be logged out unexpectedly.\n\nSteps to reproduce:\n1. Log in\n2. Wait 1 hour for token to expire\n3. Make any API call\n\nExpected: token auto-refreshes\nActual: error thrown, user logged out"
+}

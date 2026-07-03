@@ -1,0 +1,17 @@
+{
+  "name": "triage-issue-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run": "node run.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-testing": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

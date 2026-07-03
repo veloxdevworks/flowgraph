@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: claude-agent
+  description: >
+    Intelligent agent using Claude Agent SDK native file tools with
+    per-call HITL via permission: ask and canUseTool governance.
+
+providers:
+  claude:
+    kind: claude
+    model: claude-sonnet-4.5
+    permissionMode: default
+    cwd: "./workspace"
+
+config:
+  defaults:
+    provider: claude
+
+state:
+  channels:
+    result:
+      type: object
+
+nodes:
+  - id: implement
+    type: intelligent
+    provider: claude
+    with:
+      claude:
+        cwd: "./workspace"
+      system: >
+        You are a coding assistant. Use Read and Edit to inspect and update files
+        inside the workspace only.
+      prompt: >
+        Read workspace/README.md if it exists, then create or update
+        workspace/notes.txt with a one-line summary of this graph.
+      tools:
+        - builtin: [Read, Edit, Glob]
+      maxSteps: 12
+      permission: ask
+      output:
+        to: result
+
+edges:
+  - { from: START, to: implement }
+  - { from: implement, to: END }
+
+runtime:
+  checkpoint: { enabled: false }

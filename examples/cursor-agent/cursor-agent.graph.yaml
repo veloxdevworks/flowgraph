@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: cursor-agent
+  description: >
+    Intelligent agent using the Cursor SDK with custom tools (skills/functions)
+    routed through flowgraph governance.
+
+providers:
+  cursor:
+    kind: cursor
+    model: composer-2.5
+    runtime: local
+
+config:
+  defaults:
+    provider: cursor
+
+state:
+  channels:
+    result:
+      type: object
+
+nodes:
+  - id: refactor
+    type: intelligent
+    provider: cursor
+    with:
+      cursor:
+        runtime: local
+      system: You are a concise coding assistant working in the local workspace.
+      prompt: >
+        Summarize what this example graph does in one sentence.
+      maxSteps: 6
+      permission: auto
+      output:
+        to: result
+
+edges:
+  - { from: START, to: refactor }
+  - { from: refactor, to: END }
+
+runtime:
+  checkpoint: { enabled: false }

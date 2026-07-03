@@ -1,0 +1,42 @@
+{
+  "name": "flowgraph",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Declarative orchestration layer on top of LangGraph.js",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.0.9",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "clean": "turbo run clean",
+    "dev": "turbo run dev --parallel",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json,yaml,yml}\" --ignore-path .gitignore",
+    "format:check": "prettier --check \"**/*.{ts,tsx,md,json,yaml,yml}\" --ignore-path .gitignore",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "turbo run build --filter=\"./packages/*\" && changeset publish"
+  },
+  "devDependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@changesets/cli": "^2.31.0",
+    "@types/node": "^26.0.1",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0",
+    "turbo": "^2.10.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

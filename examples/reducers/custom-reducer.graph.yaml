@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: custom-reducer-dedupe
+  description: >
+    Parallel branches write overlapping findings; custom:uniqueById upserts by id.
+    Reducer is loaded via imports[].reducers.
+
+imports:
+  - { reducers: ./register.ts }
+
+state:
+  channels:
+    findings: { type: array, reducer: "custom:uniqueById" }
+
+nodes:
+  - id: branch-a
+    type: code
+    with:
+      fn: findingA
+      output: { to: findings }
+
+  - id: branch-b
+    type: code
+    with:
+      fn: findingB
+      output: { to: findings }
+
+  - id: merge-update
+    type: code
+    with:
+      fn: findingAUpdate
+      output: { to: findings }
+
+edges:
+  - { from: START, to: [branch-a, branch-b] }
+  - { from: branch-a, to: merge-update }
+  - { from: branch-b, to: merge-update }
+  - { from: merge-update, to: END }
+
+runtime:
+  checkpoint: { enabled: false }

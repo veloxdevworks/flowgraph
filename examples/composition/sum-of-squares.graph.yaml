@@ -1,0 +1,48 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: sum-of-squares
+  description: >
+    Map over a list of numbers, square each via an embedded subgraph,
+    then sum the results. Demonstrates `map` + `subgraph` composition.
+
+imports:
+  - { subgraph: ./square.graph.yaml, as: square }
+
+state:
+  channels:
+    numbers: { type: array }
+    squares: { type: array }
+    total: { type: number }
+
+nodes:
+  - id: square-each
+    type: map
+    with:
+      over: "{{ state.numbers }}"
+      as: n
+      concurrency: 3
+      node:
+        type: subgraph
+        uses: square
+        with:
+          stateMap:
+            in: { n: "{{ item.n }}" }
+            out: { squared: squared }
+      collect: { to: squares }
+
+  - id: sum-squares
+    type: code
+    with:
+      fn: sumList
+      input: { values: "{{ state.squares }}" }
+      output: { to: total }
+
+edges:
+  - { from: START, to: square-each }
+  - { from: square-each, to: sum-squares }
+  - { from: sum-squares, to: END }
+
+runtime:
+  checkpoint: { enabled: false }
+  concurrency: 4
