@@ -61,6 +61,10 @@ flowgraph wraps LangGraph.js with a low-code/no-code packaging layer so that:
 
 ## Packages
 
+Packages are grouped so core stays free of native bindings and optional SDKs. Install only the adapters and plugins you need.
+
+### Foundation
+
 | Package | Description |
 |---|---|
 | `@veloxdevworks/flowgraph-core` | Compiler, runtime, node registry, event bus, built-in nodes, **built-in LangChain provider** |
@@ -68,11 +72,27 @@ flowgraph wraps LangGraph.js with a low-code/no-code packaging layer so that:
 | `@veloxdevworks/flowgraph-expr` | Sandboxed `{{ expression }}` evaluator |
 | `@veloxdevworks/flowgraph-skills` | `SKILL.md` loader, contract validation, preflight |
 | `@veloxdevworks/flowgraph-cli` | The `flowgraph` binary |
-| `@veloxdevworks/flowgraph-checkpoint-sqlite` | Durable SQLite checkpointer |
-| `@veloxdevworks/flowgraph-observability-otel` | OpenTelemetry exporter |
+| `@veloxdevworks/flowgraph-testing` | In-memory test harness |
+
+### Adapters
+
+Peer-depend on `core` plus one provider SDK.
+
+| Package | Description |
+|---|---|
 | `@veloxdevworks/flowgraph-provider-claude` | Claude Agent SDK adapter |
 | `@veloxdevworks/flowgraph-provider-cursor` | Cursor SDK adapter |
-| `@veloxdevworks/flowgraph-testing` | In-memory test harness |
+
+### Runtime plugins
+
+Peer-depend on `core` plus one optional capability (native driver, OTel, sandbox, etc.).
+
+| Package | Description |
+|---|---|
+| `@veloxdevworks/flowgraph-checkpoint-sqlite` | Durable SQLite checkpointer |
+| `@veloxdevworks/flowgraph-checkpoint-postgres` | Durable Postgres checkpointer |
+| `@veloxdevworks/flowgraph-observability-otel` | OpenTelemetry exporter |
+| `@veloxdevworks/flowgraph-tools-fs` | Sandboxed local filesystem tools |
 
 `flowgraph tui` (interactive terminal UI) and MCP server integration ship as separate optional packages (`@veloxdevworks/flowgraph-tui`, `@veloxdevworks/flowgraph-mcp`) built from a companion repo — install them independently when you need them.
 

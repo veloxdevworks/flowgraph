@@ -14,6 +14,29 @@ import type { NodeResult } from "../registry.js";
 const configSchema = HttpWithSchema;
 type Config = z.infer<typeof configSchema>;
 
+/** Header names whose values must never appear in event telemetry. */
+const SENSITIVE_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key",
+  "proxy-authorization",
+  "x-auth-token",
+]);
+
+/** Mask sensitive header values before emitting them in events. */
+export function redactHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!headers) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    out[key] = SENSITIVE_HEADERS.has(key.toLowerCase()) ? "***" : value;
+  }
+  return out;
+}
+
 export const httpNode = defineNode<Config>({
   type: "http",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -45,8 +68,10 @@ export const httpNode = defineNode<Config>({
         const headers = config.headers
           ? (renderDeep(config.headers, scope) as Record<string, string>)
           : {};
+        const renderedBody =
+          config.body != null ? renderDeep(config.body, scope) : undefined;
         const body =
-          config.body != null ? JSON.stringify(renderDeep(config.body, scope)) : undefined;
+          renderedBody != null ? JSON.stringify(renderedBody) : undefined;
 
         // Build query string
         let fullUrl = url;
@@ -58,12 +83,14 @@ export const httpNode = defineNode<Config>({
           fullUrl = `${url}?${params}`;
         }
 
+        const requestHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+          ...headers,
+        };
+
         const requestInit: RequestInit = {
           method,
-          headers: {
-            "Content-Type": "application/json",
-            ...headers,
-          },
+          headers: requestHeaders,
           ...(body !== undefined ? { body } : {}),
           signal: ctx.signal ?? null,
         };
@@ -87,10 +114,24 @@ export const httpNode = defineNode<Config>({
           responseBody = await response.text();
         }
 
-        ctx.emit("node.output", { status: response.status, body: responseBody });
+        const responseHeaders = Object.fromEntries(response.headers);
+
+        ctx.emit("node.output", {
+          request: {
+            method,
+            url: fullUrl,
+            headers: redactHeaders(requestHeaders),
+            ...(renderedBody !== undefined ? { body: renderedBody } : {}),
+          },
+          response: {
+            status: response.status,
+            headers: responseHeaders,
+            body: responseBody,
+          },
+        });
 
         // Apply output mapping
-        const result = { status: response.status, body: responseBody, headers: Object.fromEntries(response.headers) };
+        const result = { status: response.status, body: responseBody, headers: responseHeaders };
         return applyOutput(result, config, scope, state);
       },
     };

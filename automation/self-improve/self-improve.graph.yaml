@@ -1,0 +1,258 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: self-improve
+  description: >
+    Internal automation: plan one small repo improvement, implement, quality-gate,
+    review, and open a PR. Single provider kind (Cursor SDK); planner uses a
+    Sonnet-class model for research/judgment, coder uses Composer for editing.
+
+imports:
+  - { reducers: ./register.ts }
+
+providers:
+  planner:
+    kind: cursor
+    model: sonnet-5   # verify exact id via `Cursor.models.list()` for the account before enabling the cron
+    runtime: local
+  coder:
+    kind: cursor
+    model: composer-2.5
+    runtime: local
+
+config:
+  defaults:
+    provider: planner
+
+state:
+  channels:
+    pausedCheck: { type: object }
+    runtime: { type: object }
+    ctx: { type: object }
+    plan: { type: object }
+    gate: { type: object }
+    approval: { type: object }
+    attempts: { type: number, default: 0 }
+    implementFeedback: { type: string, default: "" }
+    pr: { type: object }
+    failure: { type: object }
+    outcome: { type: object }
+
+nodes:
+  - id: check-paused
+    type: code
+    with:
+      fn: checkPaused
+      input: {}
+      output: { to: pausedCheck }
+
+  - id: check-runtime
+    type: code
+    with:
+      fn: checkRuntime
+      input: {}
+      output: { to: runtime }
+
+  - id: load-context
+    type: code
+    with:
+      fn: loadContext
+      input: {}
+      output: { to: ctx }
+
+  - id: research-and-plan
+    type: intelligent
+    provider: planner
+    with:
+      system: >
+        You are a senior maintainer for the flowgraph monorepo (low-code LangGraph wrapper).
+        Pick exactly ONE small, safe improvement per cycle. Follow the guardrails in the user context.
+        Return structured JSON only.
+      prompt: >
+        Repository context:
+
+        {{ state.ctx.context }}
+
+        Prior implementer feedback (if any):
+        {{ state.implementFeedback }}
+
+        Choose one improvement (code, test, or docs). If nothing is worth doing, set proceed to false.
+      schema:
+        type: object
+        required: [proceed]
+        properties:
+          proceed: { type: boolean }
+          reason: { type: string }
+          title: { type: string }
+          description: { type: string }
+          docsOnly: { type: boolean }
+          targets:
+            type: array
+            items: { type: string }
+      maxSteps: 4
+      permission: auto
+      output: { to: plan }
+
+  - id: implement
+    type: intelligent
+    provider: coder
+    with:
+      cursor:
+        runtime: local
+      system: >
+        You implement a single small improvement in the flowgraph repo. Follow GUARDRAILS.md rules
+        embedded in the plan context. Do not edit automation/self-improve/** or protected paths.
+      prompt: >
+        Implement this plan exactly:
+
+        Title: {{ state.plan.title }}
+        Description: {{ state.plan.description }}
+        Docs only: {{ state.plan.docsOnly }}
+        Targets: {{ state.plan.targets }}
+
+        Feedback from prior attempt:
+        {{ state.implementFeedback }}
+
+        Make minimal, tested changes. Run nothing destructive.
+      tools:
+        - builtin: [Read, Edit, Bash]
+      maxSteps: 24
+      permission: auto
+
+  - id: quality-gate
+    type: code
+    with:
+      fn: runQualityGate
+      input:
+        docsOnly: "{{ state.plan.docsOnly }}"
+      output: { to: gate }
+
+  - id: increment-attempts
+    type: code
+    with:
+      fn: incrementAttempts
+      input:
+        attempts: "{{ state.attempts }}"
+        feedback: "{{ state.approval.feedback }}"
+        gateOutput: "{{ state.gate.output }}"
+      output:
+        map:
+          attempts: "{{ result.attempts }}"
+          implementFeedback: "{{ result.implementFeedback }}"
+
+  - id: review
+    type: intelligent
+    provider: coder
+    with:
+      cursor:
+        runtime: local
+      system: >
+        You review a proposed change set for the flowgraph repo against the plan and guardrails.
+        Approve only if the diff is small, on-strategy, and quality gates passed.
+      prompt: >
+        Plan:
+        {{ state.plan }}
+
+        Quality gate passed: {{ state.gate.passed }}
+        Gate output (excerpt):
+        {{ state.gate.output }}
+
+        Inspect git diff in the workspace. Approve if ready for PR; otherwise give actionable feedback.
+      tools:
+        - builtin: [Read, Bash]
+      maxSteps: 12
+      permission: auto
+      schema:
+        type: object
+        required: [approved]
+        properties:
+          approved: { type: boolean }
+          feedback: { type: string }
+      output: { to: approval }
+
+  - id: open-pr
+    type: code
+    with:
+      fn: openPr
+      input:
+        plan: "{{ state.plan }}"
+        gate: "{{ state.gate }}"
+      output: { to: pr }
+
+  - id: finalize-failure
+    type: code
+    with:
+      fn: finalizeFailure
+      input:
+        reason: "max attempts exhausted"
+        branch: "{{ state.pr.branch }}"
+      output: { to: failure }
+
+  - id: record-outcome
+    type: code
+    with:
+      fn: recordOutcome
+      input:
+        pausedCheck: "{{ state.pausedCheck }}"
+        runtime: "{{ state.runtime }}"
+        ctx: "{{ state.ctx }}"
+        plan: "{{ state.plan }}"
+        pr: "{{ state.pr }}"
+        failure: "{{ state.failure }}"
+      output: { map: { outcome: "{{ result }}" } }
+
+edges:
+  - { from: START, to: check-paused }
+  - from: check-paused
+    branch:
+      - when: "{{ state.pausedCheck.paused }}"
+        to: record-outcome
+      - default: true
+        to: check-runtime
+  - from: check-runtime
+    branch:
+      - when: "{{ state.runtime.ok == false }}"
+        to: record-outcome
+      - default: true
+        to: load-context
+  - from: load-context
+    branch:
+      - when: "{{ state.ctx.skip }}"
+        to: record-outcome
+      - default: true
+        to: research-and-plan
+  - from: research-and-plan
+    branch:
+      - when: "{{ state.plan.proceed == false }}"
+        to: record-outcome
+      - default: true
+        to: implement
+  - { from: implement, to: quality-gate }
+  - from: quality-gate
+    branch:
+      - when: "{{ state.gate.passed == false }}"
+        to: increment-attempts
+      - default: true
+        to: review
+  - from: increment-attempts
+    branch:
+      - when: "{{ state.attempts < 3 }}"
+        to: implement
+      - default: true
+        to: finalize-failure
+  - from: review
+    branch:
+      - when: "{{ state.approval.approved }}"
+        to: open-pr
+      - default: true
+        to: increment-attempts
+  - { from: open-pr, to: record-outcome }
+  - { from: finalize-failure, to: record-outcome }
+  - { from: record-outcome, to: END }
+
+runtime:
+  checkpoint: { enabled: false }
+  budget:
+    maxUSD: 3
+    onExceed: fail

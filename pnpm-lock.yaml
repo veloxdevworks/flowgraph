@@ -39,6 +39,25 @@ importers:
         specifier: ^4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
 
+  automation/self-improve:
+    dependencies:
+      '@veloxdevworks/flowgraph-cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@veloxdevworks/flowgraph-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@veloxdevworks/flowgraph-provider-cursor':
+        specifier: workspace:*
+        version: link:../../packages/provider-cursor
+      '@veloxdevworks/flowgraph-testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+    devDependencies:
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
+
   examples/claude-agent:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
@@ -194,6 +213,22 @@ importers:
       '@veloxdevworks/flowgraph-skills':
         specifier: workspace:*
         version: link:../../packages/skills
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
+
+  examples/software-factory:
+    dependencies:
+      '@veloxdevworks/flowgraph-cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@veloxdevworks/flowgraph-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@veloxdevworks/flowgraph-testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+    devDependencies:
       vitest:
         specifier: ^4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))

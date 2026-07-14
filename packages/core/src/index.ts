@@ -9,6 +9,7 @@ export type {
   CompileOptions,
   RunOptions,
   ResumeOptions,
+  ContinueOptions,
   RunResult,
   CompiledGraph,
   InterruptInfo,

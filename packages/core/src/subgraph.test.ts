@@ -4,9 +4,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import yaml from "yaml";
 import { compileGraph } from "./compiler.js";
+import { registerFunction } from "./nodes/code.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 
 let fixtureDir = "";
+
+beforeAll(() => {
+  registerFunction("echoBang", (input) => {
+    const value = (input as { value?: string }).value ?? "ok";
+    return `${value}!`;
+  });
+});
 
 const childSpec: GraphSpec = {
   apiVersion: "flowgraph/v1",
@@ -89,5 +97,88 @@ describe("nested subgraph HITL", () => {
     const resumed = await compiled.resume({ threadId: "sub-2", resume: { approved: true } });
     expect(resumed.status).toBe("completed");
     expect((resumed.state["approval"] as { approved?: boolean }).approved).toBe(true);
+  });
+});
+
+describe("nested subgraph events", () => {
+  it("forwards child node.start/node.end onto the parent bus with parentSpanId", async () => {
+    const simpleChild: GraphSpec = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "child-simple" },
+      state: { channels: { value: { type: "string" }, out: { type: "string" } } },
+      nodes: [
+        {
+          id: "echo",
+          type: "code",
+          with: {
+            fn: "echoBang",
+            input: { value: "{{ state.value }}" },
+            output: { to: "out" },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "echo" },
+        { from: "echo", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+
+    await fs.writeFile(path.join(fixtureDir, "simple-child.graph.yaml"), yaml.stringify(simpleChild));
+
+    const parent: GraphSpec = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "parent-events" },
+      state: {
+        channels: {
+          value: { type: "string", default: "hi" },
+          result: { type: "string" },
+        },
+      },
+      nodes: [
+        {
+          id: "embed",
+          type: "subgraph",
+          uses: "./simple-child.graph.yaml",
+          with: {
+            stateMap: {
+              in: { value: "value" },
+              out: { result: "out" },
+            },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "embed" },
+        { from: "embed", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+
+    const compiled = await compileGraph(parent, { cwd: fixtureDir, checkpointer: "none" });
+    const seen: { type: string; nodeId?: string; parentSpanId?: string }[] = [];
+    compiled.events.subscribe((ev) => {
+      seen.push({
+        type: ev.type,
+        ...(ev.scope.nodeId !== undefined ? { nodeId: ev.scope.nodeId } : {}),
+        ...(ev.scope.parentSpanId !== undefined ? { parentSpanId: ev.scope.parentSpanId } : {}),
+      });
+    });
+
+    const result = await compiled.run({ threadId: "evt-1", input: { value: "hi" } });
+    expect(result.status).toBe("completed");
+
+    const childStarts = seen.filter((e) => e.type === "node.start" && e.nodeId === "echo");
+    const childEnds = seen.filter((e) => e.type === "node.end" && e.nodeId === "echo");
+    expect(childStarts.length).toBeGreaterThanOrEqual(1);
+    expect(childEnds.length).toBeGreaterThanOrEqual(1);
+    expect(childStarts.every((e) => e.parentSpanId === "embed")).toBe(true);
+    expect(childEnds.every((e) => e.parentSpanId === "embed")).toBe(true);
+
+    const parentStarts = seen.filter((e) => e.type === "node.start" && e.nodeId === "embed");
+    expect(parentStarts.length).toBeGreaterThanOrEqual(1);
+    expect(parentStarts.every((e) => e.parentSpanId === undefined)).toBe(true);
   });
 });

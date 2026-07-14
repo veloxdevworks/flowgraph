@@ -1,0 +1,414 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: software-factory
+  description: >
+    Software development lifecycle demo: HITL chooses prototype vs production, then
+    mock Jira/chat sync, design and release gates on the production track, parallel
+    design/performance/security critiques with aggregate + follow-up plan, and
+    deterministic quality steps (i18n, a11y, unit, e2e, o11y). Prototype stays a
+    tight build → staging → promote loop.
+
+imports:
+  - { reducers: ./register.ts }
+
+state:
+  channels:
+    feature: { type: object }
+    trackChoice: { type: object }
+    track: { type: string, default: "" }
+    promoteApproval: { type: object }
+    design: { type: object }
+    designApproval: { type: object }
+    reviews: { type: array, reducer: append }
+    synthesis: { type: object }
+    plan: { type: object }
+    artifact: { type: object }
+    checks: { type: object, reducer: merge }
+    releaseApproval: { type: object }
+    deploy: { type: object }
+    jira: { type: object }
+    notifications: { type: array, reducer: append }
+    fixAttempt: { type: number, default: 0 }
+    outcome: { type: object }
+
+nodes:
+  - id: intake
+    type: code
+    with:
+      fn: intakeFeature
+      input:
+        feature: "{{ state.feature }}"
+      output:
+        map:
+          feature: "{{ result.feature }}"
+          design: "{{ result.design }}"
+
+  - id: jira-in-progress
+    type: code
+    with:
+      fn: updateJira
+      input:
+        ticket: "{{ state.feature.ticket }}"
+        status: "In Progress"
+        title: "{{ state.feature.title }}"
+      output: { to: jira }
+
+  - id: choose-track
+    type: hitl
+    with:
+      mode: choice
+      message: >
+        {{ state.feature.ticket }}: {{ state.feature.title }}
+        Is this a prototype (tight staging loop) or production (full quality + gates)?
+      choices: [prototype, production]
+      output: { to: trackChoice }
+
+  - id: apply-track
+    type: code
+    with:
+      fn: applyTrackChoice
+      input:
+        choice: "{{ state.trackChoice.choice }}"
+        feature: "{{ state.feature }}"
+      output:
+        map:
+          track: "{{ result.track }}"
+          feature: "{{ result.feature }}"
+
+  - id: route-track
+    type: router
+    with:
+      mode: rules
+      routes:
+        prototype:
+          when: "{{ state.track == 'prototype' }}"
+          to: prototype-build
+        production:
+          when: "{{ state.track == 'production' }}"
+          to: chat-design
+        default:
+          default: true
+          to: chat-design
+
+  - id: prototype-build
+    type: code
+    with:
+      fn: buildArtifact
+      input:
+        feature: "{{ state.feature }}"
+        track: "{{ state.track }}"
+        design: "{{ state.design }}"
+      output: { to: artifact }
+
+  - id: deploy-staging
+    type: code
+    with:
+      fn: deploy
+      input:
+        artifact: "{{ state.artifact }}"
+        environment: staging
+        track: "{{ state.track }}"
+      output: { to: deploy }
+
+  - id: promote-gate
+    type: hitl
+    with:
+      mode: approve
+      message: >
+        {{ state.feature.ticket }} is on staging ({{ state.deploy.url }}).
+        Promote to production? (runs design review + full quality gates)
+      output: { to: promoteApproval }
+
+  - id: apply-promote
+    type: code
+    when: "{{ state.promoteApproval.approved }}"
+    with:
+      fn: applyPromote
+      input:
+        feature: "{{ state.feature }}"
+      output:
+        map:
+          track: "{{ result.track }}"
+          feature: "{{ result.feature }}"
+
+  - id: chat-design
+    type: code
+    with:
+      fn: chatOwner
+      input:
+        owner: "{{ state.feature.owner }}"
+        kind: design-review
+        title: "{{ state.feature.title }}"
+        ticket: "{{ state.feature.ticket }}"
+      output: { to: notifications }
+
+  - id: design-review
+    type: hitl
+    with:
+      mode: approve
+      message: >
+        Design review for {{ state.feature.ticket }}: {{ state.feature.title }}.
+        Approve the design and proceed to production build?
+      output: { to: designApproval }
+
+  - id: revise-design
+    type: code
+    when: "{{ state.designApproval.approved == false }}"
+    with:
+      fn: reviseDesign
+      input:
+        design: "{{ state.design }}"
+        feature: "{{ state.feature }}"
+      output: { to: design }
+
+  - id: kickoff-reviews
+    type: code
+    when: "{{ state.designApproval.approved }}"
+    with:
+      fn: kickoffReviews
+      input:
+        feature: "{{ state.feature }}"
+
+  - id: critique-design
+    type: code
+    with:
+      fn: critiqueDesign
+      input:
+        feature: "{{ state.feature }}"
+        design: "{{ state.design }}"
+      output: { to: reviews }
+
+  - id: critique-performance
+    type: code
+    with:
+      fn: critiquePerformance
+      input:
+        feature: "{{ state.feature }}"
+        design: "{{ state.design }}"
+      output: { to: reviews }
+
+  - id: critique-security
+    type: code
+    with:
+      fn: critiqueSecurity
+      input:
+        feature: "{{ state.feature }}"
+        design: "{{ state.design }}"
+      output: { to: reviews }
+
+  - id: aggregate-reviews
+    type: code
+    with:
+      fn: aggregateReviews
+      input:
+        reviews: "{{ state.reviews }}"
+        feature: "{{ state.feature }}"
+      output: { to: synthesis }
+
+  - id: follow-up-plan
+    type: code
+    with:
+      fn: followUpPlan
+      input:
+        synthesis: "{{ state.synthesis }}"
+        feature: "{{ state.feature }}"
+      output: { to: plan }
+
+  - id: production-build
+    type: code
+    with:
+      fn: buildArtifact
+      input:
+        feature: "{{ state.feature }}"
+        track: "{{ state.track }}"
+        design: "{{ state.design }}"
+        plan: "{{ state.plan }}"
+      output: { to: artifact }
+
+  - id: i18n
+    type: code
+    with:
+      fn: runI18n
+      input:
+        artifact: "{{ state.artifact }}"
+        checks: "{{ state.checks }}"
+      output: { to: checks }
+
+  - id: a11y
+    type: code
+    with:
+      fn: runA11y
+      input:
+        artifact: "{{ state.artifact }}"
+        checks: "{{ state.checks }}"
+      output: { to: checks }
+
+  - id: unit-tests
+    type: code
+    with:
+      fn: runUnitTests
+      input:
+        artifact: "{{ state.artifact }}"
+        checks: "{{ state.checks }}"
+      output: { to: checks }
+
+  - id: e2e-tests
+    type: code
+    with:
+      fn: runE2e
+      input:
+        artifact: "{{ state.artifact }}"
+        checks: "{{ state.checks }}"
+        fixAttempt: "{{ state.fixAttempt }}"
+      output: { to: checks }
+
+  - id: o11y
+    type: code
+    with:
+      fn: runO11y
+      input:
+        artifact: "{{ state.artifact }}"
+        checks: "{{ state.checks }}"
+      output: { to: checks }
+
+  - id: chat-release
+    type: code
+    with:
+      fn: chatOwner
+      input:
+        owner: "{{ state.feature.owner }}"
+        kind: release-review
+        title: "{{ state.feature.title }}"
+        ticket: "{{ state.feature.ticket }}"
+      output: { to: notifications }
+
+  - id: release-gate
+    type: hitl
+    with:
+      mode: approve
+      message: >
+        Release gate for {{ state.feature.ticket }} (fix attempt {{ state.fixAttempt }}).
+        Quality checks passed. Approve production deploy?
+      output: { to: releaseApproval }
+
+  - id: fix-and-retest
+    type: code
+    when: "{{ state.releaseApproval.approved == false }}"
+    with:
+      fn: fixAndRetest
+      input:
+        artifact: "{{ state.artifact }}"
+        fixAttempt: "{{ state.fixAttempt }}"
+      output:
+        map:
+          artifact: "{{ result.artifact }}"
+          fixAttempt: "{{ result.fixAttempt }}"
+
+  - id: deploy-production
+    type: code
+    when: "{{ state.releaseApproval.approved }}"
+    with:
+      fn: deploy
+      input:
+        artifact: "{{ state.artifact }}"
+        environment: production
+        track: "{{ state.track }}"
+      output: { to: deploy }
+
+  - id: jira-done
+    type: code
+    with:
+      fn: updateJira
+      input:
+        ticket: "{{ state.feature.ticket }}"
+        status: Done
+        title: "{{ state.feature.title }}"
+        environment: "{{ state.deploy.environment }}"
+      output: { to: jira }
+
+  - id: chat-shipped
+    type: code
+    with:
+      fn: chatOwner
+      input:
+        owner: "{{ state.feature.owner }}"
+        kind: shipped
+        title: "{{ state.feature.title }}"
+        ticket: "{{ state.feature.ticket }}"
+        environment: "{{ state.deploy.environment }}"
+      output: { to: notifications }
+
+  - id: record-outcome
+    type: code
+    with:
+      fn: recordOutcome
+      input:
+        feature: "{{ state.feature }}"
+        track: "{{ state.track }}"
+        deploy: "{{ state.deploy }}"
+        jira: "{{ state.jira }}"
+        checks: "{{ state.checks }}"
+        synthesis: "{{ state.synthesis }}"
+        plan: "{{ state.plan }}"
+      output: { to: outcome }
+
+edges:
+  - { from: START, to: intake }
+  - { from: intake, to: jira-in-progress }
+  - { from: jira-in-progress, to: choose-track }
+  - { from: choose-track, to: apply-track }
+  - { from: apply-track, to: route-track }
+  - from: route-track
+    branch:
+      - when: "{{ state.track == 'prototype' }}"
+        to: prototype-build
+      - default: true
+        to: chat-design
+  - { from: prototype-build, to: deploy-staging }
+  - { from: deploy-staging, to: promote-gate }
+  - from: promote-gate
+    branch:
+      - when: "{{ state.promoteApproval.approved }}"
+        to: apply-promote
+      - default: true
+        to: jira-done
+  - { from: apply-promote, to: chat-design }
+  - { from: chat-design, to: design-review }
+  - from: design-review
+    branch:
+      - when: "{{ state.designApproval.approved }}"
+        to: kickoff-reviews
+      - default: true
+        to: revise-design
+  - { from: revise-design, to: chat-design }
+  - { from: kickoff-reviews, to: [critique-design, critique-performance, critique-security] }
+  - { from: critique-design, to: aggregate-reviews }
+  - { from: critique-performance, to: aggregate-reviews }
+  - { from: critique-security, to: aggregate-reviews }
+  - { from: aggregate-reviews, to: follow-up-plan }
+  - { from: follow-up-plan, to: production-build }
+  - { from: production-build, to: i18n }
+  - { from: i18n, to: a11y }
+  - { from: a11y, to: unit-tests }
+  - { from: unit-tests, to: e2e-tests }
+  - { from: e2e-tests, to: o11y }
+  - { from: o11y, to: chat-release }
+  - { from: chat-release, to: release-gate }
+  - from: release-gate
+    branch:
+      - when: "{{ state.releaseApproval.approved }}"
+        to: deploy-production
+      - default: true
+        to: fix-and-retest
+  - { from: fix-and-retest, to: e2e-tests }
+  - { from: deploy-production, to: jira-done }
+  - { from: jira-done, to: chat-shipped }
+  - { from: chat-shipped, to: record-outcome }
+  - { from: record-outcome, to: END }
+
+runtime:
+  checkpoint:
+    enabled: true
+    backend: memory

@@ -92,6 +92,8 @@ This wrapper is what guarantees "observable & extensible by default": node autho
 
 We use a pnpm + Turborepo monorepo ([ADR-0006](./adr/0006-monorepo-tooling.md)). Rationale: clear public/extension boundaries, independent versioning of optional adapters (so a CI user pulling only `@veloxdevworks/flowgraph-core` does not transitively install the Claude or Cursor SDKs), and room to grow plugins.
 
+Packages under `packages/` fall into three tiers. Install only the adapters and plugins you need so `core` never pulls native bindings or optional SDKs transitively.
+
 ```
 flowgraph/                      (repo root)
 ├── package.json               (workspace root, private)
@@ -105,34 +107,45 @@ flowgraph/                      (repo root)
 │   ├── release-notes/
 │   └── software-factory/
 └── packages/
+    │  # Foundation — always relevant; no optional native/SDK deps
     ├── core/                  @veloxdevworks/flowgraph-core         — compiler, registry, runtime, built-in nodes, event bus, hooks, LangChain provider
     ├── spec/                  @veloxdevworks/flowgraph-spec         — Zod schemas + generated JSON Schema (no runtime deps)
     ├── skills/                @veloxdevworks/flowgraph-skills       — SKILL.md loader, front-matter parsing, contract & env preflight
     ├── expr/                  @veloxdevworks/flowgraph-expr         — the safe expression language ({{ ... }}) parser/evaluator
     ├── cli/                   @veloxdevworks/flowgraph-cli          — the `flowgraph` binary
-    ├── checkpoint-sqlite/     @veloxdevworks/flowgraph-checkpoint-sqlite  — durable file/sqlite checkpointer
-    ├── checkpoint-postgres/   @veloxdevworks/flowgraph-checkpoint-postgres— durable pg checkpointer (later)
-    ├── observability-otel/    @veloxdevworks/flowgraph-observability-otel — OpenTelemetry exporter wiring
+    ├── testing/               @veloxdevworks/flowgraph-testing      — in-memory harness, fixtures, golden-run helpers
+    │  # Adapters — peer-dep on core + one provider SDK
     ├── provider-claude/       @veloxdevworks/flowgraph-provider-claude    — Claude Agent SDK adapter
     ├── provider-cursor/       @veloxdevworks/flowgraph-provider-cursor    — Cursor SDK adapter
-    └── testing/               @veloxdevworks/flowgraph-testing      — in-memory harness, fixtures, golden-run helpers
+    │  # Runtime plugins — peer-dep on core + one optional capability
+    ├── checkpoint-sqlite/     @veloxdevworks/flowgraph-checkpoint-sqlite  — durable file/sqlite checkpointer
+    ├── checkpoint-postgres/   @veloxdevworks/flowgraph-checkpoint-postgres— durable pg checkpointer
+    ├── observability-otel/    @veloxdevworks/flowgraph-observability-otel — OpenTelemetry exporter wiring
+    └── tools-fs/              @veloxdevworks/flowgraph-tools-fs           — sandboxed local filesystem tools
 ```
 
 ### Package dependency rules
 
 ```
+# Foundation
 spec ◄── core ◄── cli
-          ▲   ◄── provider-*        (peer-depend on core; impl ProviderAdapter)
-          ▲   ◄── checkpoint-*      (peer-depend on core; impl CheckpointerAdapter)
-          ▲   ◄── observability-otel
 expr ◄── core
 skills ◄── core
 testing ── (dev) ── all
+
+# Adapters (peer-depend on core; impl ProviderAdapter)
+          ▲   ◄── provider-*
+
+# Runtime plugins (peer-depend on core; one optional capability each)
+          ▲   ◄── checkpoint-*      (impl CheckpointerAdapter)
+          ▲   ◄── observability-otel
+          ▲   ◄── tools-fs
 ```
 
 - `@veloxdevworks/flowgraph-spec` has **no runtime dependencies** (only Zod). It is importable by editor tooling and the future GUI to validate specs without pulling the engine.
 - `@veloxdevworks/flowgraph-core` depends on LangGraph.js, `@veloxdevworks/flowgraph-spec`, `@veloxdevworks/flowgraph-expr`, `@veloxdevworks/flowgraph-skills`. It contains the engine integration and all *deterministic* built-in nodes.
-- **Adapters are separate packages** that `peerDependencies` on `@veloxdevworks/flowgraph-core` and on their heavy SDK (`@anthropic-ai/claude-agent-sdk`, `@cursor/sdk`, `@langchain/*`). A user installs only the adapters they reference. The CLI lazy-loads adapters by name with a helpful "install `@veloxdevworks/flowgraph-provider-claude`" error if missing.
+- **Adapters and runtime plugins are separate packages** that `peerDependencies` on `@veloxdevworks/flowgraph-core` and on their heavy SDK or native driver (`@anthropic-ai/claude-agent-sdk`, `@cursor/sdk`, `better-sqlite3`/`pg`, `@opentelemetry/*`). A user installs only the packages they reference. The CLI lazy-loads them by name with a helpful "install `@veloxdevworks/flowgraph-provider-claude`" error if missing.
+- If a new capability does **not** need an optional heavy/native dependency, it probably belongs inside `core`, not a new package. See [CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-package).
 
 ## 6. Public API surface (programmatic)
 

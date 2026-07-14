@@ -1,0 +1,19 @@
+{
+  "name": "software-factory-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "flowgraph run software-factory.graph.yaml --stream --on-interrupt fail --thread software-factory",
+    "test": "vitest run",
+    "validate": "flowgraph validate software-factory.graph.yaml"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-testing": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

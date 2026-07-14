@@ -11,6 +11,7 @@ Runnable vertical slices demonstrating flowgraph features. Each example includes
 | [release-notes](./release-notes/) | HITL interrupt + durable resume | `register.ts` | [README](./release-notes/README.md) |
 | [hitl](./hitl/) | `hitl` node + interactive/CI resume | Scripted provider in test | [README](./hitl/README.md) |
 | [review-loop](./review-loop/) | Branching + revise loop until approved | `register.ts` | [README](./review-loop/README.md) |
+| [software-factory](./software-factory/) | SDLC: prototype vs production, HITL, quality gates, mock Jira/chat | `register.ts` | [README](./software-factory/README.md) |
 | [composition](./composition/) | `map` + `subgraph` fan-out | `register.ts` | [README](./composition/README.md) |
 | [reducers](./reducers/) | Custom reducers + parallel fan-out | `register.ts` | [README](./reducers/README.md) |
 | [skill-pack](./skill-pack/) | Portable skill packaging | None | [README](./skill-pack/README.md) |
@@ -43,6 +44,7 @@ cd examples/quickstart && pnpm start
 | Register custom functions | [triage-issue](./triage-issue/) |
 | Pause for human approval | [release-notes](./release-notes/) or [hitl](./hitl/) |
 | Loop until human approves | [review-loop](./review-loop/) |
+| See a full SDLC (prototype vs production) | [software-factory](./software-factory/) |
 | Run an LLM agent | [claude-agent](./claude-agent/) or [cursor-agent](./cursor-agent/) |
 | Fan out work in parallel | [composition](./composition/) or [reducers](./reducers/) |
 | Write automated tests | [composition/composition.test.ts](./composition/composition.test.ts) |

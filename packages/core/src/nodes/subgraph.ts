@@ -6,6 +6,10 @@
  *
  * Nested HITL: the child graph is invoked with the parent's LangGraph RunnableConfig
  * so interrupts propagate to the parent checkpoint (see LangGraph subgraph docs).
+ *
+ * Nested events: child node events are forwarded onto the parent EventBus with
+ * `scope.parentSpanId` set to this subgraph node's id, so UIs can visualize
+ * nested run scope.
  */
 
 import { z } from "zod";
@@ -13,6 +17,7 @@ import { SubgraphWithSchema } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
 
 const configSchema = SubgraphWithSchema;
@@ -38,6 +43,7 @@ export const subgraphNode = defineNode<Config>({
 
   build(_buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const uses = String(nodeSpec["uses"] ?? "");
+    const parentNodeId = String(nodeSpec["id"] ?? uses);
     let childPromise: Promise<EmbeddedChild> | undefined;
 
     return {
@@ -51,7 +57,7 @@ export const subgraphNode = defineNode<Config>({
           throw new Error(`subgraph "${uses}": missing LangGraph runtime config (internal error).`);
         }
 
-        childPromise ??= loadChild(uses, ctx);
+        childPromise ??= loadChild(uses, parentNodeId, ctx.events, ctx);
         const child = await childPromise;
 
         const nodeInput = nodeCtx._input ?? {};
@@ -94,7 +100,12 @@ export const subgraphNode = defineNode<Config>({
   },
 });
 
-async function loadChild(uses: string, ctx: NodeRunContext): Promise<EmbeddedChild> {
+async function loadChild(
+  uses: string,
+  parentNodeId: string,
+  parentEvents: EventBus,
+  ctx: NodeRunContext,
+): Promise<EmbeddedChild> {
   const { loadGraph } = await import("../loader.js");
   const { compileGraphForEmbedding } = await import("../compiler.js");
 
@@ -107,7 +118,17 @@ async function loadChild(uses: string, ctx: NodeRunContext): Promise<EmbeddedChi
     throw new Error(`subgraph: could not load "${uses}" (${ref}): ${diagnostics.map((d) => d.message).join("; ")}`);
   }
 
-  const { compiledLg } = await compileGraphForEmbedding(spec, { cwd: ctx.workspace });
+  const forwardSink = (event: FlowgraphEvent) => {
+    parentEvents.emit(event.type, event.data, {
+      ...event.scope,
+      parentSpanId: parentNodeId,
+    });
+  };
+
+  const { compiledLg } = await compileGraphForEmbedding(spec, {
+    cwd: ctx.workspace,
+    sinks: [forwardSink],
+  });
 
   return {
     async invoke(input, lgConfig) {

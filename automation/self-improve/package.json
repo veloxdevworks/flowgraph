@@ -1,0 +1,20 @@
+{
+  "name": "self-improve-automation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "validate": "flowgraph validate self-improve.graph.yaml",
+    "run:dry": "SELF_IMPROVE_DRY_RUN=1 flowgraph run self-improve.graph.yaml --thread manual-test --on-interrupt fail --stream"
+  },
+  "dependencies": {
+    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-provider-cursor": "workspace:*",
+    "@veloxdevworks/flowgraph-testing": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

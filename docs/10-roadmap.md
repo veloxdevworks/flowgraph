@@ -13,7 +13,7 @@ A phased plan from empty repo → community-ready v1.0. Each phase ends with a *
 | 2 — Skills | **Done** | `skills doctor`, skill packs, preflight |
 | 3 — Durability & HITL | **Mostly done** | `release-notes` + `resume`; `dev --step` / `resumeFrom` planned |
 | 4 — Intelligent + providers | **Done** | Claude, Cursor, LangChain adapters; MCP agent tools |
-| 5 — Composition & scale | **Partial** | `map` + `subgraph` + nested HITL shipped; `software-factory` example not built |
+| 5 — Composition & scale | **Partial** | `map` + `subgraph` + nested HITL shipped; `software-factory` lifecycle example shipped (fan-out via `composition`) |
 | 6 — Observability (full) | **Partial** | OTel package exists; CLI `--otel` not wired; full hook surface partial |
 | 7 — DX & docs | **In progress** | Getting started, implementation status, docs site scaffold |
 
@@ -85,7 +85,7 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 - Custom node plugin packages (`imports[].nodes`); custom reducers via `imports[].reducers`; custom providers via `imports[].providers`.
 - `global concurrency`, robust retry/backoff, abort propagation hardening.
 
-**Exit:** the `software-factory` example fans out implementation subgraphs, runs tests, loops fixes, gates on human review — durable + traced. **Not yet built.**
+**Exit:** the `software-factory` example runs a prototype vs production lifecycle with quality gates, fix loops, and human review — durable + traced. ✓ (map/subgraph fan-out demonstrated separately in `composition`)
 
 ## Phase 6 — Observability & hooks (full)  · M (partial)
 

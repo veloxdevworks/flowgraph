@@ -67,6 +67,17 @@ custom.*                                     // user-emitted via ctx.emit()
 
 Events form a **tree** via `scope.parentSpanId`: a run contains nodes; an `intelligent` node contains steps and tool calls; a `subgraph` node contains a nested run. This tree is exactly what OTel spans mirror (§5) and what a UI renders as a timeline.
 
+### Nested subgraph events
+
+When a `subgraph` node embeds a child graph, the child's `node.*` / `skill.*` / `intelligent.*` / etc. events are **forwarded onto the parent run's EventBus** with:
+
+- `scope.nodeId` / `scope.nodeType` — the child's own node identity
+- `scope.parentSpanId` — the parent subgraph node's id
+
+This lets UIs and OTel sinks visualize nested run scope without a separate subscription. Deep nesting is hop-forwarded (each embedding hop sets `parentSpanId` to that hop's subgraph node id).
+
+**`map` note:** inner-node events from a `map` fan-out already emit on the parent bus (map does not use a private EventBus). They are attributed to the map node's context / synthetic per-item node id (`mapId[item]`); there is no per-iteration canvas node, so map does not set `parentSpanId` today.
+
 ## 3. Consuming events
 
 ### Programmatic stream

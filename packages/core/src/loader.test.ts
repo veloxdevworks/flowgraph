@@ -88,3 +88,53 @@ describe("validateSpec graph lint", () => {
     expect(diags.some((d) => d.code === "UNREACHABLE_FROM_START" && d.message.includes("orphan"))).toBe(true);
   });
 });
+
+describe("validateSpec node config", () => {
+  it("errors on unregistered node type", () => {
+    const diags = validateSpec({
+      metadata: { name: "unknown-type" },
+      nodes: [{ id: "x", type: "not-a-real-type", with: {} }],
+      edges: [
+        { from: "START", to: "x" },
+        { from: "x", to: "END" },
+      ],
+    } as unknown as GraphSpec);
+    expect(
+      diags.some(
+        (d) =>
+          d.code === "UNKNOWN_NODE_TYPE" &&
+          d.severity === "error" &&
+          d.path === "nodes.x.type",
+      ),
+    ).toBe(true);
+  });
+
+  it("errors when hitl with is missing required message", () => {
+    const diags = validateSpec({
+      metadata: { name: "bad-hitl" },
+      nodes: [{ id: "gate", type: "hitl", with: { mode: "approve" } }],
+      edges: [
+        { from: "START", to: "gate" },
+        { from: "gate", to: "END" },
+      ],
+    } as unknown as GraphSpec);
+    const cfg = diags.filter((d) => d.code === "NODE_CONFIG_ERROR");
+    expect(cfg.length).toBeGreaterThan(0);
+    expect(cfg.some((d) => d.path?.includes("nodes.gate.with") && d.message.includes("message"))).toBe(
+      true,
+    );
+  });
+
+  it("does not emit NODE_CONFIG_ERROR for a valid hitl node", () => {
+    const diags = validateSpec({
+      metadata: { name: "ok-hitl" },
+      nodes: [{ id: "gate", type: "hitl", with: { mode: "approve", message: "OK?" } }],
+      edges: [
+        { from: "START", to: "gate" },
+        { from: "gate", to: "END" },
+      ],
+    } as unknown as GraphSpec);
+    expect(diags.some((d) => d.code === "NODE_CONFIG_ERROR")).toBe(false);
+    expect(diags.some((d) => d.code === "UNKNOWN_NODE_TYPE")).toBe(false);
+  });
+});

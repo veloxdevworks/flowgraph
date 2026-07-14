@@ -2,7 +2,7 @@
 
 This document tracks what is **shipped** in the monorepo today versus what the numbered design docs describe as the **target**. When in doubt, trust `packages/` and `examples/` over aspirational spec text.
 
-Last reviewed: Sprint A+B core hardening (nested subgraph HITL, upfront preflight, example integration tests).
+Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint A+B core hardening.
 
 ## Summary
 
@@ -13,7 +13,7 @@ Last reviewed: Sprint A+B core hardening (nested subgraph HITL, upfront prefligh
 | Built-in node types (11) | **Shipped** |
 | Skills loader, contracts, preflight | **Shipped** |
 | Expression language (`@veloxdevworks/flowgraph-expr`) | **Shipped** |
-| Events + console/jsonl sinks | **Shipped** |
+| Events + console/jsonl sinks | **Shipped** (nested subgraph events forward with `parentSpanId`) |
 | Hooks (YAML subset + guardrails) | **Shipped** (partial defaults) |
 | HITL + in-memory checkpointing | **Shipped** |
 | Providers: LangChain (in core), Claude, Cursor | **Shipped** |
@@ -23,7 +23,7 @@ Last reviewed: Sprint A+B core hardening (nested subgraph HITL, upfront prefligh
 | TUI (`@veloxdevworks/flowgraph-tui`) | **Shipped** |
 | Postgres checkpointer package | **Shipped** (no CLI default, no example) |
 | OTel package | **Shipped** (not wired to CLI `--otel`) |
-| `software-factory` example | **Not started** (Phase 5 exit) |
+| `software-factory` example | **Shipped** (lifecycle demo; map fan-out covered by `composition`) |
 
 ## CLI commands
 
@@ -57,7 +57,8 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 1. **Skill preflight scope** — Upfront preflight scans top-level `skill` nodes only; nested skill refs inside `map`/`subgraph`/agent tools are not scanned yet.
 2. **OTel CLI wiring** — `@veloxdevworks/flowgraph-observability-otel` exists; attach sinks programmatically or wait for `--otel`.
 3. **Schema hosting** — `https://veloxdevworks.com/flowgraph/schema/v1.json` published when docs site deploys; local via `flowgraph schema --out`.
-4. **README phase label** — Root README updated to reflect Phases 1–4 progress; some numbered docs still describe future targets inline.
+4. **Map per-item event scope** — `map` inner events share the parent bus but do not set `parentSpanId` per iteration (no per-item canvas node). Subgraph nesting does set `parentSpanId`.
+5. **README phase label** — Root README updated to reflect Phases 1–4 progress; some numbered docs still describe future targets inline.
 
 ## Examples
 
@@ -73,7 +74,7 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 | fs-agent | Yes | Yes (API key for live run) | Yes |
 | mcp | Yes | Yes (mock + optional OAuth) | — |
 | claude-agent, cursor-agent, reducers | Yes | Yes | reducers: Yes |
-| software-factory | N/A | **Not built** | — |
+| software-factory | Yes | Yes | Yes |
 
 ## Documentation layers
 

@@ -8,6 +8,8 @@ export type EventType =
   | "run.end"
   | "run.error"
   | "run.aborted"
+  | "run.paused"
+  | "run.continued"
   | "node.start"
   | "node.end"
   | "node.error"
@@ -146,7 +148,13 @@ export function createEventBus(opts: EventBusOptions): EventBus {
         }
         // End signal: a run.end or run.error event closes the stream
         const last = buffer[buffer.length - 1];
-        if (last && (last.type === "run.end" || last.type === "run.error" || last.type === "run.aborted")) {
+        if (
+          last &&
+          (last.type === "run.end" ||
+            last.type === "run.error" ||
+            last.type === "run.aborted" ||
+            last.type === "run.paused")
+        ) {
           done = true;
         }
       }

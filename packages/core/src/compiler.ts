@@ -65,6 +65,12 @@ export interface RunOptions {
   input?: Record<string, unknown>;
   threadId?: string;
   signal?: AbortSignal;
+  /**
+   * Graceful pause: after the current node completes, stop and return
+   * `status: "paused"` so the thread can later be resumed via `continueRun`.
+   * Distinct from `signal`, which hard-cancels (not resumable).
+   */
+  pauseSignal?: AbortSignal;
   sinks?: EventSink[];
   onInterrupt?: InterruptPolicy;
   /** Resolver used when onInterrupt is "prompt"/"approve". Returns the resume value. */
@@ -75,13 +81,24 @@ export interface ResumeOptions {
   threadId: string;
   resume: unknown;
   signal?: AbortSignal;
+  pauseSignal?: AbortSignal;
+  sinks?: EventSink[];
+  onInterrupt?: InterruptPolicy;
+  resolveInterrupt?: (interrupts: InterruptInfo[]) => Promise<unknown> | unknown;
+}
+
+/** Continue a paused (or checkpointed) thread from its next nodes — not HITL resume. */
+export interface ContinueOptions {
+  threadId: string;
+  signal?: AbortSignal;
+  pauseSignal?: AbortSignal;
   sinks?: EventSink[];
   onInterrupt?: InterruptPolicy;
   resolveInterrupt?: (interrupts: InterruptInfo[]) => Promise<unknown> | unknown;
 }
 
 export interface RunResult {
-  status: "completed" | "interrupted" | "error";
+  status: "completed" | "interrupted" | "paused" | "error";
   state: Record<string, unknown>;
   runId: string;
   threadId?: string | undefined;
@@ -104,10 +121,14 @@ export interface CompiledGraph {
   events: EventBus;
   run(opts?: RunOptions): Promise<RunResult>;
   resume(opts: ResumeOptions): Promise<RunResult>;
+  /** Resume a paused/checkpointed thread from `next` (not HITL). */
+  continueRun(opts: ContinueOptions): Promise<RunResult>;
   getState(threadId: string): Promise<StateSnapshot | null>;
   getStateHistory(threadId: string): Promise<StateSnapshot[]>;
   stream(opts?: RunOptions): AsyncIterable<FlowgraphEvent>;
 }
+
+type ExecuteMode = "start" | "resume" | "continue";
 
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
 export interface EmbeddedCompiledGraph {
@@ -121,7 +142,8 @@ export async function compileGraphForEmbedding(
   const { compiledLg } = await assembleCompiledLangGraph(spec, {
     ...opts,
     checkpointer: "none",
-    sinks: [],
+    // Preserve caller sinks (e.g. parent-bus forwarding from the subgraph node).
+    // Do not force sinks: [] — nested events would otherwise be invisible.
   });
   return { compiledLg };
 }
@@ -156,9 +178,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   } = assembled;
 
   const executeInvoke = async (
-    payload: Record<string, unknown> | Command,
-    runOpts: RunOptions | ResumeOptions,
-    isResume: boolean,
+    payload: Record<string, unknown> | Command | null,
+    runOpts: RunOptions | ResumeOptions | ContinueOptions,
+    mode: ExecuteMode,
   ): Promise<RunResult> => {
     const startMs = Date.now();
     const threadId = runOpts.threadId ?? `thread-${runId}`;
@@ -168,23 +190,29 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     (baseCtx as RunContext).meta = runMeta;
     (baseCtx as RunContext).logger = createLogger(events, graphSpec.metadata.name);
     if (runOpts.signal !== undefined) (baseCtx as RunContext).signal = runOpts.signal;
+    // Per-run pause flag checked at the start of each node (see node handler below).
+    const pauseable = baseCtx as RunContext & { pauseSignal?: AbortSignal };
+    if (runOpts.pauseSignal !== undefined) pauseable.pauseSignal = runOpts.pauseSignal;
+    else delete pauseable.pauseSignal;
 
     const unsubs = (runOpts.sinks ?? []).map((s) => events.subscribe(s));
     const policy = runOpts.onInterrupt ?? defaultPolicy;
     const cfg = buildInvokeConfig(threadId, graphSpec);
 
-    events.emit(isResume ? "interrupt.resumed" : "run.start", {
+    const startEvent =
+      mode === "resume" ? "interrupt.resumed" : mode === "continue" ? "run.continued" : "run.start";
+    events.emit(startEvent, {
       graphName: graphSpec.metadata.name,
     });
 
     try {
-      let current: Record<string, unknown> | Command = payload;
+      let current: Record<string, unknown> | Command | null = payload;
 
-      if (!isResume && !(payload instanceof Command) && hooks.has("run:before")) {
+      if (mode === "start" && current != null && !(current instanceof Command) && hooks.has("run:before")) {
         const r = await hooks.run("run:before", {
-          state: payload,
+          state: current,
           run: runMeta,
-          payload: { input: payload as Record<string, unknown> },
+          payload: { input: current as Record<string, unknown> },
         });
         if (r.payload.input) current = r.payload.input;
       }
@@ -197,6 +225,18 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         )) ?? {}) as Record<string, unknown>;
 
         const interrupts = extractInterrupts(result);
+
+        if (isPauseInterrupt(interrupts)) {
+          const clean = stripReserved(result);
+          events.emit("run.paused", { state: clean, durationMs: Date.now() - startMs });
+          return {
+            status: "paused",
+            state: clean,
+            runId,
+            threadId,
+            durationMs: Date.now() - startMs,
+          };
+        }
 
         if (interrupts.length === 0) {
           if (checkpointer && (interruptBefore.length || interruptAfter.length)) {
@@ -263,6 +303,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       events.emit("run.error", { error: error.message, durationMs: Date.now() - startMs });
       return { status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs };
     } finally {
+      delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       for (const u of unsubs) u();
     }
   };
@@ -285,13 +326,29 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     };
   };
 
+  const continueRun = async (continueOpts: ContinueOptions): Promise<RunResult> => {
+    let payload: Record<string, unknown> | Command | null = null;
+    if (checkpointer) {
+      const snap = await compiledLg.getState({ configurable: { thread_id: continueOpts.threadId } });
+      const hasInterrupt = (snap?.tasks ?? []).some(
+        (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
+      );
+      if (hasInterrupt) {
+        // LangGraph rejects Command({ resume: null }) as empty input.
+        payload = new Command({ resume: true });
+      }
+    }
+    return executeInvoke(payload, continueOpts, "continue");
+  };
+
   return {
     spec: graphSpec,
     runId,
     events,
-    run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, false),
+    run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, "start"),
     resume: (resumeOpts: ResumeOptions) =>
-      executeInvoke(new Command({ resume: resumeOpts.resume }), resumeOpts, true),
+      executeInvoke(new Command({ resume: resumeOpts.resume }), resumeOpts, "resume"),
+    continueRun,
     getState: async (threadId: string) => {
       if (!checkpointer) return null;
       const snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
@@ -309,7 +366,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     },
     stream: async function* (runOpts: RunOptions = {}) {
       const streamP = events.stream();
-      executeInvoke(runOpts.input ?? {}, runOpts, false).catch(() => {});
+      executeInvoke(runOpts.input ?? {}, runOpts, "start").catch(() => {});
       yield* streamP;
     },
   };
@@ -430,6 +487,12 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
 
     graph.addNode(nodeSpec.id, async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
       const runMeta = (baseCtx.meta ?? { runId, graph: spec.metadata.name, startedAt: "" }) as RunMeta;
+
+      // Graceful pause: park before this node so continueRun can resume it.
+      const pauseSignal = (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
+      if (pauseSignal?.aborted) {
+        lgInterrupt({ reason: "paused", __flowgraphPause: true });
+      }
 
       // `when` guard
       if (nodeSpec.when) {
@@ -586,6 +649,18 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function isPauseInterrupt(interrupts: InterruptInfo[]): boolean {
+  if (interrupts.length === 0) return false;
+  return interrupts.every((i) => {
+    const value = i.payload as { reason?: string; __flowgraphPause?: boolean } | undefined;
+    return (
+      value?.__flowgraphPause === true ||
+      value?.reason === "paused" ||
+      i.reason === "paused"
+    );
+  });
+}
 
 function buildInvokeConfig(threadId: string, spec: GraphSpec): Record<string, unknown> {
   const concurrency = spec.runtime?.concurrency;

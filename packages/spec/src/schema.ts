@@ -572,6 +572,8 @@ export const GraphSpecSchema = z.object({
   providers: ProvidersSchema.optional(),
   config: ConfigSchema.optional(),
   state: StateSchema.optional(),
+  /** Default run input seeded when a run starts (desktop Start inspector / CLI may override). */
+  input: z.record(z.unknown()).optional(),
   nodes: z.array(NodeSpecSchema),
   edges: z.array(EdgeSpecSchema),
   runtime: RuntimeSchema.optional(),

@@ -7,6 +7,8 @@ import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@veloxdevworks/flowgraph-spec";
 import { graphLintDiagnostics } from "./runtime/validate-graph.js";
+import { registry } from "./registry.js";
+import "./nodes/index.js";
 
 export async function loadGraph(
   filePath: string,
@@ -100,6 +102,32 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
   for (const node of spec.nodes) {
     if (!allTargets.has(node.id)) {
       diagnostics.push({ severity: "warning", code: "NO_INBOUND_EDGE", message: `Node "${node.id}" has no inbound edges` });
+    }
+  }
+
+  // Per-node type registration + `with` shape (same schemas compileGraph uses)
+  for (const node of spec.nodes) {
+    const factory = registry.get(node.type);
+    if (!factory) {
+      diagnostics.push({
+        severity: "error",
+        code: "UNKNOWN_NODE_TYPE",
+        message: `Node "${node.id}" has unregistered type "${node.type}"`,
+        path: `nodes.${node.id}.type`,
+      });
+      continue;
+    }
+    const configResult = factory.configSchema.safeParse(node.with ?? {});
+    if (!configResult.success) {
+      for (const issue of configResult.error.issues) {
+        const fieldPath = issue.path.join(".");
+        diagnostics.push({
+          severity: "error",
+          code: "NODE_CONFIG_ERROR",
+          message: fieldPath ? `${fieldPath}: ${issue.message}` : issue.message,
+          path: fieldPath ? `nodes.${node.id}.with.${fieldPath}` : `nodes.${node.id}.with`,
+        });
+      }
     }
   }
 
