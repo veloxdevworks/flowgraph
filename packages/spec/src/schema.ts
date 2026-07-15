@@ -116,10 +116,15 @@ export const DurationSchema = z.string().regex(/^\d+(\.\d+)?(ms|s|m|h|d)$/, "Inv
 // Output mapping
 // ---------------------------------------------------------------------------
 
-export const OutputMappingSchema = z.union([
-  z.object({ to: z.string() }),
-  z.object({ map: z.record(z.string()) }),
-]);
+export const OutputMappingSchema = z.union(
+  [z.object({ to: z.string() }), z.object({ map: z.record(z.string()) })],
+  {
+    errorMap: () => ({
+      message:
+        'expected { to: "<channel>" } or { map: { <channel>: "<expr>" } } — not a bare string or flat field map',
+    }),
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Node `with` blocks — per-type config

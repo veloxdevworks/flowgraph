@@ -275,4 +275,28 @@ describe("validateSpec node config", () => {
     expect(diags.some((d) => d.code === "NODE_CONFIG_ERROR")).toBe(false);
     expect(diags.some((d) => d.code === "UNKNOWN_NODE_TYPE")).toBe(false);
   });
+
+  it("describes the expected output mapping shape when output is invalid", () => {
+    const diags = validateSpec({
+      metadata: { name: "bad-output" },
+      nodes: [
+        {
+          id: "fetch",
+          type: "http",
+          with: { method: "GET", url: "https://example.com", output: "httpResult" },
+        },
+      ],
+      edges: [
+        { from: "START", to: "fetch" },
+        { from: "fetch", to: "END" },
+      ],
+    } as unknown as GraphSpec);
+    const cfg = diags.filter((d) => d.code === "NODE_CONFIG_ERROR");
+    expect(cfg.length).toBeGreaterThan(0);
+    expect(
+      cfg.some(
+        (d) => d.path === "nodes.fetch.with.output" && /expected \{ to:/.test(d.message),
+      ),
+    ).toBe(true);
+  });
 });
