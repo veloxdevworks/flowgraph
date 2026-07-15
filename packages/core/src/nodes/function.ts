@@ -1,11 +1,11 @@
 /**
- * Built-in node type: `code`
+ * Built-in node type: `function`
  *
  * Invokes a registered TypeScript function by name.
  */
 
 import { z } from "zod";
-import { CodeWithSchema } from "@veloxdevworks/flowgraph-spec";
+import { FunctionWithSchema } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
@@ -24,11 +24,11 @@ export function getRegisteredFunction(name: string) {
   return fnRegistry.get(name);
 }
 
-const configSchema = CodeWithSchema;
+const configSchema = FunctionWithSchema;
 type Config = z.infer<typeof configSchema>;
 
-export const codeNode = defineNode<Config>({
-  type: "code",
+export const functionNode = defineNode<Config>({
+  type: "function",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
   capabilities: {},
@@ -42,7 +42,7 @@ export const codeNode = defineNode<Config>({
         const fn = fnRegistry.get(config.fn);
         if (!fn) {
           throw new Error(
-            `code node: function "${config.fn}" is not registered. ` +
+            `function node: function "${config.fn}" is not registered. ` +
               `Call registerFunction("${config.fn}", handler) before running the graph.`,
           );
         }

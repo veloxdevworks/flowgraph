@@ -69,7 +69,7 @@ flowgraph v1.0 is successful if:
 
 1. **Issue triage bot (simple).** Webhook → summarize (agent) → router → open Jira ticket (skill) → notify Slack (skill). Runs in CI on issue events.
 2. **Release notes factory (medium).** Collect merged PRs (HTTP) → group/classify (agent) → draft notes (agent) → human approval (HITL interrupt) → publish (skill).
-3. **Software factory (complex).** Intake spec → plan (agent) → fan-out implementation subgraphs per task → run tests (code node) → router on results → agent fixes loop → human review gate → merge. Multi-hour, durable, resumable, fully traced.
+3. **Software factory (complex).** Intake spec → plan (agent) → fan-out implementation subgraphs per task → run tests (function node) → router on results → agent fixes loop → human review gate → merge. Multi-hour, durable, resumable, fully traced.
 
 These three span the complexity range the system must serve gracefully.
 

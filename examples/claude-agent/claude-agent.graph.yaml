@@ -25,7 +25,7 @@ state:
 
 nodes:
   - id: implement
-    type: intelligent
+    type: agent
     provider: claude
     with:
       claude:

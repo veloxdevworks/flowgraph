@@ -89,7 +89,7 @@ HITL is built on LangGraph's `interrupt()` + `Command({ resume })` + checkpointe
 2. **Static breakpoints** — `interruptBefore` / `interruptAfter` a node, set at compile or per-run (great for debugging / approval gates).
 3. **`hitl` nodes** — first-class approve / question / choice gates in the graph topology.
 4. **`ask_human` tool** — intelligent agents ask clarifying questions mid-loop (opt-in via `tools: [{ function: ask_human }]`).
-5. **`webhook: wait` / `wait` nodes** — durable pauses for external input.
+5. **`wait` nodes** — durable pauses for time, signals, conditions, or inbound webhooks (`webhook: true`).
 
 ### Interrupt kinds
 

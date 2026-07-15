@@ -24,7 +24,7 @@ state:
 
 nodes:
   - id: refactor
-    type: intelligent
+    type: agent
     provider: cursor
     with:
       cursor:

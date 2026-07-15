@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { InMemoryStore } from "@langchain/langgraph";
 import { compileGraph } from "./compiler.js";
-import { registerFunction } from "./nodes/code.js";
+import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 import type { NodeRunContext } from "./context.js";
 
@@ -14,7 +14,7 @@ function storeGraph(fn: string): GraphSpec {
     nodes: [
       {
         id: "store-op",
-        type: "code",
+        type: "function",
         with: {
           fn,
           output: { to: "result" },

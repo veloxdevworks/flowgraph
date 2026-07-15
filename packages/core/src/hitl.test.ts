@@ -91,7 +91,7 @@ describe("ask_human tool", () => {
       nodes: [
         {
           id: "agent",
-          type: "intelligent",
+          type: "agent",
           provider: "mock",
           with: {
             prompt: "Need clarification",

@@ -1,11 +1,20 @@
 /**
  * Build provider adapters from a graph spec's `providers` block.
+ *
+ * When an SDK-based provider (claude/cursor/langchain) has no API key but a
+ * matching local CLI binary is on PATH, we auto-prefer `createCliProvider`.
  */
 
 import type { ProviderAdapter } from "@veloxdevworks/flowgraph-core";
 import {
   createLangChainProviderFromConfig,
   isKnownLangChainVendor,
+  createCliProvider,
+  detectLocalCli,
+  cliVendorForProviderKind,
+  apiKeyEnvForProviderKind,
+  hasApiKey,
+  type CliVendor,
 } from "@veloxdevworks/flowgraph-core";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 
@@ -41,23 +50,86 @@ async function loadCursorFactory() {
   }
 }
 
+async function tryCliFallback(
+  name: string,
+  kind: string,
+  cfg: { vendor?: string; model?: string; cwd?: string; binary?: string },
+  cwd: string,
+): Promise<ProviderAdapter | undefined> {
+  const cliVendor = cliVendorForProviderKind(kind, cfg.vendor);
+  if (!cliVendor) return undefined;
+
+  const keyEnv = apiKeyEnvForProviderKind(kind, cfg.vendor);
+  if (hasApiKey(keyEnv)) return undefined;
+
+  const detected = await detectLocalCli(cliVendor, {
+    ...(cfg.binary ? { binary: cfg.binary } : {}),
+  });
+  if (!detected.ok) return undefined;
+
+  return createCliProvider({
+    name,
+    vendor: cliVendor,
+    ...(cfg.model ? { model: cfg.model } : {}),
+    cwd: cfg.cwd ?? cwd,
+    ...(cfg.binary ? { binary: cfg.binary } : {}),
+  });
+}
+
 export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Promise<ProviderAdapter[]> {
   const providers: ProviderAdapter[] = [];
   const built = new Set<string>();
 
   for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
     switch (cfg.kind) {
-      case "langchain":
-        providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd }));
+      case "cli": {
+        const vendor = cfg.vendor as CliVendor;
+        const detected = await detectLocalCli(vendor, {
+          ...(cfg.binary ? { binary: cfg.binary } : {}),
+        });
+        if (!detected.ok) {
+          throw new Error(
+            `Provider "${name}": local CLI binary "${detected.binary}" not found on PATH.`,
+          );
+        }
+        providers.push(
+          createCliProvider({
+            name,
+            vendor,
+            ...(cfg.model ? { model: cfg.model } : {}),
+            cwd: cfg.cwd ?? cwd,
+            ...(cfg.binary ? { binary: cfg.binary } : {}),
+          }),
+        );
         break;
+      }
+      case "langchain": {
+        const fallback = await tryCliFallback(name, "langchain", cfg, cwd);
+        if (fallback) {
+          providers.push(fallback);
+        } else {
+          providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd }));
+        }
+        break;
+      }
       case "claude": {
-        const createClaude = await loadClaudeFactory();
-        providers.push(await createClaude(name, cfg, { cwd }));
+        const fallback = await tryCliFallback(name, "claude", cfg, cwd);
+        if (fallback) {
+          providers.push(fallback);
+        } else {
+          const createClaude = await loadClaudeFactory();
+          providers.push(await createClaude(name, cfg, { cwd }));
+        }
         break;
       }
       case "cursor": {
-        const createCursor = await loadCursorFactory();
-        providers.push(await createCursor(name, cfg, { cwd }));
+        const fallback = await tryCliFallback(name, "cursor", cfg, cwd);
+        if (fallback) {
+          providers.push(fallback);
+        } else {
+          const createCursor = await loadCursorFactory();
+          providers.push(await createCursor(name, cfg, { cwd }));
+        }
         break;
       }
       default:
@@ -69,17 +141,27 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
   const defaultName = spec.config?.defaults?.provider;
   if (defaultName && !built.has(defaultName) && isKnownLangChainVendor(defaultName)) {
     const model = spec.config?.defaults?.model;
-    providers.push(
-      await createLangChainProviderFromConfig(
-        defaultName,
-        {
-          kind: "langchain",
-          vendor: defaultName,
-          ...(model ? { model } : {}),
-        },
-        { cwd },
-      ),
+    const fallback = await tryCliFallback(
+      defaultName,
+      "langchain",
+      { vendor: defaultName, ...(model ? { model } : {}) },
+      cwd,
     );
+    if (fallback) {
+      providers.push(fallback);
+    } else {
+      providers.push(
+        await createLangChainProviderFromConfig(
+          defaultName,
+          {
+            kind: "langchain",
+            vendor: defaultName,
+            ...(model ? { model } : {}),
+          },
+          { cwd },
+        ),
+      );
+    }
     built.add(defaultName);
   }
 

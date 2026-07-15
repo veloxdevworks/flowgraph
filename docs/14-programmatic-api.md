@@ -33,9 +33,20 @@ const result = await compiled.run({
 console.log(result.status, result.state);
 ```
 
-## Registering `code` node functions
+## Custom logic: prefer `shell`, or register `function`
 
-Unlike skills, `code` nodes reference registered functions by name:
+For graph authors, the zero-setup option is a [`shell` node](./03-node-types.md#5-shell--run-a-local-command) — no TypeScript registration required:
+
+```yaml
+- id: greet
+  type: shell
+  with:
+    command: echo
+    args: ["Hello, {{ input.name }}!"]
+    output: { to: message }
+```
+
+When embedding flowgraph in a host process, you can still use the legacy `function` node with `registerFunction` for in-process TypeScript handlers:
 
 ```ts
 import { registerFunction, loadGraph, compileGraph } from "@veloxdevworks/flowgraph-core";

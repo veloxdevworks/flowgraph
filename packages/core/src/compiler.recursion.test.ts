@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
-import { registerFunction } from "./nodes/code.js";
+import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 
 beforeAll(() => {
@@ -20,7 +20,7 @@ describe("runtime.recursionLimit", () => {
       nodes: [
         {
           id: "tick",
-          type: "code",
+          type: "function",
           with: {
             fn: "inc",
             input: { n: "{{ state.n }}" },

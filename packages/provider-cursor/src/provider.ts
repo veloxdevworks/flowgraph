@@ -119,7 +119,7 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
       const tools = cfg?.tools ?? [];
       const hasBuiltin = tools.some((t) => "builtin" in t);
       const permissionAsk = cfg?.permission === "ask";
-      const hasBeforeToolHook = (cfg?.hooks ?? []).some((h) => h.on === "intelligent:beforeToolCall");
+      const hasBeforeToolHook = (cfg?.hooks ?? []).some((h) => h.on === "agent:beforeToolCall");
 
       if (hasBuiltin && (permissionAsk || hasBeforeToolHook)) {
         diags.push({

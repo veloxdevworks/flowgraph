@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, type RunOptions, type ResumeOptions, type InterruptInfo } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, waitForWebhookResume, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@veloxdevworks/flowgraph-core";
 import { isError, generateJsonSchema } from "@veloxdevworks/flowgraph-spec";
 import { buildSkillsCommand } from "./skills-command.js";
 import { checkpointerOption, promptResolver, serializePendingInterrupts } from "./interrupts.js";
@@ -14,7 +14,24 @@ import { templateFor, listTemplates } from "./templates.js";
 import { migrateSpec } from "./migrate.js";
 import { printDiagnostics, printBanner, printSuccess, printError, printInfo, printWarning, formatDuration } from "./ui.js";
 
+function webhookUrlFromInterrupts(interrupts: InterruptInfo[] | undefined): string | undefined {
+  for (const it of interrupts ?? []) {
+    const payload = it.payload as { data?: { webhookUrl?: string; mode?: string } } | undefined;
+    if (payload?.data?.mode === "webhook" && typeof payload.data.webhookUrl === "string") {
+      return payload.data.webhookUrl;
+    }
+  }
+  return undefined;
+}
+
 function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: string | undefined): void {
+  const webhookUrl = webhookUrlFromInterrupts(interrupts);
+  if (webhookUrl) {
+    printWarning("Run interrupted — waiting for inbound webhook.");
+    printInfo(`  POST ${webhookUrl}`);
+    printInfo("  (GET the same URL to verify the listener is up)");
+    return;
+  }
   printWarning("Run interrupted (awaiting human input).");
   for (const it of interrupts ?? []) {
     printInfo(`  • ${it.reason ?? it.id}`);
@@ -24,6 +41,49 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
   } else {
     printInfo("Tip: pass --thread <id> so the run is resumable.");
   }
+}
+
+/**
+ * When a webhook wait interrupt is active, keep the process alive until the
+ * HTTP listener resumes (or the user hits Ctrl-C). Returns the post-resume
+ * status when available.
+ */
+async function awaitWebhookIfNeeded(result: RunResult): Promise<RunResult> {
+  if (result.status !== "interrupted") return result;
+  const webhookUrl = webhookUrlFromInterrupts(result.interrupts);
+  if (!webhookUrl || !result.threadId) return result;
+
+  const waiter = waitForWebhookResume(result.threadId);
+  if (!waiter) return result;
+
+  printInfo("Listening for webhook… (Ctrl-C to exit)");
+  const done = await new Promise<{ status: string; error?: string }>((resolve) => {
+    const onSig = () => {
+      printWarning("Interrupted by user.");
+      resolve({ status: "cancelled" });
+    };
+    process.once("SIGINT", onSig);
+    process.once("SIGTERM", onSig);
+    void waiter.then((r) => {
+      process.off("SIGINT", onSig);
+      process.off("SIGTERM", onSig);
+      resolve(r);
+    });
+  });
+
+  if (done.status === "completed") {
+    printSuccess("Webhook received — run completed.");
+    return { ...result, status: "completed" };
+  }
+  if (done.status === "cancelled") {
+    return result;
+  }
+  if (done.status === "error") {
+    printError(`Webhook resume failed: ${done.error ?? "unknown error"}`);
+    return { ...result, status: "error", error: new Error(done.error ?? "resume failed") };
+  }
+  // Another interrupt after resume, etc.
+  return { ...result, status: done.status as RunResult["status"] };
 }
 
 const program = new Command()
@@ -85,6 +145,11 @@ program
         if (opts.format !== "json" && pf.report) {
           console.log(pf.report);
         }
+        const agentPf = await preflightGraphAgents(spec, {
+          cwd,
+          agentAliases: imported.agentAliases,
+        });
+        allDiags.push(...agentPf.diagnostics);
       }
     }
 
@@ -165,6 +230,15 @@ program
       else printDiagnostics(preflight.diagnostics, graphPath);
       process.exit(2);
     }
+    const agentPreflight = await preflightGraphAgents(spec, {
+      cwd: graphDir,
+      agentAliases: imported.agentAliases,
+    });
+    if (!agentPreflight.ok) {
+      printError("Agent preflight failed — fix agent definitions before running:");
+      printDiagnostics(agentPreflight.diagnostics, graphPath);
+      process.exit(2);
+    }
 
     // Parse --input flags
     const inputState = await parseInputFlags(opts.input ?? [], cwd);
@@ -205,25 +279,35 @@ program
     let result;
     try {
       result = await compiled.run(runOpts);
-    } finally {
-      await closeMcpHub(mcpOpt.mcp);
-    }
 
-    if (!opts.json) {
-      if (result.status === "completed") {
-        printSuccess(`Completed in ${formatDuration(result.durationMs)}`);
-        printInfo(`Run ID: ${result.runId}`);
+      if (!opts.json) {
+        if (result.status === "completed") {
+          printSuccess(`Completed in ${formatDuration(result.durationMs)}`);
+          printInfo(`Run ID: ${result.runId}`);
+        } else if (result.status === "interrupted") {
+          reportInterrupts(result.interrupts, result.threadId);
+          result = await awaitWebhookIfNeeded(result);
+          if (result.status === "completed") {
+            printSuccess("Completed after webhook resume.");
+            printInfo(`Run ID: ${result.runId}`);
+          } else if (result.status === "error") {
+            process.exit(1);
+          } else {
+            process.exit(3);
+          }
+        } else if (result.status === "error") {
+          printError(`Failed: ${result.error?.message ?? "unknown error"}`);
+          process.exit(1);
+        }
       } else if (result.status === "interrupted") {
-        reportInterrupts(result.interrupts, result.threadId);
-        process.exit(3);
+        result = await awaitWebhookIfNeeded(result);
+        if (result.status === "error") process.exit(1);
+        if (result.status !== "completed") process.exit(3);
       } else if (result.status === "error") {
-        printError(`Failed: ${result.error?.message ?? "unknown error"}`);
         process.exit(1);
       }
-    } else if (result.status === "interrupted") {
-      process.exit(3);
-    } else if (result.status === "error") {
-      process.exit(1);
+    } finally {
+      await closeMcpHub(mcpOpt.mcp);
     }
   });
 
@@ -273,6 +357,15 @@ program
       printError("Skill preflight failed:");
       if (preflight.report) console.log(preflight.report);
       else printDiagnostics(preflight.diagnostics, graphPath);
+      process.exit(2);
+    }
+    const agentPreflight = await preflightGraphAgents(spec, {
+      cwd: graphDir,
+      agentAliases: imported.agentAliases,
+    });
+    if (!agentPreflight.ok) {
+      printError("Agent preflight failed:");
+      printDiagnostics(agentPreflight.diagnostics, graphPath);
       process.exit(2);
     }
 
@@ -346,22 +439,33 @@ program
     let result;
     try {
       result = await compiled.resume(resumeOpts);
+
+      if (!opts.json) {
+        if (result.status === "completed") {
+          printSuccess(`Completed in ${formatDuration(result.durationMs)}`);
+        } else if (result.status === "interrupted") {
+          reportInterrupts(result.interrupts, result.threadId);
+          result = await awaitWebhookIfNeeded(result);
+          if (result.status === "completed") {
+            printSuccess("Completed after webhook resume.");
+          } else if (result.status === "error") {
+            process.exit(1);
+          } else {
+            process.exit(3);
+          }
+        } else if (result.status === "error") {
+          printError(`Failed: ${result.error?.message ?? "unknown error"}`);
+          process.exit(1);
+        }
+      } else if (result.status === "interrupted") {
+        result = await awaitWebhookIfNeeded(result);
+        if (result.status === "error") process.exit(1);
+        if (result.status !== "completed") process.exit(3);
+      } else if (result.status !== "completed") {
+        process.exit(result.status === "interrupted" ? 3 : 1);
+      }
     } finally {
       await closeMcpHub(mcpOpt.mcp);
-    }
-
-    if (!opts.json) {
-      if (result.status === "completed") {
-        printSuccess(`Completed in ${formatDuration(result.durationMs)}`);
-      } else if (result.status === "interrupted") {
-        reportInterrupts(result.interrupts, result.threadId);
-        process.exit(3);
-      } else if (result.status === "error") {
-        printError(`Failed: ${result.error?.message ?? "unknown error"}`);
-        process.exit(1);
-      }
-    } else if (result.status !== "completed") {
-      process.exit(result.status === "interrupted" ? 3 : 1);
     }
   });
 

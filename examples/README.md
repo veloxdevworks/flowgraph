@@ -7,7 +7,7 @@ Runnable vertical slices demonstrating flowgraph features. Each example includes
 | Example | What it demonstrates | Env / setup | README |
 |---------|---------------------|-------------|--------|
 | [quickstart](./quickstart/) | Zero-code skill pipeline | None | [README](./quickstart/README.md) |
-| [triage-issue](./triage-issue/) | `code` + `router` + `skill` (north-star) | None | [README](./triage-issue/README.md) |
+| [triage-issue](./triage-issue/) | `function` + `router` + `skill` (north-star) | None | [README](./triage-issue/README.md) |
 | [release-notes](./release-notes/) | HITL interrupt + durable resume | `register.ts` | [README](./release-notes/README.md) |
 | [hitl](./hitl/) | `hitl` node + interactive/CI resume | Scripted provider in test | [README](./hitl/README.md) |
 | [review-loop](./review-loop/) | Branching + revise loop until approved | `register.ts` | [README](./review-loop/README.md) |

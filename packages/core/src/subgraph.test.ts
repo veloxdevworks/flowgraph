@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import yaml from "yaml";
 import { compileGraph } from "./compiler.js";
-import { registerFunction } from "./nodes/code.js";
+import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 
 let fixtureDir = "";
@@ -110,7 +110,7 @@ describe("nested subgraph events", () => {
       nodes: [
         {
           id: "echo",
-          type: "code",
+          type: "function",
           with: {
             fn: "echoBang",
             input: { value: "{{ state.value }}" },

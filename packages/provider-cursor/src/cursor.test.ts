@@ -22,7 +22,7 @@ const baseSpec = (withBlock: Record<string, unknown>): GraphSpec =>
   ({
     metadata: { name: "cursor-graph" },
     state: { channels: { answer: { type: "object" } } },
-    nodes: [{ id: "agent", type: "intelligent", provider: "cursor", with: withBlock }],
+    nodes: [{ id: "agent", type: "agent", provider: "cursor", with: withBlock }],
     edges: [
       { from: "START", to: "agent" },
       { from: "agent", to: "END" },
@@ -66,7 +66,7 @@ describe("@veloxdevworks/flowgraph-provider-cursor", () => {
     );
     const r = await compiled.run({ input: {} });
     expect(r.status).toBe("completed");
-    expect(events).toContain("intelligent.usage");
+    expect(events).toContain("agent.usage");
   });
 
   it("validate warns when builtin tools combine with permission ask", () => {

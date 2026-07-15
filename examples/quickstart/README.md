@@ -49,5 +49,5 @@ START → make-slug (skill: slugify) → count (skill: word-count) → END
 - `count` calls `skills/word-count` and maps `result.words` / `result.sentences`.
 
 Because skill handlers are plain ESM modules loaded from disk, this graph needs
-no `registerFunction` call — unlike `code` nodes, which require a JS runner
+no `registerFunction` call — unlike `function` nodes, which require a JS runner
 (see the `triage-issue` example for that pattern).

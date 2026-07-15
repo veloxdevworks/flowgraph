@@ -9,7 +9,7 @@ describe("discoverSkillUses", () => {
       state: { channels: {} },
       nodes: [
         { id: "a", type: "skill", uses: "./skills/foo" },
-        { id: "b", type: "code", with: { fn: "x" } },
+        { id: "b", type: "function", with: { fn: "x" } },
         { id: "c", type: "skill", uses: "alias/bar" },
       ],
       edges: [],
@@ -22,7 +22,7 @@ describe("discoverSkillUses", () => {
     const spec = {
       metadata: { name: "g" },
       state: { channels: {} },
-      nodes: [{ id: "a", type: "code", with: { fn: "x" } }],
+      nodes: [{ id: "a", type: "function", with: { fn: "x" } }],
       edges: [],
     } as unknown as GraphSpec;
 

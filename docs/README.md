@@ -28,6 +28,7 @@ We are **not** building a new graph engine. LangGraph is the engine. flowgraph i
 | 13 | [Getting started](./13-getting-started.md) | Install, first run, editor setup, hybrid authoring |
 | 14 | [Programmatic API](./14-programmatic-api.md) | `@veloxdevworks/flowgraph-core` + `@veloxdevworks/flowgraph-testing` |
 | 15 | [MCP operations](./15-mcp-operations.md) | OAuth, CI patterns, provider env vars |
+| 16 | [Agent Definitions](./16-agents.md) | Reusable `AGENT.md` system prompts for agent nodes |
 | — | [Implementation status](./IMPLEMENTATION_STATUS.md) | Shipped vs planned feature matrix |
 | — | [ADRs](./adr/) | Architecture Decision Records capturing locked-in choices |
 | — | [Examples](../examples/README.md) | Runnable example index |
@@ -77,7 +78,7 @@ state:
     label: { type: string }
 nodes:
   - id: summarize
-    type: intelligent
+    type: agent
     provider: claude
     with:
       prompt: "Summarize this issue for triage:\n{{ state.issue.body }}"
@@ -111,7 +112,7 @@ edges:
 These were decided at kickoff and are recorded as ADRs:
 
 - **Hybrid authoring model** — YAML declares topology + config + conditions; logic lives in registered TS nodes/skills. ([ADR-0002](./adr/0002-hybrid-authoring-model.md))
-- **Intelligent nodes are agent-with-tools (hub & spoke)** — other nodes/skills are exposed to the agent as callable tools. ([ADR-0003](./adr/0003-intelligent-node-hub-and-spoke.md))
+- **Agent nodes are agent-with-tools (hub & spoke)** — other nodes/skills are exposed to the agent as callable tools. ([ADR-0003](./adr/0003-intelligent-node-hub-and-spoke.md))
 - **Pluggable provider interface first**, then Claude/Cursor/LangChain adapters. ([ADR-0004](./adr/0004-pluggable-providers.md))
 - **Checkpointing + HITL + durability are first-class in v1.** ([ADR-0005](./adr/0005-durability-and-hitl.md))
 - **Monorepo: pnpm + Turborepo + tsup + Vitest + Changesets.** ([ADR-0006](./adr/0006-monorepo-tooling.md))

@@ -15,7 +15,7 @@ state:
     label:   { type: string }
 nodes:
   - id: summarize
-    type: intelligent
+    type: agent
     provider: claude
     with:
       prompt: "Summarize for triage:\n{{ state.issue.body }}"

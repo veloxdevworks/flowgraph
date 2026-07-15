@@ -13,7 +13,7 @@ const baseSpec = (withBlock: Record<string, unknown>): GraphSpec =>
   ({
     metadata: { name: "claude-graph" },
     state: { channels: { answer: { type: "object" } } },
-    nodes: [{ id: "agent", type: "intelligent", provider: "claude", with: withBlock }],
+    nodes: [{ id: "agent", type: "agent", provider: "claude", with: withBlock }],
     edges: [
       { from: "START", to: "agent" },
       { from: "agent", to: "END" },

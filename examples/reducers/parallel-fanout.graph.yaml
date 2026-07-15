@@ -14,13 +14,13 @@ state:
 
 nodes:
   - id: branch-alpha
-    type: code
+    type: function
     with:
       fn: tagAlpha
       output: { to: tags }
 
   - id: branch-beta
-    type: code
+    type: function
     with:
       fn: tagBeta
       output: { to: tags }

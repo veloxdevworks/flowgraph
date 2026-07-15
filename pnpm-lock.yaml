@@ -374,6 +374,9 @@ importers:
       '@veloxdevworks/flowgraph-spec':
         specifier: workspace:*
         version: link:../spec
+      gray-matter:
+        specifier: ^4.0.3
+        version: 4.0.3
       yaml:
         specifier: ^2.9.0
         version: 2.9.0

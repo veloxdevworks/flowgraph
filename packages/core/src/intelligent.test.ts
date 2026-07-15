@@ -16,7 +16,7 @@ function spec(nodeWith: Record<string, unknown>, provider = "mock", model?: stri
     metadata: { name: "agent-graph" },
     state: { channels: { answer: { type: "object" } } },
     nodes: [
-      { id: "agent", type: "intelligent", provider, ...(model ? { model } : {}), with: nodeWith },
+      { id: "agent", type: "agent", provider, ...(model ? { model } : {}), with: nodeWith },
     ],
     edges: [
       { from: "START", to: "agent" },
@@ -26,7 +26,7 @@ function spec(nodeWith: Record<string, unknown>, provider = "mock", model?: stri
   } as unknown as GraphSpec;
 }
 
-describe("intelligent node + mock provider", () => {
+describe("agent node + mock provider", () => {
   it("runs the agent loop and writes structured output", async () => {
     const compiled = await compileGraph(
       spec({
@@ -55,9 +55,9 @@ describe("intelligent node + mock provider", () => {
     expect(r.status).toBe("completed");
     const answer = r.state["answer"] as { toolResults: Record<string, unknown> };
     expect(answer.toolResults["lookup"]).toMatchObject({ fact: expect.stringContaining("value for") });
-    expect(events).toContain("intelligent.tool.call");
-    expect(events).toContain("intelligent.tool.result");
-    expect(events).toContain("intelligent.usage");
+    expect(events).toContain("agent.tool.call");
+    expect(events).toContain("agent.tool.result");
+    expect(events).toContain("agent.usage");
   });
 
   it("uses a scripted provider for deterministic output", async () => {
@@ -137,7 +137,7 @@ describe("router model mode", () => {
             output: { to: "decision" },
           },
         },
-        { id: "handle", type: "code", with: { fn: "noop", output: { to: "done" } } },
+        { id: "handle", type: "function", with: { fn: "noop", output: { to: "done" } } },
       ],
       edges: [
         { from: "START", to: "route" },
@@ -147,7 +147,7 @@ describe("router model mode", () => {
       runtime: { checkpoint: { enabled: false } },
     } as unknown as GraphSpec;
 
-    const { registerFunction } = await import("./nodes/code.js");
+    const { registerFunction } = await import("./nodes/function.js");
     registerFunction("noop", () => "handled");
 
     const compiled = await compileGraph(routerSpec, { providers: [scripted] });

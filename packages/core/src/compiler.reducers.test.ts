@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
 import { validateSpec } from "./loader.js";
-import { registerFunction } from "./nodes/code.js";
+import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 import type { FlowgraphEvent } from "./events.js";
 
@@ -21,12 +21,12 @@ function fanOutSpec(channel: { type: string; reducer?: string }): GraphSpec {
     nodes: [
       {
         id: "branch-a",
-        type: "code",
+        type: "function",
         with: { fn: "emitA", output: { to: "result" } },
       },
       {
         id: "branch-b",
-        type: "code",
+        type: "function",
         with: { fn: "emitB", output: { to: "result" } },
       },
     ],

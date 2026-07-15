@@ -133,15 +133,19 @@ metadata:
 
 state:
   channels:
+    name:
+      type: string
+      reducer: lastWrite
     message:
       type: string
       reducer: lastWrite
 
 nodes:
   - id: greet
-    type: code
+    type: shell
     with:
-      fn: greet
+      command: echo
+      args: ["Hello, {{ state.name }}!"]
       output:
         to: message
 
@@ -215,7 +219,7 @@ runtime:
   );
 }
 
-function intelligent(name: string): ScaffoldResult {
+function agent(name: string): ScaffoldResult {
   const graphFile = `${name}.graph.yaml`;
   return singleFile(
     graphFile,
@@ -223,7 +227,7 @@ function intelligent(name: string): ScaffoldResult {
 kind: Graph
 metadata:
   name: ${name}
-  description: An intelligent (LLM) node that can call tools.
+  description: An agent (LLM) node that can call tools.
 
 # Requires OPENAI_API_KEY and: pnpm add @langchain/openai
 providers:
@@ -244,7 +248,7 @@ state:
 
 nodes:
   - id: agent
-    type: intelligent
+    type: agent
     with:
       system: "You are a concise assistant."
       prompt: "{{ input.question }}"
@@ -272,7 +276,7 @@ runtime:
     maxUSD: 1.00
     onExceed: warn
   hooks:
-    - on: intelligent:beforeToolCall
+    - on: agent:beforeToolCall
       where: { tool: Bash }
       do: interrupt
       reason: "Approve shell command"
@@ -284,7 +288,9 @@ const TEMPLATES: Record<string, (name: string) => ScaffoldResult> = {
   hello,
   minimal,
   http,
-  intelligent,
+  agent,
+  /** @deprecated Use "agent" */
+  intelligent: agent,
 };
 
 export function listTemplates(): string[] {

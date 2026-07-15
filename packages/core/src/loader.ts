@@ -39,6 +39,9 @@ export async function loadGraph(
     };
   }
 
+  // Backward-compat: rewrite deprecated node type aliases before schema validation.
+  parsed = normalizeNodeTypeAliases(parsed);
+
   const result = GraphSpecSchema.safeParse(parsed);
   if (!result.success) {
     return {
@@ -59,6 +62,68 @@ function expandEnvVars(yaml: string): string {
   return yaml.replace(/\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => {
     return process.env[name] ?? def ?? "";
   });
+}
+
+/** Deprecated YAML node type → canonical type. */
+const NODE_TYPE_ALIASES: Readonly<Record<string, string>> = {
+  code: "function",
+  intelligent: "agent",
+};
+
+/** Deprecated YAML hook phase → canonical phase. */
+const HOOK_PHASE_ALIASES: Readonly<Record<string, string>> = {
+  "intelligent:beforeStep": "agent:beforeStep",
+  "intelligent:beforeToolCall": "agent:beforeToolCall",
+  "intelligent:afterToolCall": "agent:afterToolCall",
+};
+
+/**
+ * Rewrite deprecated `type: code` / `type: intelligent` (and nested map/subgraph
+ * node specs) plus legacy `intelligent:*` hook phases to their canonical names.
+ * Exported for tests and for UI-side YAML parsers that want the same mapping.
+ */
+export function normalizeNodeTypeAliases(parsed: unknown): unknown {
+  if (!parsed || typeof parsed !== "object") return parsed;
+  const root = parsed as Record<string, unknown>;
+
+  const rewriteNode = (node: unknown): unknown => {
+    if (!node || typeof node !== "object") return node;
+    const n = { ...(node as Record<string, unknown>) };
+    if (typeof n.type === "string" && NODE_TYPE_ALIASES[n.type]) {
+      n.type = NODE_TYPE_ALIASES[n.type];
+    }
+    // map nodes nest an inner node under with.node
+    if (n.with && typeof n.with === "object") {
+      const w = { ...(n.with as Record<string, unknown>) };
+      if (w.node && typeof w.node === "object") {
+        w.node = rewriteNode(w.node);
+      }
+      n.with = w;
+    }
+    return n;
+  };
+
+  if (Array.isArray(root.nodes)) {
+    root.nodes = root.nodes.map(rewriteNode);
+  }
+
+  const runtime = root.runtime;
+  if (runtime && typeof runtime === "object") {
+    const rt = { ...(runtime as Record<string, unknown>) };
+    if (Array.isArray(rt.hooks)) {
+      rt.hooks = rt.hooks.map((hook) => {
+        if (!hook || typeof hook !== "object") return hook;
+        const h = { ...(hook as Record<string, unknown>) };
+        if (typeof h.on === "string" && HOOK_PHASE_ALIASES[h.on]) {
+          h.on = HOOK_PHASE_ALIASES[h.on];
+        }
+        return h;
+      });
+    }
+    root.runtime = rt;
+  }
+
+  return root;
 }
 
 /** Offline lint — no side effects, no network */

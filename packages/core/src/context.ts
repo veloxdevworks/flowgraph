@@ -40,6 +40,8 @@ export interface RunConfig {
   cwd?: string | undefined;
   /** Skill alias map: alias → path/package */
   skills?: Record<string, string> | undefined;
+  /** Agent-definition alias map: alias → path/package */
+  agents?: Record<string, string> | undefined;
   /** Subgraph alias map: alias → child graph path/package */
   subgraphs?: Record<string, string> | undefined;
 }
@@ -60,7 +62,7 @@ export interface RunContext {
   logger: Logger;
   signal?: AbortSignal | undefined;
   workspace: string;
-  /** Run-level token/cost budget tracker, shared across intelligent nodes. */
+  /** Run-level token/cost budget tracker, shared across agent nodes. */
   budget?: BudgetState | undefined;
   /** Hook bus for lifecycle interception (mutate/veto/route/retry/interrupt). */
   hooks?: HookBus | undefined;

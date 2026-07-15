@@ -7,7 +7,7 @@ function fakeNodeCtx(overrides: Partial<NodeRunContext> = {}): NodeRunContext {
   const hooks = createHookBus();
   return {
     nodeId: "agent",
-    nodeType: "intelligent",
+    nodeType: "agent",
     meta: { runId: "r1", startedAt: new Date().toISOString(), graph: "test" },
     config: {},
     secrets: { get: async () => undefined },
@@ -45,7 +45,7 @@ describe("tool call governance", () => {
   it("beforeToolCall veto blocks the call", async () => {
     const node = fakeNodeCtx();
     node.hooks!.register({
-      phase: "intelligent:beforeToolCall",
+      phase: "agent:beforeToolCall",
       where: { tool: "fs_write" },
       handler: () => ({ kind: "veto", reason: "no writes" }),
     });
@@ -56,7 +56,7 @@ describe("tool call governance", () => {
   it("beforeToolCall mutates args", async () => {
     const node = fakeNodeCtx();
     node.hooks!.register({
-      phase: "intelligent:beforeToolCall",
+      phase: "agent:beforeToolCall",
       handler: () => ({ kind: "mutate", payload: { args: { redacted: true } } }),
     });
     const g = { node, state: {}, permission: "auto" as const };
@@ -67,7 +67,7 @@ describe("tool call governance", () => {
   it("afterToolCall mutates result", async () => {
     const node = fakeNodeCtx();
     node.hooks!.register({
-      phase: "intelligent:afterToolCall",
+      phase: "agent:afterToolCall",
       handler: () => ({ kind: "mutate", payload: { result: { masked: true } } }),
     });
     const g = { node, state: {}, permission: "auto" as const };

@@ -8,10 +8,18 @@ import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 import { createRedactor, DEFAULT_REDACT_PATTERNS } from "../secrets.js";
 import type { Hook, HookDirective, HookPhase, HookWhere } from "./types.js";
 
-const KNOWN_PHASES: ReadonlySet<string> = new Set<HookPhase>([
+/** Legacy hook phase names accepted from YAML and rewritten to canonical. */
+const HOOK_PHASE_ALIASES: Readonly<Record<string, HookPhase>> = {
+  "intelligent:beforeStep": "agent:beforeStep",
+  "intelligent:beforeToolCall": "agent:beforeToolCall",
+  "intelligent:afterToolCall": "agent:afterToolCall",
+};
+
+const KNOWN_PHASES: ReadonlySet<string> = new Set<string>([
   "run:before", "run:after", "run:error",
   "node:before", "node:after", "node:error",
-  "intelligent:beforeStep", "intelligent:beforeToolCall", "intelligent:afterToolCall",
+  "agent:beforeStep", "agent:beforeToolCall", "agent:afterToolCall",
+  ...Object.keys(HOOK_PHASE_ALIASES),
   "skill:beforeRun", "skill:afterRun",
   "router:beforeDecision", "router:afterDecision",
   "state:beforeUpdate", "checkpoint:beforeWrite",
@@ -56,11 +64,11 @@ export function hooksFromSpec(spec: GraphSpec): Hook[] {
   const hooks: Hook[] = [];
   for (const entry of entries) {
     if (!KNOWN_PHASES.has(entry.on)) continue;
-    const phase = entry.on as HookPhase;
+    const phase = (HOOK_PHASE_ALIASES[entry.on] ?? entry.on) as HookPhase;
     const where = entry.where as HookWhere | undefined;
     const resolve = directiveFor(entry.do, entry.reason, redactor);
     hooks.push({
-      name: `yaml:${entry.on}:${entry.do}`,
+      name: `yaml:${phase}:${entry.do}`,
       phase,
       priority: 50,
       ...(where ? { where } : {}),

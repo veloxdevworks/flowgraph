@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
-import { registerFunction } from "./nodes/code.js";
+import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 
 beforeAll(() => {
@@ -27,13 +27,13 @@ describe("map node — fan-out / fan-in", () => {
             over: "{{ state.numbers }}",
             as: "n",
             concurrency: 2,
-            node: { type: "code", with: { fn: "double", input: { n: "{{ item.n }}" }, output: { to: "value" } } },
+            node: { type: "function", with: { fn: "double", input: { n: "{{ item.n }}" }, output: { to: "value" } } },
             collect: { to: "doubled" },
           },
         },
         {
           id: "sum-doubled",
-          type: "code",
+          type: "function",
           with: { fn: "sum", input: { values: "{{ state.doubled }}" }, output: { to: "total" } },
         },
       ],

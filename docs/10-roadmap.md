@@ -59,17 +59,17 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 **Goal:** checkpoint, interrupt, resume — proven across a process restart.
 
 - Checkpointer adapter over LangGraph `BaseCheckpointSaver`; `MemorySaver` + `@veloxdevworks/flowgraph-checkpoint-sqlite`.
-- `ctx.interrupt()`, static breakpoints, `webhook: wait`/`wait` (signal) nodes.
+- `ctx.interrupt()`, static breakpoints, `wait` (signal / webhook) nodes.
 - `flowgraph resume`; `--on-interrupt` policies; `ctx.once` idempotency.
 - Time-travel: `getStateHistory` ✓; `resumeFrom`, `flowgraph dev --step` — **planned**.
 
 **Exit:** `release-notes` example pauses for approval, the process exits, and a later `flowgraph resume` continues from the durable checkpoint to publish. ✓
 
-## Phase 4 — Intelligent nodes + providers  · L ✓
+## Phase 4 — Agent nodes + providers  · L ✓
 
 **Goal:** hub-and-spoke agent nodes with pluggable backends.
 
-- `ProviderAdapter` interface + tool normalization + `intelligent` node ([ADR-0003](./adr/0003-intelligent-node-hub-and-spoke.md)).
+- `ProviderAdapter` interface + tool normalization + `agent` node ([ADR-0003](./adr/0003-intelligent-node-hub-and-spoke.md)).
 - LangChain provider built into `@veloxdevworks/flowgraph-core` (broadest model coverage, simplest loop); `@veloxdevworks/flowgraph-provider-claude` (Claude Agent SDK) and `@veloxdevworks/flowgraph-provider-cursor` as optional lazy-loaded packages.
 - Skills/nodes/MCP as tools; structured output (`schema`); `permission: ask` → HITL.
 - `intelligent.*` events; token/cost accounting + `runtime.budget`.
@@ -120,7 +120,7 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 ## Sequencing rationale
 
 1. **Prove the wrapper early (Phase 1).** If compiling YAML → `StateGraph` with clean events isn't pleasant, nothing else matters.
-2. **Skills before intelligence (Phase 2 < 4).** Skills are the reusable contract unit and become agent tools; getting contracts/preflight right first makes intelligent nodes' tool layer fall out naturally.
+2. **Skills before intelligence (Phase 2 < 4).** Skills are the reusable contract unit and become agent tools; getting contracts/preflight right first makes agent nodes' tool layer fall out naturally.
 3. **Durability before agents (Phase 3 < 4).** Agent loops are long-running and the prime HITL consumer; we want resume/interrupt solid before adding them.
 4. **Observability/hooks full build last (Phase 6).** Events exist from Phase 1 (so we can see everything early); the heavy OTel + full hook system lands once the surfaces are stable.
 

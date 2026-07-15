@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
-import { registerFunction } from "./nodes/code.js";
+import { registerFunction } from "./nodes/function.js";
 import { registerTool, mockProvider } from "./providers/index.js";
 import type { Hook } from "./hooks/types.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
@@ -25,7 +25,7 @@ function codeGraph(extra: Partial<GraphSpec> = {}): GraphSpec {
     metadata: { name: "hooks-graph" },
     state: { channels: { flag: { type: "boolean" }, ok: { type: "boolean" } } },
     nodes: [
-      { id: "step", type: "code", with: { fn: "setFlag", output: { to: "flag" } } },
+      { id: "step", type: "function", with: { fn: "setFlag", output: { to: "flag" } } },
     ],
     edges: [
       { from: "START", to: "step" },
@@ -63,7 +63,7 @@ describe("hooks — node lifecycle", () => {
     spec.state = { channels: { name: { type: "string" } } } as GraphSpec["state"];
     (spec.nodes[0] as Record<string, unknown>) = {
       id: "step",
-      type: "code",
+      type: "function",
       input: { name: "original" },
       with: { fn: "echoName", input: { name: "{{ input.name }}" }, output: { to: "name" } },
     };
@@ -105,15 +105,15 @@ describe("hooks — redaction", () => {
   });
 });
 
-describe("hooks — intelligent tool gating", () => {
-  it("intelligent:beforeToolCall veto blocks a tool call", async () => {
+describe("hooks — agent tool gating", () => {
+  it("agent:beforeToolCall veto blocks a tool call", async () => {
     const spec = {
       apiVersion: "flowgraph/v1",
       kind: "Graph",
       metadata: { name: "tool-gate" },
       state: { channels: { answer: { type: "object" } } },
       nodes: [
-        { id: "agent", type: "intelligent", provider: "mock", with: { prompt: "use danger", tools: [{ function: "danger" }], output: { to: "answer" } } },
+        { id: "agent", type: "agent", provider: "mock", with: { prompt: "use danger", tools: [{ function: "danger" }], output: { to: "answer" } } },
       ],
       edges: [
         { from: "START", to: "agent" },
@@ -122,7 +122,7 @@ describe("hooks — intelligent tool gating", () => {
       runtime: { checkpoint: { enabled: false } },
     } as unknown as GraphSpec;
     const hook: Hook = {
-      phase: "intelligent:beforeToolCall",
+      phase: "agent:beforeToolCall",
       where: { tool: "danger" },
       handler: () => ({ kind: "veto", reason: "not allowed" }),
     };

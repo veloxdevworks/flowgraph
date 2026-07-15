@@ -11,7 +11,7 @@ state:
 
 nodes:
   - id: sq
-    type: code
+    type: function
     with:
       fn: square
       input: { n: "{{ state.n }}" }

@@ -15,9 +15,9 @@ export type HookPhase =
   | "node:before"
   | "node:after"
   | "node:error"
-  | "intelligent:beforeStep"
-  | "intelligent:beforeToolCall"
-  | "intelligent:afterToolCall"
+  | "agent:beforeStep"
+  | "agent:beforeToolCall"
+  | "agent:afterToolCall"
   | "skill:beforeRun"
   | "skill:afterRun"
   | "router:beforeDecision"
@@ -43,7 +43,7 @@ export interface HookPayload {
   input?: Record<string, unknown>;
   /** node:after / state:beforeUpdate — the state delta. */
   update?: Record<string, unknown>;
-  /** intelligent:*ToolCall — tool name + args/result. */
+  /** agent:*ToolCall — tool name + args/result. */
   tool?: string;
   args?: unknown;
   result?: unknown;

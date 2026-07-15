@@ -181,7 +181,7 @@ export function otelSink(opts: OtelSinkOptions = {}): EventSink {
           activeNodeSpan(ev)?.addEvent(ev.type, toAttrs(ev.data));
           break;
         }
-        case "intelligent.step": {
+        case "agent.step": {
           const span = activeNodeSpan(ev);
           if (span) {
             const d = ev.data as { provider?: string; model?: string };
@@ -190,17 +190,17 @@ export function otelSink(opts: OtelSinkOptions = {}): EventSink {
               span.setAttribute(ATTR.genaiSystem, d.provider);
             }
             if (d.model) span.setAttribute(ATTR.genaiModel, d.model);
-            span.addEvent("intelligent.step", toAttrs(ev.data));
+            span.addEvent("agent.step", toAttrs(ev.data));
           }
           break;
         }
-        case "intelligent.tool.call":
-        case "intelligent.tool.result":
-        case "intelligent.token": {
+        case "agent.tool.call":
+        case "agent.tool.result":
+        case "agent.token": {
           activeNodeSpan(ev)?.addEvent(ev.type, toAttrs(ev.data));
           break;
         }
-        case "intelligent.usage": {
+        case "agent.usage": {
           const span = activeNodeSpan(ev);
           const u = ev.data as { promptTokens?: number; completionTokens?: number; totalTokens?: number };
           if (span) {

@@ -44,7 +44,7 @@ The compiler is a deterministic pipeline. Each stage has a typed input/output so
 1. **Load** — read the graph file + referenced files (skills, imported subgraphs, `$ref`s). Resolve relative paths, apply layered config (defaults → file → env → CLI flags).
 2. **Parse** — YAML → JS object. Strict YAML (no anchors-as-code, no arbitrary tags).
 3. **Validate** — Zod schema validation + semantic lint (unknown node refs, unreachable nodes, missing `START`/`END` paths, channel/contract type mismatches, duplicate ids). Produces precise, line-mapped diagnostics.
-4. **Resolve** — for each node, look up its `type` in the **Node Registry**; for `intelligent` nodes resolve the **Provider**; for `skill` nodes load and validate the **SKILL.md** contract and env deps; expand `subgraph` references.
+4. **Resolve** — for each node, look up its `type` in the **Node Registry**; for `agent` nodes resolve the **Provider**; for `skill` nodes load and validate the **SKILL.md** contract and env deps; expand `subgraph` references.
 5. **Build** — translate the resolved plan into LangGraph builder calls: `new StateGraph(channels)`, `addNode`, `addEdge`, `addConditionalEdges`, attach checkpointer/store, set interrupt points.
 6. **Ready** — return a `CompiledGraph` handle that the Runtime can `invoke`/`stream`.
 

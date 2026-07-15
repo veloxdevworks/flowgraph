@@ -129,8 +129,10 @@ const BaseWithSchema = z.object({
   output: OutputMappingSchema.optional(),
 });
 
-// intelligent node
-export const IntelligentWithSchema = BaseWithSchema.extend({
+// agent node (formerly "intelligent")
+export const AgentWithSchema = BaseWithSchema.extend({
+  /** Reference to a reusable agent definition (AGENT.md), resolved at run time. */
+  agent: z.string().optional(),
   system: z.string().optional(),
   prompt: z.string(),
   tools: z
@@ -153,6 +155,9 @@ export const IntelligentWithSchema = BaseWithSchema.extend({
   cursor: z.record(z.unknown()).optional(),
   langchain: z.record(z.unknown()).optional(),
 });
+
+/** @deprecated Use AgentWithSchema */
+export const IntelligentWithSchema = AgentWithSchema;
 
 // skill node
 export const SkillWithSchema = BaseWithSchema;
@@ -196,10 +201,24 @@ export const HttpWithSchema = BaseWithSchema.extend({
   retry: RetrySchema.optional(),
 });
 
-// code node
-export const CodeWithSchema = BaseWithSchema.extend({
+// function node (formerly "code") — legacy programmatic escape hatch
+export const FunctionWithSchema = BaseWithSchema.extend({
   fn: z.string().describe("Registered function name"),
   input: z.record(z.string()).optional(),
+});
+
+/** @deprecated Use FunctionWithSchema */
+export const CodeWithSchema = FunctionWithSchema;
+
+// shell node — run a command (argv-safe) or OS shell string
+export const ShellWithSchema = BaseWithSchema.extend({
+  command: z.string().describe("Binary/script, or full shell command when args is omitted"),
+  args: z.array(z.string()).optional().describe("Argv; when set, runs without a shell"),
+  cwd: z.string().optional(),
+  env: z.record(z.string()).optional(),
+  input: z.record(z.unknown()).optional().describe("Rendered, passed via FLOWGRAPH_INPUT env + stdin JSON"),
+  timeout: DurationSchema.optional(),
+  expect: z.object({ exitCode: z.array(z.number()).optional() }).optional(),
 });
 
 // subgraph node
@@ -228,12 +247,19 @@ export const HitlWithSchema = BaseWithSchema.extend({
   choices: z.array(z.string()).optional(),
 });
 
-// wait node
-export const WaitWithSchema = z.object({
+// wait node — duration / until / signal / webhook (inbound HTTP resume)
+export const WaitWithSchema = BaseWithSchema.extend({
   duration: DurationSchema.optional(),
   until: z.string().optional(),
   signal: z.string().optional(),
   timeout: DurationSchema.optional(),
+  /** When set, interrupt and listen for an inbound HTTP POST to resume. */
+  webhook: z
+    .union([
+      z.literal(true),
+      z.object({ schema: z.record(z.unknown()).optional() }),
+    ])
+    .optional(),
 });
 
 // mcp node — deterministic MCP tool/resource call
@@ -284,12 +310,9 @@ export const McpServerSchema = z.union([
   }),
 ]);
 
-// webhook node
+// webhook node — outbound HTTP notification only (inbound waits live on `wait`)
 export const WebhookWithSchema = BaseWithSchema.extend({
-  mode: z.union([z.literal("wait"), z.literal("emit")]).default("wait"),
-  timeout: DurationSchema.optional(),
-  schema: z.record(z.unknown()).optional(),
-  url: z.string().optional(),
+  url: z.string(),
   method: z.string().optional(),
   headers: z.record(z.string()).optional(),
   body: z.unknown().optional(),
@@ -364,6 +387,7 @@ export type EdgeSpec = z.infer<typeof EdgeSpecSchema>;
 
 export const ImportSpecSchema = z.union([
   z.object({ skill: z.string(), as: z.string().optional() }),
+  z.object({ agent: z.string(), as: z.string().optional() }),
   z.object({ subgraph: z.string(), as: z.string().optional() }),
   z.object({ nodes: z.string() }),
   z.object({ providers: z.string() }),
@@ -433,11 +457,24 @@ export const CursorProviderConfigSchema = z.object({
   options: z.record(z.unknown()).optional(),
 });
 
-/** @deprecated Use LangChainProviderConfigSchema */
+export const CliVendorSchema = z.enum(["claude", "cursor", "codex", "grok"]);
+
+/** Local agent CLI (Claude Code, Cursor CLI, Codex, Grok Build) — no API key required. */
+export const CliProviderConfigSchema = z.object({
+  kind: z.literal("cli"),
+  vendor: CliVendorSchema,
+  model: z.string().optional(),
+  cwd: z.string().optional(),
+  /** Override binary name/path (defaults: claude, cursor-agent, codex, grok). */
+  binary: z.string().optional(),
+  options: z.record(z.unknown()).optional(),
+});
+
 export const ProviderConfigSchema = z.discriminatedUnion("kind", [
   LangChainProviderConfigSchema,
   ClaudeProviderConfigSchema,
   CursorProviderConfigSchema,
+  CliProviderConfigSchema,
 ]);
 
 export const ProvidersSchema = z.record(ProviderConfigSchema);
@@ -479,6 +516,15 @@ export const RuntimeSchema = z.object({
     .object({
       enabled: z.boolean().optional().default(true),
       backend: StoreBackendSchema.optional().default("memory"),
+    })
+    .optional(),
+  /** Embedded HTTP ingress for `wait` nodes with `webhook: true`. Local/trusted-network only (no auth in v1). */
+  webhookServer: z
+    .object({
+      /** Default 8878. Use 0 for an OS-assigned ephemeral port. */
+      port: z.number().int().nonnegative().optional(),
+      /** Default 127.0.0.1. */
+      host: z.string().optional(),
     })
     .optional(),
   hitl: z
@@ -584,6 +630,8 @@ export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type LangChainProviderConfig = z.infer<typeof LangChainProviderConfigSchema>;
 export type ClaudeProviderConfig = z.infer<typeof ClaudeProviderConfigSchema>;
 export type CursorProviderConfig = z.infer<typeof CursorProviderConfigSchema>;
+export type CliProviderConfig = z.infer<typeof CliProviderConfigSchema>;
+export type CliVendor = z.infer<typeof CliVendorSchema>;
 export type LangChainVendor = z.infer<typeof LangChainVendorSchema>;
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 /**
- * Shared permission + hook governance for intelligent-node tool calls.
+ * Shared permission + hook governance for agent-node tool calls.
  *
- * Used by intelligent.ts invokeTool and by provider adapters that execute
+ * Used by agent.ts invokeTool and by provider adapters that execute
  * provider-native tools (Claude canUseTool, Cursor customTools, etc.).
  */
 
@@ -31,7 +31,7 @@ export async function requireToolApproval(
 }
 
 /**
- * Runs permission:ask HITL + intelligent:beforeToolCall (veto/interrupt/mutate).
+ * Runs permission:ask HITL + agent:beforeToolCall (veto/interrupt/mutate).
  * Returns (possibly mutated) args; throws on deny/veto.
  */
 export async function checkToolCall(
@@ -40,7 +40,7 @@ export async function checkToolCall(
   args: unknown,
 ): Promise<unknown> {
   if (g.permission === "deny") {
-    throw new Error(`Tool calls are disabled for this intelligent node (permission: deny).`);
+    throw new Error(`Tool calls are disabled for this agent node (permission: deny).`);
   }
 
   let callArgs = args;
@@ -48,8 +48,8 @@ export async function checkToolCall(
     await requireToolApproval(g.node, tool, callArgs, "Approve tool call");
   }
 
-  if (g.node.hooks?.has("intelligent:beforeToolCall")) {
-    const r = await g.node.hooks.run("intelligent:beforeToolCall", {
+  if (g.node.hooks?.has("agent:beforeToolCall")) {
+    const r = await g.node.hooks.run("agent:beforeToolCall", {
       state: g.state,
       run: g.node.meta,
       payload: { nodeId: g.node.nodeId, nodeType: g.node.nodeType, tool, args: callArgs },
@@ -67,7 +67,7 @@ export async function checkToolCall(
   return callArgs;
 }
 
-/** Runs intelligent:afterToolCall (mutate). Returns (possibly mutated) result. */
+/** Runs agent:afterToolCall (mutate). Returns (possibly mutated) result. */
 export async function reportToolResult(
   g: GovernanceCtx,
   tool: string,
@@ -75,8 +75,8 @@ export async function reportToolResult(
   result: unknown,
 ): Promise<unknown> {
   let finalResult = result;
-  if (g.node.hooks?.has("intelligent:afterToolCall")) {
-    const r = await g.node.hooks.run("intelligent:afterToolCall", {
+  if (g.node.hooks?.has("agent:afterToolCall")) {
+    const r = await g.node.hooks.run("agent:afterToolCall", {
       state: g.state,
       run: g.node.meta,
       payload: { nodeId: g.node.nodeId, nodeType: g.node.nodeType, tool, args, result: finalResult },

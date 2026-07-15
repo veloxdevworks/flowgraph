@@ -32,7 +32,7 @@ nodes:
       collect: { to: squares }
 
   - id: sum-squares
-    type: code
+    type: function
     with:
       fn: sumList
       input: { values: "{{ state.squares }}" }

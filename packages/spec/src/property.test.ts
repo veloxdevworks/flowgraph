@@ -37,7 +37,7 @@ function genValidSpec(rand: () => number): Record<string, unknown> {
   for (let i = 0; i < nNodes; i++) {
     const id = `n${i}_${kebab(rand)}`;
     ids.push(id);
-    nodes.push({ id, type: "code", with: { fn: kebab(rand) } });
+    nodes.push({ id, type: "function", with: { fn: kebab(rand) } });
   }
   const edges: Record<string, unknown>[] = [{ from: "START", to: ids[0] }];
   for (let i = 0; i < ids.length - 1; i++) edges.push({ from: ids[i], to: ids[i + 1] });

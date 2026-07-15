@@ -11,7 +11,10 @@ export {
   GraphSpecSchema,
   RouterWithSchema,
   HttpWithSchema,
+  FunctionWithSchema,
   CodeWithSchema,
+  ShellWithSchema,
+  AgentWithSchema,
   IntelligentWithSchema,
   SkillWithSchema,
   SubgraphWithSchema,
@@ -29,6 +32,8 @@ export {
   ClaudePermissionModeSchema,
   CursorProviderConfigSchema,
   CursorRuntimeSchema,
+  CliVendorSchema,
+  CliProviderConfigSchema,
   ProviderConfigSchema,
   ProvidersSchema,
   FsOperationSchema,
@@ -55,6 +60,8 @@ export type {
   LangChainProviderConfig,
   ClaudeProviderConfig,
   CursorProviderConfig,
+  CliProviderConfig,
+  CliVendor,
   LangChainVendor,
 } from "./schema.js";
 

@@ -26,7 +26,7 @@ const spec = {
   state: { channels: { approved: { type: "boolean" }, published: { type: "boolean" } } },
   nodes: [
     { id: "gate", type: "wait", with: { signal: "approval" } },
-    { id: "publish", type: "code", with: { fn: "publish", output: { to: "published" } } },
+    { id: "publish", type: "function", with: { fn: "publish", output: { to: "published" } } },
   ],
   edges: [
     { from: "START", to: "gate" },

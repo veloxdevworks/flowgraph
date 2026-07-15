@@ -1,6 +1,6 @@
 # 04 — Skills
 
-A **skill** is a portable, contract-bearing, environment-aware unit of capability. It is the reusable building block that makes flowgraph graphs composable across projects and teams. Skills are referenced by `skill` nodes ([03 §2](./03-node-types.md#2-skill--invoke-a-declared-skill)) and exposed as tools to `intelligent` nodes ([03 §1](./03-node-types.md#1-intelligent--agent-node-hub--spoke)).
+A **skill** is a portable, contract-bearing, environment-aware unit of capability. It is the reusable building block that makes flowgraph graphs composable across projects and teams. Skills are referenced by `skill` nodes ([03 §2](./03-node-types.md#2-skill--invoke-a-declared-skill)) and exposed as tools to `agent` nodes ([03 §1](./03-node-types.md#1-intelligent--agent-node-hub--spoke)).
 
 Skills deliberately mirror the familiar **`SKILL.md` = YAML front-matter + Markdown body** format (as used by the Claude Agent SDK and Cursor skills), so existing skill authors feel at home and so an agent can read a skill's body as instructions.
 
@@ -179,7 +179,7 @@ This gives us a path to a community skill ecosystem without inventing a new regi
 
 ## 7. Skills as agent tools
 
-When a skill is listed under an `intelligent` node's `with.tools`, flowgraph wraps it as a provider tool:
+When a skill is listed under an `agent` node's `with.tools`, flowgraph wraps it as a provider tool:
 
 - The tool's **name/description** come from the skill's `name`/`description`.
 - The tool's **input schema** is the skill's `inputs` contract (so the model calls it with valid args).

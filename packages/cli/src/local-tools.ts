@@ -9,16 +9,16 @@ const loadToolsFs = lazyOptionalImport<typeof import("@veloxdevworks/flowgraph-t
 
 function hasMutatingFsHook(spec: GraphSpec, mutatingToolNames: Set<string>): boolean {
   for (const hook of spec.runtime?.hooks ?? []) {
-    if (hook.on !== "intelligent:beforeToolCall") continue;
+    if (hook.on !== "agent:beforeToolCall") continue;
     const tool = hook.where?.["tool"];
     if (typeof tool === "string" && mutatingToolNames.has(tool)) return true;
   }
   return false;
 }
 
-function hasPermissionAskOnIntelligent(spec: GraphSpec): boolean {
+function hasPermissionAskOnAgent(spec: GraphSpec): boolean {
   return spec.nodes.some(
-    (n) => n.type === "intelligent" && (n.with as { permission?: string } | undefined)?.permission === "ask",
+    (n) => n.type === "agent" && (n.with as { permission?: string } | undefined)?.permission === "ask",
   );
 }
 
@@ -47,12 +47,12 @@ export async function registerLocalTools(spec: GraphSpec, cwd = process.cwd()): 
   if (
     enabledMutating.length > 0 &&
     !hasMutatingFsHook(spec, mutatingToolNames) &&
-    !hasPermissionAskOnIntelligent(spec)
+    !hasPermissionAskOnAgent(spec)
   ) {
     warnings.push(
       `localTools.fs enables mutating operations (${enabledMutating.join(", ")}) without ` +
-        `runtime.hooks gating (intelligent:beforeToolCall + do: interrupt) or permission: ask ` +
-        `on an intelligent node. Consider adding approval gates before running in production.`,
+        `runtime.hooks gating (agent:beforeToolCall + do: interrupt) or permission: ask ` +
+        `on an agent node. Consider adding approval gates before running in production.`,
     );
   }
 

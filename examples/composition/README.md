@@ -21,11 +21,11 @@ Tests load `register.ts` (registers `square` and `sumList`), then run `sum-of-sq
 
 - Imports `./square.graph.yaml` as subgraph `square`
 - `map` node iterates `state.numbers`, invokes the subgraph for each item
-- `code` node `sumList` aggregates `state.squares`
+- `function` node `sumList` aggregates `state.squares`
 
 **Child subgraph** (`square.graph.yaml`):
 
-- Single `code` node squaring input `n` → output `squared`
+- Single `function` node squaring input `n` → output `squared`
 
 ## Example result
 

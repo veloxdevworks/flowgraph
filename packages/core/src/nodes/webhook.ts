@@ -1,8 +1,8 @@
 /**
  * Built-in node type: `webhook`
  *
- *  - wait: durable interrupt until an external system resumes with a payload
- *  - emit: outbound HTTP notification (idempotent via ctx.once)
+ * Outbound HTTP notification (idempotent via ctx.once).
+ * Inbound waits live on `wait` with `webhook: true`.
  */
 
 import { z } from "zod";
@@ -18,16 +18,12 @@ export const webhookNode = defineNode<Config>({
   type: "webhook",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true, sideEffecting: true },
+  capabilities: { sideEffecting: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
-    const mode = config.mode ?? "wait";
-    const capabilities =
-      mode === "wait" ? { interruptible: true } : { sideEffecting: true };
-
     return {
       contract: {},
-      capabilities,
+      capabilities: { sideEffecting: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {
@@ -43,38 +39,11 @@ export const webhookNode = defineNode<Config>({
           }),
         };
 
-        if (mode === "emit") {
-          return runEmit(nodeSpec, config, scope, ctx);
-        }
-
-        return runWait(nodeSpec, config, scope, ctx);
+        return runEmit(nodeSpec, config, scope, ctx);
       },
     };
   },
 });
-
-async function runWait(
-  nodeSpec: Record<string, unknown>,
-  config: Config,
-  scope: Record<string, unknown>,
-  ctx: NodeRunContext,
-): Promise<NodeResult> {
-  const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
-  const reason = `Waiting for webhook callback on node "${nodeId}"`;
-
-  const payload = ctx.interrupt<unknown>({
-    reason,
-    kind: "custom",
-    data: { mode: "wait", schema: config.schema },
-  });
-
-  const result = normalizePayload(payload);
-  validateSchema(result, config.schema, nodeId);
-
-  ctx.emit("node.output", { webhook: { mode: "wait", result } });
-
-  return applyOutput(result, config, scope);
-}
 
 async function runEmit(
   nodeSpec: Record<string, unknown>,
@@ -83,7 +52,7 @@ async function runEmit(
   ctx: NodeRunContext,
 ): Promise<NodeResult> {
   if (!config.url) {
-    throw new Error(`webhook node "${String(nodeSpec["id"])}": mode "emit" requires url.`);
+    throw new Error(`webhook node "${String(nodeSpec["id"])}": url is required.`);
   }
 
   const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
@@ -134,37 +103,6 @@ async function runEmit(
   ctx.emit("node.output", { webhook: { mode: "emit", result } });
 
   return applyOutput(result, config, scope);
-}
-
-function normalizePayload(payload: unknown): Record<string, unknown> {
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    return payload as Record<string, unknown>;
-  }
-  return { value: payload };
-}
-
-/**
- * Lightweight schema check: validates `schema.required` keys only.
- * Full JSON-Schema validation may be added in a future pass.
- */
-function validateSchema(
-  payload: Record<string, unknown>,
-  schema: Record<string, unknown> | undefined,
-  nodeId: string,
-): void {
-  if (!schema) return;
-
-  const required = schema["required"];
-  if (!Array.isArray(required)) return;
-
-  const missing = (required as string[]).filter(
-    (key) => payload[key] === undefined,
-  );
-  if (missing.length > 0) {
-    throw new Error(
-      `webhook node "${nodeId}": resume payload missing required field(s): ${missing.join(", ")}`,
-    );
-  }
 }
 
 function applyOutput(

@@ -31,7 +31,7 @@ state:
 
 nodes:
   - id: writer
-    type: intelligent
+    type: agent
     with:
       system: >
         You are a file assistant. Use fs_write to create files and fs_read to
@@ -56,7 +56,7 @@ runtime:
     enabled: true
     backend: memory
   hooks:
-    - on: intelligent:beforeToolCall
+    - on: agent:beforeToolCall
       where: { tool: fs_write }
       do: interrupt
       reason: "Approve filesystem write"

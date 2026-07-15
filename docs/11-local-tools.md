@@ -1,6 +1,6 @@
 # 11 — Local Tools
 
-Opt-in tool packages extend intelligent nodes with capabilities that need local I/O (filesystem, shell, etc.). They register **function tools** via `@veloxdevworks/flowgraph-core`'s `registerTool()` API so any provider (including LangChain) can invoke them.
+Opt-in tool packages extend agent nodes with capabilities that need local I/O (filesystem, shell, etc.). They register **function tools** via `@veloxdevworks/flowgraph-core`'s `registerTool()` API so any provider (including LangChain) can invoke them.
 
 ## 1. Filesystem tools (`@veloxdevworks/flowgraph-tools-fs`)
 
@@ -25,7 +25,7 @@ The CLI calls `registerFsTools()` on `flowgraph run` / `resume` when `localTools
 | `fs_edit` | Find/replace in a file | opt-in |
 | `fs_delete` | Delete a file | opt-in |
 
-Expose to an intelligent node:
+Expose to an agent node:
 
 ```yaml
 with:
@@ -55,13 +55,13 @@ Gate specific tools (recommended for mutating fs ops):
 ```yaml
 runtime:
   hooks:
-    - on: intelligent:beforeToolCall
+    - on: agent:beforeToolCall
       where: { tool: fs_write }
       do: interrupt
       reason: "Approve filesystem write"
 ```
 
-The CLI warns at startup if mutating `operations` are enabled without matching hooks or `permission: ask` on an intelligent node.
+The CLI warns at startup if mutating `operations` are enabled without matching hooks or `permission: ask` on an agent node.
 
 ### Example
 

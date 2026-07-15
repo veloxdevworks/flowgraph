@@ -80,7 +80,7 @@ Pre-authenticate tokens in a setup step, or use stdio mock servers for integrati
 
 ## Provider environment variables
 
-MCP OAuth tokens are **independent** of LLM API keys. Intelligent nodes reuse the same MCP hub as deterministic `mcp` nodes.
+MCP OAuth tokens are **independent** of LLM API keys. Agent nodes reuse the same MCP hub as deterministic `mcp` nodes.
 
 ### LLM providers
 

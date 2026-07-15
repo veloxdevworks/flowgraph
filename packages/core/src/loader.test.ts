@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
 import { validateSpec } from "./loader.js";
-import { registerFunction } from "./nodes/code.js";
+import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 
 beforeAll(() => {
@@ -18,8 +18,8 @@ function parallelFanOutSpec(reducer: "append" | undefined): GraphSpec {
       },
     },
     nodes: [
-      { id: "branch-a", type: "code", with: { fn: "emitA", output: { to: "tags" } } },
-      { id: "branch-b", type: "code", with: { fn: "emitB", output: { to: "tags" } } },
+      { id: "branch-a", type: "function", with: { fn: "emitA", output: { to: "tags" } } },
+      { id: "branch-b", type: "function", with: { fn: "emitB", output: { to: "tags" } } },
     ],
     edges: [
       { from: "START", to: ["branch-a", "branch-b"] },
@@ -75,8 +75,8 @@ describe("validateSpec graph lint", () => {
     const diags = validateSpec({
       metadata: { name: "orphan" },
       nodes: [
-        { id: "live", type: "code", with: { fn: "emitA", output: { to: "tags" } } },
-        { id: "orphan", type: "code", with: { fn: "emitB", output: { to: "tags" } } },
+        { id: "live", type: "function", with: { fn: "emitA", output: { to: "tags" } } },
+        { id: "orphan", type: "function", with: { fn: "emitB", output: { to: "tags" } } },
       ],
       edges: [
         { from: "START", to: "live" },
@@ -86,6 +86,144 @@ describe("validateSpec graph lint", () => {
       runtime: { checkpoint: { enabled: false } },
     } as unknown as GraphSpec);
     expect(diags.some((d) => d.code === "UNREACHABLE_FROM_START" && d.message.includes("orphan"))).toBe(true);
+  });
+
+  it("errors when output.to targets an undeclared channel", () => {
+    const diags = validateSpec({
+      metadata: { name: "undeclared-to" },
+      nodes: [
+        { id: "shell-1", type: "shell", with: { command: "echo hi", output: { to: "shell" } } },
+      ],
+      edges: [
+        { from: "START", to: "shell-1" },
+        { from: "shell-1", to: "END" },
+      ],
+      state: { channels: {} },
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec);
+    expect(
+      diags.some(
+        (d) =>
+          d.code === "UNDECLARED_OUTPUT_CHANNEL" &&
+          d.severity === "error" &&
+          d.message.includes("shell") &&
+          d.path === "nodes.shell-1.with.output",
+      ),
+    ).toBe(true);
+  });
+
+  it("errors when output.map keys target undeclared channels", () => {
+    const diags = validateSpec({
+      metadata: { name: "undeclared-map" },
+      nodes: [
+        {
+          id: "a",
+          type: "shell",
+          with: {
+            command: "echo hi",
+            output: { map: { stdout: "{{ result.stdout }}", missing: "{{ result.stderr }}" } },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+      state: { channels: { stdout: { type: "string" } } },
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec);
+    const undeclared = diags.filter((d) => d.code === "UNDECLARED_OUTPUT_CHANNEL");
+    expect(undeclared).toHaveLength(1);
+    expect(undeclared[0]!.message).toContain("missing");
+  });
+
+  it("errors when subgraph stateMap.out values target undeclared parent channels", () => {
+    const diags = validateSpec({
+      metadata: { name: "undeclared-statemap" },
+      nodes: [
+        {
+          id: "child",
+          type: "subgraph",
+          uses: "child-graph",
+          with: {
+            stateMap: { out: { summary: "testResults" } },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "child" },
+        { from: "child", to: "END" },
+      ],
+      state: { channels: {} },
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec);
+    expect(
+      diags.some(
+        (d) =>
+          d.code === "UNDECLARED_OUTPUT_CHANNEL" &&
+          d.message.includes("testResults") &&
+          d.path === "nodes.child.with.stateMap.out",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not error when output channels are declared", () => {
+    const diags = validateSpec({
+      metadata: { name: "declared-ok" },
+      nodes: [
+        { id: "shell-1", type: "shell", with: { command: "echo hi", output: { to: "shell" } } },
+        {
+          id: "map-1",
+          type: "map",
+          with: {
+            over: "{{ state.items }}",
+            node: { type: "shell", with: { command: "echo" } },
+            collect: { to: "results" },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "shell-1" },
+        { from: "shell-1", to: "map-1" },
+        { from: "map-1", to: "END" },
+      ],
+      state: {
+        channels: {
+          shell: { type: "object" },
+          items: { type: "array" },
+          results: { type: "array", reducer: "append" },
+        },
+      },
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec);
+    expect(diags.some((d) => d.code === "UNDECLARED_OUTPUT_CHANNEL")).toBe(false);
+  });
+});
+
+describe("normalizeNodeTypeAliases", () => {
+  it("rewrites deprecated code/intelligent types and hook phases", async () => {
+    const { normalizeNodeTypeAliases } = await import("./loader.js");
+    const parsed = normalizeNodeTypeAliases({
+      nodes: [
+        { id: "a", type: "code", with: { fn: "x" } },
+        { id: "b", type: "intelligent", with: { prompt: "hi" } },
+        {
+          id: "m",
+          type: "map",
+          with: { items: "{{ state.xs }}", node: { type: "code", with: { fn: "y" } } },
+        },
+      ],
+      runtime: {
+        hooks: [{ on: "intelligent:beforeToolCall", do: "interrupt" }],
+      },
+    }) as {
+      nodes: Array<{ type: string; with?: { node?: { type: string } } }>;
+      runtime: { hooks: Array<{ on: string }> };
+    };
+    expect(parsed.nodes[0]!.type).toBe("function");
+    expect(parsed.nodes[1]!.type).toBe("agent");
+    expect(parsed.nodes[2]!.with?.node?.type).toBe("function");
+    expect(parsed.runtime.hooks[0]!.on).toBe("agent:beforeToolCall");
   });
 });
 

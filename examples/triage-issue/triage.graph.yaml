@@ -25,7 +25,7 @@ config:
 
 nodes:
   - id: classify
-    type: code
+    type: function
     with:
       fn: classifyIssue
       input:
@@ -62,11 +62,8 @@ nodes:
 edges:
   - { from: START,          to: classify }
   - { from: classify,       to: route }
-  - { from: route,          branch: [
-      { when: "{{ state.label == 'bug' }}",     to: create-ticket },
-      { when: "{{ state.label == 'feature' }}", to: create-ticket },
-      { default: true,                          to: create-ticket }
-    ]}
+  # route → create-ticket is chosen by the router's with.routes (Command.goto);
+  # no duplicate branch edge is required.
   - { from: create-ticket, to: END }
 
 runtime:

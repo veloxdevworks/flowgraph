@@ -8,7 +8,7 @@ START → classify (code) → route (router) → create-ticket (skill) → END
 
 ## Run it
 
-This example uses a **`code` node**, which requires registering functions before compile. Use the provided runner:
+This example uses a **`function` node**, which requires registering functions before compile. Use the provided runner:
 
 ```bash
 cd examples/triage-issue
@@ -21,13 +21,13 @@ Or with the CLI after registering functions in your own script (see `run.js`).
 
 | Node | Type | Role |
 |------|------|------|
-| `classify` | `code` | Pure function `classifyIssue` → `bug` \| `feature` \| `question` |
+| `classify` | `function` | Pure function `classifyIssue` → `bug` \| `feature` \| `question` |
 | `route` | `router` | Rules-based routing (all paths lead to ticket creation in this demo) |
 | `create-ticket` | `skill` | Calls `skills/mock-create-ticket` with project, type, title, description |
 
 ### Hybrid authoring pattern
 
-- **`code` node** — Logic lives in `run.js` via `registerFunction("classifyIssue", …)`. Required because `code` nodes reference registered functions by name.
+- **`function` node** — Logic lives in `run.js` via `registerFunction("classifyIssue", …)`. Required because `function` nodes reference registered functions by name.
 - **`skill` node** — Handler on disk at `skills/mock-create-ticket/handler.js`. No registration needed.
 
 Compare with [quickstart](../quickstart/) where **both** steps are skills and run with zero TypeScript.
@@ -42,7 +42,7 @@ flowgraph skills doctor skills/mock-create-ticket
 
 ## Extend
 
-- Swap `classify` for an `intelligent` node (Phase 4 exit criterion).
+- Swap `classify` for an `agent` node (Phase 4 exit criterion).
 - Replace `mock-create-ticket` with a real Jira/Linear skill.
 - Enable checkpointing in `runtime.checkpoint` for durable runs.
 

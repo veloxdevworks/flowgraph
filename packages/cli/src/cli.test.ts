@@ -38,7 +38,7 @@ describe("templates", () => {
     expect(listTemplates()).toContain("hello");
     expect(listTemplates()).toContain("minimal");
     expect(listTemplates()).toContain("http");
-    expect(listTemplates()).toContain("intelligent");
+    expect(listTemplates()).toContain("agent");
   });
 
   it("hello template returns graph plus skill files", () => {
@@ -57,11 +57,15 @@ describe("templates", () => {
     expect(graph).toContain("uses: ./skills/hello");
   });
 
-  it("minimal template returns a single graph file", () => {
+  it("minimal template returns a single graph file with a shell node", () => {
     const result = templateFor("minimal", "my-graph");
     expect(result).toBeDefined();
     expect(result!.files).toHaveLength(1);
     expect(result!.graphFile).toBe("my-graph.graph.yaml");
+    const graph = result!.files[0]!.content;
+    expect(graph).toContain("type: shell");
+    expect(graph).toContain("command: echo");
+    expect(graph).not.toContain("type: function");
   });
 
   it("http template routes directly to END without code nodes", () => {
@@ -71,8 +75,8 @@ describe("templates", () => {
     expect(graph).toContain("to: END");
   });
 
-  it("intelligent template declares a langchain provider block", () => {
-    const result = templateFor("intelligent", "agent");
+  it("agent template declares a langchain provider block", () => {
+    const result = templateFor("agent", "demo");
     const graph = result!.files[0]!.content;
     expect(graph).toContain("providers:");
     expect(graph).toContain("vendor: openai");

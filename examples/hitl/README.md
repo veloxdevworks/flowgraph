@@ -55,5 +55,5 @@ Or pass any JSON resume value matching the interrupt kind:
 ## Graph highlights
 
 - `hitl` node with `mode: approve` — deterministic approval gate in the graph
-- `ask_human` tool on an `intelligent` node — agent-driven clarification
+- `ask_human` tool on an `agent` node — agent-driven clarification
 - SQLite checkpoint — survives process restarts between resume calls

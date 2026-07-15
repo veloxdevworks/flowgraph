@@ -41,28 +41,28 @@ state:
 
 nodes:
   - id: check-paused
-    type: code
+    type: function
     with:
       fn: checkPaused
       input: {}
       output: { to: pausedCheck }
 
   - id: check-runtime
-    type: code
+    type: function
     with:
       fn: checkRuntime
       input: {}
       output: { to: runtime }
 
   - id: load-context
-    type: code
+    type: function
     with:
       fn: loadContext
       input: {}
       output: { to: ctx }
 
   - id: research-and-plan
-    type: intelligent
+    type: agent
     provider: planner
     with:
       system: >
@@ -95,7 +95,7 @@ nodes:
       output: { to: plan }
 
   - id: implement
-    type: intelligent
+    type: agent
     provider: coder
     with:
       cursor:
@@ -121,7 +121,7 @@ nodes:
       permission: auto
 
   - id: quality-gate
-    type: code
+    type: function
     with:
       fn: runQualityGate
       input:
@@ -129,7 +129,7 @@ nodes:
       output: { to: gate }
 
   - id: increment-attempts
-    type: code
+    type: function
     with:
       fn: incrementAttempts
       input:
@@ -142,7 +142,7 @@ nodes:
           implementFeedback: "{{ result.implementFeedback }}"
 
   - id: review
-    type: intelligent
+    type: agent
     provider: coder
     with:
       cursor:
@@ -172,7 +172,7 @@ nodes:
       output: { to: approval }
 
   - id: open-pr
-    type: code
+    type: function
     with:
       fn: openPr
       input:
@@ -181,7 +181,7 @@ nodes:
       output: { to: pr }
 
   - id: finalize-failure
-    type: code
+    type: function
     with:
       fn: finalizeFailure
       input:
@@ -190,7 +190,7 @@ nodes:
       output: { to: failure }
 
   - id: record-outcome
-    type: code
+    type: function
     with:
       fn: recordOutcome
       input:

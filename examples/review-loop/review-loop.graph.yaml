@@ -17,7 +17,7 @@ state:
 
 nodes:
   - id: write-draft
-    type: code
+    type: function
     with:
       fn: draftContent
       input:
@@ -33,7 +33,7 @@ nodes:
       output: { to: approval }
 
   - id: revise
-    type: code
+    type: function
     when: "{{ state.approval.approved == false }}"
     with:
       fn: reviseContent
@@ -45,7 +45,7 @@ nodes:
           revision: "{{ state.revision + 1 }}"
 
   - id: finalize
-    type: code
+    type: function
     when: "{{ state.approval.approved }}"
     with:
       fn: finalizeContent

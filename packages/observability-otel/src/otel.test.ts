@@ -14,8 +14,8 @@ function demoSpec(): GraphSpec {
     metadata: { name: "otel-demo" },
     state: { channels: { greeting: { type: "string", reducer: "lastWrite" } } },
     nodes: [
-      { id: "hello", type: "code", with: { fn: "otelHello" } },
-      { id: "world", type: "code", with: { fn: "otelWorld" } },
+      { id: "hello", type: "function", with: { fn: "otelHello" } },
+      { id: "world", type: "function", with: { fn: "otelWorld" } },
     ],
     edges: [
       { from: "START", to: "hello" },

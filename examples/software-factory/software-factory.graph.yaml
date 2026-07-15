@@ -35,7 +35,7 @@ state:
 
 nodes:
   - id: intake
-    type: code
+    type: function
     with:
       fn: intakeFeature
       input:
@@ -46,7 +46,7 @@ nodes:
           design: "{{ result.design }}"
 
   - id: jira-in-progress
-    type: code
+    type: function
     with:
       fn: updateJira
       input:
@@ -66,7 +66,7 @@ nodes:
       output: { to: trackChoice }
 
   - id: apply-track
-    type: code
+    type: function
     with:
       fn: applyTrackChoice
       input:
@@ -93,7 +93,7 @@ nodes:
           to: chat-design
 
   - id: prototype-build
-    type: code
+    type: function
     with:
       fn: buildArtifact
       input:
@@ -103,7 +103,7 @@ nodes:
       output: { to: artifact }
 
   - id: deploy-staging
-    type: code
+    type: function
     with:
       fn: deploy
       input:
@@ -122,7 +122,7 @@ nodes:
       output: { to: promoteApproval }
 
   - id: apply-promote
-    type: code
+    type: function
     when: "{{ state.promoteApproval.approved }}"
     with:
       fn: applyPromote
@@ -134,7 +134,7 @@ nodes:
           feature: "{{ result.feature }}"
 
   - id: chat-design
-    type: code
+    type: function
     with:
       fn: chatOwner
       input:
@@ -154,7 +154,7 @@ nodes:
       output: { to: designApproval }
 
   - id: revise-design
-    type: code
+    type: function
     when: "{{ state.designApproval.approved == false }}"
     with:
       fn: reviseDesign
@@ -164,7 +164,7 @@ nodes:
       output: { to: design }
 
   - id: kickoff-reviews
-    type: code
+    type: function
     when: "{{ state.designApproval.approved }}"
     with:
       fn: kickoffReviews
@@ -172,7 +172,7 @@ nodes:
         feature: "{{ state.feature }}"
 
   - id: critique-design
-    type: code
+    type: function
     with:
       fn: critiqueDesign
       input:
@@ -181,7 +181,7 @@ nodes:
       output: { to: reviews }
 
   - id: critique-performance
-    type: code
+    type: function
     with:
       fn: critiquePerformance
       input:
@@ -190,7 +190,7 @@ nodes:
       output: { to: reviews }
 
   - id: critique-security
-    type: code
+    type: function
     with:
       fn: critiqueSecurity
       input:
@@ -199,7 +199,7 @@ nodes:
       output: { to: reviews }
 
   - id: aggregate-reviews
-    type: code
+    type: function
     with:
       fn: aggregateReviews
       input:
@@ -208,7 +208,7 @@ nodes:
       output: { to: synthesis }
 
   - id: follow-up-plan
-    type: code
+    type: function
     with:
       fn: followUpPlan
       input:
@@ -217,7 +217,7 @@ nodes:
       output: { to: plan }
 
   - id: production-build
-    type: code
+    type: function
     with:
       fn: buildArtifact
       input:
@@ -228,7 +228,7 @@ nodes:
       output: { to: artifact }
 
   - id: i18n
-    type: code
+    type: function
     with:
       fn: runI18n
       input:
@@ -237,7 +237,7 @@ nodes:
       output: { to: checks }
 
   - id: a11y
-    type: code
+    type: function
     with:
       fn: runA11y
       input:
@@ -246,7 +246,7 @@ nodes:
       output: { to: checks }
 
   - id: unit-tests
-    type: code
+    type: function
     with:
       fn: runUnitTests
       input:
@@ -255,7 +255,7 @@ nodes:
       output: { to: checks }
 
   - id: e2e-tests
-    type: code
+    type: function
     with:
       fn: runE2e
       input:
@@ -265,7 +265,7 @@ nodes:
       output: { to: checks }
 
   - id: o11y
-    type: code
+    type: function
     with:
       fn: runO11y
       input:
@@ -274,7 +274,7 @@ nodes:
       output: { to: checks }
 
   - id: chat-release
-    type: code
+    type: function
     with:
       fn: chatOwner
       input:
@@ -294,7 +294,7 @@ nodes:
       output: { to: releaseApproval }
 
   - id: fix-and-retest
-    type: code
+    type: function
     when: "{{ state.releaseApproval.approved == false }}"
     with:
       fn: fixAndRetest
@@ -307,7 +307,7 @@ nodes:
           fixAttempt: "{{ result.fixAttempt }}"
 
   - id: deploy-production
-    type: code
+    type: function
     when: "{{ state.releaseApproval.approved }}"
     with:
       fn: deploy
@@ -318,7 +318,7 @@ nodes:
       output: { to: deploy }
 
   - id: jira-done
-    type: code
+    type: function
     with:
       fn: updateJira
       input:
@@ -329,7 +329,7 @@ nodes:
       output: { to: jira }
 
   - id: chat-shipped
-    type: code
+    type: function
     with:
       fn: chatOwner
       input:
@@ -341,7 +341,7 @@ nodes:
       output: { to: notifications }
 
   - id: record-outcome
-    type: code
+    type: function
     with:
       fn: recordOutcome
       input:
@@ -360,12 +360,7 @@ edges:
   - { from: jira-in-progress, to: choose-track }
   - { from: choose-track, to: apply-track }
   - { from: apply-track, to: route-track }
-  - from: route-track
-    branch:
-      - when: "{{ state.track == 'prototype' }}"
-        to: prototype-build
-      - default: true
-        to: chat-design
+  # route-track destinations come from with.routes (Command.goto); no branch edge needed.
   - { from: prototype-build, to: deploy-staging }
   - { from: deploy-staging, to: promote-gate }
   - from: promote-gate

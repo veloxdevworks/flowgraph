@@ -87,7 +87,7 @@ Two consumption modes share one client (`@veloxdevworks/flowgraph-mcp`):
 
 ```yaml
 - id: triage
-  type: intelligent
+  type: agent
   provider: mock
   with:
     prompt: "Create a ticket if needed."
@@ -103,7 +103,7 @@ When a tool is invoked, the adapter calls back into flowgraph's runtime (`ctx.in
 **Governance layers:**
 
 1. **Node `permission`** — `auto` (default), `ask` (interrupt every tool call), or `deny` (no tools).
-2. **`runtime.hooks`** — fine-grained control per tool name on `intelligent:beforeToolCall` (`veto`, `interrupt`, mutate args). Recommended for side-effecting tools like `fs_write` ([11 — Local Tools](./11-local-tools.md)).
+2. **`runtime.hooks`** — fine-grained control per tool name on `agent:beforeToolCall` (`veto`, `interrupt`, mutate args). Recommended for side-effecting tools like `fs_write` ([11 — Local Tools](./11-local-tools.md)).
 
 `permission: ask` and hook `do: interrupt` both route through HITL ([07 §HITL](./07-runtime-and-execution.md#5-human-in-the-loop)).
 
@@ -124,16 +124,32 @@ providers:
 config:
   defaults:
     provider: main
-    model: claude-3-5-sonnet-latest   # optional per-run override on intelligent nodes
+    model: claude-3-5-sonnet-latest   # optional per-run override on agent nodes
 ```
 
 **Shorthand:** `config.defaults.provider: anthropic` (bare vendor name) synthesizes a LangChain provider when no matching `providers` entry exists.
 
 Install the vendor package you reference (`@langchain/anthropic`, `@langchain/openai`, etc.) and set the API key env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). Ollama needs no key; set `baseUrl` if not localhost.
 
-MCP OAuth tokens (`.flowgraph/mcp-oauth/`) are independent of LLM API keys — intelligent nodes reuse the same MCP hub as deterministic `mcp` nodes.
+MCP OAuth tokens (`.flowgraph/mcp-oauth/`) are independent of LLM API keys — agent nodes reuse the same MCP hub as deterministic `mcp` nodes.
 
-**Future:** local agent CLIs (Claude Code, Codex, Grok CLI) as separate provider packages that shell out to their own runtimes; they cannot reuse the in-process MCP hub/OAuth path documented here.
+### Local CLI providers (`kind: cli`)
+
+When Claude Code, Cursor CLI, Codex, or Grok Build is installed on `PATH`, you can run agent nodes against that local CLI instead of an API key:
+
+```yaml
+providers:
+  local:
+    kind: cli
+    vendor: claude          # claude | cursor | codex | grok
+    # binary: claude        # optional override (defaults: claude, cursor-agent, codex, grok)
+    # model: claude-sonnet-4.5
+    # cwd: ./workspace
+```
+
+**Auto-prefer:** if a graph declares `kind: claude`, `kind: cursor`, or `kind: langchain` (vendors `openai`→Codex, `xai`→Grok, `anthropic`→Claude) and the matching API key env var is **absent**, but the corresponding CLI binary is on `PATH`, the runtime silently builds a `cli` provider instead of failing on a missing key. Set the API key to force the SDK/API path.
+
+**v1 limits:** the CLI provider is single-shot (prompt → text). It does not mediate flowgraph tools/MCP through the CLI; the installed CLI runs its own agent loop. For hub-and-spoke tool wiring, use the SDK providers (`claude` / `cursor` / `langchain`) with an API key.
 
 ## 3. Adapter: Claude (`@veloxdevworks/flowgraph-provider-claude`)
 
@@ -144,11 +160,11 @@ Wraps `@anthropic-ai/claude-agent-sdk` (`query({ prompt, options })`). Maps:
 - `tools.mcp` → MCP server config.
 - `schema` → structured output via a final tool/`output` contract.
 - `permission` → SDK permission mode / `canUseTool` callback (→ flowgraph HITL).
-- Streams SDK messages → `intelligent.step` / `intelligent.tool.call` / `intelligent.token` events.
+- Streams SDK messages → `agent.step` / `agent.tool.call` / `agent.token` events.
 
 ```yaml
 - id: implement
-  type: intelligent
+  type: agent
   provider: claude
   model: claude-sonnet-4.5
   with:
@@ -186,11 +202,11 @@ providers:
 
 Wraps `@cursor/sdk` (`Agent.create`/`prompt`/`stream`). Maps the same `AgentRequest` onto the Cursor agent loop, exposing skills/nodes as `local.customTools` and streaming run messages into flowgraph events. Supports Cursor's local vs. cloud runtime selection via `providers.cursor.runtime` or `with.cursor.runtime`. Auth via `CURSOR_API_KEY` (or `apiKeyEnv`), surfaced to preflight.
 
-**Governance note:** Custom tools (skills/nodes/functions) route through flowgraph `checkToolCall`/`reportToolResult`. Native Cursor builtin tools do not support per-call `canUseTool`; `validate()` warns when combining `tools.builtin` with `permission: ask` or `intelligent:beforeToolCall` hooks — use `provider: claude` or `@veloxdevworks/flowgraph-tools-fs` for fine-grained file-tool gating.
+**Governance note:** Custom tools (skills/nodes/functions) route through flowgraph `checkToolCall`/`reportToolResult`. Native Cursor builtin tools do not support per-call `canUseTool`; `validate()` warns when combining `tools.builtin` with `permission: ask` or `agent:beforeToolCall` hooks — use `provider: claude` or `@veloxdevworks/flowgraph-tools-fs` for fine-grained file-tool gating.
 
 ```yaml
 - id: refactor
-  type: intelligent
+  type: agent
   provider: cursor
   with:
     cursor: { runtime: cloud }
@@ -206,7 +222,7 @@ Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/ope
 
 ```yaml
 - id: classify
-  type: intelligent
+  type: agent
   provider: langchain
   model: gpt-4o            # or anthropic, etc., per configured ChatModel
   with:

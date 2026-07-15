@@ -22,7 +22,7 @@ function fakeModel(responses: AIMessage[]): ChatModelLike {
 const spec: GraphSpec = {
   metadata: { name: "lc-graph" },
   state: { channels: { answer: { type: "object" } } },
-  nodes: [{ id: "agent", type: "intelligent", provider: "langchain", with: { prompt: "Hi", output: { to: "answer" } } }],
+  nodes: [{ id: "agent", type: "agent", provider: "langchain", with: { prompt: "Hi", output: { to: "answer" } } }],
   edges: [
     { from: "START", to: "agent" },
     { from: "agent", to: "END" },
@@ -51,7 +51,7 @@ describe("LangChain provider (built into @veloxdevworks/flowgraph-core)", () => 
     const provider = createLangChainProvider(model);
     const toolSpec = {
       ...spec,
-      nodes: [{ id: "agent", type: "intelligent", provider: "langchain", with: { prompt: "weather?", tools: [{ function: "weather" }], output: { to: "answer" } } }],
+      nodes: [{ id: "agent", type: "agent", provider: "langchain", with: { prompt: "weather?", tools: [{ function: "weather" }], output: { to: "answer" } } }],
     } as unknown as GraphSpec;
 
     const events: string[] = [];
@@ -60,6 +60,6 @@ describe("LangChain provider (built into @veloxdevworks/flowgraph-core)", () => 
 
     expect(r.status).toBe("completed");
     expect((r.state["answer"] as { text: string }).text).toBe("It is 72F in SF.");
-    expect(events).toContain("intelligent.tool.call");
+    expect(events).toContain("agent.tool.call");
   });
 });

@@ -15,6 +15,7 @@ export interface LoadGraphImportsOptions {
 
 export interface LoadGraphImportsResult {
   skillAliases: Record<string, string>;
+  agentAliases: Record<string, string>;
   subgraphAliases: Record<string, string>;
 }
 
@@ -74,6 +75,7 @@ export async function loadGraphImports(
 ): Promise<LoadGraphImportsResult> {
   const cwd = opts.cwd ?? process.cwd();
   const skillAliases: Record<string, string> = {};
+  const agentAliases: Record<string, string> = {};
   const subgraphAliases: Record<string, string> = {};
 
   for (const imp of spec.imports ?? []) {
@@ -91,12 +93,14 @@ export async function loadGraphImports(
       await loadReducerImport(imp.reducers, cwd);
     } else if ("skill" in imp) {
       skillAliases[imp.as ?? imp.skill] = imp.skill;
+    } else if ("agent" in imp) {
+      agentAliases[imp.as ?? imp.agent] = imp.agent;
     } else if ("subgraph" in imp) {
       subgraphAliases[imp.as ?? imp.subgraph] = imp.subgraph;
     }
   }
 
-  return { skillAliases, subgraphAliases };
+  return { skillAliases, agentAliases, subgraphAliases };
 }
 
 function normalizeDefaultExport<T>(value: unknown): T[] {

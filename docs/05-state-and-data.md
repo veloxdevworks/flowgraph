@@ -16,6 +16,8 @@ state:
     counters: { type: object, reducer: merge }    # shallow object merge
 ```
 
+> **Channels must be declared before they can be written.** Any channel targeted by `output`, `collect`, or `subgraph` `stateMap.out` should appear under `state.channels`. The underlying LangGraph state schema only accepts keys that were declared at compile time — undeclared writes are otherwise **silently dropped** (no runtime error), so a later `{{ state.myChannel }}` reads as empty/`null`. `flowgraph validate` reports this as `UNDECLARED_OUTPUT_CHANNEL`. The desktop builder and `compileGraph` auto-declare missing targets as `{ type: any }` so runs still succeed; prefer declaring the real type (`object`, `string`, …) in YAML.
+
 ### Channel types
 
 | `type` | JS type | Notes |
@@ -64,7 +66,7 @@ findings: { type: array, reducer: "custom:uniqueById" }
 
 `custom:<name>` reducers must be registered before `compileGraph` / `flowgraph run` — via `registry.registerReducer` in app bootstrap or `imports: [{ reducers: "./my-reducers.ts" }]` in the graph YAML. An unregistered name is an error at validate/compile time (no silent fallback to last-write-wins).
 
-`flowgraph validate` also reports fan-in `lastWrite` risks, reducer/type mismatches, and reachability warnings offline.
+`flowgraph validate` also reports fan-in `lastWrite` risks, reducer/type mismatches, undeclared output channels (`UNDECLARED_OUTPUT_CHANNEL`), and reachability warnings offline.
 
 Channels with `type: messages` (or `reducer: messages`) use LangGraph's `messagesStateReducer` — append plus id-based message upsert, not last-write-wins.
 
@@ -99,13 +101,13 @@ state:
 
 nodes:
   - id: agent
-    type: intelligent
+    type: agent
     with:
       prompt: "Research the topic."
       output: { to: answer }          # writes agent result → state.answer
 
   - id: format
-    type: intelligent
+    type: agent
     with:
       prompt: "One-line summary: {{ state.answer.text }}"
       output: { to: formatted }       # reads state.answer, writes state.formatted
@@ -169,7 +171,7 @@ priority: "{{ state.severity >= 8 ? 'high' : 'medium' }}"
 | Logic/util | `default coalesce ifElse jsonParse jsonStringify` |
 | Time | `now toIso duration` (durations like `30s`, `24h`, `2d`) |
 
-The stdlib is intentionally small and pure. Anything more complex belongs in a `code` node or skill, not an expression.
+The stdlib is intentionally small and pure. Anything more complex belongs in a `function` node or skill, not an expression.
 
 ### Safety properties
 
@@ -191,7 +193,7 @@ config:
   defaults: { model: "${FLOWGRAPH_MODEL:-claude-sonnet-4.5}" }   # ${} = env, resolved at load
 nodes:
   - id: x
-    type: intelligent
+    type: agent
     with: { prompt: "Summarize {{ state.issue.title }}" }     # {{ }} = expr, per run
 ```
 

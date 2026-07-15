@@ -90,8 +90,8 @@ flowgraph uses a **hybrid model**: YAML declares topology and config; logic live
 | Pattern | When to use | Registration required |
 |---------|-------------|----------------------|
 | **`skill` node** + on-disk `handler.js` | Portable, shareable units with contracts | No — see [quickstart](../examples/quickstart/) |
-| **`code` node** + `registerFunction()` | Custom in-process TS/JS logic | Yes — see [triage-issue](../examples/triage-issue/) |
-| **`intelligent` node** | LLM agent with tool loop | LangChain vendor SDK (e.g. `@langchain/openai`) + API key — adapter is built into `@veloxdevworks/flowgraph-core` / CLI |
+| **`function` node** + `registerFunction()` | Custom in-process TS/JS logic | Yes — see [triage-issue](../examples/triage-issue/) |
+| **`agent` node** | LLM agent with tool loop | LangChain vendor SDK (e.g. `@langchain/openai`) + API key — adapter is built into `@veloxdevworks/flowgraph-core` / CLI |
 | **`mcp` node** or agent MCP tools | External tool servers | MCP config + optional OAuth |
 
 **Rule of thumb:** If your handler can be a plain ESM module on disk, use a **skill**. If you need tight integration with your app's runtime, use **`code`** with registration.

@@ -16,19 +16,19 @@ state:
 
 nodes:
   - id: branch-a
-    type: code
+    type: function
     with:
       fn: findingA
       output: { to: findings }
 
   - id: branch-b
-    type: code
+    type: function
     with:
       fn: findingB
       output: { to: findings }
 
   - id: merge-update
-    type: code
+    type: function
     with:
       fn: findingAUpdate
       output: { to: findings }

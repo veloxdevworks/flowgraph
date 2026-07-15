@@ -32,19 +32,22 @@ interface NodeCapabilities {
 
 ---
 
-## 1. `intelligent` — agent node (hub & spoke)
+## 1. `agent` — LLM agent node (hub & spoke)
 
 An LLM-driven agent that runs a tool-calling loop. **This is the hub in hub-and-spoke**: other nodes and skills are exposed to it as callable tools (spokes). It decides which to call, loops until done, then writes its result back to state. Backed by a pluggable **provider** (see [08 — Providers](./08-providers.md)).
 
 ```yaml
 - id: implement
-  type: intelligent
+  type: agent
   provider: claude                 # claude | cursor | langchain | <registered>  (defaults from config)
   model: claude-sonnet-4.5         # optional; provider-specific
   input:
     task: "{{ state.currentTask }}"
   with:
-    system: "You are a senior engineer. Implement the task, then stop."
+    # Reusable agent definition (AGENT.md) — body becomes the system prompt.
+    # Optional; see [16 — Agents](./16-agents.md). Node-level `system` is appended after it.
+    agent: ./agents/code-reviewer   # or an imports alias
+    system: "Also prefer short answers."   # optional extra instructions
     prompt: "Task:\n{{ input.task }}"
 
     # --- hub & spoke: expose tools the agent may call ---
@@ -77,7 +80,7 @@ An LLM-driven agent that runs a tool-calling loop. **This is the hub in hub-and-
 - The agent runs **inside a single graph node**. Its internal tool-calls do **not** create graph edges; they are intra-node steps. This keeps the graph topology readable while allowing rich agent behavior.
 - A tool that is a **skill** or **node** is invoked through flowgraph's runtime, so tool-calls still emit events/traces (nested spans under the agent span) and respect contracts.
 - `permission: ask` raises a **HITL interrupt before every tool call** on that node. `permission: deny` blocks all tool calls. `permission: auto` (default) allows tools unless a hook vetoes or interrupts.
-- Per-tool gates use `runtime.hooks` on `intelligent:beforeToolCall` (e.g. require approval only for `fs_write`). See [11 — Local Tools](./11-local-tools.md).
+- Per-tool gates use `runtime.hooks` on `agent:beforeToolCall` (e.g. require approval only for `fs_write`). See [11 — Local Tools](./11-local-tools.md).
 - In CI, interrupt behavior is governed by `--on-interrupt` / `runtime.hitl.onInterrupt`.
 - When a richer, *visible-in-the-graph* decomposition is wanted, use a `router` + explicit nodes or a `subgraph` instead of (or in addition to) agent tools. The two compose.
 
@@ -112,19 +115,28 @@ Runs a **skill**: a portable, contract-bearing unit defined by a `SKILL.md` file
 
 ## 3. `router` — intelligent / rule-based routing
 
-A node whose job is to **choose the next node(s)** based on state/output. Routing can be rule-based (expressions) or model-based (an LLM picks among labeled routes). Implemented via LangGraph conditional edges, but expressed as a first-class node for readability.
+A node whose job is to **choose the next node(s)** based on state/output. Routing can be rule-based (expressions) or model-based (an LLM picks among labeled routes). The router's `with.routes` is the source of truth: at runtime it returns a `Command{ goto }` that jumps to the matched target. You do **not** need a duplicate `branch` edge in `edges` for the router to work (and any static fan-out from a router is ignored so it cannot race the decision).
 
 ```yaml
-- id: route-by-result
-  type: router
-  with:
-    mode: rules                    # rules | model
-    input: "{{ state.testResults }}"
-    routes:
-      passed:  { when: "{{ state.testResults.failed == 0 }}", to: open-pr }
-      failed:  { when: "{{ state.testResults.failed > 0 }}",  to: fix-loop }
-      flaky:   { when: "{{ state.testResults.flaky }}",       to: rerun-tests }
-      default: { to: needs-human }
+nodes:
+  - id: route-by-result
+    type: router
+    with:
+      mode: rules                    # rules | model
+      input: "{{ state.testResults }}"
+      routes:
+        passed:  { when: "{{ state.testResults.failed == 0 }}", to: open-pr }
+        failed:  { when: "{{ state.testResults.failed > 0 }}",  to: fix-loop }
+        flaky:   { when: "{{ state.testResults.flaky }}",       to: rerun-tests }
+        default: { default: true, to: needs-human }
+
+edges:
+  - { from: START, to: route-by-result }
+  # No outgoing edge from route-by-result — destinations come from with.routes.
+  - { from: open-pr, to: END }
+  - { from: fix-loop, to: END }
+  - { from: rerun-tests, to: END }
+  - { from: needs-human, to: END }
 ```
 
 Model-based routing:
@@ -140,12 +152,13 @@ Model-based routing:
     routes:
       billing:   { description: "Questions about invoices/payments", to: billing-flow }
       technical: { description: "Bug reports / how-to", to: tech-flow }
-      default:   { to: fallback }
+      default:   { default: true, to: fallback }
 ```
 
 - A router may target **multiple** routes (fan-out) by returning more than one match (configurable: `firstMatch` vs `allMatches`).
 - Model-based routers are constrained to emit one of the declared route keys (enforced via structured output), so routing is always valid.
 - Routers are `routing: true` capability; they return a `Command{ goto }` rather than a state update.
+- In the desktop builder, dragging from a router node adds a route (not a parallel edge), and the canvas draws dashed edges from `with.routes`.
 
 ---
 
@@ -200,32 +213,79 @@ See `examples/mcp/` for a runnable walkthrough.
       map: { prs: "{{ result.body }}" }   # parse JSON by default; result.body/status/headers
 ```
 
-### `webhook` — receive / wait for an inbound event
+### `webhook` — outbound HTTP notification
 
 ```yaml
-- id: await-approval
+- id: notify-slack
   type: webhook
   with:
-    mode: wait                   # wait (inbound) | emit (outbound notify)
-    # In `wait` mode the node interrupts until an external system resumes
-    # with a payload (durable via checkpointer). Resume via compiled.resume()
-    # or `flowgraph resume --thread <id> --resume '{"approved":true}'`.
-    timeout: 24h
-    schema: { type: object, properties: { approved: { type: boolean } }, required: [approved] }
-    output: { to: approval }
+    url: "https://hooks.example.com/notify"
+    method: POST
+    body: { event: "started", runId: "{{ run.runId }}" }
+    output: { to: notifyResult }
 ```
 
-`webhook: wait` is built on the same interrupt/resume machinery as HITL ([07 §HITL](./07-runtime-and-execution.md#5-human-in-the-loop)). In `emit` mode the node POSTs to a configured URL (idempotent via `ctx.once`). In CI without a resume caller, behavior follows the `onInterrupt` policy.
+Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
-## 5. `code` — typed inline/registered TS logic
+## 5. `shell` — run a local command
 
-The escape hatch for deterministic logic that does not warrant a full skill. References a **registered** TS function by name (not embedded source — keeps YAML safe and analyzable, per [Vision §Design principles](./00-vision.md#6-design-principles)).
+The primary escape hatch for custom logic: run any CLI, script, or shell pipeline without registering TypeScript. Prefer this over `function` for new graphs.
+
+**Two modes:**
+
+| Config | How it runs | Use when |
+|---|---|---|
+| `args` set | `execFile(command, args)` — no shell, argv-safe | You have a discrete binary + arguments |
+| `args` omitted | OS shell (`/bin/sh -c` / `cmd.exe`) | You need pipes, `&&`, globs, or shell builtins |
+
+```yaml
+# Safe argv mode (recommended)
+- id: greet
+  type: shell
+  with:
+    command: echo
+    args: ["Hello, {{ input.name }}!"]
+    output: { to: message }
+
+# Shell-string mode (pipes / chaining)
+- id: build
+  type: shell
+  with:
+    command: "npm run build && npm test"
+    cwd: "{{ state.repoDir }}"
+    timeout: 5m
+    env: { CI: "1" }
+    expect: { exitCode: [0] }
+    output:
+      map:
+        log: "{{ result.stdout }}"
+```
+
+**Result shape** written via `output`:
+
+```ts
+{ stdout: string; stderr: string; exitCode: number; json?: unknown }
+```
+
+`json` is set when `stdout` parses as JSON.
+
+**Input:** optional `with.input` is rendered, JSON-stringified into the `FLOWGRAPH_INPUT` env var, and also written to the child's stdin — same convention as skill `kind_of: command` handlers.
+
+**Defaults:** timeout `30s`, `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
+
+**Injection caveat:** shell-string mode interpolates templates into the command line. Treat untrusted state values the same way you would for `http` URL/body templates — prefer argv mode (`args`) when values come from external input.
+
+---
+
+## 5b. `function` — registered TypeScript (legacy)
+
+Legacy escape hatch for programmatic embedders — prefer [`shell`](#5-shell--run-a-local-command) for new graphs; see [14 — Programmatic API](./14-programmatic-api.md). References a **registered** TS function by name (not embedded source — keeps YAML safe and analyzable, per [Vision §Design principles](./00-vision.md#6-design-principles)).
 
 ```yaml
 - id: dedupe-findings
-  type: code
+  type: function
   with:
     fn: "dedupeFindings"          # resolved from the registered function table
     input: { findings: "{{ state.findings }}" }
@@ -234,13 +294,15 @@ The escape hatch for deterministic logic that does not warrant a full skill. Ref
 
 ```ts
 // registered at compile time
-registry.registerFunction("dedupeFindings", (input, ctx) => {
+import { registerFunction } from "@veloxdevworks/flowgraph-core";
+
+registerFunction("dedupeFindings", (input, ctx) => {
   const seen = new Set<string>();
   return { findings: input.findings.filter(f => !seen.has(f.id) && seen.add(f.id)) };
 });
 ```
 
-For substantial reusable logic, prefer a **skill** (portable, contract + env declared) over a `code` node.
+For substantial reusable logic, prefer a **skill** (portable, contract + env declared) over a `function` node.
 
 ---
 
@@ -318,13 +380,13 @@ Deterministic pause points for human input. Unlike `wait` (duration/signal/condi
 
 Each mode sets an interrupt **kind** (`approval`, `question`, `choice`) so the CLI and external GUIs know how to prompt and parse the resume value.
 
-### `ask_human` tool (intelligent nodes)
+### `ask_human` tool (agent nodes)
 
 Agents can ask clarifying questions mid-loop by opting into the built-in tool:
 
 ```yaml
 - id: planner
-  type: intelligent
+  type: agent
   with:
     prompt: "{{ state.task }}"
     tools:
@@ -344,9 +406,24 @@ The tool raises a `question` or `choice` interrupt; the answer is returned to th
     duration: 30s                   # fixed delay (in-process sleep)
     # or: until: "{{ state.ready }}"  (durable interrupt until condition is true on resume)
     # or: signal: deploy-finished    (durable interrupt until resumed with that signal)
-    # optional on until/signal:
+    # or: webhook: true              (durable interrupt; embedded HTTP listener resumes)
+    # optional on until/signal/webhook:
     timeout: 24h                    # informational deadline (see below)
 ```
+
+Inbound webhook example:
+
+```yaml
+- id: await-approval
+  type: wait
+  with:
+    webhook: true
+    # or: webhook: { schema: { type: object, required: [approved], properties: { approved: { type: boolean } } } }
+    timeout: 24h
+    output: { to: approval }
+```
+
+When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTTP server and attaches a generated URL on the interrupt payload as `data.webhookUrl` (e.g. `http://127.0.0.1:8878/webhooks/<threadId>/<nodeId>`). `POST` JSON to that URL to resume; `GET` returns `{ waiting: true }`. Configure host/port via `runtime.webhookServer` (default `127.0.0.1:8878`; on `EADDRINUSE` falls back to an ephemeral port). **No auth in v1** — local / trusted-network only. Routes are in-memory and one-shot; a process restart loses pending registrations until the node is hit again.
 
 ### Modes
 
@@ -355,17 +432,19 @@ The tool raises a `question` or `choice` interrupt; the answer is returned to th
 | `duration` | In-process sleep for the given duration | No — same as any in-flight node |
 | `until` | Interrupt if the guard is false; re-evaluate on resume | Yes (checkpointed interrupt) |
 | `signal` | Interrupt until resumed with a payload for the named signal | Yes (checkpointed interrupt) |
+| `webhook` | Interrupt until inbound HTTP POST resumes (schema-validated) | Interrupt yes; listening URL requires the owning process |
 
 ### Observability
 
 - **`duration`:** emits a `node.output` event before sleeping: `{ wait: { mode: "duration", durationMs, wakeAt } }`. Use `wakeAt` (ISO timestamp) in CLIs/TUIs to show when the run will continue.
-- **`until` / `signal`:** optional `timeout` is included in the interrupt `data` payload (visible via `flowgraph resume --list --json`) so operators can see the intended deadline.
+- **`until` / `signal` / `webhook`:** optional `timeout` is included in the interrupt `data` payload (visible via `flowgraph resume --list --json`) so operators can see the intended deadline.
+- **`webhook`:** interrupt `data` also includes `mode: "webhook"` and `webhookUrl`.
 
 ### `timeout` (informational only)
 
-`timeout` on `until`/`signal` is **surfaced as metadata** on the interrupt payload but is **not enforced** by the runtime today. A durable, cross-restart deadline would require an external scheduler to resume or fail the run after the deadline (same class of feature as cron-driven resume). Until that exists, treat `timeout` as documentation for operators and external tooling.
+`timeout` on `until`/`signal`/`webhook` is **surfaced as metadata** on the interrupt payload but is **not enforced** by the runtime today. A durable, cross-restart deadline would require an external scheduler to resume or fail the run after the deadline (same class of feature as cron-driven resume). Until that exists, treat `timeout` as documentation for operators and external tooling.
 
-`wait` for external signals/conditions uses interrupt/resume so it survives restarts.
+`wait` for external signals/conditions/webhooks uses interrupt/resume so the pause survives restarts (the HTTP listener itself does not).
 
 ---
 
@@ -373,17 +452,18 @@ The tool raises a `question` or `choice` interrupt; the answer is returned to th
 
 | `type` | Purpose | Capabilities | Package |
 |---|---|---|---|
-| `intelligent` | Agent loop w/ tools (hub & spoke) | streaming, interruptible, side-effecting | core (+ provider pkg) |
+| `agent` | Agent loop w/ tools (hub & spoke) | streaming, interruptible, side-effecting | core (+ provider pkg) |
 | `skill` | Run a declared skill | varies by skill | core (+ `@veloxdevworks/flowgraph-skills`) |
 | `router` | Choose next node(s) | routing | core |
 | `http` | Outbound HTTP | side-effecting | core |
 | `mcp` | MCP tool/resource call | side-effecting | core (+ `@veloxdevworks/flowgraph-mcp` at runtime) |
-| `webhook` | Inbound wait / outbound emit | interruptible, side-effecting | core |
-| `code` | Registered TS function | varies | core |
-| `subgraph` | Embed a child graph | composite | core |
+| `webhook` | Outbound HTTP notify | side-effecting | core |
+| `shell` | Run a local command / shell string | side-effecting | core |
+| `function` | Registered TS function (legacy) | varies | core |
+| `subgraph` | Nested / embed a child graph | composite | core |
 | `map` | Fan-out over a collection | composite, parallel | core |
 | `hitl` | Human approve / question / choice gate | interruptible | core |
-| `wait` | Delay / condition / signal gate | interruptible | core |
+| `wait` | Delay / condition / signal / inbound webhook gate | interruptible | core |
 
 ---
 

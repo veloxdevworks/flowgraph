@@ -28,14 +28,14 @@ runtime:
 
 nodes:
   - id: draft-notes
-    type: code
+    type: function
     with:
       fn: draftNotes
       input: { version: "{{ state.version }}" }
       output: { to: draft }
 
   - id: approve
-    type: code
+    type: function
     with:
       fn: requestApproval
       input: { draft: "{{ state.draft }}" }
@@ -45,7 +45,7 @@ nodes:
           notes: "{{ result.notes }}"
 
   - id: publish-notes
-    type: code
+    type: function
     with:
       fn: publishNotes
       input: { notes: "{{ state.notes }}", version: "{{ state.version }}" }

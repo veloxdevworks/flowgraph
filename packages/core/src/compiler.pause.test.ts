@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
-import { registerFunction } from "./nodes/code.js";
+import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 import type { FlowgraphEvent } from "./events.js";
 
@@ -32,9 +32,9 @@ function threeStepSpec(): GraphSpec {
       },
     },
     nodes: [
-      { id: "n1", type: "code", with: { fn: "stepA", output: { to: "a" } } },
-      { id: "n2", type: "code", with: { fn: "stepB", output: { to: "b" } } },
-      { id: "n3", type: "code", with: { fn: "stepC", output: { to: "c" } } },
+      { id: "n1", type: "function", with: { fn: "stepA", output: { to: "a" } } },
+      { id: "n2", type: "function", with: { fn: "stepB", output: { to: "b" } } },
+      { id: "n3", type: "function", with: { fn: "stepC", output: { to: "c" } } },
     ],
     edges: [
       { from: "START", to: "n1" },

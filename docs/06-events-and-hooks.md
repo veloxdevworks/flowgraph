@@ -53,10 +53,10 @@ node.output                              // emitted with the node's result updat
 state.update                             // channel(s) changed (delta)
 edge.taken                               // which edge/branch was chosen (+ why)
 router.decision                          // route key chosen + rationale
-intelligent.step                         // each agent loop iteration
-intelligent.tool.call    intelligent.tool.result
-intelligent.token        // streaming token/chunk (when streaming enabled)
-intelligent.usage        // token/cost accounting
+agent.step                         // each agent loop iteration
+agent.tool.call    agent.tool.result
+agent.token        // streaming token/chunk (when streaming enabled)
+agent.usage        // token/cost accounting
 skill.preflight          skill.start     skill.end          skill.error
 checkpoint.write         checkpoint.load
 interrupt.raised         interrupt.resumed                  // HITL / webhook / wait
@@ -65,7 +65,7 @@ log                                          // structured log line forwarded as
 custom.*                                     // user-emitted via ctx.emit()
 ```
 
-Events form a **tree** via `scope.parentSpanId`: a run contains nodes; an `intelligent` node contains steps and tool calls; a `subgraph` node contains a nested run. This tree is exactly what OTel spans mirror (§5) and what a UI renders as a timeline.
+Events form a **tree** via `scope.parentSpanId`: a run contains nodes; an `agent` node contains steps and tool calls; a `subgraph` node contains a nested run. This tree is exactly what OTel spans mirror (§5) and what a UI renders as a timeline.
 
 ### Nested subgraph events
 
@@ -85,7 +85,7 @@ This lets UIs and OTel sinks visualize nested run scope without a separate subsc
 ```ts
 for await (const ev of runGraph.stream(compiled, { input })) {
   if (ev.type === "node.start") log(`▶ ${ev.scope.nodeId}`);
-  if (ev.type === "intelligent.tool.call") log(`  ↳ tool ${ev.data.name}`);
+  if (ev.type === "agent.tool.call") log(`  ↳ tool ${ev.data.name}`);
   if (ev.type === "run.end") log(`✓ done in ${ev.data.durationMs}ms`);
 }
 ```
@@ -115,7 +115,7 @@ Hooks run at **defined lifecycle points** and may return a typed directive. They
 type HookPhase =
   | "run:before" | "run:after" | "run:error"
   | "node:before" | "node:after" | "node:error"
-  | "intelligent:beforeStep" | "intelligent:beforeToolCall" | "intelligent:afterToolCall"
+  | "agent:beforeStep" | "agent:beforeToolCall" | "agent:afterToolCall"
   | "skill:beforeRun" | "skill:afterRun"
   | "router:beforeDecision" | "router:afterDecision"
   | "state:beforeUpdate"
@@ -146,7 +146,7 @@ type HookResult =
 | `node:before` | rewrite node `input`; `veto`; short-circuit with a cached result; `interrupt` for approval |
 | `node:after` | rewrite the node's output/update; `retry`; `route` |
 | `node:error` | swallow→`route`, `retry`, or escalate |
-| `intelligent:beforeToolCall` | block a dangerous tool call; require approval (`interrupt`); rewrite args |
+| `agent:beforeToolCall` | block a dangerous tool call; require approval (`interrupt`); rewrite args |
 | `skill:beforeRun` | inject defaults; enforce a policy; `veto` if env not satisfied |
 | `state:beforeUpdate` | redact/transform a channel delta before it's committed |
 | `checkpoint:beforeWrite` | strip/transform data before persistence |
@@ -168,7 +168,7 @@ Other sinks (`console`, `jsonl`) ship in `@veloxdevworks/flowgraph-core` for zer
 
 ## 6. Cost & token accounting
 
-Intelligent nodes emit `intelligent.usage` events (prompt/completion tokens, cost estimate per provider pricing table). The runtime aggregates per-node and per-run totals, surfaces them on `run.end`, exports them as OTel metrics, and can enforce a **budget** via a default hook:
+Agent nodes emit `agent.usage` events (prompt/completion tokens, cost estimate per provider pricing table). The runtime aggregates per-node and per-run totals, surfaces them on `run.end`, exports them as OTel metrics, and can enforce a **budget** via a default hook:
 
 ```yaml
 runtime:
@@ -192,7 +192,7 @@ runtime:
     - on: node:error
       where: { nodeType: http }
       do: retry              # retry | fail | continue | route:<id> | interrupt
-    - on: intelligent:beforeToolCall
+    - on: agent:beforeToolCall
       where: { tool: Bash }
       do: interrupt          # require human approval for shell tool calls
       reason: "Approve shell command"

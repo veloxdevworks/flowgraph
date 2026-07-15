@@ -44,6 +44,8 @@ Imports make graphs composable and skills/nodes reusable. Each import is resolve
 imports:
   - skill: "@acme/skills/post-to-slack"     # a published or local skill (by package or path)
     as: notify
+  - agent: "./agents/code-reviewer"         # reusable AGENT.md system prompt
+    as: reviewer
   - subgraph: "./subgraphs/run-tests.graph.yaml"
     as: tests
   - nodes: "@acme/flowgraph-nodes-aws"          # a node plugin package registering custom types
@@ -51,11 +53,12 @@ imports:
 ```
 
 - `skill:` — import a skill so nodes can reference it as `uses: notify`.
+- `agent:` — import an agent definition so agent nodes can reference it as `with.agent: reviewer`. See [16 — Agents](./16-agents.md).
 - `subgraph:` — import another graph to embed via a `subgraph` node.
 - `nodes:` — load a plugin package that registers custom node `type`s into the registry.
 - `reducers:` — load a module that registers custom state reducers (`custom:<name>`). The module may call `registry.registerReducer` on load, or `export default` a record of `{ [name]: (cur, inc) => next }` (or an array of `{ name, reducer }`).
 
-Resolution order for path/package specifiers: relative path → workspace alias → node module. See [04 — Skills](./04-skills.md) for skill resolution details.
+Resolution order for path/package specifiers: relative path → workspace alias → node module. See [04 — Skills](./04-skills.md) for skill resolution details and [16 — Agents](./16-agents.md) for agent definitions.
 
 ## 4. `state`
 
@@ -118,7 +121,7 @@ edges:
 
 ### Conditional edges
 
-Conditional edges branch based on an expression or a router node's decision.
+Conditional edges branch based on an expression evaluated against state. Prefer these for forks off ordinary nodes (e.g. HITL approve/deny). For a dedicated router node, put the conditions in `with.routes` instead — the router returns `Command{ goto }` and does not need a matching `branch` edge.
 
 ```yaml
 edges:
@@ -151,7 +154,7 @@ Graph-level configuration and reusable values. Supports environment interpolatio
 ```yaml
 config:
   defaults:
-    provider: claude              # default provider for intelligent nodes
+    provider: claude              # default provider for agent nodes
     model: "${FLOWGRAPH_MODEL:-claude-sonnet-4.5}"   # env interpolation w/ fallback
   vars:                           # author-defined constants, referenced as {{ config.vars.* }}
     jiraProject: "PLAT"
@@ -166,7 +169,7 @@ To keep nodes reusable, a node declares **what it reads** (`input`) and **where 
 ```yaml
 nodes:
   - id: summarize
-    type: intelligent
+    type: agent
     input:
       text: "{{ state.issue.title }} — {{ state.issue.body }}"   # map state → node input
     with:
@@ -193,6 +196,9 @@ runtime:
     enabled: true
     backend: sqlite               # memory | sqlite | postgres | <custom>
     path: ".flowgraph/checkpoints.db"
+  webhookServer:                  # embedded HTTP ingress for wait.webhook
+    host: "127.0.0.1"             # default
+    port: 8878                    # default; 0 = ephemeral; EADDRINUSE → ephemeral fallback
   hitl:
     onInterrupt: prompt           # prompt | fail | approve | webhook  (per-environment overridable)
   retry:
@@ -202,7 +208,7 @@ runtime:
   recursionLimit: 50            # max supersteps for graph-level loops (default: 25)
   concurrency: 4                # max parallel branches per superstep
   hooks:
-    - on: intelligent:beforeToolCall
+    - on: agent:beforeToolCall
       where: { tool: fs_write }
       do: interrupt
   observability:
@@ -241,14 +247,14 @@ state:
 
 nodes:
   - id: summarize
-    type: intelligent
+    type: agent
     input: { text: "{{ state.issue.title }}\n{{ state.issue.body }}" }
     with:
       prompt: "Summarize this issue in 2 sentences for triage:\n{{ input.text }}"
       output: { to: summary }
 
   - id: classify
-    type: intelligent
+    type: agent
     with:
       prompt: |
         Classify the issue as exactly one of: bug, feature, question.

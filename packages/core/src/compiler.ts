@@ -20,9 +20,18 @@ import {
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
 import { buildStateAnnotation, ONCE_CHANNEL } from "./runtime/state-annotation.js";
+import { ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
+import {
+  ensureWebhookServer,
+  registerWebhookRoute,
+  unregisterWebhookRoute,
+  buildWebhookUrl,
+  getWebhookRoute,
+  type WebhookServerConfig,
+} from "./runtime/webhook-server.js";
 import { registerProvider, type ProviderAdapter } from "./providers/index.js";
 import type { ToolWiring } from "./providers/tools.js";
 import type { BudgetState } from "./context.js";
@@ -199,6 +208,11 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const policy = runOpts.onInterrupt ?? defaultPolicy;
     const cfg = buildInvokeConfig(threadId, graphSpec);
 
+    // CLI/IPC resume should drop any in-process HTTP listener for this thread.
+    if (mode === "resume") {
+      unregisterWebhookRoute(threadId);
+    }
+
     const startEvent =
       mode === "resume" ? "interrupt.resumed" : mode === "continue" ? "run.continued" : "run.start";
     events.emit(startEvent, {
@@ -261,6 +275,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           return { status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs };
         }
 
+        await attachWebhookUrls(interrupts, {
+          threadId,
+          graphSpec,
+          executeInvoke,
+          ...(runOpts.signal ? { signal: runOpts.signal } : {}),
+          ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
+        });
+
         events.emit("interrupt.raised", { interrupts });
 
         if (policy === "fail" || policy === "webhook") {
@@ -274,6 +296,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             durationMs: Date.now() - startMs,
           };
         }
+
+        // Resolving via prompt/approve — drop the HTTP listener for this thread.
+        unregisterWebhookRoute(threadId);
 
         let resumeValue: unknown;
         if (runOpts.resolveInterrupt) {
@@ -310,6 +335,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
   const toSnapshot = (
     snap: { values: Record<string, unknown>; next: readonly string[]; config?: { configurable?: { checkpoint_id?: string } }; createdAt?: string; tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id: string; value?: unknown }> }> },
+    threadId?: string,
   ): StateSnapshot => {
     const interrupts: InterruptInfo[] = [];
     for (const task of snap.tasks ?? []) {
@@ -317,6 +343,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         interrupts.push(toInterruptInfo(it));
       }
     }
+    if (threadId) enrichInterruptsWithWebhookUrls(interrupts, threadId);
     return {
       values: stripReserved(snap.values),
       next: [...snap.next],
@@ -353,14 +380,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (!checkpointer) return null;
       const snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return toSnapshot(snap as any);
+      return toSnapshot(snap as any, threadId);
     },
     getStateHistory: async (threadId: string) => {
       if (!checkpointer) return [];
       const snapshots: StateSnapshot[] = [];
       for await (const snap of compiledLg.getStateHistory({ configurable: { thread_id: threadId } })) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        snapshots.push(toSnapshot(snap as any));
+        snapshots.push(toSnapshot(snap as any, threadId));
       }
       return snapshots;
     },
@@ -373,6 +400,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 }
 
 async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions): Promise<AssembledGraph> {
+  // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
+  // does not silently drop node updates when authors omit state.channels entries.
+  spec = ensureDeclaredOutputChannels(spec);
+
   const cwd = opts.cwd ?? process.cwd();
   const graphDir =
     opts.graphPath != null
@@ -389,6 +420,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
 
   const imported = await loadGraphImports(spec, { cwd: graphDir });
   const skillAliases: Record<string, string> = { ...(opts.runConfig?.skills ?? {}), ...imported.skillAliases };
+  const agentAliases: Record<string, string> = { ...(opts.runConfig?.agents ?? {}), ...imported.agentAliases };
   const subgraphAliases: Record<string, string> = { ...(opts.runConfig?.subgraphs ?? {}), ...imported.subgraphAliases };
 
   const StateAnnotation = buildStateAnnotation(spec);
@@ -418,8 +450,10 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const baseCtx: Partial<RunContext> = {
     config: {
       ...(opts.runConfig ?? {}),
+      defaults: { ...(spec.config?.defaults ?? {}), ...(opts.runConfig?.defaults ?? {}) },
       vars: { ...(spec.config?.vars ?? {}), ...(opts.runConfig?.vars ?? {}) },
       skills: skillAliases,
+      agents: agentAliases,
       subgraphs: subgraphAliases,
     },
     secrets: createEnvSecretProvider(),
@@ -485,6 +519,11 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       return update;
     };
 
+    // Routers (and any routing-capable node) declare Command.goto destinations via
+    // `ends` so LangGraph accepts goto without requiring a duplicate branch edge.
+    const routeEnds = collectRouteEnds(nodeSpec);
+    const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
+
     graph.addNode(nodeSpec.id, async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
       const runMeta = (baseCtx.meta ?? { runId, graph: spec.metadata.name, startedAt: "" }) as RunMeta;
 
@@ -525,6 +564,12 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
 
       try {
         const run = await runOnce(state, inputOverride, lgConfig);
+        // Capture goto before resultToUpdate strips it — routers (and any node
+        // returning Command{ goto }) rely on this to drive exclusive routing.
+        const nodeGoto =
+          "command" in run.res && run.res.command.goto != null
+            ? run.res.command.goto
+            : undefined;
         let update = finalizeUpdate(run);
 
         // node:after — mutate output / route
@@ -542,6 +587,11 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
         if (hooks.has("state:beforeUpdate")) {
           const r = await hooks.run("state:beforeUpdate", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, update } });
           update = (r.payload.update as Record<string, unknown> | undefined) ?? update;
+        }
+
+        if (nodeGoto != null) {
+          events.emit("node.end", { nodeId: nodeSpec.id, update, routed: nodeGoto }, scope);
+          return new Command({ goto: nodeGoto, update }) as unknown as Record<string, unknown>;
         }
 
         events.emit("node.end", { nodeId: nodeSpec.id, update }, scope);
@@ -573,7 +623,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
         events.emit("node.error", { nodeId: nodeSpec.id, error: String(err) }, scope);
         throw err;
       }
-    });
+    }, addNodeOpts as Parameters<typeof graph.addNode>[2]);
   }
 
   // Node-as-tool: run a sibling node's logic with the agent-supplied args as
@@ -593,8 +643,12 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     return resultToUpdate(res);
   };
 
-  // Edges
+  // Edges. Router nodes drive exclusive routing via Command{ goto } + `ends`
+  // declared from with.routes — skip their static/branch edges so a UI fan-out
+  // (`to: [a, b]`) cannot race with the router's decision and run both branches.
+  const routerIds = new Set(spec.nodes.filter((n) => n.type === "router").map((n) => n.id));
   for (const edge of spec.edges) {
+    if (routerIds.has(edge.from)) continue;
     const from = edge.from === "START" ? START : edge.from;
     if ("to" in edge) {
       const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
@@ -709,6 +763,23 @@ function resultToUpdate(result: NodeResult): Record<string, unknown> {
   return {};
 }
 
+/** Collect Command.goto destinations declared on a router node's `with.routes`. */
+function collectRouteEnds(nodeSpec: { type: string; with?: unknown }): string[] {
+  if (nodeSpec.type !== "router") return [];
+  const withBlock = (nodeSpec.with ?? {}) as Record<string, unknown>;
+  const routes = withBlock["routes"];
+  if (!routes || typeof routes !== "object" || Array.isArray(routes)) return [];
+  const ends = new Set<string>();
+  for (const raw of Object.values(routes as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const to = (raw as Record<string, unknown>)["to"];
+    if (typeof to === "string" && to.trim()) {
+      ends.add(to === "END" ? END : to);
+    }
+  }
+  return [...ends];
+}
+
 function isInterruptLike(err: unknown): boolean {
   if (err == null || typeof err !== "object") return false;
   const name = (err as { name?: string }).name ?? "";
@@ -733,6 +804,103 @@ function toInterruptInfo(it: { id: string; value?: unknown }): InterruptInfo {
     if (Array.isArray(choices) && choices.length > 0) info.choices = choices;
   }
   return info;
+}
+
+function isWebhookInterrupt(info: InterruptInfo): boolean {
+  const payload = info.payload as { data?: { mode?: string } } | undefined;
+  return payload?.data?.mode === "webhook";
+}
+
+function webhookNodeIdFromInterrupt(info: InterruptInfo): string | undefined {
+  const payload = info.payload as { data?: { __nodeId?: string } } | undefined;
+  const tagged = payload?.data?.__nodeId;
+  if (typeof tagged === "string" && tagged) return tagged;
+  // Fall back to interrupt id when it looks like a node id (LangGraph often uses the node id).
+  if (info.id && !info.id.includes(":")) return info.id;
+  return undefined;
+}
+
+function setWebhookUrlOnInterrupt(info: InterruptInfo, url: string): void {
+  const payload = info.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+  const obj = payload as Record<string, unknown>;
+  const existing = obj["data"];
+  const data =
+    existing && typeof existing === "object" && !Array.isArray(existing)
+      ? (existing as Record<string, unknown>)
+      : {};
+  data["webhookUrl"] = url;
+  obj["data"] = data;
+}
+
+/** Reattach listening URLs from the in-process route registry (e.g. getState). */
+function enrichInterruptsWithWebhookUrls(interrupts: InterruptInfo[], threadId: string): void {
+  const route = getWebhookRoute(threadId);
+  if (!route?.url) return;
+  for (const info of interrupts) {
+    if (!isWebhookInterrupt(info)) continue;
+    setWebhookUrlOnInterrupt(info, route.url);
+  }
+}
+
+async function attachWebhookUrls(
+  interrupts: InterruptInfo[],
+  opts: {
+    threadId: string;
+    graphSpec: GraphSpec;
+    executeInvoke: (
+      payload: Record<string, unknown> | Command | null,
+      runOpts: RunOptions | ResumeOptions | ContinueOptions,
+      mode: ExecuteMode,
+    ) => Promise<RunResult>;
+    signal?: AbortSignal;
+    sinks?: EventSink[];
+  },
+): Promise<void> {
+  const webhookInterrupts = interrupts.filter(isWebhookInterrupt);
+  if (webhookInterrupts.length === 0) return;
+
+  const serverCfg = (opts.graphSpec.runtime as { webhookServer?: WebhookServerConfig } | undefined)
+    ?.webhookServer;
+  const info = await ensureWebhookServer(serverCfg);
+
+  for (const interrupt of webhookInterrupts) {
+    const nodeId = webhookNodeIdFromInterrupt(interrupt) ?? "unknown";
+    const url = buildWebhookUrl(info.host, info.port, opts.threadId, nodeId);
+    setWebhookUrlOnInterrupt(interrupt, url);
+
+    const onAbort = () => unregisterWebhookRoute(opts.threadId);
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        unregisterWebhookRoute(opts.threadId);
+        continue;
+      }
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    void registerWebhookRoute({
+      threadId: opts.threadId,
+      nodeId,
+      url,
+      resume: async (body) => {
+        if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+        const result = await opts.executeInvoke(
+          new Command({ resume: body }),
+          {
+            threadId: opts.threadId,
+            resume: body,
+            onInterrupt: "fail",
+            ...(opts.sinks ? { sinks: opts.sinks } : {}),
+          },
+          "resume",
+        );
+        return {
+          status: result.status,
+          ...(result.error ? { error: result.error.message } : {}),
+        };
+      },
+    });
+  }
 }
 
 function stripReserved(state: Record<string, unknown>): Record<string, unknown> {
@@ -785,9 +953,14 @@ function buildNodeCtx(
       return renderDeep(template, { state, input: _input, config: base.config, run: base.meta, ...extra });
     },
     emit(type, data) { events.emit(type, data, { nodeId, nodeType }); },
-    interrupt<T = unknown>(payload: { reason: string; data?: unknown }): T {
-      events.emit("interrupt.raised", { reason: payload.reason, data: payload.data }, { nodeId, nodeType });
-      return lgInterrupt(payload) as T;
+    interrupt<T = unknown>(payload: { reason: string; data?: unknown; kind?: import("./context.js").InterruptKind }): T {
+      const data =
+        payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+          ? { ...(payload.data as Record<string, unknown>), __nodeId: nodeId }
+          : { ...(payload.data !== undefined ? { value: payload.data } : {}), __nodeId: nodeId };
+      const tagged = { ...payload, data };
+      events.emit("interrupt.raised", { reason: tagged.reason, data: tagged.data }, { nodeId, nodeType });
+      return lgInterrupt(tagged) as T;
     },
     async once<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
       const scopedKey = `${nodeId}:${key}`;
