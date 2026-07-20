@@ -94,15 +94,22 @@ async function importTypeScriptModule(resolved: string): Promise<Record<string, 
     `${path.basename(resolved)}.${process.pid}.${Date.now()}.mjs`,
   );
   await fs.writeFile(outPath, file.text, "utf8");
-  try {
-    return (await import(pathToFileURL(outPath).href)) as Record<string, unknown>;
-  } finally {
-    await fs.unlink(outPath).catch(() => undefined);
-  }
+  // Delay cleanup: Vitest/Vite may still read the file after dynamic import
+  // resolves, and some platforms lock the file until the module finishes linking.
+  const imported = (await import(pathToFileURL(outPath).href)) as Record<string, unknown>;
+  setTimeout(() => {
+    void fs.unlink(outPath).catch(() => undefined);
+  }, 5_000);
+  return imported;
 }
 
 async function importResolvedPath(resolved: string): Promise<Record<string, unknown>> {
   if (isTypeScriptPath(resolved)) {
+    // Vitest/Vite already transpile .ts; going through a temp .mjs file breaks
+    // their module pipeline. Plain Node (CLI/sidecar) needs the esbuild path.
+    if (process.env["VITEST"] || process.env["VITEST_WORKER_ID"]) {
+      return (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;
+    }
     return importTypeScriptModule(resolved);
   }
   return (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;

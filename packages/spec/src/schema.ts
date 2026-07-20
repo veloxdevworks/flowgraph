@@ -898,7 +898,14 @@ export const LocalToolsSchema = z.object({
 // Run `inputs` schema (pre-start parameters — not HITL)
 // ---------------------------------------------------------------------------
 
-export const InputFieldTypeSchema = z.enum(["string", "text", "number", "boolean", "select"]);
+export const InputFieldTypeSchema = z.enum([
+  "string",
+  "text",
+  "number",
+  "boolean",
+  "select",
+  "json",
+]);
 
 export const InputFieldSchema = z.object({
   key: z.string().min(1),

@@ -59,4 +59,31 @@ describe("resolveAndValidateInput", () => {
       }),
     ).toThrow(/must be one of/);
   });
+
+  it("parses json fields from strings and accepts objects", () => {
+    const jsonSchema: InputField[] = [
+      { key: "numbers", type: "json", required: true },
+      { key: "ticket", type: "json", default: { subject: "hi" } },
+    ];
+    expect(
+      resolveAndValidateInput(jsonSchema, {
+        numbers: "[1, 2, 3]",
+      }),
+    ).toEqual({
+      numbers: [1, 2, 3],
+      ticket: { subject: "hi" },
+    });
+    expect(
+      resolveAndValidateInput(jsonSchema, {
+        numbers: [1, 2],
+        ticket: { subject: "x", body: "y" },
+      }),
+    ).toEqual({
+      numbers: [1, 2],
+      ticket: { subject: "x", body: "y" },
+    });
+    expect(() =>
+      resolveAndValidateInput(jsonSchema, { numbers: "{not json" }),
+    ).toThrow(/invalid JSON/);
+  });
 });

@@ -67,6 +67,20 @@ function coerceValue(
     return { ok: true, value: str };
   }
 
+  if (type === "json") {
+    if (raw !== null && typeof raw === "object") return { ok: true, value: raw };
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      if (trimmed === "") return { ok: false, error: "expected JSON" };
+      try {
+        return { ok: true, value: JSON.parse(trimmed) as unknown };
+      } catch {
+        return { ok: false, error: "invalid JSON" };
+      }
+    }
+    return { ok: false, error: "expected JSON" };
+  }
+
   // string | text
   if (typeof raw === "string") return { ok: true, value: raw };
   if (typeof raw === "number" || typeof raw === "boolean") return { ok: true, value: String(raw) };
