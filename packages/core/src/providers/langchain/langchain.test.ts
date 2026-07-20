@@ -4,7 +4,10 @@ import { compileGraph, registerTool, type GraphSpec } from "../../index.js";
 import { createLangChainProvider, type ChatModelLike } from "./index.js";
 
 /** A minimal fake chat model: returns scripted AIMessages in sequence. */
-function fakeModel(responses: AIMessage[]): ChatModelLike {
+function fakeModel(
+  responses: AIMessage[],
+  onBindTools?: (tools: unknown[]) => void,
+): ChatModelLike {
   let i = 0;
   const model: ChatModelLike = {
     async invoke(_input: BaseMessage[]) {
@@ -12,7 +15,8 @@ function fakeModel(responses: AIMessage[]): ChatModelLike {
       i++;
       return r!;
     },
-    bindTools() {
+    bindTools(tools: unknown[]) {
+      onBindTools?.(tools);
       return model;
     },
   };
@@ -44,10 +48,16 @@ describe("LangChain provider (built into @veloxdevworks/flowgraph-core)", () => 
   it("executes a tool call then finishes (hub & spoke loop)", async () => {
     registerTool({ name: "weather", handler: () => ({ tempF: 72 }) });
 
-    const model = fakeModel([
-      new AIMessage({ content: "", tool_calls: [{ name: "weather", args: { city: "SF" }, id: "t1" }] }),
-      new AIMessage({ content: "It is 72F in SF." }),
-    ]);
+    const bound: unknown[] = [];
+    const model = fakeModel(
+      [
+        new AIMessage({ content: "", tool_calls: [{ name: "weather", args: { city: "SF" }, id: "t1" }] }),
+        new AIMessage({ content: "It is 72F in SF." }),
+      ],
+      (tools) => {
+        bound.push(...tools);
+      },
+    );
     const provider = createLangChainProvider(model);
     const toolSpec = {
       ...spec,
@@ -61,5 +71,15 @@ describe("LangChain provider (built into @veloxdevworks/flowgraph-core)", () => 
     expect(r.status).toBe("completed");
     expect((r.state["answer"] as { text: string }).text).toBe("It is 72F in SF.");
     expect(events).toContain("agent.tool.call");
+    // Bedrock Converse (and similar) require DynamicStructuredTool, not plain objects.
+    expect(bound.length).toBeGreaterThan(0);
+    for (const t of bound) {
+      expect(t).toEqual(
+        expect.objectContaining({
+          name: "weather",
+        }),
+      );
+      expect(typeof (t as { invoke?: unknown }).invoke === "function" || typeof (t as { func?: unknown }).func === "function").toBe(true);
+    }
   });
 });

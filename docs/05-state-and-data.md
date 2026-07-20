@@ -74,49 +74,49 @@ Channels with `type: messages` (or `reducer: messages`) use LangGraph's `message
 
 ## 3. Reading & writing state
 
-- **Read** anywhere via expressions: `{{ state.summary }}`, `{{ state.issue.body }}`.
-- **Write** via a node's `output` mapping (declarative) — nodes never mutate state directly; they return updates that the runtime applies through reducers.
+- **Read** anywhere via expressions: `{{ state.summary }}`, `{{ state.issue.body }}`, `{{ state.outputs.summarize }}`.
+- **Write** — by default each node saves its raw result to `state.outputs.<nodeId>` (reserved `outputs` object channel, `mergeDeep`). Optional `output` projections (`to` / `map`) are additive. Nodes never mutate state directly; they return updates that the runtime applies through reducers.
 
 ```yaml
+# Default (no output block): node id "summarize" → state.outputs.summarize
+
 with:
   output:
-    to: summary                  # shorthand: write primary result to one channel
-    # — or —
-    map:                         # structured: write multiple channels from the result
-      summary: "{{ result.text }}"
-      tokens:  "{{ result.usage.totalTokens }}"
+    to: summary                  # also write primary result to state.summary
+    map:                         # and project fields (additive with the slug)
+      tokens: "{{ result.usage.totalTokens }}"
+  # output: none                 # opt out — write nothing (side-effect only)
 ```
 
-`result` is the node's raw output object (shape depends on node type/contract). `input` is the node's mapped input. `state` is current graph state. `config`, `secret`, `env`, and `run` are also in scope (see §6).
+`result` in `map` expressions is the node's raw output object (shape depends on node type/contract). `input` is the node's mapped input. `state` is current graph state. `config`, `secret`, `env`, and `run` are also in scope (see §6).
 
 ### Passing output between nodes
 
-Nodes do not call each other directly. They **write channels** via `output`, and downstream nodes **read** those channels in `prompt`, `input`, `when`, etc.
+Nodes do not call each other directly. They **write channels** (auto `outputs` slug and/or `output`), and downstream nodes **read** those channels in `prompt`, `input`, `when`, etc.
 
 ```yaml
-state:
-  channels:
-    answer: { type: object }
-    formatted: { type: string, default: "" }
-
 nodes:
-  - id: agent
+  - id: research
     type: agent
     with:
       prompt: "Research the topic."
-      output: { to: answer }          # writes agent result → state.answer
+      # writes state.outputs.research automatically
 
   - id: format
     type: agent
     with:
-      prompt: "One-line summary: {{ state.answer.text }}"
-      output: { to: formatted }       # reads state.answer, writes state.formatted
+      prompt: "One-line summary: {{ state.outputs.research.text }}"
+      # writes state.outputs.format automatically
 
 edges:
-  - { from: START, to: agent }
-  - { from: agent, to: format }
+  - { from: START, to: research }
+  - { from: research, to: format }
   - { from: format, to: END }
 ```
+
+Use explicit `output: { to: … }` when multiple parallel nodes must fan in to one reducer-backed channel, or when you want a stable typed contract name independent of the node id.
+
+**Artifacts (e.g. from `demo` nodes)** are files on disk under `<workspace>/.flowgraph/demo/<nodeId>/`. State holds **paths and metadata** (`path`, `mimeType`, `sizeBytes`, …) — not inline binary blobs. Downstream nodes and UIs read those paths from `state.outputs.<nodeId>` (or a projected channel).
 
 For **accumulating results** (e.g. from a `map` fan-out or repeated writes), declare `reducer: append` on an array channel:
 
@@ -196,6 +196,8 @@ nodes:
     type: agent
     with: { prompt: "Summarize {{ state.issue.title }}" }     # {{ }} = expr, per run
 ```
+
+> **Gotcha — shell bodies:** load-time `${ENV}` expansion currently scans the **entire YAML text**, not only `config`/`runtime`. So `${SLUG}` or `${SPEC_SLUG:-}` inside a `shell` node's `command` / `args` / `env` is rewritten against the *host* process environment before the node runs (usually to empty) — even when that same node sets `SPEC_SLUG` via `with.env`. Use unbraced `$SLUG` / `$SPEC_SLUG` for node-level env vars (POSIX shell substitution at exec time), or `{{ state.* }}` for runtime data. `loadGraph` emits a `NODE_BODY_ENV_EXPANSION` warning when it detects this pattern.
 
 ## 6. Expression scope objects
 

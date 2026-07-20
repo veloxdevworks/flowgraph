@@ -40,6 +40,11 @@ export interface BuildContext {
       args: Record<string, unknown>,
       ctx: NodeRunContext,
     ) => Promise<unknown>;
+    /** Look up description/schema for a sibling node exposed as a tool. */
+    resolveToolMeta?: (nodeId: string) => {
+      description?: string;
+      schema?: Record<string, unknown>;
+    } | undefined;
   };
 }
 

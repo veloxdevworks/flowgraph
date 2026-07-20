@@ -115,11 +115,12 @@ Graphs declare LLM backends once at the top level. The CLI builds and registers 
 providers:
   main:
     kind: langchain
-    vendor: anthropic          # openai | anthropic | xai | ollama | google
+    vendor: anthropic          # openai | anthropic | xai | ollama | google | bedrock
     model: claude-3-5-sonnet-latest
     options: { temperature: 0 }
     baseUrl: http://localhost:11434   # optional (ollama, proxies)
     apiKeyEnv: ANTHROPIC_API_KEY      # optional override
+    # region: us-east-1               # required for bedrock (AWS region)
 
 config:
   defaults:
@@ -129,7 +130,9 @@ config:
 
 **Shorthand:** `config.defaults.provider: anthropic` (bare vendor name) synthesizes a LangChain provider when no matching `providers` entry exists.
 
-Install the vendor package you reference (`@langchain/anthropic`, `@langchain/openai`, etc.) and set the API key env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). Ollama needs no key; set `baseUrl` if not localhost.
+Install the vendor package you reference (`@langchain/anthropic`, `@langchain/openai`, `@langchain/aws`, etc.) and set the API key env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). Ollama needs no key; set `baseUrl` if not localhost.
+
+**AWS Bedrock** (`vendor: bedrock`): use an [inference-profile model ID](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html) (e.g. `us.anthropic.claude-sonnet-4-20250514-v1:0`), set `region` on the provider entry, and authenticate via the AWS default credential chain — `AWS_PROFILE` / `~/.aws` files, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`). There is no single API-key env for Bedrock. Note: the LangChain adapter constructs the chat model from the provider entry's `model` at build time and ignores per-node `model:` / `req.model` for LangChain vendors.
 
 MCP OAuth tokens (`.flowgraph/mcp-oauth/`) are independent of LLM API keys — agent nodes reuse the same MCP hub as deterministic `mcp` nodes.
 
@@ -262,6 +265,7 @@ Register via `compileGraph(spec, { providers: [gemini] })` or publish as `@scope
 | LangChain / xAI | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/xai` | `XAI_API_KEY` | `vendor: xai` |
 | LangChain / Google | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/google-genai` | `GOOGLE_API_KEY` | `vendor: google` |
 | LangChain / Ollama | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/ollama` | _(none)_ | `baseUrl: http://localhost:11434` |
+| LangChain / Bedrock | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/aws` | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, or `AWS_PROFILE` | `vendor: bedrock`, `region`, inference-profile `model` ID |
 | Claude Agent SDK | `@veloxdevworks/flowgraph-provider-claude` | `ANTHROPIC_API_KEY` | `apiKeyEnv` in `providers.claude` |
 | Cursor SDK | `@veloxdevworks/flowgraph-provider-cursor` | `CURSOR_API_KEY` | `apiKeyEnv`, `runtime: local\|cloud` |
 
@@ -270,3 +274,5 @@ MCP OAuth tokens (`.flowgraph/mcp-oauth/`) and LLM API keys are independent. For
 ## 9. Cost & pricing tables
 
 Each adapter supplies a pricing function (model → $/token) used by the budget/cost machinery ([06 §6](./06-events-and-hooks.md#6-cost--token-accounting)). Tables are overridable via config for negotiated rates or new models.
+
+**LangChain vendors (including Bedrock):** the built-in LangChain adapter records token usage from the model response but does **not** populate `costUSD`. USD budgets (`runtime.budget.maxUSD` / related hooks) therefore do not enforce for LangChain backends today — use token budgets, or supply a custom pricing/cost path. This is an accepted limitation until vendor pricing maps are added.

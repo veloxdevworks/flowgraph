@@ -33,7 +33,7 @@ const result = await compiled.run({
 console.log(result.status, result.state);
 ```
 
-## Custom logic: prefer `shell`, or register `function`
+## Custom logic: prefer `shell` / `script`, or register `function`
 
 For graph authors, the zero-setup option is a [`shell` node](./03-node-types.md#5-shell--run-a-local-command) — no TypeScript registration required:
 

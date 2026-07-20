@@ -20,28 +20,47 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@langchain/core": "^1.2.0",
+    "@langchain/langgraph": "^1.4.7",
     "@veloxdevworks/flowgraph-expr": "workspace:*",
     "@veloxdevworks/flowgraph-skills": "workspace:*",
     "@veloxdevworks/flowgraph-spec": "workspace:*",
-    "@langchain/core": "^1.2.0",
-    "@langchain/langgraph": "^1.4.7",
+    "esbuild": "^0.25.12",
     "gray-matter": "^4.0.3",
     "yaml": "^2.9.0",
     "zod": "^3.24.0"
   },
   "peerDependencies": {
     "@langchain/anthropic": "^1.0.0",
+    "@langchain/aws": "^1.0.0",
     "@langchain/google-genai": "^1.0.0",
     "@langchain/ollama": "^1.0.0",
     "@langchain/openai": "^1.0.0",
-    "@langchain/xai": "^1.0.0"
+    "@langchain/xai": "^1.0.0",
+    "playwright": "^1.50.0"
   },
   "peerDependenciesMeta": {
-    "@langchain/anthropic": { "optional": true },
-    "@langchain/google-genai": { "optional": true },
-    "@langchain/ollama": { "optional": true },
-    "@langchain/openai": { "optional": true },
-    "@langchain/xai": { "optional": true }
+    "@langchain/anthropic": {
+      "optional": true
+    },
+    "@langchain/aws": {
+      "optional": true
+    },
+    "@langchain/google-genai": {
+      "optional": true
+    },
+    "@langchain/ollama": {
+      "optional": true
+    },
+    "@langchain/openai": {
+      "optional": true
+    },
+    "@langchain/xai": {
+      "optional": true
+    },
+    "playwright": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^26.0.1",

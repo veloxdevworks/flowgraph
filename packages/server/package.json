@@ -1,0 +1,39 @@
+{
+  "name": "@veloxdevworks/flowgraph-server",
+  "version": "0.1.0",
+  "description": "HTTP run server for hosted flowgraph execution (ECS/Fargate + Bedrock AgentCore)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "flowgraph-server": "./dist/bin.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "start": "node dist/bin.js",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@langchain/langgraph": "^1.4.7",
+    "@veloxdevworks/flowgraph-checkpoint-postgres": "workspace:*",
+    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

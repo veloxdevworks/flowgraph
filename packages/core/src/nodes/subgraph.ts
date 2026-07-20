@@ -13,12 +13,13 @@
  */
 
 import { z } from "zod";
-import { SubgraphWithSchema } from "@veloxdevworks/flowgraph-spec";
+import { SubgraphWithSchema, type GraphSpec } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
+import { applyOutput, isOutputNone } from "./output.js";
 
 const configSchema = SubgraphWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -35,6 +36,15 @@ interface EmbeddedChild {
   ): Promise<Record<string, unknown>>;
 }
 
+function isInlineGraphSpec(value: unknown): value is GraphSpec {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Array.isArray((value as { nodes?: unknown }).nodes)
+  );
+}
+
 export const subgraphNode = defineNode<Config>({
   type: "subgraph",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,7 +53,8 @@ export const subgraphNode = defineNode<Config>({
 
   build(_buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const uses = String(nodeSpec["uses"] ?? "");
-    const parentNodeId = String(nodeSpec["id"] ?? uses);
+    const inlineSpec = isInlineGraphSpec(nodeSpec["spec"]) ? nodeSpec["spec"] : undefined;
+    const parentNodeId = String(nodeSpec["id"] ?? (uses || "subgraph"));
     let childPromise: Promise<EmbeddedChild> | undefined;
 
     return {
@@ -53,11 +64,12 @@ export const subgraphNode = defineNode<Config>({
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const nodeCtx = ctx as NodeCtx;
         const lgConfig = nodeCtx._lgConfig;
+        const label = uses || parentNodeId;
         if (!lgConfig) {
-          throw new Error(`subgraph "${uses}": missing LangGraph runtime config (internal error).`);
+          throw new Error(`subgraph "${label}": missing LangGraph runtime config (internal error).`);
         }
 
-        childPromise ??= loadChild(uses, parentNodeId, ctx.events, ctx);
+        childPromise ??= loadChild(uses, inlineSpec, parentNodeId, ctx.events, ctx);
         const child = await childPromise;
 
         const nodeInput = nodeCtx._input ?? {};
@@ -71,7 +83,7 @@ export const subgraphNode = defineNode<Config>({
           childInput = { ...state, ...nodeInput };
         }
 
-        ctx.emit("node.output", { subgraph: uses, input: Object.keys(childInput) });
+        ctx.emit("node.output", { subgraph: label, input: Object.keys(childInput) });
 
         const childState = await child.invoke(childInput, lgConfig);
         const clean = stripSubgraphState(childState);
@@ -84,16 +96,26 @@ export const subgraphNode = defineNode<Config>({
           return { update };
         }
 
-        if (config.output && "to" in config.output) {
-          return { update: { [config.output.to]: clean } };
+        // Opt out of writing anything into the parent.
+        if (isOutputNone(config.output)) {
+          return { update: {} };
         }
-        if (config.output && "map" in config.output) {
-          const update: Record<string, unknown> = {};
-          for (const [channel, expr] of Object.entries(config.output.map)) {
-            update[channel] = renderDeep(expr, { result: clean, ...clean });
-          }
-          return { update };
+
+        // Explicit to/map: slug + projections (not a full child-state merge).
+        if (
+          config.output != null &&
+          typeof config.output === "object" &&
+          (config.output.to != null || config.output.map != null)
+        ) {
+          return {
+            update: applyOutput(config.output, clean, {
+              nodeId: parentNodeId,
+              scope: { result: clean, ...clean },
+            }),
+          };
         }
+
+        // Default: merge the child's state into the parent (transparent passthrough).
         return { update: clean };
       },
     };
@@ -102,20 +124,29 @@ export const subgraphNode = defineNode<Config>({
 
 async function loadChild(
   uses: string,
+  inlineSpec: GraphSpec | undefined,
   parentNodeId: string,
   parentEvents: EventBus,
   ctx: NodeRunContext,
 ): Promise<EmbeddedChild> {
-  const { loadGraph } = await import("../loader.js");
   const { compileGraphForEmbedding } = await import("../compiler.js");
 
-  const aliases =
-    (ctx.config as { subgraphs?: Record<string, string> }).subgraphs ?? {};
-  const ref = aliases[uses] ?? uses;
+  let spec: GraphSpec;
+  if (inlineSpec) {
+    spec = inlineSpec;
+  } else {
+    const { loadGraph } = await import("../loader.js");
+    const aliases =
+      (ctx.config as { subgraphs?: Record<string, string> }).subgraphs ?? {};
+    const ref = aliases[uses] ?? uses;
 
-  const { spec, diagnostics } = await loadGraph(ref, { cwd: ctx.workspace });
-  if (!spec) {
-    throw new Error(`subgraph: could not load "${uses}" (${ref}): ${diagnostics.map((d) => d.message).join("; ")}`);
+    const loaded = await loadGraph(ref, { cwd: ctx.workspace });
+    if (!loaded.spec) {
+      throw new Error(
+        `subgraph: could not load "${uses}" (${ref}): ${loaded.diagnostics.map((d) => d.message).join("; ")}`,
+      );
+    }
+    spec = loaded.spec;
   }
 
   const forwardSink = (event: FlowgraphEvent) => {

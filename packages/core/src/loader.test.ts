@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { compileGraph } from "./compiler.js";
-import { validateSpec } from "./loader.js";
+import {
+  envExpansionCollisionDiagnostics,
+  loadGraph,
+  NODE_BODY_ENV_EXPANSION,
+  validateSpec,
+} from "./loader.js";
 import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 
@@ -198,6 +206,190 @@ describe("validateSpec graph lint", () => {
     } as unknown as GraphSpec);
     expect(diags.some((d) => d.code === "UNDECLARED_OUTPUT_CHANNEL")).toBe(false);
   });
+
+  it("errors when a node id collides with a state channel name", () => {
+    const diags = validateSpec({
+      metadata: { name: "node-channel-collision" },
+      nodes: [
+        { id: "survey", type: "function", with: { fn: "noop" } },
+      ],
+      edges: [
+        { from: "START", to: "survey" },
+        { from: "survey", to: "END" },
+      ],
+      state: { channels: { survey: { type: "object" } } },
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec);
+    expect(
+      diags.some(
+        (d) =>
+          d.code === "NODE_CHANNEL_NAME_COLLISION" &&
+          d.severity === "error" &&
+          d.message.includes("survey") &&
+          d.path === "nodes.survey",
+      ),
+    ).toBe(true);
+  });
+
+  it("errors when a node id collides with an output.to channel", () => {
+    const diags = validateSpec({
+      metadata: { name: "output-to-collision" },
+      nodes: [
+        {
+          id: "survey",
+          type: "shell",
+          with: { command: "echo hi", output: { to: "survey" } },
+        },
+      ],
+      edges: [
+        { from: "START", to: "survey" },
+        { from: "survey", to: "END" },
+      ],
+      state: { channels: { survey: { type: "object" } } },
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec);
+    expect(diags.some((d) => d.code === "NODE_CHANNEL_NAME_COLLISION")).toBe(true);
+  });
+
+  it("errors when a node is named outputs (reserved channel)", () => {
+    const diags = validateSpec({
+      metadata: { name: "outputs-collision" },
+      nodes: [{ id: "outputs", type: "shell", with: { command: "echo hi" } }],
+      edges: [
+        { from: "START", to: "outputs" },
+        { from: "outputs", to: "END" },
+      ],
+      state: { channels: {} },
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec);
+    expect(
+      diags.some(
+        (d) => d.code === "NODE_CHANNEL_NAME_COLLISION" && d.message.includes("outputs"),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("envExpansionCollisionDiagnostics", () => {
+  const minimal = (shellWith: string) => `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: env-collision-test
+nodes:
+  - id: run
+    type: shell
+    with:
+${shellWith}
+edges:
+  - { from: START, to: run }
+  - { from: run, to: END }
+`;
+
+  it("warns on ${VAR} inside shell command", () => {
+    const diags = envExpansionCollisionDiagnostics(
+      minimal(`      command: |
+        BRANCH="plan/\${SLUG}"
+        echo "$BRANCH"
+`),
+    );
+    expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION && d.path === "nodes.run.with.command")).toBe(
+      true,
+    );
+    expect(diags.some((d) => d.message.includes("${SLUG}"))).toBe(true);
+  });
+
+  it("warns on ${VAR:-default} inside shell command", () => {
+    const diags = envExpansionCollisionDiagnostics(
+      minimal(`      command: 'echo "\${SPEC_SLUG:-}"'`),
+    );
+    expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION && d.message.includes("SPEC_SLUG"))).toBe(
+      true,
+    );
+  });
+
+  it("warns on ${VAR} inside shell args", () => {
+    const diags = envExpansionCollisionDiagnostics(
+      minimal(`      command: echo
+      args:
+        - "\${PLAN_TITLE}"
+`),
+    );
+    expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION && d.path === "nodes.run.with.args[0]")).toBe(
+      true,
+    );
+  });
+
+  it("warns on ${VAR} inside shell env values", () => {
+    const diags = envExpansionCollisionDiagnostics(
+      minimal(`      command: echo hi
+      env:
+        X: "\${CODEBASE_PATH:-/tmp}"
+`),
+    );
+    expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION && d.path === "nodes.run.with.env.X")).toBe(
+      true,
+    );
+  });
+
+  it("does not warn on bare $VAR (unbraced)", () => {
+    const diags = envExpansionCollisionDiagnostics(
+      minimal(`      command: |
+        BRANCH="plan/$SLUG"
+        echo "$SPEC_SLUG"
+`),
+    );
+    expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION)).toBe(false);
+  });
+
+  it("does not warn on ${VAR} inside config/runtime (legitimate load-time use)", () => {
+    const yaml = `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: ok-config-env
+config:
+  defaults:
+    model: "\${FLOWGRAPH_MODEL:-claude-sonnet-4.5}"
+  vars:
+    project: "\${FLOWGRAPH_PROJECT}"
+runtime:
+  checkpoint:
+    enabled: true
+    path: "\${FLOWGRAPH_CHECKPOINT_PATH:-.flowgraph/checkpoints.db}"
+nodes:
+  - id: run
+    type: shell
+    with:
+      command: echo hi
+edges:
+  - { from: START, to: run }
+  - { from: run, to: END }
+`;
+    const diags = envExpansionCollisionDiagnostics(yaml);
+    expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION)).toBe(false);
+  });
+
+  it("loadGraph returns NODE_BODY_ENV_EXPANSION on the success path", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-env-lint-"));
+    const file = path.join(dir, "g.graph.yaml");
+    await fs.writeFile(
+      file,
+      minimal(`      command: 'BRANCH="plan/\${SLUG}"'`),
+      "utf8",
+    );
+    try {
+      const { spec, diagnostics } = await loadGraph(file, { cwd: dir });
+      expect(spec).not.toBeNull();
+      expect(
+        diagnostics.some(
+          (d) => d.code === NODE_BODY_ENV_EXPANSION && d.severity === "warning",
+        ),
+      ).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("normalizeNodeTypeAliases", () => {
@@ -295,7 +487,9 @@ describe("validateSpec node config", () => {
     expect(cfg.length).toBeGreaterThan(0);
     expect(
       cfg.some(
-        (d) => d.path === "nodes.fetch.with.output" && /expected \{ to:/.test(d.message),
+        (d) =>
+          d.path === "nodes.fetch.with.output" &&
+          (/expected "none"/.test(d.message) || /expected \{ to:/.test(d.message)),
       ),
     ).toBe(true);
   });

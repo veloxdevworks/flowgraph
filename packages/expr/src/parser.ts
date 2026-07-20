@@ -166,7 +166,7 @@ class Parser {
     while (true) {
       if (this.check("DOT")) {
         this.advance();
-        const prop = this.expect("IDENT").value;
+        const prop = this.parseMemberPropertyName();
         expr = { kind: "Member", object: expr, property: prop };
       } else if (this.check("LBRACKET")) {
         this.advance();
@@ -178,6 +178,33 @@ class Parser {
       }
     }
     return expr;
+  }
+
+  /**
+   * Parse the property name after a `.` in a member access, allowing hyphens.
+   *
+   * Node ids conventionally use kebab-case (`generate-topics`, `content-plan`),
+   * so `state.outputs.generate-topics` must resolve as a single property
+   * lookup rather than `state.outputs.generate` minus `topics`. The lexer has
+   * no way to distinguish these contexts, so we greedily re-glue immediately
+   * adjacent (no whitespace) `- IDENT` / `- NUMBER` runs back onto the
+   * property name here, where we know we're parsing a member access. Real
+   * subtraction (`a.b - c`, with any whitespace) is unaffected because the
+   * adjacency check fails as soon as a space separates the tokens.
+   */
+  private parseMemberPropertyName(): string {
+    const first = this.expect("IDENT");
+    let prop = first.value;
+    let end = first.pos + first.value.length;
+    while (this.check("MINUS") && this.peek().pos === end) {
+      const next = this.tokens[this.pos + 1];
+      if (!next || (next.kind !== "IDENT" && next.kind !== "NUMBER") || next.pos !== end + 1) break;
+      this.advance(); // MINUS
+      const piece = this.advance(); // IDENT or NUMBER
+      prop += `-${piece.value}`;
+      end = piece.pos + piece.value.length;
+    }
+    return prop;
   }
 
   private parsePrimary(): Expr {

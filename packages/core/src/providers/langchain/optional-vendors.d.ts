@@ -29,3 +29,9 @@ declare module "@langchain/google-genai" {
     constructor(opts?: Record<string, unknown>);
   }
 }
+
+declare module "@langchain/aws" {
+  export class ChatBedrockConverse {
+    constructor(opts?: Record<string, unknown>);
+  }
+}

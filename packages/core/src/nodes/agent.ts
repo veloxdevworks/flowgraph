@@ -16,6 +16,7 @@ import { expandMcpTools, requireMcpHub } from "../mcp/expand.js";
 import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
 import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
+import { applyOutput } from "./output.js";
 
 const configSchema = AgentWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -130,19 +131,12 @@ export const agentNode = defineNode<Config>({
           enforceBudget(ctx, result.usage);
         }
 
-        // Apply output mapping
-        if (!config.output) return { update: { result: result.output } };
-        if ("to" in config.output) {
-          return { update: { [config.output.to]: result.output } };
-        }
-        if ("map" in config.output) {
-          const update: Record<string, unknown> = {};
-          for (const [channel, expr] of Object.entries(config.output.map)) {
-            update[channel] = renderDeep(expr, { result: result.output, output: result.output, ...scope });
-          }
-          return { update };
-        }
-        return { update: { result: result.output } };
+        return {
+          update: applyOutput(config.output, result.output, {
+            nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+            scope,
+          }),
+        };
       },
     };
   },

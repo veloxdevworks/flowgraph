@@ -12,9 +12,12 @@ A graph file is a single YAML document:
 apiVersion: flowgraph/v1        # required — versioned contract
 kind: Graph                 # required — Graph | Skill | Subgraph
 metadata: { ... }           # name, labels, description
+triggers: [ ... ]           # optional — host-interpreted auto-start conditions
 imports: [ ... ]            # optional — reusable subgraphs/skills/node packages
 config: { ... }             # optional — graph-level config/defaults
 state: { ... }              # required — channel (state) definitions
+inputs: [ ... ]             # optional — typed run parameters (collected before start)
+input: { ... }              # optional — default seed values for a run
 nodes: [ ... ]              # required — the node list
 edges: [ ... ]              # required — static + conditional edges
 runtime: { ... }            # optional — checkpoint/HITL/retry/observability defaults
@@ -35,6 +38,93 @@ metadata:
 ```
 
 `metadata.name` becomes the root OTel span name and the default checkpoint namespace.
+
+## 2a. `triggers` (auto-start conditions)
+
+Optional list of **host-interpreted** conditions that should start a run of this graph. The engine validates and round-trips the field but does **not** schedule or listen for these itself — desktop/server hosts own execution. Missed schedules while a host is offline are not replayed (Flowgraph is not a durable DAG/ETL scheduler).
+
+```yaml
+triggers:
+  - id: nightly
+    type: cron
+    schedule: "0 2 * * *"          # minute hour day-of-month month day-of-week
+    timezone: America/Denver       # optional IANA tz
+  - id: poll
+    type: interval
+    every: 15
+    unit: minutes                  # seconds | minutes | hours
+  - id: boot
+    type: startup                  # when the host app starts
+  - id: after-ingest
+    type: flow-complete
+    graph: ingest-pipeline         # other graph's metadata.name
+  - id: on-ingest-fail
+    type: flow-failed
+    graph: ingest-pipeline
+  - id: hook
+    type: webhook
+    path: /hooks/trig-graph        # optional; hosts may derive from metadata.name
+  - id: watch-inbox
+    type: file-watch
+    path: ./inbox
+    events: [create, change]       # optional; create | change | delete
+```
+
+| Field | Description |
+|-------|-------------|
+| `id` | Stable id within this graph. Required. |
+| `type` | `cron` \| `interval` \| `startup` \| `flow-complete` \| `flow-failed` \| `webhook` \| `file-watch`. |
+| `enabled` | When `false`, hosts ignore the trigger. Default `true`. |
+| `schedule` | Cron only — 5-field cron expression. |
+| `timezone` | Cron only — optional IANA timezone. |
+| `every` / `unit` | Interval only. |
+| `graph` | Flow-complete / flow-failed — target graph `metadata.name` (kebab-case). |
+| `path` | Webhook (URL path) or file-watch (filesystem path). |
+| `events` | File-watch only — subset of `create` / `change` / `delete`. |
+
+Hosts typically guard against a graph triggering itself via `flow-complete` / `flow-failed`. Cascade depth beyond that simple self-loop check is host-defined.
+
+## 2b. `inputs` (run parameters)
+
+Declare typed parameters that must be supplied **before** a run starts. These are distinct from mid-run `hitl` interrupts: they do not create a checkpoint, do not pause a thread, and work for headless/CLI/webhook triggers.
+
+```yaml
+inputs:
+  - key: prospectName
+    label: Prospect Name
+    type: string          # string | text | number | boolean | select
+    required: true
+  - key: prospectDescription
+    label: Description
+    type: text
+    description: "What the prospect does / why they matter"
+  - key: jiraTicketId
+    label: Jira Ticket ID
+    type: string
+    required: true
+  - key: priority
+    type: select
+    options: [low, medium, high]
+    default: medium
+```
+
+| Field | Description |
+|-------|-------------|
+| `key` | Written into the initial run input / state under this name. Required. |
+| `label` | Human-readable name for forms and CLI errors. |
+| `type` | `string` (single-line), `text` (multi-line), `number`, `boolean`, or `select`. Default: `string`. |
+| `required` | When `true`, the run fails fast if the value is missing and no `default` is set. |
+| `default` | Applied when the caller omits the key. |
+| `options` | Required for `type: select` — allowed string values. |
+| `description` | Optional help text for UIs. |
+
+**Runtime behavior:**
+
+- CLI: `flowgraph run … --input prospectName=Acme --input jiraTicketId=PROJ-1`. Missing required keys exit `1` with a list of issues (no interactive prompt).
+- Programmatic / desktop: values are passed as `run({ input: { … } })` and validated against `inputs` inside `compiled.run()`.
+- Graphs without an `inputs` array keep the previous free-form `input:` / `--input` behavior (no validation).
+
+Do **not** use a leading `hitl` node for call parameters — reserve HITL for mid-run approvals and clarifying questions that depend on something computed during execution.
 
 ## 3. `imports`
 
@@ -164,7 +254,9 @@ Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time fo
 
 ## 8. Input / output mapping
 
-To keep nodes reusable, a node declares **what it reads** (`input`) and **where it writes** (type-specific `output`), instead of hard-coding channel names inside logic.
+To keep nodes reusable, a node declares **what it reads** (`input`) and optionally **where else it writes** (`output`), instead of hard-coding channel names inside logic.
+
+**Default:** every node auto-saves its raw result to `state.outputs.<nodeId>` (a reserved object channel with `mergeDeep`). LangGraph forbids a channel name equal to a node id, so results live under the `outputs` bag. No `output` block is required for the common case — downstream nodes read `{{ state.outputs.summarize }}`, etc. The `outputs` channel is auto-declared at compile time when needed.
 
 ```yaml
 nodes:
@@ -174,17 +266,26 @@ nodes:
       text: "{{ state.issue.title }} — {{ state.issue.body }}"   # map state → node input
     with:
       prompt: "Summarize: {{ input.text }}"
-      output:
-        to: summary                # write the node's primary output to state.summary
-        # or structured mapping:
-        # map:
-        #   summary: "{{ result.text }}"
-        #   tokens:  "{{ result.usage.totalTokens }}"
+      # omitted output → writes state.outputs.summarize automatically
+      # optional projections (additive with the slug):
+      # output:
+      #   to: summary              # also write full result to state.summary
+      #   map:
+      #     tokens: "{{ result.usage.totalTokens }}"
+      # opt out of any state write (pure side-effect):
+      # output: none               # or { none: true }
 ```
 
+| Form | Effect |
+|------|--------|
+| omitted / `{}` | Write `{ outputs: { [nodeId]: rawResult } }` |
+| `output: none` or `{ none: true }` | Write nothing (side-effect-only nodes) |
+| `{ to: X }` and/or `{ map: {…} }` | Apply those projections **and** still write `state.outputs.<nodeId>` |
+
 - `input:` builds an `input` object available to the node's `with` expressions (and to skills as their declared inputs).
-- `output:` declares how the node's `result` is written back into state channels.
-- This indirection is what lets the same skill/node be dropped into different graphs with different channel names.
+- `to` / `map` are optional overrides for shared/typed/reducer-backed channels (e.g. parallel fan-in into one `append` channel) or field projection.
+- **Exception — `subgraph`:** when `output` is omitted, the child graph's state is **merged** into the parent (transparent passthrough). Use `output: none` to suppress that, or `to`/`map`/`stateMap.out` for explicit projection.
+- Prefer not to declare your own `outputs` channel unless you intend to override its `mergeDeep` semantics.
 
 ## 9. `runtime` (graph-level defaults)
 
@@ -199,6 +300,8 @@ runtime:
   webhookServer:                  # embedded HTTP ingress for wait.webhook
     host: "127.0.0.1"             # default
     port: 8878                    # default; 0 = ephemeral; EADDRINUSE → ephemeral fallback
+  services:
+    terminateOnEnd: true          # stop non-keepAlive `service` processes on completed/error (default)
   hitl:
     onInterrupt: prompt           # prompt | fail | approve | webhook  (per-environment overridable)
   retry:

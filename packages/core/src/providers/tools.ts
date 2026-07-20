@@ -27,6 +27,11 @@ export interface NormalizedTools {
 export interface ToolWiring {
   /** Run a sibling graph node as a tool (provided by the compiler). */
   invokeNode?: (id: string, args: Record<string, unknown>, ctx: NodeRunContext) => Promise<unknown>;
+  /** Look up description/schema for a sibling node exposed as a tool. */
+  resolveToolMeta?: (nodeId: string) => {
+    description?: string;
+    schema?: Record<string, unknown>;
+  } | undefined;
   /** MCP hub injected by the compiler / CLI. */
   mcp?: McpHub | undefined;
 }
@@ -69,7 +74,11 @@ export function normalizeTools(
         return runSkill(cached, (args ?? {}) as Record<string, unknown>, ctx);
       });
     } else if ("node" in ref) {
-      specs.push({ name: ref.node, kind: "node", ref: ref.node });
+      const meta = wiring.resolveToolMeta?.(ref.node);
+      const spec: ToolSpec = { name: ref.node, kind: "node", ref: ref.node };
+      if (meta?.description) spec.description = meta.description;
+      if (meta?.schema) spec.schema = meta.schema;
+      specs.push(spec);
       executors.set(ref.node, async (args, ctx) => {
         if (!wiring.invokeNode) {
           throw new Error(`node-as-tool "${ref.node}" requires compiler wiring (not available in this context).`);

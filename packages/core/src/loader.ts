@@ -6,9 +6,18 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import {
+  envExpansionCollisionDiagnostics,
+  LOAD_TIME_ENV_VAR_RE,
+} from "./runtime/env-expansion-lint.js";
 import { graphLintDiagnostics } from "./runtime/validate-graph.js";
 import { registry } from "./registry.js";
 import "./nodes/index.js";
+
+export {
+  envExpansionCollisionDiagnostics,
+  NODE_BODY_ENV_EXPANSION,
+} from "./runtime/env-expansion-lint.js";
 
 export async function loadGraph(
   filePath: string,
@@ -27,6 +36,9 @@ export async function loadGraph(
     };
   }
 
+  // Scan raw YAML before expandEnvVars rewrites `${UPPER}` away.
+  const envCollisionDiags = envExpansionCollisionDiagnostics(raw);
+
   const expanded = expandEnvVars(raw);
 
   let parsed: unknown;
@@ -35,7 +47,10 @@ export async function loadGraph(
   } catch (err) {
     return {
       spec: null,
-      diagnostics: [{ severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` }],
+      diagnostics: [
+        { severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` },
+        ...envCollisionDiags,
+      ],
     };
   }
 
@@ -46,20 +61,23 @@ export async function loadGraph(
   if (!result.success) {
     return {
       spec: null,
-      diagnostics: result.error.issues.map((i) => ({
-        severity: "error" as const,
-        code: "SCHEMA_ERROR",
-        message: `${i.path.join(".")}: ${i.message}`,
-        path: i.path.join("."),
-      })),
+      diagnostics: [
+        ...result.error.issues.map((i) => ({
+          severity: "error" as const,
+          code: "SCHEMA_ERROR",
+          message: `${i.path.join(".")}: ${i.message}`,
+          path: i.path.join("."),
+        })),
+        ...envCollisionDiags,
+      ],
     };
   }
 
-  return { spec: result.data, diagnostics: [] };
+  return { spec: result.data, diagnostics: envCollisionDiags };
 }
 
 function expandEnvVars(yaml: string): string {
-  return yaml.replace(/\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => {
+  return yaml.replace(LOAD_TIME_ENV_VAR_RE, (_m, name: string, def: string) => {
     return process.env[name] ?? def ?? "";
   });
 }

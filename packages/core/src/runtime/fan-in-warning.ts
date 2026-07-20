@@ -9,28 +9,26 @@
 import type { GraphSpec, NodeSpec, Diagnostic } from "@veloxdevworks/flowgraph-spec";
 import type { Logger } from "../context.js";
 
-type OutputMapping = { to?: string; map?: Record<string, string> };
-
-/** Channels a node writes via `with.output` or `with.collect` (map nodes). */
+/** Channels a node writes via explicit `with.output` / `with.collect` projections. */
 export function outputChannelsForNode(node: NodeSpec): string[] {
   const withBlock = (node.with ?? {}) as Record<string, unknown>;
   const channels = new Set<string>();
 
-  const output = withBlock["output"] as OutputMapping | undefined;
-  if (output) {
-    if (typeof output.to === "string") channels.add(output.to);
-    if (output.map) {
-      for (const ch of Object.keys(output.map)) channels.add(ch);
+  const addFrom = (mapping: unknown) => {
+    if (mapping == null || mapping === "none") return;
+    if (typeof mapping !== "object" || Array.isArray(mapping)) return;
+    const m = mapping as { to?: unknown; map?: unknown; none?: unknown };
+    if (m.none === true) return;
+    if (typeof m.to === "string" && m.to.trim()) channels.add(m.to.trim());
+    if (m.map != null && typeof m.map === "object" && !Array.isArray(m.map)) {
+      for (const ch of Object.keys(m.map as Record<string, unknown>)) {
+        if (ch.trim()) channels.add(ch);
+      }
     }
-  }
+  };
 
-  const collect = withBlock["collect"] as OutputMapping | undefined;
-  if (collect) {
-    if (typeof collect.to === "string") channels.add(collect.to);
-    if (collect.map) {
-      for (const ch of Object.keys(collect.map)) channels.add(ch);
-    }
-  }
+  addFrom(withBlock["output"]);
+  addFrom(withBlock["collect"]);
 
   return [...channels];
 }

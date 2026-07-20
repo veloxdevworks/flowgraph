@@ -9,6 +9,7 @@ import { FunctionWithSchema } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { applyOutput } from "./output.js";
 
 // Function registry separate from the node registry
 const fnRegistry = new Map<string, (input: unknown, ctx: NodeRunContext) => Promise<unknown> | unknown>();
@@ -33,7 +34,7 @@ export const functionNode = defineNode<Config>({
   configSchema: configSchema as any,
   capabilities: {},
 
-  build(_ctx: BuildContext, _nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
+  build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
       capabilities: {},
@@ -63,20 +64,12 @@ export const functionNode = defineNode<Config>({
 
         ctx.emit("node.output", { result });
 
-        // Apply output mapping
-        if (!config.output) return { update: {} };
-        if ("to" in config.output) {
-          return { update: { [config.output.to]: result } };
-        }
-        if ("map" in config.output) {
-          const update: Record<string, unknown> = {};
-          for (const [channel, expr] of Object.entries(config.output.map)) {
-            const rendered = renderDeep(expr, { result, ...scope });
-            update[channel] = rendered;
-          }
-          return { update };
-        }
-        return { update: {} };
+        return {
+          update: applyOutput(config.output, result, {
+            nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+            scope,
+          }),
+        };
       },
     };
   },

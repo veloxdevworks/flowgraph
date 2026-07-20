@@ -32,6 +32,7 @@ import {
   getWebhookRoute,
   type WebhookServerConfig,
 } from "./runtime/webhook-server.js";
+import { terminateThreadServices } from "./runtime/service-manager.js";
 import { registerProvider, type ProviderAdapter } from "./providers/index.js";
 import type { ToolWiring } from "./providers/tools.js";
 import type { BudgetState } from "./context.js";
@@ -272,6 +273,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             await hooks.run("run:after", { state: clean, run: runMeta, payload: { update: clean } });
           }
           events.emit("run.end", { state: clean, durationMs: Date.now() - startMs });
+          await maybeTerminateServices(graphSpec, threadId);
           return { status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs };
         }
 
@@ -326,6 +328,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
       }
       events.emit("run.error", { error: error.message, durationMs: Date.now() - startMs });
+      await maybeTerminateServices(graphSpec, threadId);
       return { status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs };
     } finally {
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
@@ -643,6 +646,15 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     return resultToUpdate(res);
   };
 
+  toolWiring.resolveToolMeta = (id) => {
+    const ns = spec.nodes.find((n) => n.id === id);
+    if (!ns) return undefined;
+    const out: { description?: string; schema?: Record<string, unknown> } = {};
+    if (ns.description) out.description = ns.description;
+    if (ns.toolInput) out.schema = ns.toolInput as Record<string, unknown>;
+    return Object.keys(out).length ? out : undefined;
+  };
+
   // Edges. Router nodes drive exclusive routing via Command{ goto } + `ends`
   // declared from with.routes — skip their static/branch edges so a UI fan-out
   // (`to: [a, b]`) cannot race with the router's decision and run both branches.
@@ -910,6 +922,17 @@ function stripReserved(state: Record<string, unknown>): Record<string, unknown> 
     out[k] = v;
   }
   return out;
+}
+
+/** Tear down non-keepAlive services when a run reaches completed/error. */
+async function maybeTerminateServices(spec: GraphSpec, threadId: string): Promise<void> {
+  const terminate = spec.runtime?.services?.terminateOnEnd ?? true;
+  if (!terminate) return;
+  try {
+    await terminateThreadServices(threadId);
+  } catch {
+    /* best-effort cleanup — do not fail the run result */
+  }
 }
 
 function buildNodeCtx(

@@ -10,6 +10,7 @@ import { WebhookWithSchema } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { applyOutput } from "./output.js";
 
 const configSchema = WebhookWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -102,27 +103,7 @@ async function runEmit(
 
   ctx.emit("node.output", { webhook: { mode: "emit", result } });
 
-  return applyOutput(result, config, scope);
-}
-
-function applyOutput(
-  result: unknown,
-  config: Config,
-  scope: Record<string, unknown>,
-): NodeResult {
-  if (!config.output) return { update: { result } };
-
-  if ("to" in config.output) {
-    return { update: { [config.output.to]: result } };
-  }
-
-  if ("map" in config.output) {
-    const update: Record<string, unknown> = {};
-    for (const [channel, expr] of Object.entries(config.output.map)) {
-      update[channel] = renderDeep(expr, { result, ...scope });
-    }
-    return { update };
-  }
-
-  return { update: { result } };
+  return {
+    update: applyOutput(config.output, result, { nodeId, scope }),
+  };
 }

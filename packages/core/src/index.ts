@@ -1,6 +1,12 @@
 // Core public API
 
-export { loadGraph, validateSpec, normalizeNodeTypeAliases } from "./loader.js";
+export {
+  loadGraph,
+  validateSpec,
+  normalizeNodeTypeAliases,
+  envExpansionCollisionDiagnostics,
+  NODE_BODY_ENV_EXPANSION,
+} from "./loader.js";
 export { loadGraphImports } from "./runtime/load-imports.js";
 export type { LoadGraphImportsOptions, LoadGraphImportsResult } from "./runtime/load-imports.js";
 export {
@@ -8,8 +14,14 @@ export {
   undeclaredOutputChannelDiagnostics,
   unconditionalFanOutDiagnostics,
 } from "./runtime/validate-graph.js";
+export { applyOutput, isOutputNone, OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
+export {
+  resolveAndValidateInput,
+  isInputValidationError,
+  InputValidationError,
+} from "./inputs.js";
 export { compileGraph } from "./compiler.js";
-export type { GraphSpec, NodeSpec, EdgeSpec } from "@veloxdevworks/flowgraph-spec";
+export type { GraphSpec, NodeSpec, EdgeSpec, InputField, InputFieldType } from "@veloxdevworks/flowgraph-spec";
 export type {
   CompileOptions,
   RunOptions,
@@ -42,10 +54,36 @@ export type {
   WebhookResumeFn,
 } from "./runtime/webhook-server.js";
 
+export {
+  startService,
+  stopService,
+  restartService,
+  statusService,
+  terminateThreadServices,
+  resetServiceManager,
+  listThreadServices,
+  threadIdOf,
+} from "./runtime/service-manager.js";
+export type {
+  ServiceReady,
+  ServiceStartSpec,
+  ServiceInfo,
+  ServiceStatusValue,
+} from "./runtime/service-manager.js";
+
+export { findFreePorts } from "./runtime/port.js";
+export type { FindFreePortsOptions } from "./runtime/port.js";
+
 export { registry, defineNode } from "./registry.js";
 export type { NodeFactory, CompiledNode, NodeResult, NodeContract, NodeCapabilities, ReducerFn } from "./registry.js";
 export { registerFunction } from "./nodes/function.js";
 export { registerFunction as registerFn } from "./nodes/function.js";
+export { runScriptSandboxed } from "./nodes/script.js";
+export type {
+  RunScriptSandboxedOptions,
+  RunScriptSandboxedResult,
+  ScriptPermissions,
+} from "./nodes/script.js";
 
 export { createEventBus, consoleSink, jsonlSink } from "./events.js";
 export type { FlowgraphEvent, EventType, EventBus, EventSink, EventScope } from "./events.js";
@@ -79,6 +117,8 @@ export type { AgentDef, AgentFrontMatter } from "./agents/schema.js";
 export { AgentFrontMatterSchema } from "./agents/schema.js";
 export { preflightGraphSkills, preflightGraphAgents } from "./preflight-graph.js";
 export type { PreflightGraphOptions, PreflightGraphResult } from "./preflight-graph.js";
+export { bundleGraphForRemote } from "./runtime/bundle-graph.js";
+export type { BundleResult, BundleGraphOptions } from "./runtime/bundle-graph.js";
 
 // Hooks — lifecycle interception (mutate/veto/route/retry/interrupt)
 export { createHookBus } from "./hooks/bus.js";
@@ -160,6 +200,9 @@ export {
   functionNode,
   codeNode,
   shellNode,
+  serviceNode,
+  portNode,
+  scriptNode,
   waitNode,
   skillNode,
   agentNode,
@@ -169,4 +212,14 @@ export {
   mcpNode,
   hitlNode,
   webhookNode,
+  demoNode,
 } from "./nodes/index.js";
+
+export {
+  demoManifestPath,
+  appendDemoManifestEntry,
+  readDemoManifest,
+  demoManifestKey,
+} from "./nodes/demo-manifest.js";
+export type { DemoManifestEntry } from "./nodes/demo-manifest.js";
+export type { DemoResult, DemoKind } from "./nodes/demo.js";

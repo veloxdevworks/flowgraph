@@ -50,6 +50,28 @@ describe("cli provider helpers", () => {
     const miss = await detectLocalCli("cursor", { detectFn: async () => false });
     expect(miss).toEqual({ ok: false, binary: "cursor-agent" });
   });
+
+  it("detectLocalCli prefers cursor-agent over agent when both exist", async () => {
+    const detectFn = async (binary: string) => binary === "cursor-agent" || binary === "agent";
+    const hit = await detectLocalCli("cursor", { detectFn });
+    expect(hit).toEqual({ ok: true, binary: "cursor-agent" });
+  });
+
+  it("detectLocalCli rejects bare agent when it is Grok Build", async () => {
+    const hit = await detectLocalCli("cursor", {
+      detectFn: async (binary) => binary === "agent",
+      helpFn: async () => "Grok Build TUI\nUsage: agent [OPTIONS]",
+    });
+    expect(hit).toEqual({ ok: false, binary: "cursor-agent" });
+  });
+
+  it("detectLocalCli accepts bare agent when help fingerprints as Cursor", async () => {
+    const hit = await detectLocalCli("cursor", {
+      detectFn: async (binary) => binary === "agent",
+      helpFn: async () => "Usage: agent [options]\n\nStart the Cursor Agent",
+    });
+    expect(hit).toEqual({ ok: true, binary: "agent" });
+  });
 });
 
 describe("createCliProvider", () => {

@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, waitForWebhookResume, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, waitForWebhookResume, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@veloxdevworks/flowgraph-core";
 import { isError, generateJsonSchema } from "@veloxdevworks/flowgraph-spec";
 import { buildSkillsCommand } from "./skills-command.js";
 import { checkpointerOption, promptResolver, serializePendingInterrupts } from "./interrupts.js";
@@ -240,8 +240,20 @@ program
       process.exit(2);
     }
 
-    // Parse --input flags
-    const inputState = await parseInputFlags(opts.input ?? [], cwd);
+    // Parse --input flags and validate against declared `inputs` schema (fail fast)
+    let inputState: Record<string, unknown>;
+    try {
+      const rawInput = await parseInputFlags(opts.input ?? [], cwd);
+      // Merge graph-default `input` under CLI overrides, then apply schema defaults/validation
+      inputState = resolveAndValidateInput(spec.inputs, { ...(spec.input ?? {}), ...rawInput });
+    } catch (err) {
+      if (isInputValidationError(err)) {
+        printError(err.message);
+        printInfo("Pass values with --input key=value (or key=@file.json).");
+        process.exit(1);
+      }
+      throw err;
+    }
 
     // Build sinks
     const sinks = opts.json

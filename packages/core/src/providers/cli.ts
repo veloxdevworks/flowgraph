@@ -21,10 +21,23 @@ export type CliVendor = "claude" | "cursor" | "codex" | "grok";
 
 const DEFAULT_BINARIES: Record<CliVendor, string> = {
   claude: "claude",
+  /**
+   * Prefer `cursor-agent` — bare `agent` collides with Grok Build's PATH alias
+   * (`~/.grok/bin/agent`), which often wins over Cursor's `agent` symlink.
+   */
   cursor: "cursor-agent",
   codex: "codex",
   grok: "grok",
 };
+
+/** Binaries to probe for a vendor (first hit wins). */
+function binaryCandidatesFor(vendor: CliVendor): string[] {
+  if (vendor === "cursor") {
+    // Unambiguous name first; bare `agent` only if fingerprint confirms Cursor.
+    return ["cursor-agent", "agent"];
+  }
+  return [DEFAULT_BINARIES[vendor]];
+}
 
 export interface CliProviderOptions {
   name: string;
@@ -94,16 +107,36 @@ export function hasApiKey(envName: string | undefined, env: NodeJS.ProcessEnv = 
 
 export async function detectLocalCli(
   vendorOrBinary: CliVendor | string,
-  opts: { binary?: string; detectFn?: (binary: string) => Promise<boolean> } = {},
+  opts: {
+    binary?: string;
+    detectFn?: (binary: string) => Promise<boolean>;
+    /** Injected for tests — used to fingerprint bare `agent` vs Grok. */
+    helpFn?: (binary: string) => Promise<string>;
+  } = {},
 ): Promise<{ ok: boolean; binary: string }> {
-  const binary =
-    opts.binary ??
-    (vendorOrBinary in DEFAULT_BINARIES
-      ? DEFAULT_BINARIES[vendorOrBinary as CliVendor]
-      : vendorOrBinary);
   const detect = opts.detectFn ?? checkBinOnPath;
-  const ok = await detect(binary);
-  return { ok, binary };
+  if (opts.binary) {
+    const ok = await detect(opts.binary);
+    return { ok, binary: opts.binary };
+  }
+  if (vendorOrBinary in DEFAULT_BINARIES) {
+    const vendor = vendorOrBinary as CliVendor;
+    const candidates = binaryCandidatesFor(vendor);
+    for (const binary of candidates) {
+      if (!(await detect(binary))) continue;
+      if (
+        vendor === "cursor" &&
+        binary === "agent" &&
+        !(await isCursorAgentBinary(binary, opts.helpFn))
+      ) {
+        continue;
+      }
+      return { ok: true, binary };
+    }
+    return { ok: false, binary: DEFAULT_BINARIES[vendor] };
+  }
+  const ok = await detect(vendorOrBinary);
+  return { ok, binary: vendorOrBinary };
 }
 
 async function checkBinOnPath(name: string): Promise<boolean> {
@@ -111,6 +144,36 @@ async function checkBinOnPath(name: string): Promise<boolean> {
     const cmd = process.platform === "win32" ? "where" : "which";
     await execFile(cmd, [name]);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/** True when `binary --help` looks like Cursor Agent (not Grok Build's `agent` alias). */
+async function isCursorAgentBinary(
+  binary: string,
+  helpFn?: (binary: string) => Promise<string>,
+): Promise<boolean> {
+  try {
+    const text =
+      (await helpFn?.(binary)) ??
+      (await execFile(binary, ["--help"], {
+        timeout: 4000,
+        maxBuffer: 256 * 1024,
+      }).then(
+        ({ stdout, stderr }) => `${stdout}\n${stderr}`,
+        (err: unknown) => {
+          // Some CLIs print help on stderr / non-zero exit — still usable.
+          if (err && typeof err === "object" && "stdout" in err) {
+            const e = err as { stdout?: string; stderr?: string };
+            return `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
+          }
+          throw err;
+        },
+      ));
+    if (/Grok Build/i.test(text)) return false;
+    if (/Cursor Agent/i.test(text)) return true;
+    return false;
   } catch {
     return false;
   }
@@ -183,7 +246,6 @@ function parseCliStdout(vendor: CliVendor, stdout: string): unknown {
 
 export function createCliProvider(options: CliProviderOptions): ProviderAdapter {
   const vendor = options.vendor;
-  const binary = options.binary ?? defaultBinaryFor(vendor);
   const runExec = options.execFileFn ?? execFile;
   const detectFn = options.detectFn;
 
@@ -197,13 +259,17 @@ export function createCliProvider(options: CliProviderOptions): ProviderAdapter 
     },
 
     async run(req: AgentRequest, ctx: ProviderRunContext): Promise<AgentResult> {
-      const detected = await detectLocalCli(vendor, { binary, ...(detectFn ? { detectFn } : {}) });
+      const detected = await detectLocalCli(vendor, {
+        ...(options.binary ? { binary: options.binary } : {}),
+        ...(detectFn ? { detectFn } : {}),
+      });
       if (!detected.ok) {
         throw new Error(
-          `Local CLI provider "${options.name}": binary "${binary}" not found on PATH. ` +
+          `Local CLI provider "${options.name}": binary "${detected.binary}" not found on PATH. ` +
             `Install the ${vendor} CLI or set providers.${options.name}.binary.`,
         );
       }
+      const binary = detected.binary;
 
       const prompt = req.system ? `${req.system}\n\n${req.prompt}` : req.prompt;
       const model = req.model ?? options.model;

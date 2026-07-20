@@ -12,6 +12,7 @@ import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { parseDuration } from "../runtime/duration.js";
+import { applyOutput } from "./output.js";
 
 const configSchema = ShellWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -35,7 +36,7 @@ export const shellNode = defineNode<Config>({
   configSchema: configSchema as any,
   capabilities: { sideEffecting: true },
 
-  build(_ctx: BuildContext, _nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
+  build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
       capabilities: { sideEffecting: true },
@@ -135,18 +136,12 @@ export const shellNode = defineNode<Config>({
           stderr,
         });
 
-        if (!config.output) return { update: {} };
-        if ("to" in config.output) {
-          return { update: { [config.output.to]: result } };
-        }
-        if ("map" in config.output) {
-          const update: Record<string, unknown> = {};
-          for (const [channel, expr] of Object.entries(config.output.map)) {
-            update[channel] = renderDeep(expr, { result, ...scope });
-          }
-          return { update };
-        }
-        return { update: {} };
+        return {
+          update: applyOutput(config.output, result, {
+            nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+            scope,
+          }),
+        };
       },
     };
   },

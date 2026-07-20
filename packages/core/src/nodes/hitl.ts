@@ -9,6 +9,7 @@ import { HitlWithSchema } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { InterruptKind, NodeRunContext } from "../context.js";
+import { applyOutput } from "./output.js";
 
 const configSchema = HitlWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -57,18 +58,12 @@ export const hitlNode = defineNode<Config>({
 
         ctx.emit("node.output", { hitl: { mode: config.mode, result } });
 
-        if (!config.output) return { update: { result } };
-        if ("to" in config.output) {
-          return { update: { [config.output.to]: result } };
-        }
-        if ("map" in config.output) {
-          const update: Record<string, unknown> = {};
-          for (const [channel, expr] of Object.entries(config.output.map)) {
-            update[channel] = renderDeep(expr, { result, ...scope });
-          }
-          return { update };
-        }
-        return { update: { result } };
+        return {
+          update: applyOutput(config.output, result, {
+            nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+            scope,
+          }),
+        };
       },
     };
   },

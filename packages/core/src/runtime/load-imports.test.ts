@@ -20,6 +20,15 @@ const specWithImport = (): GraphSpec =>
   }) as unknown as GraphSpec;
 
 describe("loadGraphImports — reducers", () => {
+  it("loads TypeScript .ts import modules via esbuild (not Vitest transpile)", async () => {
+    // The fixture is a real .ts file; loadGraphImports must compile it itself
+    // so CLI/sidecar (plain Node) can load register.ts the same way.
+    expect(pluginPath.endsWith(".ts")).toBe(true);
+    const spec = specWithImport();
+    await loadGraphImports(spec, { cwd: __dirname });
+    expect(registry.getReducer("uniqueById")).toBeTypeOf("function");
+  });
+
   it("loads reducers from default export record", async () => {
     const spec = specWithImport();
     await loadGraphImports(spec, { cwd: __dirname });

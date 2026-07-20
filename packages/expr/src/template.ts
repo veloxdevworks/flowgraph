@@ -26,8 +26,27 @@ export function renderTemplate(template: string, scope: EvalScope, strict = fals
   return template.replace(TEMPLATE_RE, (_, expr: string) => {
     const ast = parseExpr(expr.trim());
     const result = evalExpr(ast, scope, strict);
-    return result == null ? "" : String(result);
+    return stringifyInterpolated(result);
   });
+}
+
+/**
+ * Render an interpolated value for a template that mixes `{{ expr }}` with
+ * surrounding text. Plain `String(value)` turns objects/arrays into
+ * "[object Object]" / lossy comma joins — serialize those as JSON instead so
+ * e.g. `{{ state.weeklyBrief }}` (an object) stays readable to an LLM prompt.
+ */
+function stringifyInterpolated(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "object") {
+    try {
+      const json = JSON.stringify(value);
+      if (json !== undefined) return json;
+    } catch {
+      // fall through to String() below
+    }
+  }
+  return String(value);
 }
 
 /**

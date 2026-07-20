@@ -2,9 +2,12 @@
  * Resolve and load graph `imports` (nodes, providers, reducers, skill/subgraph aliases).
  */
 
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import * as esbuild from "esbuild";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
 import { registry, type NodeFactory, type ReducerFn } from "../registry.js";
 import { registerProvider, type ProviderAdapter } from "../providers/index.js";
@@ -19,14 +22,100 @@ export interface LoadGraphImportsResult {
   subgraphAliases: Record<string, string>;
 }
 
+function isTypeScriptPath(filePath: string): boolean {
+  return filePath.endsWith(".ts") || filePath.endsWith(".tsx") || filePath.endsWith(".mts");
+}
+
+/**
+ * Resolve a bare package specifier to an absolute filesystem path.
+ * Uses import.meta.resolve (honors ESM `exports`) — createRequire fails on
+ * packages that only declare `"exports"."import"` without a CJS main.
+ *
+ * Prefer the import file's tree (dev checkouts with link: deps), then fall
+ * back to the running engine's tree (bundled examples have no node_modules).
+ */
+function resolveBareImport(specifier: string, fromFile: string): string {
+  const parents = [pathToFileURL(fromFile).href, import.meta.url];
+  for (const parent of parents) {
+    try {
+      const url = import.meta.resolve(specifier, parent);
+      if (url.startsWith("file:")) return fileURLToPath(url);
+      return url;
+    } catch {
+      // try next parent
+    }
+  }
+  return specifier;
+}
+
+/**
+ * Compile a TypeScript import module to ESM and load it.
+ * Bare imports become absolute paths so the compiled file can live in
+ * os.tmpdir() (graph examples may ship inside a read-only app bundle).
+ */
+async function importTypeScriptModule(resolved: string): Promise<Record<string, unknown>> {
+  const built = await esbuild.build({
+    entryPoints: [resolved],
+    bundle: true,
+    write: false,
+    format: "esm",
+    platform: "node",
+    target: "node20",
+    logLevel: "silent",
+    plugins: [
+      {
+        name: "absolute-externals",
+        setup(build) {
+          build.onResolve({ filter: /.*/ }, (args) => {
+            // Keep the entry point as the only non-external module.
+            if (args.kind === "entry-point") return undefined;
+            if (args.path.startsWith("node:")) {
+              return { path: args.path, external: true };
+            }
+            // Relative imports: let esbuild follow/bundle nested .ts if needed.
+            if (args.path.startsWith(".") || path.isAbsolute(args.path)) {
+              return undefined;
+            }
+            const abs = resolveBareImport(args.path, resolved);
+            return { path: abs, external: true };
+          });
+        },
+      },
+    ],
+  });
+  const file = built.outputFiles?.[0];
+  if (!file) {
+    throw new Error(`Failed to compile TypeScript import: ${resolved}`);
+  }
+  const cacheDir = path.join(os.tmpdir(), "flowgraph-imports");
+  await fs.mkdir(cacheDir, { recursive: true });
+  const outPath = path.join(
+    cacheDir,
+    `${path.basename(resolved)}.${process.pid}.${Date.now()}.mjs`,
+  );
+  await fs.writeFile(outPath, file.text, "utf8");
+  try {
+    return (await import(pathToFileURL(outPath).href)) as Record<string, unknown>;
+  } finally {
+    await fs.unlink(outPath).catch(() => undefined);
+  }
+}
+
+async function importResolvedPath(resolved: string): Promise<Record<string, unknown>> {
+  if (isTypeScriptPath(resolved)) {
+    return importTypeScriptModule(resolved);
+  }
+  return (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;
+}
+
 async function importModuleSpecifier(specifier: string, cwd: string): Promise<Record<string, unknown>> {
   if (specifier.startsWith(".") || specifier.startsWith("/") || /^[a-zA-Z]:\\/.test(specifier)) {
     const resolved = path.resolve(cwd, specifier);
-    return (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;
+    return importResolvedPath(resolved);
   }
   const require = createRequire(path.join(cwd, "package.json"));
   const resolved = require.resolve(specifier);
-  return (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;
+  return importResolvedPath(resolved);
 }
 
 function registerReducerExports(mod: Record<string, unknown>): void {

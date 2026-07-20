@@ -12,6 +12,7 @@ import { defineNode, type CompiledNode, type BuildContext } from "../registry.js
 import type { NodeRunContext } from "../context.js";
 import { getProvider, listProviders } from "../providers/registry.js";
 import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
+import { applyOutput } from "./output.js";
 
 const configSchema = RouterWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -82,8 +83,10 @@ export const routerNode = defineNode<Config>({
           );
         }
 
+        const nodeId = String(nodeSpec["id"]);
+        const update = applyOutput(config.output, matchedKey, { nodeId, scope });
         return {
-          command: { goto: matchedTo },
+          command: { goto: matchedTo, update },
         };
       },
     };
@@ -163,9 +166,6 @@ async function runModelRouter(
 
   ctx.emit("router.decision", { routes: Object.keys(config.routes), chosen: chosenKey, to: chosen.to, mode: "model" });
 
-  const update: Record<string, unknown> = {};
-  if (config.output && "to" in config.output) {
-    update[config.output.to] = chosenKey;
-  }
+  const update = applyOutput(config.output, chosenKey, { nodeId, scope });
   return { command: { goto: chosen.to, update } };
 }

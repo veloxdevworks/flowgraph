@@ -15,6 +15,7 @@ const DEFAULT_API_KEY_ENV: Record<LangChainVendor, string | undefined> = {
   xai: "XAI_API_KEY",
   ollama: undefined,
   google: "GOOGLE_API_KEY",
+  bedrock: undefined,
 };
 
 const VENDOR_PACKAGES: Record<LangChainVendor, string> = {
@@ -23,6 +24,7 @@ const VENDOR_PACKAGES: Record<LangChainVendor, string> = {
   xai: "@langchain/xai",
   ollama: "@langchain/ollama",
   google: "@langchain/google-genai",
+  bedrock: "@langchain/aws",
 };
 
 export interface LangChainProviderConfigInput {
@@ -32,10 +34,18 @@ export interface LangChainProviderConfigInput {
   options?: Record<string, unknown> | undefined;
   baseUrl?: string | undefined;
   apiKeyEnv?: string | undefined;
+  region?: string | undefined;
 }
 
 function isLangChainVendor(v: string): v is LangChainVendor {
-  return v === "openai" || v === "anthropic" || v === "xai" || v === "ollama" || v === "google";
+  return (
+    v === "openai" ||
+    v === "anthropic" ||
+    v === "xai" ||
+    v === "ollama" ||
+    v === "google" ||
+    v === "bedrock"
+  );
 }
 
 function readEnvKey(name: string): string | undefined {
@@ -63,6 +73,9 @@ async function importVendorModule(
   cwd: string,
 ): Promise<Record<string, new (opts: Record<string, unknown>) => unknown>> {
   const pkg = VENDOR_PACKAGES[vendor];
+  // Prefer cwd-relative resolution (project installs / tests), then bare
+  // import so bundled hosts (desktop sidecar) that install vendor packages
+  // next to flowgraph-core still resolve them without a graph-local node_modules.
   try {
     const req = createRequire(path.join(cwd, "package.json"));
     const resolved = req.resolve(pkg);
@@ -70,6 +83,11 @@ async function importVendorModule(
       string,
       new (opts: Record<string, unknown>) => unknown
     >;
+  } catch {
+    // continue to bare import
+  }
+  try {
+    return (await import(pkg)) as Record<string, new (opts: Record<string, unknown>) => unknown>;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("Cannot find module") || msg.includes("Cannot find package") || msg.includes("ERR_MODULE_NOT_FOUND")) {
@@ -105,6 +123,22 @@ async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): 
     modelOpts["baseUrl"] = cfg.baseUrl;
   }
 
+  // Bedrock authenticates through the AWS SDK, not a single API key string.
+  // Region comes from the config `region` field; credentials are passed
+  // explicitly ONLY when access-key env vars are present, otherwise we let the
+  // AWS default credential chain (profile / ~/.aws / SSO) resolve them.
+  if (vendor === "bedrock") {
+    if (cfg.region) modelOpts["region"] = cfg.region;
+    const accessKeyId = readEnvKey("AWS_ACCESS_KEY_ID");
+    const secretAccessKey = readEnvKey("AWS_SECRET_ACCESS_KEY");
+    if (accessKeyId && secretAccessKey) {
+      const credentials: Record<string, string> = { accessKeyId, secretAccessKey };
+      const sessionToken = readEnvKey("AWS_SESSION_TOKEN");
+      if (sessionToken) credentials["sessionToken"] = sessionToken;
+      modelOpts["credentials"] = credentials;
+    }
+  }
+
   try {
     const mod = await importVendorModule(vendor, cwd);
     switch (vendor) {
@@ -132,6 +166,11 @@ async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): 
         const ChatGoogleGenerativeAI = mod["ChatGoogleGenerativeAI"];
         if (!ChatGoogleGenerativeAI) throw new Error(`@langchain/google-genai: missing ChatGoogleGenerativeAI export`);
         return new ChatGoogleGenerativeAI(modelOpts) as unknown as ChatModelLike;
+      }
+      case "bedrock": {
+        const ChatBedrockConverse = mod["ChatBedrockConverse"];
+        if (!ChatBedrockConverse) throw new Error(`@langchain/aws: missing ChatBedrockConverse export`);
+        return new ChatBedrockConverse(modelOpts) as unknown as ChatModelLike;
       }
       default: {
         const _exhaustive: never = vendor;
@@ -176,6 +215,7 @@ export async function createLangChainProviderFromConfig(
       options: cfg.options,
       baseUrl: cfg.baseUrl,
       apiKeyEnv: cfg.apiKeyEnv,
+      region: "region" in cfg ? cfg.region : undefined,
     },
     cwd,
   );

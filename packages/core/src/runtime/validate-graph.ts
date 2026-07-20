@@ -4,7 +4,9 @@
 
 import type { GraphSpec, Diagnostic } from "@veloxdevworks/flowgraph-spec";
 import { registry } from "../registry.js";
+import { isOutputNone, OUTPUTS_CHANNEL } from "./apply-output.js";
 import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
+import { ONCE_CHANNEL } from "./state-annotation.js";
 
 function outgoingTargets(spec: GraphSpec, from: string): string[] {
   const targets: string[] = [];
@@ -149,24 +151,44 @@ export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
-/** Extract channel names targeted by an `output` / `collect` mapping. */
+/** Extract channel names targeted by an `output` / `collect` mapping (`to` + `map` keys). */
 export function channelsFromOutputMapping(mapping: unknown): string[] {
-  if (mapping == null || typeof mapping !== "object") return [];
+  if (mapping == null || isOutputNone(mapping)) return [];
+  if (typeof mapping !== "object" || Array.isArray(mapping)) return [];
   const m = mapping as Record<string, unknown>;
-  if (typeof m["to"] === "string" && m["to"].trim()) return [m["to"].trim()];
+  const names: string[] = [];
+  if (typeof m["to"] === "string" && m["to"].trim()) names.push(m["to"].trim());
   if (m["map"] != null && typeof m["map"] === "object" && !Array.isArray(m["map"])) {
-    return Object.keys(m["map"] as Record<string, unknown>).filter((k) => k.trim());
+    names.push(...Object.keys(m["map"] as Record<string, unknown>).filter((k) => k.trim()));
   }
-  return [];
+  return names;
 }
 
-/** All state channel names written by a node's output/collect/stateMap.out. */
+function hasExplicitProjection(mapping: unknown): boolean {
+  if (mapping == null || typeof mapping !== "object" || Array.isArray(mapping)) return false;
+  const m = mapping as Record<string, unknown>;
+  return (
+    (typeof m["to"] === "string" && !!m["to"].trim()) ||
+    (m["map"] != null && typeof m["map"] === "object" && !Array.isArray(m["map"]))
+  );
+}
+
+/**
+ * All state channel names written by a node's output/collect/stateMap.out,
+ * including the reserved `outputs` channel for the default per-node slug
+ * (unless opted out via `none`, or subgraph transparent state-merge when
+ * output is omitted).
+ */
 export function collectNodeWriteChannels(node: GraphSpec["nodes"][number]): string[] {
   const withBlock = (node.with ?? {}) as Record<string, unknown>;
-  const names = new Set<string>(channelsFromOutputMapping(withBlock["output"]));
+  const output = withBlock["output"];
+  const names = new Set<string>(channelsFromOutputMapping(output));
 
   if (node.type === "map") {
-    for (const c of channelsFromOutputMapping(withBlock["collect"])) names.add(c);
+    const collect = withBlock["collect"];
+    for (const c of channelsFromOutputMapping(collect)) names.add(c);
+    if (!isOutputNone(collect)) names.add(OUTPUTS_CHANNEL);
+    return [...names];
   }
 
   if (node.type === "subgraph") {
@@ -177,17 +199,36 @@ export function collectNodeWriteChannels(node: GraphSpec["nodes"][number]): stri
         for (const channel of Object.values(out as Record<string, unknown>)) {
           if (typeof channel === "string" && channel.trim()) names.add(channel.trim());
         }
+        // stateMap.out replaces the default merge/slug path
+        return [...names];
       }
     }
+    if (isOutputNone(output)) return [...names];
+    // Explicit to/map: outputs slug + projections. Omitted output: child-state merge
+    // (unknown channel set — do not auto-declare the outputs channel for merge).
+    if (hasExplicitProjection(output)) names.add(OUTPUTS_CHANNEL);
+    return [...names];
   }
+
+  // Ordinary nodes: always write state.outputs.<nodeId> unless output: none.
+  if (!isOutputNone(output)) names.add(OUTPUTS_CHANNEL);
 
   return [...names];
 }
 
+/** Channel def used when auto-declaring the reserved per-node outputs bag. */
+export const OUTPUTS_CHANNEL_DEF = {
+  type: "object" as const,
+  reducer: "mergeDeep" as const,
+  default: {},
+  description: "Per-node results keyed by node id (auto-written when output is omitted).",
+};
+
 /**
  * Ensure every channel written by nodes exists under `state.channels`.
  * Missing names are added as `{ type: "any" }` so LangGraph does not silently
- * drop updates. Returns the same spec instance when nothing changes.
+ * drop updates. The reserved `outputs` channel is declared with mergeDeep.
+ * Returns the same spec instance when nothing changes.
  */
 export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {
   const existing = { ...(spec.state?.channels ?? {}) };
@@ -196,7 +237,7 @@ export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {
   for (const node of spec.nodes) {
     for (const name of collectNodeWriteChannels(node)) {
       if (name in existing) continue;
-      existing[name] = { type: "any" };
+      existing[name] = name === OUTPUTS_CHANNEL ? { ...OUTPUTS_CHANNEL_DEF } : { type: "any" };
       changed = true;
     }
   }
@@ -222,6 +263,8 @@ export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[
 
   const pushIfUndeclared = (nodeId: string, channel: string, path: string) => {
     if (declared.has(channel)) return;
+    // Reserved per-node bag — always auto-declared by ensureDeclaredOutputChannels.
+    if (channel === OUTPUTS_CHANNEL) return;
     diagnostics.push({
       severity: "error",
       code: "UNDECLARED_OUTPUT_CHANNEL",
@@ -264,6 +307,47 @@ export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[
  * Parallel fan-out is valid, but often the author meant exclusive branching
  * (set `when` / `default` on a `branch` edge, or use a `router` node).
  */
+/**
+ * Channel names that become LangGraph state attributes at compile time —
+ * declared channels, auto-declared output targets, and reserved channels.
+ */
+export function channelNamesForCollisionCheck(spec: GraphSpec): Set<string> {
+  const names = new Set(Object.keys(spec.state?.channels ?? {}));
+  for (const node of spec.nodes) {
+    for (const channel of collectNodeWriteChannels(node)) names.add(channel);
+  }
+  names.add(ONCE_CHANNEL);
+  // buildStateAnnotation adds a placeholder `result` channel when the
+  // annotation would otherwise be empty (aside from __once).
+  const userChannels = [...names].filter((n) => n !== ONCE_CHANNEL);
+  if (userChannels.length === 0) names.add("result");
+  return names;
+}
+
+/**
+ * LangGraph forbids using the same string as both a state channel and a node
+ * id ("X is already being used as a state attribute…"). Catch this offline.
+ */
+export function nodeChannelNameCollisionDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const channels = channelNamesForCollisionCheck(spec);
+
+  for (const node of spec.nodes) {
+    if (!channels.has(node.id)) continue;
+    diagnostics.push({
+      severity: "error",
+      code: "NODE_CHANNEL_NAME_COLLISION",
+      message:
+        `Node id "${node.id}" conflicts with state channel "${node.id}" — ` +
+        `LangGraph cannot use the same name for a node and a state attribute. ` +
+        `Rename the node (e.g. "${node.id}-node") or the channel.`,
+      path: `nodes.${node.id}`,
+    });
+  }
+
+  return diagnostics;
+}
+
 export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const routerIds = new Set(spec.nodes.filter((n) => n.type === "router").map((n) => n.id));
@@ -303,12 +387,47 @@ export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
+/**
+ * Subgraph nodes must identify the child via exactly one of `uses` (path/alias)
+ * or `spec` (inline GraphSpec from bundling).
+ */
+export function subgraphRefDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const node of spec.nodes) {
+    if (node.type !== "subgraph") continue;
+    const hasUses = typeof node.uses === "string" && node.uses.trim().length > 0;
+    const hasSpec =
+      node.spec != null && typeof node.spec === "object" && Array.isArray(node.spec.nodes);
+    if (hasUses && hasSpec) {
+      diagnostics.push({
+        severity: "error",
+        code: "SUBGRAPH_REF_CONFLICT",
+        message:
+          `Node "${node.id}" sets both "uses" and "spec" — ` +
+          `provide exactly one (path/alias via uses, or an inline GraphSpec via spec)`,
+        path: `nodes.${node.id}`,
+      });
+    } else if (!hasUses && !hasSpec) {
+      diagnostics.push({
+        severity: "error",
+        code: "SUBGRAPH_REF_MISSING",
+        message:
+          `Node "${node.id}" (type subgraph) requires "uses" (path or alias) or "spec" (inline GraphSpec)`,
+        path: `nodes.${node.id}`,
+      });
+    }
+  }
+  return diagnostics;
+}
+
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   return [
     ...reachabilityDiagnostics(spec),
     ...channelReducerDiagnostics(spec),
     ...undeclaredOutputChannelDiagnostics(spec),
+    ...nodeChannelNameCollisionDiagnostics(spec),
     ...fanInLastWriteDiagnostics(spec),
     ...unconditionalFanOutDiagnostics(spec),
+    ...subgraphRefDiagnostics(spec),
   ];
 }

@@ -6,10 +6,10 @@
 
 import { z } from "zod";
 import { SkillWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { loadResolvedSkill, runSkill } from "./skill-runner.js";
+import { applyOutput } from "./output.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const configSchema: any = SkillWithSchema;
@@ -38,20 +38,13 @@ export const skillNode = defineNode<Config>({
         const nodeInput = (runCtx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {};
         const result = await runSkill(skill, nodeInput, runCtx);
 
-        // Apply output mapping
         const scope = { state, input: nodeInput, config: runCtx.config, run: runCtx.meta };
-        if (!config.output) return { update: {} };
-        if ("to" in config.output) {
-          return { update: { [config.output.to]: result } };
-        }
-        if ("map" in config.output) {
-          const update: Record<string, unknown> = {};
-          for (const [channel, expr] of Object.entries(config.output.map)) {
-            update[channel] = renderDeep(expr, { result, ...scope });
-          }
-          return { update };
-        }
-        return { update: {} };
+        return {
+          update: applyOutput(config.output, result, {
+            nodeId: String(nodeSpec["id"] ?? runCtx.nodeId),
+            scope,
+          }),
+        };
       },
     };
   },

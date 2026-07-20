@@ -62,7 +62,7 @@ flowgraph run ./triage.graph.yaml \
 
 | Flag | Description |
 |------|-------------|
-| `--input <key=val>` | Initial channel values. `@file.json` loads JSON; bare strings are parsed as JSON when valid. |
+| `--input <key=val>` | Initial channel values. `@file.json` loads JSON; bare strings are parsed as JSON when valid. When the graph declares an `inputs:` schema, values are coerced/validated against it (defaults applied; missing required keys fail fast). |
 | `--thread <id>` | Checkpoint/resume key (required for durable HITL flows). |
 | `--stream` | Pretty-print live events to the terminal. |
 | `--json` | Emit events as JSONL on stdout (machine-readable). |
@@ -73,6 +73,7 @@ flowgraph run ./triage.graph.yaml \
 **Behavior (shipped):**
 
 - Loads, validates, and compiles the graph; exits `2` on load/validation errors.
+- If the graph declares `inputs:`, resolves defaults and validates `--input` (and any `input:` seed defaults) **before** the run starts. Missing required keys or type mismatches exit `1` with an aggregated error listing every issue — never an interactive prompt.
 - Checkpoint backend comes from `runtime.checkpoint` in the YAML (not a CLI flag).
 - Budget limits come from `runtime.budget` in the YAML (not `--max-usd`).
 - Skill preflight runs when a **skill node executes**, not upfront at run start.

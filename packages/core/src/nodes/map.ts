@@ -14,6 +14,7 @@ import { MapWithSchema } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
 import { registry, defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { applyOutput } from "./output.js";
 
 const configSchema = MapWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -84,28 +85,58 @@ export const mapNode = defineNode<Config>({
         };
 
         const results = await runPool(collection, config.concurrency, runItem);
+        const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
 
-        // Fan-in
-        if (config.collect && "to" in config.collect) {
-          return { update: { [config.collect.to]: results } };
-        }
-        if (config.collect && "map" in config.collect) {
-          const update: Record<string, unknown> = {};
+        // Fan-in via collect (same semantics as output: slug + optional to/map).
+        // For map projections, evaluate per collected item.
+        if (
+          config.collect != null &&
+          typeof config.collect === "object" &&
+          config.collect.map != null &&
+          !config.collect.none
+        ) {
+          const update = applyOutput(
+            { to: config.collect.to, none: config.collect.none },
+            results,
+            { nodeId, scope: baseScope },
+          );
           for (const [channel, expr] of Object.entries(config.collect.map)) {
+            if (!channel.trim()) continue;
             update[channel] = results.map((r) => renderDeep(expr, { result: r, item: r }));
           }
           return { update };
         }
-        return { update: { result: results } };
+
+        return {
+          update: applyOutput(config.collect, results, { nodeId, scope: baseScope }),
+        };
       },
     };
   },
 });
 
-/** Reduce a NodeResult to a single collectable value (unwrap single-key updates). */
+/**
+ * Reduce a NodeResult to a single collectable value.
+ * Prefers an explicit `to`/`map` channel over the reserved `outputs` slug.
+ */
 function unwrapUpdate(res: NodeResult): unknown {
   const update = "update" in res ? res.update : "command" in res ? (res.command.update ?? {}) : {};
   const keys = Object.keys(update);
+
+  const nonOutputs = keys.filter((k) => k !== "outputs");
+  if (nonOutputs.length === 1) return update[nonOutputs[0]!];
+  if (nonOutputs.length > 1) return update;
+
+  // Only the outputs slug (or empty): peel the single nested node value.
+  if (keys.length === 1 && keys[0] === "outputs") {
+    const nested = update["outputs"];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const nestedKeys = Object.keys(nested as Record<string, unknown>);
+      if (nestedKeys.length === 1) return (nested as Record<string, unknown>)[nestedKeys[0]!];
+    }
+    return nested;
+  }
+
   if (keys.length === 1) return update[keys[0]!];
   return update;
 }

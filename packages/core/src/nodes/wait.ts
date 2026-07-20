@@ -9,10 +9,11 @@
 
 import { z } from "zod";
 import { WaitWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { evalGuard, renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { evalGuard } from "@veloxdevworks/flowgraph-expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { parseDuration, sleep } from "../runtime/duration.js";
+import { applyOutput } from "./output.js";
 
 const configSchema = WaitWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -61,7 +62,9 @@ export const waitNode = defineNode<Config>({
           const result = normalizePayload(payload);
           validateSchema(result, schema, nodeId);
           ctx.emit("node.output", { wait: { mode: "webhook", result } });
-          return applyOutput(result, config, scope);
+          return {
+            update: applyOutput(config.output, result, { nodeId, scope }),
+          };
         }
 
         // Fixed delay
@@ -104,14 +107,14 @@ export const waitNode = defineNode<Config>({
             },
           });
           // Resume value (if any) is available; surface it as the node output
-          if (config.output) {
-            return applyOutput(
-              payload && typeof payload === "object" ? payload : { value: payload },
-              config,
+          const result =
+            payload && typeof payload === "object" ? payload : { value: payload };
+          return {
+            update: applyOutput(config.output, result, {
+              nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
               scope,
-            );
-          }
-          return { update: payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {} };
+            }),
+          };
         }
 
         return { update: {} };
@@ -149,26 +152,4 @@ function validateSchema(
       `wait node "${nodeId}": resume payload missing required field(s): ${missing.join(", ")}`,
     );
   }
-}
-
-function applyOutput(
-  result: unknown,
-  config: Config,
-  scope: Record<string, unknown>,
-): NodeResult {
-  if (!config.output) return { update: { result } };
-
-  if ("to" in config.output) {
-    return { update: { [config.output.to]: result } };
-  }
-
-  if ("map" in config.output) {
-    const update: Record<string, unknown> = {};
-    for (const [channel, expr] of Object.entries(config.output.map)) {
-      update[channel] = renderDeep(expr, { result, ...scope });
-    }
-    return { update };
-  }
-
-  return { update: { result } };
 }

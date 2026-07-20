@@ -20,6 +20,7 @@ import {
   type BaseMessage,
   type AIMessage,
 } from "@langchain/core/messages";
+import { DynamicStructuredTool } from "@langchain/core/tools";
 import type {
   ProviderAdapter,
   AgentRequest,
@@ -137,10 +138,10 @@ export function createLangChainProvider(
 function buildTool(
   spec: { name: string; description?: string; schema?: Record<string, unknown> },
   ctx: ProviderRunContext,
-): Record<string, unknown> {
-  // A DynamicStructuredTool-compatible plain object. LangChain models accept
-  // tool definitions with name/description/schema and a func.
-  return {
+): DynamicStructuredTool {
+  // DynamicStructuredTool is required for Bedrock Converse bindTools (plain
+  // { name, description, schema, func } objects are rejected by some vendors).
+  return new DynamicStructuredTool({
     name: spec.name,
     description: spec.description ?? `flowgraph tool: ${spec.name}`,
     schema: spec.schema ?? { type: "object", properties: {}, additionalProperties: true },
@@ -148,7 +149,7 @@ function buildTool(
       const result = await ctx.invokeTool(spec.name, args);
       return typeof result === "string" ? result : JSON.stringify(result);
     },
-  };
+  });
 }
 
 function accumulateUsage(usage: TokenUsage, ai: AIMessage): void {

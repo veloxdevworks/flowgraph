@@ -10,7 +10,7 @@ Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint 
 |------|--------|
 | YAML spec + Zod validation + JSON Schema | **Shipped** |
 | Compiler + runtime (`loadGraph` → `compileGraph` → `run`/`resume`) | **Shipped** |
-| Built-in node types (11) | **Shipped** |
+| Built-in node types (incl. `script`, `demo`, `service`, `port`) | **Shipped** |
 | Skills loader, contracts, preflight | **Shipped** |
 | Expression language (`@veloxdevworks/flowgraph-expr`) | **Shipped** |
 | Events + console/jsonl sinks | **Shipped** (nested subgraph events forward with `parentSpanId`) |
