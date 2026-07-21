@@ -22,6 +22,11 @@ packages via `link:` to a sibling checkout of this repo.
   repo). Run `pnpm build` here **before** running or building `flowgraph-app` /
   `flowgraph-desktop`: their `link:` consumers import from `packages/*/dist`, and
   the `flowgraph` CLI bin (`packages/cli/dist/bin.js`) only exists after a build.
+- After pull, prefer a root `pnpm build` (turbo already runs dependency builds via
+  `^build`). If you isolate a core DTS/`typecheck` against a leftover
+  `packages/spec/dist`, stale types can briefly reject new input field types
+  (e.g. `"json"`) even though runtime JS is fine — rebuild
+  `@veloxdevworks/flowgraph-spec` first, or just run the root build.
 - Standard commands live in `CONTRIBUTING.md` and `package.json`
   (`pnpm build`, `pnpm test`, `pnpm typecheck`).
 
