@@ -42,7 +42,7 @@ The same declarative artifact runs **headless in CI**, from a **CLI on a desktop
 - **No GUI / visual editor.** Explicitly out of scope here. This repo produces the standalone engine + CLI the GUI will consume. (See [Architecture §"GUI boundary"](./01-architecture.md#9-the-gui-boundary).)
 - **No new graph runtime.** We wrap LangGraph.js; we do not fork or reimplement scheduling, channels, or the pregel loop.
 - **No model hosting / inference.** We adapt to existing SDKs/providers; we do not serve models.
-- **No proprietary cloud control plane** (in this repo). Hosted/multi-tenant features, if ever built, live elsewhere and consume this library.
+- **No proprietary cloud control-plane server** (in this repo). Hosted/multi-tenant control plane lives in Velox Platform. An optional, config-gated **outbound control-plane client** in `flowgraph-server` may dial that plane (ADR-0014); business logic (authz, library, fanout) stays out of this repository.
 - **Not a general DAG/ETL scheduler.** flowgraph targets agentic + automation graphs; it is not Airflow/Temporal (though it can call into such systems via nodes).
 
 ## 6. Design principles
