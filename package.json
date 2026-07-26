@@ -6,8 +6,8 @@
   "license": "Apache-2.0",
   "packageManager": "pnpm@11.0.9",
   "engines": {
-    "node": ">=20",
-    "pnpm": ">=9"
+    "node": ">=22.13",
+    "pnpm": ">=11"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
