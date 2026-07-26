@@ -50,7 +50,7 @@ describe("http node", () => {
   });
 
   it("emits node.output with request and response, redacting Authorization", async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "content-type": "application/json", "x-from": "mock" },

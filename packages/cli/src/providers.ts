@@ -53,7 +53,12 @@ async function loadCursorFactory() {
 async function tryCliFallback(
   name: string,
   kind: string,
-  cfg: { vendor?: string; model?: string; cwd?: string; binary?: string },
+  cfg: {
+    vendor?: string | undefined;
+    model?: string | undefined;
+    cwd?: string | undefined;
+    binary?: string | undefined;
+  },
   cwd: string,
 ): Promise<ProviderAdapter | undefined> {
   const cliVendor = cliVendorForProviderKind(kind, cfg.vendor);

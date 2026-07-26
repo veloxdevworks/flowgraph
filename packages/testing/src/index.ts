@@ -20,7 +20,7 @@ export interface TestRunOptions {
 }
 
 export interface TestRunResult {
-  status: "completed" | "interrupted" | "error";
+  status: "completed" | "interrupted" | "paused" | "error";
   state: Record<string, unknown>;
   events: FlowgraphEvent[];
   interrupts?: InterruptInfo[] | undefined;

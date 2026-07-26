@@ -474,7 +474,8 @@ program
         if (result.status === "error") process.exit(1);
         if (result.status !== "completed") process.exit(3);
       } else if (result.status !== "completed") {
-        process.exit(result.status === "interrupted" ? 3 : 1);
+        // remaining: error | paused (interrupted handled above)
+        process.exit(result.status === "paused" ? 3 : 1);
       }
     } finally {
       await closeMcpHub(mcpOpt.mcp);
