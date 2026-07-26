@@ -42,14 +42,16 @@ describe("findFreePorts", () => {
   it("honors a free preferred port", async () => {
     // Grab an ephemeral port, release it, then prefer it (best-effort).
     const [probe] = await findFreePorts();
-    const ports = await findFreePorts({ preferred: probe });
+    expect(probe).toBeDefined();
+    const ports = await findFreePorts({ preferred: probe! });
     expect(ports[0]).toBe(probe);
   });
 
   it("falls back when preferred is taken", async () => {
     const [preferred] = await findFreePorts();
+    expect(preferred).toBeDefined();
     await occupy(preferred!);
-    const ports = await findFreePorts({ preferred });
+    const ports = await findFreePorts({ preferred: preferred! });
     expect(ports).toHaveLength(1);
     expect(ports[0]).not.toBe(preferred);
     expect(ports[0]).toBeGreaterThan(0);

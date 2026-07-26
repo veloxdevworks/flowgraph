@@ -50,7 +50,7 @@ describe("pause / continueRun", () => {
   it("pauses after the in-flight node and continues the rest without re-running completed nodes", async () => {
     const events: FlowgraphEvent[] = [];
     const compiled = await compileGraph(threeStepSpec(), {
-      sinks: [(ev) => events.push(ev)],
+      sinks: [(ev) => { events.push(ev); }],
     });
 
     const pause = new AbortController();
