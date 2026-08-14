@@ -2,10 +2,14 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as url from "node:url";
 import yaml from "yaml";
 import { compileGraph } from "./compiler.js";
+import { loadGraph } from "./loader.js";
 import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+
+const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 let fixtureDir = "";
 
@@ -180,5 +184,26 @@ describe("nested subgraph events", () => {
     const parentStarts = seen.filter((e) => e.type === "node.start" && e.nodeId === "embed");
     expect(parentStarts.length).toBeGreaterThanOrEqual(1);
     expect(parentStarts.every((e) => e.parentSpanId === undefined)).toBe(true);
+  });
+});
+
+describe("subgraph file-relative imports", () => {
+  it("resolves ../register.ts from a subgraph in a subfolder against the child file", async () => {
+    // software-factory layout: parent/register.ts, parent/subgraphs/child.graph.yaml
+    // with `{ reducers: ../register.ts }`. Parent-relative resolution would load
+    // the decoy at fixtures/register.ts instead.
+    const parentDir = path.join(__dirname, "runtime/fixtures/nested-subgraph-imports");
+    const loaded = await loadGraph("parent.graph.yaml", { cwd: parentDir });
+    expect(loaded.spec).not.toBeNull();
+
+    const compiled = await compileGraph(loaded.spec!, {
+      cwd: parentDir,
+      graphPath: loaded.resolvedPath,
+      checkpointer: "none",
+    });
+    const result = await compiled.run({ threadId: "nested-import-1" });
+
+    expect(result.status).toBe("completed");
+    expect(result.state["result"]).toEqual({ source: "graph-dir-register" });
   });
 });

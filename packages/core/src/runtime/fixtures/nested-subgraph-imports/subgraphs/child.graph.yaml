@@ -1,0 +1,20 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: quality-gates
+imports:
+  - { reducers: ../register.ts }
+state:
+  channels:
+    result: { type: object }
+nodes:
+  - id: run-checks
+    type: function
+    with:
+      fn: fromNestedSubgraphImport
+      output: { to: result }
+edges:
+  - { from: START, to: run-checks }
+  - { from: run-checks, to: END }
+runtime:
+  checkpoint: { enabled: false }

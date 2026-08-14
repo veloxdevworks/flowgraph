@@ -148,7 +148,7 @@ imports:
 - `nodes:` — load a plugin package that registers custom node `type`s into the registry.
 - `reducers:` — load a module that registers custom state reducers (`custom:<name>`). The module may call `registry.registerReducer` on load, or `export default` a record of `{ [name]: (cur, inc) => next }` (or an array of `{ name, reducer }`).
 
-Resolution order for path/package specifiers: relative path → workspace alias → node module. See [04 — Skills](./04-skills.md) for skill resolution details and [16 — Agents](./16-agents.md) for agent definitions.
+Resolution order for path/package specifiers: relative path → workspace alias → node module. Relative `imports` paths (`./`, `../`) resolve against the directory of the YAML file that contains them — including subgraph files — not the parent graph or process cwd. See [04 — Skills](./04-skills.md) for skill resolution details and [16 — Agents](./16-agents.md) for agent definitions.
 
 ## 4. `state`
 

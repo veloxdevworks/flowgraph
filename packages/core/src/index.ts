@@ -7,6 +7,7 @@ export {
   envExpansionCollisionDiagnostics,
   NODE_BODY_ENV_EXPANSION,
 } from "./loader.js";
+export type { LoadGraphResult } from "./loader.js";
 export { loadGraphImports } from "./runtime/load-imports.js";
 export type { LoadGraphImportsOptions, LoadGraphImportsResult } from "./runtime/load-imports.js";
 export {

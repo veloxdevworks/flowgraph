@@ -13,6 +13,7 @@ import { registry, type NodeFactory, type ReducerFn } from "../registry.js";
 import { registerProvider, type ProviderAdapter } from "../providers/index.js";
 
 export interface LoadGraphImportsOptions {
+  /** Directory of the graph YAML that declared `imports` (file-relative resolution). */
   cwd?: string;
 }
 

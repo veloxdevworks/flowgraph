@@ -19,10 +19,17 @@ export {
   NODE_BODY_ENV_EXPANSION,
 } from "./runtime/env-expansion-lint.js";
 
+export interface LoadGraphResult {
+  spec: GraphSpec | null;
+  diagnostics: Diagnostic[];
+  /** Absolute path of the YAML that was (or would be) read. */
+  resolvedPath: string;
+}
+
 export async function loadGraph(
   filePath: string,
   opts: { cwd?: string } = {},
-): Promise<{ spec: GraphSpec | null; diagnostics: Diagnostic[] }> {
+): Promise<LoadGraphResult> {
   const cwd = opts.cwd ?? process.cwd();
   const resolved = path.resolve(cwd, filePath);
 
@@ -33,6 +40,7 @@ export async function loadGraph(
     return {
       spec: null,
       diagnostics: [{ severity: "error", code: "FILE_NOT_FOUND", message: `Cannot read: ${resolved}` }],
+      resolvedPath: resolved,
     };
   }
 
@@ -51,6 +59,7 @@ export async function loadGraph(
         { severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` },
         ...envCollisionDiags,
       ],
+      resolvedPath: resolved,
     };
   }
 
@@ -70,10 +79,11 @@ export async function loadGraph(
         })),
         ...envCollisionDiags,
       ],
+      resolvedPath: resolved,
     };
   }
 
-  return { spec: result.data, diagnostics: envCollisionDiags };
+  return { spec: result.data, diagnostics: envCollisionDiags, resolvedPath: resolved };
 }
 
 function expandEnvVars(yaml: string): string {

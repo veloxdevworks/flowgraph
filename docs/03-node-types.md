@@ -524,6 +524,8 @@ Provide **exactly one** of:
 - `uses:` — path or `imports[].subgraph` alias (resolved from the graph's working directory at run time)
 - `spec:` — an inline child `GraphSpec` (produced by `bundleGraphForRemote` for remote portability; the engine compiles it via `compileGraphForEmbedding` without reading the filesystem)
 
+When the child is loaded from a file, that child's own `imports` (reducers, nodes, providers) and nested `uses` paths resolve against the **child file's directory**. A subgraph at `subgraphs/quality-gates.graph.yaml` that writes `{ reducers: ../register.ts }` therefore loads `register.ts` next to the parent graph, not one directory above the parent.
+
 The child graph runs with its own channels; `stateMap` projects parent state in and child state out. Child events are nested under the parent's span. The parent must use checkpointing (`runtime.checkpoint`) for nested HITL inside the child to pause and resume correctly — the child inherits the parent's LangGraph checkpointer.
 
 On resume, the parent `subgraph` node re-executes from the top (recomputing `stateMap.in`). Side effects reached before a nested interrupt should use `ctx.once()` so they do not re-fire on replay (same pattern as top-level HITL nodes).
