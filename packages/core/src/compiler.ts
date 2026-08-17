@@ -739,17 +739,32 @@ function buildInvokeConfig(threadId: string, spec: GraphSpec): Record<string, un
 }
 
 function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpointSaver | undefined {
-  // Explicit object instance wins
+  // 1. Injected saver instance wins (CLI sqlite, programmatic Postgres, tests).
   if (opts.checkpointer && typeof opts.checkpointer === "object") {
     return opts.checkpointer;
   }
-  const enabled = spec.runtime?.checkpoint?.enabled !== false;
-  if (!enabled) return undefined;
+  // 2. enabled: false → no saver
+  if (spec.runtime?.checkpoint?.enabled === false) return undefined;
+  // 3. Embedding / explicit opt-out. Do not inspect YAML backend — subgraph
+  //    children inherit the parent's checkpointer; compileGraphForEmbedding
+  //    always passes "none" even when the child YAML says sqlite|postgres.
   if (opts.checkpointer === "none") return undefined;
+  // Explicit in-memory request (CompileOptions string). Same as injecting MemorySaver.
+  if (opts.checkpointer === "memory") return new MemorySaver();
 
-  const backend = spec.runtime?.checkpoint?.backend ?? (opts.checkpointer as string) ?? "memory";
-  if (backend === "memory") return new MemorySaver();
-  // sqlite/postgres are provided by external packages and passed as instances.
+  const backend = spec.runtime?.checkpoint?.backend ?? (opts.checkpointer as string | undefined) ?? "memory";
+  // 4. Durable backends require a real saver. Silent MemorySaver made
+  //    programmatic resume fail after process restart.
+  if (backend === "sqlite" || backend === "postgres") {
+    throw new Error(
+      `Durable checkpoint backend "${backend}" requires an injected checkpointer instance. ` +
+        `Pass a BaseCheckpointSaver to compileGraph({ checkpointer }). ` +
+        `The CLI injects SQLite when the graph requests it; programmatic callers should use ` +
+        `@veloxdevworks/flowgraph-checkpoint-${backend}. ` +
+        `To compile without a saver (e.g. subgraph embedding), pass checkpointer: "none".`,
+    );
+  }
+  // 5. memory / missing / unknown backend stays in-memory
   return new MemorySaver();
 }
 

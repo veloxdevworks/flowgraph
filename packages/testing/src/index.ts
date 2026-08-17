@@ -3,6 +3,7 @@
  */
 
 import * as path from "node:path";
+import { MemorySaver } from "@langchain/langgraph";
 import { loadGraph, validateSpec, compileGraph, loadGraphImports } from "@veloxdevworks/flowgraph-core";
 import type { FlowgraphEvent, CompiledGraph, CompileOptions, InterruptInfo, InterruptPolicy } from "@veloxdevworks/flowgraph-core";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
@@ -39,7 +40,8 @@ export async function compileForTest(
 ): Promise<{ compiled: CompiledGraph; events: FlowgraphEvent[] }> {
   const events: FlowgraphEvent[] = [];
   const compiled = await compileGraph(spec, {
-    checkpointer: "memory",
+    // Instance wins over YAML sqlite|postgres so example graphs stay testable.
+    checkpointer: new MemorySaver(),
     store: opts.store ?? "memory",
     sinks: [(ev) => { events.push(ev); }],
   });
@@ -57,7 +59,7 @@ export async function runInMemory(
   const collectedEvents: FlowgraphEvent[] = [];
 
   const compiled = await compileGraph(spec, {
-    checkpointer: "memory",
+    checkpointer: new MemorySaver(),
     store: opts.store ?? "memory",
     sinks: [(ev) => { collectedEvents.push(ev); }],
   });
