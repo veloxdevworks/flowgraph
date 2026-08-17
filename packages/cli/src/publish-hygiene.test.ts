@@ -13,6 +13,7 @@ describe("publish hygiene", () => {
       encoding: "utf8",
     });
     expect(out).toContain("publish hygiene ok");
-    expect(out).not.toContain("workspace:*");
+    expect(out).toMatch(/flowgraph-core: \d+ files, no workspace:\*/);
+    expect(out).toMatch(/flowgraph-cli: \d+ files, no workspace:\*/);
   });
 });
