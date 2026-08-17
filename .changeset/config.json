@@ -7,5 +7,20 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": []
+  "ignore": [
+    "@veloxdevworks/flowgraph-server",
+    "quickstart-example",
+    "triage-issue-example",
+    "release-notes-example",
+    "hitl-example",
+    "review-loop-example",
+    "software-factory-example",
+    "composition-example",
+    "reducers-example",
+    "skill-pack-example",
+    "fs-agent-example",
+    "claude-agent-example",
+    "cursor-agent-example",
+    "self-improve-automation"
+  ]
 }
