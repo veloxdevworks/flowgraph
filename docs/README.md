@@ -103,7 +103,7 @@ edges:
   - { from: file-feature, to: END }
 ```
 
-> Note: code samples in these docs describe the **target design**. The monorepo implements the compiler, runtime, CLI, and examples under `packages/` and `examples/`; see the [Roadmap](./10-roadmap.md) for remaining gaps.
+> Note: numbered design docs mix target and shipped behavior. Trust `packages/` and [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) over aspirational samples. The hosted docs site will lag until the private companion syncs.
 
 ---
 

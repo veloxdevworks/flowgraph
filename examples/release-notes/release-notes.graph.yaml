@@ -6,6 +6,9 @@
 apiVersion: flowgraph/v1
 kind: Graph
 
+imports:
+  - { reducers: ./register.ts }
+
 metadata:
   name: release-notes
   description: Draft release notes, pause for human approval, then publish.

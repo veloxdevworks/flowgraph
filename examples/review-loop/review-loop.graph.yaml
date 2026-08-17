@@ -7,6 +7,9 @@ metadata:
     Draft content, pause for human review, revise and loop back on rejection until
     approved — demonstrates conditional branching and cyclic control flow.
 
+imports:
+  - { reducers: ./register.ts }
+
 state:
   channels:
     topic: { type: string, default: "Product launch announcement" }

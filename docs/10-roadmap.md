@@ -28,7 +28,7 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 - CI: install, build, typecheck, test, lint on PR.
 - `LICENSE` (Apache-2.0, [ADR-0008](./adr/0008-license.md)), root `README`, `CONTRIBUTING`, `CODE_OF_CONDUCT`.
 
-**Exit:** `pnpm build && pnpm test` green; `npx flowgraph --help` prints (stub). ✓
+**Exit:** `pnpm build && pnpm test` green; `npx @veloxdevworks/flowgraph-cli --help` prints (stub). ✓
 
 ## Phase 1 — Spec + Compiler core (deterministic only)  · L ✓
 

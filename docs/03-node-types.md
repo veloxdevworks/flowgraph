@@ -819,7 +819,7 @@ Need to log in, click through a flow, or record a mobile simulator? Do that in a
 | `router` | Choose next node(s) | routing | core |
 | `http` | Outbound HTTP | side-effecting | core |
 | `demo` | Best-effort artifact capture (HTTP transcript / screenshot / file) | side-effecting | core (+ optional `playwright` for screenshot) |
-| `mcp` | MCP tool/resource call | side-effecting | core (+ `@veloxdevworks/flowgraph-mcp` at runtime) |
+| `mcp` | MCP tool/resource call | side-effecting | core interface + companion `@veloxdevworks/flowgraph-mcp` (**not published** with 0.1) |
 | `webhook` | Outbound HTTP notify | side-effecting | core |
 | `shell` | Run a local command / shell string | side-effecting | core |
 | `service` | Start/stop long-running background processes | side-effecting | core |

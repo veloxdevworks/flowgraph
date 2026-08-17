@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "flowgraph run review-loop.graph.yaml --stream --on-interrupt fail --thread review-loop",
+    "start": "flowgraph run review-loop.graph.yaml --stream --on-interrupt fail --thread review-loop --input 'topic=Product launch announcement'",
     "test": "vitest run",
     "validate": "flowgraph validate review-loop.graph.yaml"
   },

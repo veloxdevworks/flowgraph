@@ -4,17 +4,16 @@ This doc covers what happens when a compiled graph runs: compilation handoff, ch
 
 ## 1. From compiled graph to run
 
-`compileGraph()` returns a `CompiledGraph` (a LangGraph `StateGraph.compile()` result plus flowgraph metadata). `runGraph()` executes it:
+`compileGraph()` returns a `CompiledGraph`. Execute it with **`compiled.run`** (there is no `runGraph` helper):
 
 ```ts
-const result = await runGraph(compiled, {
+const result = await compiled.run({
   input: { issue },             // initial state (validated against channels)
   threadId: "issue-123",        // checkpoint/resume key; auto-generated if omitted
-  config: { /* per-run overrides */ },
   signal,                       // AbortSignal → run.aborted
   onInterrupt: "prompt",        // override env policy for this run
 });
-// result: { state, status: "completed" | "interrupted" | "error", interrupts?, usage, runId }
+// result: { state, status: "completed" | "interrupted" | "paused" | "error", interrupts?, runId, durationMs }
 ```
 
 Under the hood flowgraph calls LangGraph's `invoke`/`stream` with `{ configurable: { thread_id } }`, wraps each node in the middleware stack, and translates LangGraph stream chunks into flowgraph events.
@@ -23,9 +22,11 @@ Under the hood flowgraph calls LangGraph's `invoke`/`stream` with `{ configurabl
 
 | Mode | API | Use |
 |---|---|---|
-| **invoke** | `runGraph(...)` → final result | CI jobs, scripts: run to completion (or first interrupt) |
-| **stream** | `runGraph.stream(...)` → async iterable of events | live UIs, CLI TTY rendering, progress |
-| **step** | `runGraph.step(...)` | advance one superstep (debugging, time-travel) |
+| **invoke** | `compiled.run(...)` → final result | CI jobs, scripts: run to completion (or first interrupt) |
+| **stream** | `compiled.stream(...)` → async iterable of events | live UIs, CLI TTY rendering, progress |
+| **resume** | `compiled.resume({ threadId, resume })` | answer a HITL interrupt |
+| **continue** | `compiled.continueRun({ threadId })` | continue a paused/checkpointed thread (not HITL) |
+| **step** | *planned* (`CompiledGraph.step`) | advance one superstep (debugging, time-travel) |
 
 All three share the same compiled graph and emit the same events.
 
@@ -51,18 +52,19 @@ runtime:
     namespace: "{{ metadata.name }}"     # default
 ```
 
-The adapter interface wraps LangGraph's `BaseCheckpointSaver` (`put`, `putWrites`, `getTuple`, `list`) so any LangGraph checkpointer is usable, and ours add lifecycle events (`checkpoint.write/load`) and the `checkpoint:beforeWrite` hook (for redaction/transform).
+Pass a LangGraph `BaseCheckpointSaver` instance into `compileGraph({ checkpointer })`. YAML `backend: sqlite|postgres` **does not** construct a saver — compile **throws** unless an instance is injected (the CLI injects SQLite) or you pass `checkpointer: "none"` (subgraph embedding). `checkpoint.write` / `checkpoint.load` are reserved `EventType`s and are **not emitted** today. The `checkpoint:beforeWrite` hook exists for redaction/transform.
 
 ### Time travel & inspection
 
 Because every superstep is checkpointed, the runtime exposes:
 
 ```ts
-const history = await getStateHistory(compiled, { threadId });   // list of StateSnapshots
-await resumeFrom(compiled, { threadId, checkpointId });          // fork/replay from a point
+const history = await compiled.getStateHistory(threadId);   // list of StateSnapshots
+const snap = await compiled.getState(threadId);
+// resumeFrom(checkpointId) is planned — not shipped
 ```
 
-This powers `flowgraph run --resume`, debugging, and "what if I re-run from here" flows.
+CLI resume is `flowgraph resume --thread <id>`, which calls `compiled.resume`.
 
 ## 4. Retries, timeouts, idempotency
 
@@ -171,7 +173,7 @@ The same flow is available via the programmatic API: `compiled.getState(threadId
 
 ## 7. Abortion & cancellation
 
-`runGraph({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written (so the run is resumable), and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this.
+`compiled.run({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written when a saver is attached, and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this. `pauseSignal` yields `status: "paused"` so `continueRun` can pick up the thread.
 
 ## 8. Secrets & redaction
 
@@ -191,21 +193,22 @@ runtime:
 ## 9. Run lifecycle (sequence)
 
 ```
-runGraph()
-  ├─ emit run.start; open root OTel span
-  ├─ deep preflight (skills env; fail fast)         [skill.preflight]
-  ├─ load checkpoint if threadId exists             [checkpoint.load]
+compiled.run()
+  ├─ emit run.start
+  ├─ CLI: skill/agent preflight before compile      [skill.preflight when a skill runs]
+  ├─ LangGraph loads checkpoint if a saver + threadId exist
   ├─ for each superstep (LangGraph drives):
   │    ├─ for each active node:
-  │    │     hooks(node:before) → [retry/timeout]{ span: node.run } → hooks(node:after)
+  │    │     hooks(node:before) → [retry/timeout] → hooks(node:after)
   │    │     emit node.start / node.output / node.end (or node.error)
-  │    │     apply state update via reducers         [state.update]
-  │    │     write checkpoint                         [checkpoint.write]
-  │    ├─ evaluate edges/branches                     [edge.taken / router.decision]
+  │    │     apply state update via reducers
+  │    │     LangGraph writes a checkpoint when a saver is attached
+  │    ├─ evaluate edges/branches                     [router.decision when a router runs]
   │    └─ if interrupt raised → persist + surface     [interrupt.raised] → return interrupted
-  ├─ emit usage totals
-  └─ emit run.end (or run.error / run.aborted); close span
+  └─ emit run.end (or run.error / run.aborted / run.paused)
 ```
+
+Reserved event types that are **not emitted** today: `state.update`, `edge.taken`, `checkpoint.write`, `checkpoint.load`. Planned is fine; do not subscribe as if they fire. OTel spans are **not** opened by the CLI — attach `otelSink()` from `@veloxdevworks/flowgraph-observability-otel` yourself (`--otel` is unwired).
 
 ## 10. Failure semantics
 

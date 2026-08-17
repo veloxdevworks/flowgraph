@@ -65,31 +65,41 @@ See [triage-issue](../examples/triage-issue/run.js) for a complete runner script
 
 ## Resume after interrupt
 
-Requires a durable checkpointer configured in `runtime.checkpoint`:
+Requires a **injected** durable checkpointer. YAML `runtime.checkpoint.backend: sqlite|postgres` does **not** construct a saver — compile throws unless you pass an instance (or `checkpointer: "none"` for embedding).
 
 ```ts
+import { createSqliteCheckpointer } from "@veloxdevworks/flowgraph-checkpoint-sqlite";
+
 const compiled = await compileGraph(spec, {
   cwd,
-  checkpointer: "sqlite",  // or pass a BaseCheckpointSaver instance
-  // ...
+  checkpointer: createSqliteCheckpointer(".flowgraph/checkpoints.db"),
 });
 
 // First run — interrupts at HITL gate
 await compiled.run({ threadId: "rel-1", input: { version: "1.4.0" }, onInterrupt: "fail" });
 
-// Later — resume with operator decision
+// Later — resume with operator decision (HITL)
 await compiled.resume({
   threadId: "rel-1",
   resume: { approved: true, notes: "LGTM" },
 });
+
+// Continue a paused (non-HITL) thread from its next nodes
+await compiled.continueRun({ threadId: "rel-1" });
 ```
 
-See [release-notes](../examples/release-notes/register.ts) for `ctx.interrupt()` and `ctx.once()` patterns.
+There is no `runGraph` / `resumeFrom` helper. The public API is `compiled.run` / `.resume` / `.continueRun` / `.stream` (plus `getState` / `getStateHistory`).
+
+See [release-notes](../examples/release-notes/register.ts) for `ctx.interrupt()` and `ctx.once()` patterns. The example graph imports `./register.ts` so `flowgraph run` / `resume` work.
 
 ## Custom providers
 
+Core exports `mockProvider` but does **not** auto-register it (the CLI does). Pass it in, or define your own:
+
 ```ts
-import { compileGraph, defineProvider } from "@veloxdevworks/flowgraph-core";
+import { compileGraph, defineProvider, mockProvider } from "@veloxdevworks/flowgraph-core";
+
+await compileGraph(spec, { providers: [mockProvider] });
 
 const mock = defineProvider({
   name: "mock",
@@ -127,20 +137,20 @@ Hooks from the graph spec (`runtime.hooks`) are applied at compile time. Program
 
 ## MCP hub (programmatic)
 
-When not using the CLI, pass an MCP hub to `compileGraph`:
+When not using the CLI, pass an MCP hub to `compileGraph`. `@veloxdevworks/flowgraph-mcp` is a **companion package** — it is **not in this repo and not published** with 0.1. The CLI still has `flowgraph mcp …` commands that lazy-load it when present.
 
 ```ts
+// Companion — not published with 0.1
 import { McpHub } from "@veloxdevworks/flowgraph-mcp";
 
 const mcp = new McpHub({ cwd, servers: spec.mcpServers });
 await mcp.connectAll();
 
 const compiled = await compileGraph(spec, { mcp, cwd });
-// ...
 await mcp.close();
 ```
 
-The CLI handles this via `mcpHubForRun` — see [15 — MCP operations](./15-mcp-operations.md).
+See [15 — MCP operations](./15-mcp-operations.md).
 
 ## Testing with `@veloxdevworks/flowgraph-testing`
 
@@ -183,8 +193,10 @@ Examples using this pattern: [composition](../examples/composition/composition.t
 
 ## Planned API (not yet shipped)
 
-- `resumeFrom(checkpointId)` — time-travel resume from a specific checkpoint
+- `resumeFrom(checkpointId)` — time-travel resume from a specific checkpoint (do not call this today)
 - `CompiledGraph.step()` — superstep debugging
 - `flowgraph.config.ts` — project-level auto-registration
+
+`runGraph` / `runGraph.stream` / `runGraph.step` are **not** APIs — use the `CompiledGraph` methods above.
 
 See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).

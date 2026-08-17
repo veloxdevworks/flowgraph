@@ -1,28 +1,18 @@
 # 12 — Interactive TUI (`flowgraph tui`)
 
-The TUI is a keyboard-driven terminal interface for exploring graphs, running workflows live, answering human-in-the-loop (HITL) interrupts, and inspecting skills/MCP servers. It lives in `@veloxdevworks/flowgraph-tui` and is **optional** — the scriptable `flowgraph` CLI remains the stable surface for CI, automation, and a future GUI.
+The TUI is a keyboard-driven terminal interface for exploring graphs, running workflows live, answering human-in-the-loop (HITL) interrupts, and inspecting skills/MCP servers. It is designed as a **companion** package `@veloxdevworks/flowgraph-tui` — **not in this repository and not published** with the 0.1 npm set. The scriptable `flowgraph` CLI remains the stable surface for CI, automation, and a future GUI.
 
-## Launch
+## Launch (when the companion exists)
+
+`flowgraph tui` lazy-loads `@veloxdevworks/flowgraph-tui`. Until that package is published, the command exits with "TUI is not installed." Do **not** `pnpm add @veloxdevworks/flowgraph-tui` as if it ships from this repo.
 
 ```bash
-# From a project directory (discovers *.graph.yaml)
+# Intended usage once the companion is published:
 flowgraph tui
-
-# Open a specific graph in the explorer
 flowgraph tui ./triage.graph.yaml
-
-# Standalone binary (same package)
-npx @veloxdevworks/flowgraph-tui
-flowgraph-tui ./my.graph.yaml
 ```
 
 Requires an interactive terminal (TTY). In CI or piped shells, use `flowgraph run` instead.
-
-Install the TUI package if `flowgraph tui` reports it is missing:
-
-```bash
-pnpm add @veloxdevworks/flowgraph-tui
-```
 
 ## Architecture
 

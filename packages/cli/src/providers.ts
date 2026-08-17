@@ -14,6 +14,7 @@ import {
   cliVendorForProviderKind,
   apiKeyEnvForProviderKind,
   hasApiKey,
+  mockProvider,
   type CliVendor,
 } from "@veloxdevworks/flowgraph-core";
 import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
@@ -168,6 +169,12 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
       );
     }
     built.add(defaultName);
+  }
+
+  // CLI-only: register the built-in mock so `provider: mock` works without an
+  // imports module. Core does not auto-register it (desktop registers its own).
+  if (!built.has(mockProvider.name) && !providers.some((p) => p.name === mockProvider.name)) {
+    providers.push(mockProvider);
   }
 
   return providers;
