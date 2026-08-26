@@ -39,6 +39,7 @@ export interface BuildContext {
       id: string,
       args: Record<string, unknown>,
       ctx: NodeRunContext,
+      state?: Record<string, unknown>,
     ) => Promise<unknown>;
     /** Look up description/schema for a sibling node exposed as a tool. */
     resolveToolMeta?: (nodeId: string) => {

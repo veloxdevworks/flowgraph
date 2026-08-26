@@ -31,6 +31,16 @@ export function renderTemplate(template: string, scope: EvalScope, strict = fals
 }
 
 /**
+ * Coerce a `renderDeep` / `renderTemplate` result to a string for LLM prompts.
+ * Sole-expression templates return typed values; objects/arrays JSON-stringify
+ * the same way mixed templates do (instead of `String(obj)` → `[object Object]`).
+ */
+export function stringifyRendered(value: unknown): string {
+  if (typeof value === "string") return value;
+  return stringifyInterpolated(value);
+}
+
+/**
  * Render an interpolated value for a template that mixes `{{ expr }}` with
  * surrounding text. Plain `String(value)` turns objects/arrays into
  * "[object Object]" / lossy comma joins — serialize those as JSON instead so

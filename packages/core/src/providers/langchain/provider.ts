@@ -17,8 +17,8 @@ import {
   SystemMessage,
   HumanMessage,
   ToolMessage,
+  AIMessage,
   type BaseMessage,
-  type AIMessage,
 } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import type {
@@ -95,15 +95,24 @@ export function createLangChainProvider(
       const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
       const maxSteps = req.maxSteps ?? 10;
       let final: AIMessage | undefined;
+      let stopReason: AgentResult["stopReason"] = "done";
 
       for (let step = 0; step < maxSteps; step++) {
-        const ai = await bound.invoke(messages, { signal: ctx.signal });
+        const llmIndex = `llm:${step}`;
+        const cached = ctx.replay?.get(llmIndex);
+        const ai = cached instanceof AIMessage
+          ? cached
+          : await bound.invoke(messages, { signal: ctx.signal });
+        if (!(cached instanceof AIMessage)) ctx.replay?.set(llmIndex, ai);
         final = ai;
         messages.push(ai);
         accumulateUsage(usage, ai);
 
         const toolCalls = (ai.tool_calls ?? []) as Array<{ name: string; args: unknown; id?: string }>;
-        if (toolCalls.length === 0) break;
+        if (toolCalls.length === 0) {
+          stopReason = "done";
+          break;
+        }
 
         for (const call of toolCalls) {
           ctx.emit("tool.call", { tool: call.name, args: call.args });
@@ -117,6 +126,8 @@ export function createLangChainProvider(
             }),
           );
         }
+
+        if (step === maxSteps - 1) stopReason = "maxSteps";
       }
 
       usage.totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
@@ -128,7 +139,7 @@ export function createLangChainProvider(
         output = tryParseJson(content) ?? { text: content };
       }
 
-      return { output, steps, usage, stopReason: "done" };
+      return { output, steps, usage, stopReason };
     },
   };
 }

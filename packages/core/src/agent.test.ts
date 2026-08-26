@@ -224,3 +224,36 @@ describe("config.defaults provider/model", () => {
     expect(captured?.model).toBe("node-model");
   });
 });
+
+describe("agent prompt rendering", () => {
+  it("JSON-stringifies a sole-expression object prompt", async () => {
+    let captured: AgentRequest | undefined;
+    const capture = createScriptedProvider("capture", (req) => {
+      captured = req;
+      return { output: { ok: true }, stopReason: "done" };
+    });
+    const spec = {
+      metadata: { name: "sole-expr-prompt" },
+      state: { channels: { brief: { type: "object" }, answer: { type: "object" } } },
+      nodes: [
+        {
+          id: "agent",
+          type: "agent",
+          provider: "capture",
+          with: { prompt: "{{ state.brief }}", output: { to: "answer" } },
+        },
+      ],
+      edges: [
+        { from: "START", to: "agent" },
+        { from: "agent", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+
+    const compiled = await compileGraph(spec, { providers: [capture] });
+    const r = await compiled.run({ input: { brief: { topic: "widgets" } } });
+    expect(r.status).toBe("completed");
+    expect(captured?.prompt).toBe('{"topic":"widgets"}');
+    expect(captured?.prompt).not.toBe("[object Object]");
+  });
+});

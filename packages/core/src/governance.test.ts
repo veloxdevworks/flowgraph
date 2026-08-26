@@ -42,6 +42,25 @@ describe("tool call governance", () => {
     expect(interrupted).toBe(true);
   });
 
+  it("ask approves only on explicit approval", async () => {
+    const approve = fakeNodeCtx({ interrupt: <T = unknown>(): T => ({ approved: true }) as T });
+    await checkToolCall({ node: approve, state: {}, permission: "ask" }, "lookup", {});
+
+    const deny = fakeNodeCtx({ interrupt: <T = unknown>(): T => ({ approved: false }) as T });
+    await expect(
+      checkToolCall({ node: deny, state: {}, permission: "ask" }, "lookup", {}),
+    ).rejects.toThrow("denied by human reviewer");
+  });
+
+  it("ask fails closed on ambiguous resume values", async () => {
+    for (const resume of [{}, "yes", { ok: 1 }, null]) {
+      const node = fakeNodeCtx({ interrupt: <T = unknown>(): T => resume as T });
+      await expect(
+        checkToolCall({ node, state: {}, permission: "ask" }, "lookup", {}),
+      ).rejects.toThrow("denied by human reviewer");
+    }
+  });
+
   it("beforeToolCall veto blocks the call", async () => {
     const node = fakeNodeCtx();
     node.hooks!.register({

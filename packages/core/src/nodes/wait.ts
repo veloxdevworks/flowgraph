@@ -77,22 +77,23 @@ export const waitNode = defineNode<Config>({
           return { update: {} };
         }
 
-        // Conditional wait
+        // Conditional wait — re-evaluate after each resume so a later state
+        // write (or a retry) can satisfy the guard without a new graph.
         if (config.until) {
           const expr = config.until.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
-          const satisfied = evalGuard(expr, { state, config: ctx.config, run: ctx.meta });
-          if (satisfied) return { update: {} };
-          // Not satisfied — durably pause until external resume re-evaluates
-          ctx.interrupt({
-            reason: `Waiting for condition: ${config.until}`,
-            kind: "custom",
-            data: {
-              mode: "until",
-              until: config.until,
-              ...(config.timeout ? { timeout: config.timeout } : {}),
-            },
-          });
-          return { update: {} };
+          for (;;) {
+            const satisfied = evalGuard(expr, { state, config: ctx.config, run: ctx.meta });
+            if (satisfied) return { update: {} };
+            ctx.interrupt({
+              reason: `Waiting for condition: ${config.until}`,
+              kind: "custom",
+              data: {
+                mode: "until",
+                until: config.until,
+                ...(config.timeout ? { timeout: config.timeout } : {}),
+              },
+            });
+          }
         }
 
         // Named signal gate — durable interrupt

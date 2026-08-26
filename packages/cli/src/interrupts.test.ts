@@ -4,6 +4,7 @@ import {
   formatInterruptPrompt,
   parseInterruptAnswer,
   serializePendingInterrupts,
+  combineInterruptAnswers,
 } from "./interrupts.js";
 
 function info(partial: Partial<InterruptInfo> & { id: string }): InterruptInfo {
@@ -60,6 +61,32 @@ describe("parseInterruptAnswer", () => {
     const it = info({ id: "1", kind: "choice", choices: ["alpha", "beta"] });
     expect(parseInterruptAnswer(it, "2")).toEqual({ choice: "beta" });
     expect(parseInterruptAnswer(it, "alpha")).toEqual({ choice: "alpha" });
+  });
+});
+
+describe("combineInterruptAnswers", () => {
+  it("returns the single parsed value for one interrupt", () => {
+    expect(
+      combineInterruptAnswers(
+        [info({ id: "a", kind: "approval" })],
+        [{ approved: true }],
+      ),
+    ).toEqual({ approved: true });
+  });
+
+  it("returns an id-keyed map for multiple interrupts", () => {
+    expect(
+      combineInterruptAnswers(
+        [
+          info({ id: "hash-a", kind: "approval" }),
+          info({ id: "hash-b", kind: "question" }),
+        ],
+        [{ approved: true }, { answer: "x" }],
+      ),
+    ).toEqual({
+      "hash-a": { approved: true },
+      "hash-b": { answer: "x" },
+    });
   });
 });
 

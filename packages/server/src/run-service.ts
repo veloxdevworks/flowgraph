@@ -207,7 +207,9 @@ export class RunService {
           ? "paused"
           : result.status === "error"
             ? "error"
-            : "completed";
+            : result.status === "aborted"
+              ? "cancelled"
+              : "completed";
     this.registry.setStatus(threadId, status);
     this.metrics.recordResult(result.status);
     log("info", "run.end", { threadId, status: result.status, runId: result.runId });

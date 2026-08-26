@@ -79,6 +79,138 @@ describe("hitl node", () => {
     expect(r2.status).toBe("completed");
     expect((r2.state["gateResult"] as { choice: string }).choice).toBe("b");
   });
+
+  it("approve mode accepts a bare boolean resume", async () => {
+    const compiled = await compileGraph(hitlGraph("approve"), {});
+    await compiled.run({ threadId: "hitl-bool", onInterrupt: "fail" });
+    const r2 = await compiled.resume({
+      threadId: "hitl-bool",
+      resume: true,
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("completed");
+    expect((r2.state["gateResult"] as { approved: boolean }).approved).toBe(true);
+  });
+
+  it("choice mode maps a 1-based index to the choice string", async () => {
+    const compiled = await compileGraph(hitlGraph("choice"), {});
+    await compiled.run({ threadId: "hitl-idx", onInterrupt: "fail" });
+    const r2 = await compiled.resume({
+      threadId: "hitl-idx",
+      resume: "2",
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("completed");
+    expect((r2.state["gateResult"] as { choice: string }).choice).toBe("b");
+  });
+
+  it("choice mode rejects an invalid choice", async () => {
+    const compiled = await compileGraph(hitlGraph("choice"), {});
+    await compiled.run({ threadId: "hitl-bad", onInterrupt: "fail" });
+    const r2 = await compiled.resume({
+      threadId: "hitl-bad",
+      resume: { choice: "nope" },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("error");
+    expect(r2.error?.message).toContain("Invalid choice");
+  });
+});
+
+function parallelHitlSpec(): GraphSpec {
+  return {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: "parallel-hitl" },
+    state: {
+      channels: {
+        gateA: { type: "object" },
+        gateB: { type: "object" },
+      },
+    },
+    nodes: [
+      {
+        id: "gate-a",
+        type: "hitl",
+        with: { mode: "approve", message: "Approve A?", output: { to: "gateA" } },
+      },
+      {
+        id: "gate-b",
+        type: "hitl",
+        with: { mode: "question", message: "Answer B?", output: { to: "gateB" } },
+      },
+    ],
+    edges: [
+      { from: "START", to: ["gate-a", "gate-b"] },
+      { from: "gate-a", to: "END" },
+      { from: "gate-b", to: "END" },
+    ],
+    runtime: { checkpoint: { enabled: true, backend: "memory" } },
+  } as unknown as GraphSpec;
+}
+
+describe("parallel HITL interrupts", () => {
+  it("resumes both pending interrupts via an id-keyed map", async () => {
+    const compiled = await compileGraph(parallelHitlSpec(), {});
+    const r1 = await compiled.run({ threadId: "hitl-par", onInterrupt: "fail" });
+    expect(r1.status).toBe("interrupted");
+    expect(r1.interrupts).toHaveLength(2);
+
+    const byNode = new Map(
+      (r1.interrupts ?? []).map((it) => {
+        const data = (it.payload as { data?: { __nodeId?: string } } | undefined)?.data;
+        return [data?.__nodeId ?? it.id, it];
+      }),
+    );
+    const a = byNode.get("gate-a");
+    const b = byNode.get("gate-b");
+    expect(a?.kind).toBe("approval");
+    expect(b?.kind).toBe("question");
+
+    const r2 = await compiled.resume({
+      threadId: "hitl-par",
+      resume: {
+        [a!.id]: { approved: true },
+        [b!.id]: { answer: "clarified" },
+      },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("completed");
+    expect((r2.state["gateA"] as { approved: boolean }).approved).toBe(true);
+    expect((r2.state["gateB"] as { answer: string }).answer).toBe("clarified");
+  });
+
+  it("partial map resume re-raises the remaining interrupt", async () => {
+    const compiled = await compileGraph(parallelHitlSpec(), {});
+    const r1 = await compiled.run({ threadId: "hitl-partial", onInterrupt: "fail" });
+    expect(r1.interrupts).toHaveLength(2);
+
+    const first = r1.interrupts![0]!;
+    const firstNode =
+      (first.payload as { data?: { __nodeId?: string } } | undefined)?.data?.__nodeId;
+    const resumeValue = firstNode === "gate-b" ? { answer: "later" } : { approved: true };
+
+    const r2 = await compiled.resume({
+      threadId: "hitl-partial",
+      resume: { [first.id]: resumeValue },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("interrupted");
+    expect(r2.interrupts).toHaveLength(1);
+    expect(r2.interrupts![0]!.id).not.toBe(first.id);
+
+    const remaining = r2.interrupts![0]!;
+    const remainingNode =
+      (remaining.payload as { data?: { __nodeId?: string } } | undefined)?.data?.__nodeId;
+    const remainingValue =
+      remainingNode === "gate-b" ? { answer: "clarified" } : { approved: true };
+    const r3 = await compiled.resume({
+      threadId: "hitl-partial",
+      resume: { [remaining.id]: remainingValue },
+      onInterrupt: "fail",
+    });
+    expect(r3.status).toBe("completed");
+  });
 });
 
 describe("ask_human tool", () => {

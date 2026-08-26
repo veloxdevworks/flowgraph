@@ -97,27 +97,51 @@ export function parseInterruptAnswer(it: InterruptInfo, raw: string): unknown {
 }
 
 /**
+ * Combine per-interrupt parsed answers into a Command resume value.
+ * A single interrupt stays a scalar; two or more become an id-keyed map.
+ */
+export function combineInterruptAnswers(
+  interrupts: InterruptInfo[],
+  values: unknown[],
+): unknown {
+  if (interrupts.length === 0) return { approved: true };
+  if (interrupts.length === 1) return values[0];
+  const map: Record<string, unknown> = {};
+  for (let i = 0; i < interrupts.length; i++) {
+    map[interrupts[i]!.id] = values[i];
+  }
+  return map;
+}
+
+/**
  * Interactive resolver for `--on-interrupt prompt`. Asks the operator for a
  * value on the terminal and returns it as the interrupt's resume value.
+ * Multiple pending interrupts become an id-keyed resume map.
  */
 export async function promptResolver(interrupts: InterruptInfo[]): Promise<unknown> {
   const rl = readline.createInterface({ input: stdin, output: stdout });
   try {
-    const it = interrupts[0];
-    if (!it) return { approved: true };
+    if (interrupts.length === 0) return { approved: true };
 
     if (interrupts.length > 1) {
-      printInfo(`${interrupts.length} interrupts pending; answering the first.`);
+      printInfo(`${interrupts.length} interrupts pending; answering each in turn.`);
     }
 
-    if (it.payload && typeof it.payload === "object") {
-      const data = (it.payload as { data?: unknown }).data;
-      if (data !== undefined) printInfo(`  context: ${JSON.stringify(data)}`);
+    const answers: Record<string, unknown> = {};
+    for (const it of interrupts) {
+      if (it.payload && typeof it.payload === "object") {
+        const data = (it.payload as { data?: unknown }).data;
+        if (data !== undefined) printInfo(`  context: ${JSON.stringify(data)}`);
+      }
+      const prompt = formatInterruptPrompt(it);
+      const answer = await rl.question(prompt);
+      answers[it.id] = parseInterruptAnswer(it, answer);
     }
 
-    const prompt = formatInterruptPrompt(it);
-    const answer = await rl.question(prompt);
-    return parseInterruptAnswer(it, answer);
+    return combineInterruptAnswers(
+      interrupts,
+      interrupts.map((it) => answers[it.id]),
+    );
   } finally {
     rl.close();
   }

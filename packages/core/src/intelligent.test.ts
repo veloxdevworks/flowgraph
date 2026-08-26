@@ -158,3 +158,59 @@ describe("router model mode", () => {
     expect(r.state["decision"]).toBe("feature");
   });
 });
+
+describe("node-as-tool state", () => {
+  it("passes the agent state snapshot and unwraps the node result", async () => {
+    const { registerFunction } = await import("./nodes/function.js");
+    registerFunction("echoTopic", (input) => input);
+
+    const scripted = createScriptedProvider("scripted-tool", async (_req, ctx) => {
+      const result = await ctx.invokeTool("echo-topic", { extra: 1 });
+      return { output: result, stopReason: "done" };
+    });
+
+    const graph = {
+      metadata: { name: "node-as-tool-state" },
+      state: {
+        channels: {
+          topic: { type: "string" },
+          answer: { type: "object" },
+        },
+      },
+      nodes: [
+        {
+          id: "echo-topic",
+          type: "function",
+          // Reachable-but-skipped: LangGraph requires every compiled node on a path.
+          when: "false",
+          with: {
+            fn: "echoTopic",
+            input: { topic: "{{ state.topic }}", extra: "{{ input.extra }}" },
+          },
+        },
+        {
+          id: "agent",
+          type: "agent",
+          provider: "scripted-tool",
+          with: {
+            prompt: "use the helper",
+            tools: [{ node: "echo-topic" }],
+            output: { to: "answer" },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "echo-topic" },
+        { from: "echo-topic", to: "agent" },
+        { from: "agent", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+
+    const compiled = await compileGraph(graph, { providers: [scripted] });
+    const r = await compiled.run({ input: { topic: "widgets" } });
+    expect(r.status).toBe("completed");
+    expect(r.state["answer"]).toEqual({ topic: "widgets", extra: 1 });
+    expect(r.state["answer"]).not.toHaveProperty("outputs");
+  });
+});

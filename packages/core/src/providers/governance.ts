@@ -24,7 +24,10 @@ export async function requireToolApproval(
     kind: "approval",
     data: { tool, args },
   });
-  const approved = typeof approval === "boolean" ? approval : approval?.approved !== false;
+  // Fail closed: only an explicit `true` / `{ approved: true }` approves. An
+  // ambiguous resume (empty object, raw string, bare webhook POST) must not
+  // silently authorize a gated tool call.
+  const approved = typeof approval === "boolean" ? approval : approval?.approved === true;
   if (!approved) {
     throw new Error(`Tool call "${tool}" denied by human reviewer.`);
   }
