@@ -20,6 +20,7 @@ import {
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
 import { buildStateAnnotation, ONCE_CHANNEL } from "./runtime/state-annotation.js";
+import { OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
 import { ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
@@ -34,6 +35,7 @@ import {
 } from "./runtime/webhook-server.js";
 import { terminateThreadServices } from "./runtime/service-manager.js";
 import { registerProvider, type ProviderAdapter } from "./providers/index.js";
+import { clearThreadReplayCache } from "./providers/replay-cache.js";
 import type { ToolWiring } from "./providers/tools.js";
 import type { BudgetState } from "./context.js";
 import type { McpHub } from "./mcp/types.js";
@@ -108,7 +110,7 @@ export interface ContinueOptions {
 }
 
 export interface RunResult {
-  status: "completed" | "interrupted" | "paused" | "error";
+  status: "completed" | "interrupted" | "paused" | "error" | "aborted";
   state: Record<string, unknown>;
   runId: string;
   threadId?: string | undefined;
@@ -212,6 +214,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // CLI/IPC resume should drop any in-process HTTP listener for this thread.
     if (mode === "resume") {
       unregisterWebhookRoute(threadId);
+    }
+
+    // A fresh start must not replay agent LLM/tool results left behind by an
+    // interrupted run on the same thread that was never resumed.
+    if (mode === "start") {
+      clearThreadReplayCache(threadId);
     }
 
     const startEvent =
@@ -324,10 +332,15 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      if (isAbortFailure(err, runOpts.signal)) {
+        events.emit("run.aborted", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
+        await maybeTerminateServices(graphSpec, threadId);
+        return { status: "aborted", state: {}, runId, threadId, error, durationMs: Date.now() - startMs };
+      }
       if (hooks.has("run:error")) {
         try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
       }
-      events.emit("run.error", { error: error.message, durationMs: Date.now() - startMs });
+      events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
       await maybeTerminateServices(graphSpec, threadId);
       return { status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs };
     } finally {
@@ -630,8 +643,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   }
 
   // Node-as-tool: run a sibling node's logic with the agent-supplied args as
-  // its input. Returns the node's state update (the tool result for the agent).
-  toolWiring.invokeNode = async (id, args, ctx) => {
+  // its input against the calling agent's state snapshot. Returns the node's
+  // raw result (the outputs slug) so the LLM sees clean data, not the update envelope.
+  toolWiring.invokeNode = async (id, args, ctx, state = {}) => {
     const target = compiledNodes.get(id);
     if (!target) throw new Error(`node-as-tool: no node "${id}" in this graph.`);
     const childCtx = {
@@ -639,11 +653,21 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       nodeId: id,
       _input: args,
       render(template: string, extra: Record<string, unknown> = {}) {
-        return renderDeep(template, { state: {}, input: args, config: ctx.config, run: ctx.meta, ...extra });
+        return renderDeep(template, { state, input: args, config: ctx.config, run: ctx.meta, ...extra });
       },
     } as typeof ctx & { _input: Record<string, unknown> };
-    const res = await target.run({}, childCtx);
-    return resultToUpdate(res);
+    const res = await target.run(state, childCtx);
+    const update = resultToUpdate(res);
+    const outputs = update[OUTPUTS_CHANNEL];
+    if (
+      outputs != null &&
+      typeof outputs === "object" &&
+      !Array.isArray(outputs) &&
+      id in (outputs as Record<string, unknown>)
+    ) {
+      return (outputs as Record<string, unknown>)[id];
+    }
+    return update;
   };
 
   toolWiring.resolveToolMeta = (id) => {
@@ -796,6 +820,16 @@ function isInterruptLike(err: unknown): boolean {
   if (err == null || typeof err !== "object") return false;
   const name = (err as { name?: string }).name ?? "";
   return name === "GraphInterrupt" || name === "NodeInterrupt" || "lg_interrupt" in err;
+}
+
+function isAbortFailure(err: unknown, signal?: AbortSignal): boolean {
+  if (isInterruptLike(err)) return false;
+  if (signal?.aborted) return true;
+  if (err != null && typeof err === "object") {
+    const name = (err as { name?: string }).name ?? "";
+    if (name === "AbortError") return true;
+  }
+  return false;
 }
 
 function extractInterrupts(result: Record<string, unknown>): InterruptInfo[] {

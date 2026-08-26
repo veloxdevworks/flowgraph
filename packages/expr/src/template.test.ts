@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderTemplate } from "./template.js";
+import { renderTemplate, stringifyRendered } from "./template.js";
 
 describe("renderTemplate", () => {
   it("returns the typed value for a sole expression (no surrounding text)", () => {
@@ -45,5 +45,21 @@ describe("renderTemplate", () => {
   it("still treats spaced-out subtraction of member access as subtraction, not property glue", () => {
     expect(renderTemplate("{{ state.n - other }}", { state: { n: 10 }, other: 3 })).toBe(7);
     expect(renderTemplate("{{ 5 - 3 }}", {})).toBe(2);
+  });
+});
+
+describe("stringifyRendered", () => {
+  it("passes strings through", () => {
+    expect(stringifyRendered("hello")).toBe("hello");
+  });
+
+  it("JSON-stringifies objects and arrays instead of [object Object]", () => {
+    expect(stringifyRendered({ a: 1 })).toBe('{"a":1}');
+    expect(stringifyRendered(["x", "y"])).toBe('["x","y"]');
+  });
+
+  it("renders null as empty string", () => {
+    expect(stringifyRendered(null)).toBe("");
+    expect(stringifyRendered(undefined)).toBe("");
   });
 });

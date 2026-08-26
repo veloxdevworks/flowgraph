@@ -307,6 +307,9 @@ program
           } else {
             process.exit(3);
           }
+        } else if (result.status === "aborted") {
+          printError("Aborted");
+          process.exit(130);
         } else if (result.status === "error") {
           printError(`Failed: ${result.error?.message ?? "unknown error"}`);
           process.exit(1);
@@ -315,8 +318,8 @@ program
         result = await awaitWebhookIfNeeded(result);
         if (result.status === "error") process.exit(1);
         if (result.status !== "completed") process.exit(3);
-      } else if (result.status === "error") {
-        process.exit(1);
+      } else if (result.status === "error" || result.status === "aborted") {
+        process.exit(result.status === "aborted" ? 130 : 1);
       }
     } finally {
       await closeMcpHub(mcpOpt.mcp);
@@ -465,6 +468,9 @@ program
           } else {
             process.exit(3);
           }
+        } else if (result.status === "aborted") {
+          printError("Aborted");
+          process.exit(130);
         } else if (result.status === "error") {
           printError(`Failed: ${result.error?.message ?? "unknown error"}`);
           process.exit(1);
@@ -474,8 +480,8 @@ program
         if (result.status === "error") process.exit(1);
         if (result.status !== "completed") process.exit(3);
       } else if (result.status !== "completed") {
-        // remaining: error | paused (interrupted handled above)
-        process.exit(result.status === "paused" ? 3 : 1);
+        // remaining: error | paused | aborted (interrupted handled above)
+        process.exit(result.status === "paused" ? 3 : result.status === "aborted" ? 130 : 1);
       }
     } finally {
       await closeMcpHub(mcpOpt.mcp);

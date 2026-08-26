@@ -58,7 +58,7 @@ export function createMetrics(): RunMetrics & {
       } else if (status === "error" || status === "failed") {
         m.runsFailed++;
         this.runsFailed = m.runsFailed;
-      } else if (status === "cancelled") {
+      } else if (status === "cancelled" || status === "aborted") {
         m.runsCancelled++;
         this.runsCancelled = m.runsCancelled;
       }

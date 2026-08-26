@@ -7,7 +7,7 @@ export type { Expr, BinaryOp } from "./ast.js";
 export { evalExpr, EvalError } from "./evaluator.js";
 export type { EvalScope } from "./evaluator.js";
 
-export { renderTemplate, renderDeep, evalGuard, collectRefs } from "./template.js";
+export { renderTemplate, renderDeep, stringifyRendered, evalGuard, collectRefs } from "./template.js";
 
 export { stdlib } from "./stdlib.js";
 export type { Stdlib, StdlibFn } from "./stdlib.js";

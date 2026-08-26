@@ -17,7 +17,11 @@ export type ToolRef =
   | { builtin: string[] }
   | McpToolRef;
 
-export type ToolExecutor = (args: unknown, ctx: NodeRunContext) => Promise<unknown>;
+export type ToolExecutor = (
+  args: unknown,
+  ctx: NodeRunContext,
+  state?: Record<string, unknown>,
+) => Promise<unknown>;
 
 export interface NormalizedTools {
   specs: ToolSpec[];
@@ -26,7 +30,12 @@ export interface NormalizedTools {
 
 export interface ToolWiring {
   /** Run a sibling graph node as a tool (provided by the compiler). */
-  invokeNode?: (id: string, args: Record<string, unknown>, ctx: NodeRunContext) => Promise<unknown>;
+  invokeNode?: (
+    id: string,
+    args: Record<string, unknown>,
+    ctx: NodeRunContext,
+    state?: Record<string, unknown>,
+  ) => Promise<unknown>;
   /** Look up description/schema for a sibling node exposed as a tool. */
   resolveToolMeta?: (nodeId: string) => {
     description?: string;
@@ -79,11 +88,11 @@ export function normalizeTools(
       if (meta?.description) spec.description = meta.description;
       if (meta?.schema) spec.schema = meta.schema;
       specs.push(spec);
-      executors.set(ref.node, async (args, ctx) => {
+      executors.set(ref.node, async (args, ctx, state) => {
         if (!wiring.invokeNode) {
           throw new Error(`node-as-tool "${ref.node}" requires compiler wiring (not available in this context).`);
         }
-        return wiring.invokeNode(ref.node, (args ?? {}) as Record<string, unknown>, ctx);
+        return wiring.invokeNode(ref.node, (args ?? {}) as Record<string, unknown>, ctx, state ?? {});
       });
     } else if ("builtin" in ref) {
       for (const b of ref.builtin) {

@@ -89,6 +89,15 @@ export interface ProviderRunContext {
   reportToolResult(name: string, args: unknown, result: unknown): Promise<unknown>;
   emit(type: AgentEvent["type"], data: unknown): void;
   signal?: AbortSignal | undefined;
+  /**
+   * Per-node replay scratchpad. Providers record LLM responses (and the
+   * agent node records tool results) so interrupt() resume does not re-bill
+   * or re-execute completed steps.
+   */
+  replay?: {
+    get(index: string): unknown | undefined;
+    set(index: string, value: unknown): void;
+  };
 }
 
 export interface ProviderAdapter {
