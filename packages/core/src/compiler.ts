@@ -360,6 +360,16 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
     }
     if (threadId) enrichInterruptsWithWebhookUrls(interrupts, threadId);
+    if (
+      interrupts.length === 0 &&
+      snap.next.length > 0 &&
+      (interruptBefore.length || interruptAfter.length)
+    ) {
+      interrupts.push({
+        id: `breakpoint:${snap.next.join(",")}`,
+        reason: `Paused before: ${snap.next.join(", ")}`,
+      });
+    }
     return {
       values: stripReserved(snap.values),
       next: [...snap.next],
@@ -384,13 +394,30 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     return executeInvoke(payload, continueOpts, "continue");
   };
 
+  const resume = async (resumeOpts: ResumeOptions): Promise<RunResult> => {
+    let payload: Record<string, unknown> | Command | null = new Command({
+      resume: resumeOpts.resume,
+    });
+    if (checkpointer) {
+      const snap = await compiledLg.getState({ configurable: { thread_id: resumeOpts.threadId } });
+      const hasInterrupt = (snap?.tasks ?? []).some(
+        (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
+      );
+      // Static breakpoints pause with empty task.interrupts and a non-empty
+      // `next`. LangGraph continues those with null input, not Command({ resume }).
+      if (!hasInterrupt && Array.isArray(snap?.next) && snap.next.length > 0) {
+        payload = null;
+      }
+    }
+    return executeInvoke(payload, resumeOpts, "resume");
+  };
+
   return {
     spec: graphSpec,
     runId,
     events,
     run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, "start"),
-    resume: (resumeOpts: ResumeOptions) =>
-      executeInvoke(new Command({ resume: resumeOpts.resume }), resumeOpts, "resume"),
+    resume,
     continueRun,
     getState: async (threadId: string) => {
       if (!checkpointer) return null;

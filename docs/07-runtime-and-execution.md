@@ -116,11 +116,27 @@ Each interrupt carries a **kind** so operators know how to answer:
 
 ```ts
 // later (could be days later, after process restart) — same threadId
-const result = await resumeGraph(compiled, {
+const result = await compiled.resume({
   threadId: "release-42",
   resume: { approved: true, editedNotes: "..." },   // becomes the interrupt()'s return value
 });
 ```
+
+When several branches interrupt in the same superstep, `result.interrupts` lists every pending gate. Resume with a **map keyed by interrupt id** (the `id` on each `InterruptInfo`) so each `interrupt()` call receives its own value:
+
+```ts
+const result = await compiled.resume({
+  threadId: "fan-out-1",
+  resume: {
+    [interrupts[0].id]: { approved: true },
+    [interrupts[1].id]: { answer: "option B" },
+  },
+});
+```
+
+A scalar / object resume (anything whose keys are not interrupt ids) is broadcast the same way a single-interrupt resume is. Answering only a subset of the map leaves the remaining gates pending — they re-surface on the next `interrupt.raised`.
+
+Static breakpoints (`runtime.hitl.breakpoints.before` / `after`) pause with a synthetic `breakpoint:…` interrupt and no `interrupt()` call. `compiled.resume()` continues past those with LangGraph's null input; the resume payload is ignored.
 
 A `thread_id` + durable checkpointer is what makes "interrupt for approval and resume days later" work ([Vision success criteria](./00-vision.md#7-success-criteria)).
 

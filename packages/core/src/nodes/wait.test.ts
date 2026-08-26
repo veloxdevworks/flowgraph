@@ -142,4 +142,43 @@ describe("wait node", () => {
     expect(r2.status).toBe("error");
     expect(r2.error?.message).toContain("missing required field(s): approved");
   });
+
+  it("signal mode maps a resume payload to the output channel", async () => {
+    const compiled = await compileGraph(
+      waitGraph({ signal: "deploy-finished", output: { to: "approval" } }),
+      {},
+    );
+    const r1 = await compiled.run({ threadId: "wait-sig-resume", onInterrupt: "fail" });
+    expect(r1.status).toBe("interrupted");
+
+    const r2 = await compiled.resume({
+      threadId: "wait-sig-resume",
+      resume: { deployFinished: true },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("completed");
+    expect(r2.state["approval"]).toEqual({ deployFinished: true });
+  });
+
+  it("until mode re-evaluates the condition after resume", async () => {
+    const compiled = await compileGraph(
+      waitGraph({ until: "{{ state.ready }}" }),
+      {},
+    );
+    const r1 = await compiled.run({
+      threadId: "wait-until-resume",
+      input: { ready: false },
+      onInterrupt: "fail",
+    });
+    expect(r1.status).toBe("interrupted");
+
+    // Resume without flipping the condition — the node re-runs and interrupts again.
+    const r2 = await compiled.resume({
+      threadId: "wait-until-resume",
+      resume: {},
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("interrupted");
+    expect(interruptData(r2.interrupts)["mode"]).toBe("until");
+  });
 });
