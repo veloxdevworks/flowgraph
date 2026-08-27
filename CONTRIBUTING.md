@@ -61,6 +61,34 @@ Prefer extending an existing package. Create a new one only when the capability 
 
 We use [Changesets](https://github.com/changesets/changesets) for versioning and changelogs. Every user-visible change needs a changeset; pure internal/doc changes do not.
 
+## Releasing (pnpm only)
+
+Source `package.json` files use `workspace:*`. **`npm pack` / `npx changeset publish` / `npm publish` leave that protocol in the packed manifest**, and `npm install` of the published package then fails.
+
+The publish path is **pnpm + changesets**, and pnpm rewrites `workspace:*` to the concrete semver at pack/publish time:
+
+```bash
+# 1. Consume changesets (bumps versions, writes CHANGELOG.md — do not hand-write a historical changelog)
+pnpm version-packages
+
+# 2. Review, commit, tag as usual
+
+# 3. Build, then publish with pnpm (rewrites workspace:*). Never use
+#    `npx changeset publish` or `npm publish`.
+pnpm release
+# equivalent:
+#   pnpm build
+#   pnpm publish -r --filter "./packages/*" --filter "!@veloxdevworks/flowgraph-server" --access public
+```
+
+`@veloxdevworks/flowgraph-server` and every `examples/*` / `automation/*` package are on the changesets **ignore** list and are not part of the 0.1 npm set.
+
+Assert a packed core/cli/provider manifest has no `workspace:*` and no `src/` / tests / `.turbo`:
+
+```bash
+pnpm pack:check
+```
+
 ## Code style
 
 - TypeScript strict mode; no `any` without a comment explaining why.

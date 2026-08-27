@@ -46,24 +46,23 @@ interface flowgraphEvent<T = unknown> {
 
 ```
 run.start            run.end            run.error          run.aborted
-graph.compile.start  graph.compile.end  graph.compile.error
+run.paused           run.continued
 node.start           node.end           node.error         node.skipped(when=false)
 node.retry           node.timeout
 node.output                              // emitted with the node's result update
-state.update                             // channel(s) changed (delta)
-edge.taken                               // which edge/branch was chosen (+ why)
 router.decision                          // route key chosen + rationale
 agent.step                         // each agent loop iteration
 agent.tool.call    agent.tool.result
 agent.token        // streaming token/chunk (when streaming enabled)
 agent.usage        // token/cost accounting
 skill.preflight          skill.start     skill.end          skill.error
-checkpoint.write         checkpoint.load
 interrupt.raised         interrupt.resumed                  // HITL / webhook / wait
 hook.invoked             hook.error
 log                                          // structured log line forwarded as event
 custom.*                                     // user-emitted via ctx.emit()
 ```
+
+These names exist on `EventType` but are **never emitted** today (planned): `state.update`, `edge.taken`, `checkpoint.write`, `checkpoint.load`. `graph.compile.*` is not an `EventType`.
 
 Events form a **tree** via `scope.parentSpanId`: a run contains nodes; an `agent` node contains steps and tool calls; a `subgraph` node contains a nested run. This tree is exactly what OTel spans mirror (§5) and what a UI renders as a timeline.
 
@@ -83,7 +82,7 @@ This lets UIs and OTel sinks visualize nested run scope without a separate subsc
 ### Programmatic stream
 
 ```ts
-for await (const ev of runGraph.stream(compiled, { input })) {
+for await (const ev of compiled.stream({ input })) {
   if (ev.type === "node.start") log(`▶ ${ev.scope.nodeId}`);
   if (ev.type === "agent.tool.call") log(`  ↳ tool ${ev.data.name}`);
   if (ev.type === "run.end") log(`✓ done in ${ev.data.durationMs}ms`);
@@ -94,14 +93,12 @@ for await (const ev of runGraph.stream(compiled, { input })) {
 
 ```ts
 const compiled = await compileGraph(spec, {
-  observability: {
-    sinks: [
-      consoleSink({ format: "pretty" }),
-      jsonlSink({ path: "run.jsonl" }),
-      otelSink(),                       // from @veloxdevworks/flowgraph-observability-otel
-      myWebhookSink("https://..."),     // custom
-    ],
-  },
+  sinks: [
+    consoleSink({ format: "pretty" }),
+    jsonlSink(process.stdout),
+    otelSink(),                       // from @veloxdevworks/flowgraph-observability-otel — attach yourself
+    myWebhookSink("https://..."),     // custom
+  ],
 });
 ```
 
@@ -156,7 +153,7 @@ Hooks are **ordered** (priority) and **composable**; the first `veto`/`route`/`i
 
 ## 5. Observability: OpenTelemetry first-class ([ADR-0007](./adr/0007-observability-otel.md))
 
-`@veloxdevworks/flowgraph-observability-otel` maps the event tree to OTel signals with zero user instrumentation:
+`@veloxdevworks/flowgraph-observability-otel` maps **emitted** events to OTel signals when you attach `otelSink()` (or call `startOtel()`). This is **not** automatic, and CLI `--otel` is **unwired** in 0.1 — there is no "every lifecycle moment" OTel span unless you opt in:
 
 - **Traces** — a span per run/node/agent-step/tool-call/skill, nested via `parentSpanId`. Span attributes: `flowgraph.graph`, `flowgraph.node.id/type`, `flowgraph.provider`, `flowgraph.attempt`, token usage, etc. This is the end-to-end trace promised in [Vision §Success criteria](./00-vision.md#7-success-criteria).
 - **Metrics** — counters/histograms: node duration, retries, token usage, cost, interrupts raised, hook latency, error rates by node type.

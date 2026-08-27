@@ -4,11 +4,7 @@ Draft content, pause for human review, revise on rejection, and loop until appro
 
 ## Setup
 
-None — zero API keys; uses registered `code` functions.
-
-```bash
-pnpm install
-```
+None — zero API keys. `imports: [{ reducers: ./register.ts }]` registers the `function` nodes so `flowgraph run` works without a separate runner.
 
 ## Run
 

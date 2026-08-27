@@ -2,7 +2,7 @@
 
 Operational guide for Model Context Protocol integrations in flowgraph. MCP is the primary way to connect external tools and APIs; see [08 — Providers §MCP](./08-providers.md#mcp-first-integrations-v1) for schema and configuration details.
 
-> **Install:** MCP support is provided by the optional `@veloxdevworks/flowgraph-mcp` package (`pnpm add @veloxdevworks/flowgraph-mcp`). It is not bundled in the default `@veloxdevworks/flowgraph-cli` install — see [09 — CLI §1.1](./09-cli.md#11-optional-cli-packages).
+> **Companion / not published:** MCP support is designed as `@veloxdevworks/flowgraph-mcp`. That package is **not in this repository and not on npm** with 0.1. Do not `pnpm add` it as if it ships. The CLI still has `flowgraph mcp …` commands that lazy-load the package when present. Core exposes an `McpHub` interface only. There is no `examples/mcp` folder in this repo.
 
 ## Declaring MCP servers
 

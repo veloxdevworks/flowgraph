@@ -1,6 +1,8 @@
 # `@veloxdevworks/flowgraph-server`
 
-HTTP run server for hosted flowgraph execution. One ARM64 container serves:
+HTTP run server for hosted flowgraph execution. **Not published in the 0.1 npm set** (listed in `.changeset` ignore). Consume it from this repo or a container image, not `npm install`.
+
+One ARM64 container serves:
 
 - **Generic REST + SSE** — for ECS/Fargate behind an ALB (desktop remote transport)
 - **Bedrock AgentCore Runtime** — `GET /ping` + `POST /invocations`

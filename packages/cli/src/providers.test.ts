@@ -27,8 +27,7 @@ describe("buildProviders", () => {
     } as unknown as GraphSpec;
 
     const providers = await buildProviders(spec);
-    expect(providers).toHaveLength(1);
-    expect(providers[0]!.name).toBe("main");
+    expect(providers.map((p) => p.name)).toEqual(["main", "mock"]);
   });
 
   it("synthesizes provider when defaults.provider is a bare vendor name", async () => {
@@ -40,8 +39,7 @@ describe("buildProviders", () => {
     } as unknown as GraphSpec;
 
     const providers = await buildProviders(spec);
-    expect(providers).toHaveLength(1);
-    expect(providers[0]!.name).toBe("openai");
+    expect(providers.map((p) => p.name)).toEqual(["openai", "mock"]);
   });
 
   it("does not duplicate when defaults.provider matches a providers key", async () => {
@@ -56,8 +54,7 @@ describe("buildProviders", () => {
     } as unknown as GraphSpec;
 
     const providers = await buildProviders(spec);
-    expect(providers).toHaveLength(1);
-    expect(providers[0]!.name).toBe("main");
+    expect(providers.map((p) => p.name)).toEqual(["main", "mock"]);
   });
 
   it("builds claude providers via dynamic import", async () => {
@@ -80,7 +77,17 @@ describe("buildProviders", () => {
 
     const { buildProviders: build } = await import("./providers.js");
     const providers = await build(spec);
-    expect(providers).toHaveLength(1);
-    expect(providers[0]!.name).toBe("claude");
+    expect(providers.map((p) => p.name)).toEqual(["claude", "mock"]);
+  });
+
+  it("registers the built-in mock provider when the graph does not declare one", async () => {
+    const spec = {
+      metadata: { name: "test" },
+      nodes: [],
+      edges: [],
+    } as unknown as GraphSpec;
+
+    const providers = await buildProviders(spec);
+    expect(providers.some((p) => p.name === "mock")).toBe(true);
   });
 });

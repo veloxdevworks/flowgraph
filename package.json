@@ -25,7 +25,8 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,md,json,yaml,yml}\" --ignore-path .gitignore",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "turbo run build --filter=\"./packages/*\" && changeset publish"
+    "pack:check": "node scripts/assert-publish-hygiene.mjs",
+    "release": "turbo run build --filter=\"./packages/*\" && pnpm publish -r --filter \"./packages/*\" --filter \"!@veloxdevworks/flowgraph-server\" --access public"
   },
   "devDependencies": {
     "@veloxdevworks/flowgraph-cli": "workspace:*",

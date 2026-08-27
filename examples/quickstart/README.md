@@ -22,8 +22,8 @@ That runs:
 flowgraph run quickstart.graph.yaml --stream --input 'text=Hello, flowgraph World!'
 ```
 
-You'll see the event stream (`node.start`, `skill.start/end`, `state.update`,
-`run.end`) and the final state with `slug`, `words`, and `sentences`.
+You'll see the event stream (`node.start`, `skill.start/end`, `run.end`) and
+the final state with `slug`, `words`, and `sentences`.
 
 Try your own input:
 

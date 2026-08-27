@@ -80,7 +80,7 @@ mcpServers:
       Authorization: "Bearer {{ secret.ATLASSIAN_TOKEN }}"
 ```
 
-Two consumption modes share one client (`@veloxdevworks/flowgraph-mcp`):
+Two consumption modes share one client (`@veloxdevworks/flowgraph-mcp` — **companion / not published** with 0.1):
 
 1. **Deterministic** — `type: mcp` nodes call a specific tool or read a resource with arguments mapped from state.
 2. **Agentic** — `{ mcp: atlassian }` under `intelligent.with.tools` expands the server's tools at run time and routes invocations through `ctx.invokeTool` (hooks, HITL, events).
@@ -127,6 +127,8 @@ config:
     provider: main
     model: claude-3-5-sonnet-latest   # optional per-run override on agent nodes
 ```
+
+**`provider: mock`:** core exports `mockProvider` but does **not** auto-register it. The CLI registers it on `run` / `resume`. Programmatic `compileGraph` must pass `{ providers: [mockProvider] }` or load an `imports` module. Desktop hosts register their own copy.
 
 **Shorthand:** `config.defaults.provider: anthropic` (bare vendor name) synthesizes a LangChain provider when no matching `providers` entry exists.
 

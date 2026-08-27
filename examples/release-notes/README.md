@@ -10,8 +10,8 @@ START → draft-notes → approve (interrupt) → publish-notes → END
 
 ## Prerequisites
 
-- Functions registered via `register.ts` (`draftNotes`, `requestApproval`, `publishNotes`)
-- SQLite checkpoint enabled in the graph YAML
+- Functions registered via `register.ts` (`draftNotes`, `requestApproval`, `publishNotes`), loaded by `imports: [{ reducers: ./register.ts }]`
+- SQLite checkpoint enabled in the graph YAML (the CLI injects the saver)
 
 ## Run locally (interactive)
 
@@ -19,8 +19,6 @@ START → draft-notes → approve (interrupt) → publish-notes → END
 cd examples/release-notes
 pnpm test          # in-memory test harness
 ```
-
-For a manual CLI run with registration, import `./register.ts` before compile (see `release-notes.test.ts` for the pattern).
 
 ### CLI with durable checkpoint
 

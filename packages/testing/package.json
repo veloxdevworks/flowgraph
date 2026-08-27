@@ -19,6 +19,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@langchain/langgraph": "^1.4.7",
     "@veloxdevworks/flowgraph-core": "workspace:*",
     "@veloxdevworks/flowgraph-spec": "workspace:*"
   },
@@ -27,5 +28,10 @@
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",
     "vitest": "^4.1.9"
-  }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
 }

@@ -4,16 +4,18 @@ This guide gets you from zero to a running graph in a few minutes. For the full 
 
 ## Prerequisites
 
-- **Node.js ≥ 20**
-- **pnpm ≥ 9** (for monorepo development)
+- **Node.js ≥ 22.13**
+- **pnpm ≥ 11** (for monorepo development; matches root `packageManager` / `engines`)
 
 ## Install
 
 ### Run without cloning (when published)
 
 ```bash
-npx flowgraph run my.graph.yaml
+npx @veloxdevworks/flowgraph-cli run my.graph.yaml
 ```
+
+Unscoped `npx flowgraph` is a different 2015 package. `provider: mock` is registered by the CLI only — programmatic `compileGraph` must pass `mockProvider` (or an `imports` module).
 
 ### Develop from the monorepo
 
@@ -92,7 +94,7 @@ flowgraph uses a **hybrid model**: YAML declares topology and config; logic live
 | **`skill` node** + on-disk `handler.js` | Portable, shareable units with contracts | No — see [quickstart](../examples/quickstart/) |
 | **`function` node** + `registerFunction()` | Custom in-process TS/JS logic | Yes — see [triage-issue](../examples/triage-issue/) |
 | **`agent` node** | LLM agent with tool loop | LangChain vendor SDK (e.g. `@langchain/openai`) + API key — adapter is built into `@veloxdevworks/flowgraph-core` / CLI |
-| **`mcp` node** or agent MCP tools | External tool servers | MCP config + optional OAuth |
+| **`mcp` node** or agent MCP tools | External tool servers | Companion `@veloxdevworks/flowgraph-mcp` (**not published** with 0.1) |
 
 **Rule of thumb:** If your handler can be a plain ESM module on disk, use a **skill**. If you need tight integration with your app's runtime, use **`code`** with registration.
 
@@ -103,7 +105,7 @@ flowgraph uses a **hybrid model**: YAML declares topology and config; logic live
 | Deterministic routing + skills | [triage-issue](../examples/triage-issue/) |
 | Human approval + resume | [release-notes](../examples/release-notes/) |
 | LLM agents | [claude-agent](../examples/claude-agent/), [08 — Providers](./08-providers.md) |
-| MCP integrations | [mcp](../examples/mcp/), [15 — MCP operations](./15-mcp-operations.md) |
+| MCP integrations | [15 — MCP operations](./15-mcp-operations.md) (companion package; no `examples/mcp` in this repo) |
 | Map + subgraph composition | [composition](../examples/composition/) |
 | Programmatic API + tests | [14 — Programmatic API](./14-programmatic-api.md) |
 | Full example index | [examples/README.md](../examples/README.md) |

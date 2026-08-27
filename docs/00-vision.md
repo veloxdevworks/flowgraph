@@ -32,7 +32,7 @@ The same declarative artifact runs **headless in CI**, from a **CLI on a desktop
 2. **Run anywhere.** One spec runs in CI (headless, non-interactive) and on a desktop CLI (interactive HITL), with no code changes — only config/runtime differences.
 3. **Reusable units.** Skills and node types are portable, contract-bearing building blocks with declared environment dependencies and preflight checks.
 4. **Intelligent + deterministic, side by side.** Agent nodes (Claude/Cursor) coexist with deterministic nodes (HTTP, webhook, code, router).
-5. **Observable by default.** Every lifecycle moment emits a structured event and an OTel span; nothing requires custom instrumentation to see what happened.
+5. **Observable by default.** The runtime emits a structured event stream for the lifecycle moments it actually implements. OpenTelemetry is an **opt-in package** (`@veloxdevworks/flowgraph-observability-otel`); the CLI does not attach it (`--otel` is unwired).
 6. **Extensible by design.** Events, hooks, a node registry, and a provider interface are all public extension points.
 7. **Durable & resumable.** Long-running graphs (software factories, multi-day approvals) checkpoint and resume; humans can intervene.
 8. **A genuine community standalone.** Quality, docs, and DX good enough that the OSS community adopts it independently of any GUI we build on top.

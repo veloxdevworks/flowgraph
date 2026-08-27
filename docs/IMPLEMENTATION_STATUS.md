@@ -2,14 +2,14 @@
 
 This document tracks what is **shipped** in the monorepo today versus what the numbered design docs describe as the **target**. When in doubt, trust `packages/` and `examples/` over aspirational spec text.
 
-Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint A+B core hardening.
+Last reviewed: 0.1 publish hygiene (tarballs, fail-fast checkpointer, honest consumer docs).
 
 ## Summary
 
 | Area | Status |
 |------|--------|
 | YAML spec + Zod validation + JSON Schema | **Shipped** |
-| Compiler + runtime (`loadGraph` → `compileGraph` → `run`/`resume`) | **Shipped** |
+| Compiler + runtime (`loadGraph` → `compileGraph` → `run`/`resume`/`continueRun`/`stream`) | **Shipped** |
 | Built-in node types (incl. `script`, `demo`, `service`, `port`) | **Shipped** |
 | Skills loader, contracts, preflight | **Shipped** |
 | Expression language (`@veloxdevworks/flowgraph-expr`) | **Shipped** |
@@ -17,12 +17,13 @@ Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint 
 | Hooks (YAML subset + guardrails) | **Shipped** (partial defaults) |
 | HITL + in-memory checkpointing | **Shipped** |
 | Providers: LangChain (in core), Claude, Cursor | **Shipped** |
-| MCP hub (stdio, HTTP, OAuth) | **Shipped** (`@veloxdevworks/flowgraph-mcp` optional peer of CLI) |
+| MCP hub (stdio, HTTP, OAuth) | **Companion** (`@veloxdevworks/flowgraph-mcp` — not in this repo, **not published** with 0.1) |
 | Local FS tools + governance | **Shipped** (`@veloxdevworks/flowgraph-tools-fs` optional peer of CLI) |
 | SQLite checkpointing (CLI) | **Shipped** (`@veloxdevworks/flowgraph-checkpoint-sqlite` optional peer of CLI) |
-| TUI (`@veloxdevworks/flowgraph-tui`) | **Shipped** |
+| TUI (`@veloxdevworks/flowgraph-tui`) | **Companion** — not in this repo, **not published** with 0.1 |
 | Postgres checkpointer package | **Shipped** (no CLI default, no example) |
-| OTel package | **Shipped** (not wired to CLI `--otel`) |
+| OTel package | **Shipped** as `@veloxdevworks/flowgraph-observability-otel` (attach `otelSink()` yourself; CLI `--otel` unwired) |
+| HTTP server | **In repo, not in 0.1 npm** (`@veloxdevworks/flowgraph-server` is changeset-ignored) |
 | `software-factory` example | **Shipped** (lifecycle demo; map fan-out covered by `composition`) |
 
 ## CLI commands
@@ -30,10 +31,11 @@ Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint 
 | Command / flag | Status | Notes |
 |----------------|--------|-------|
 | `run`, `validate`, `graph`, `schema`, `migrate` | **Shipped** | |
-| `resume`, `tui`, `new`, `init` | **Shipped** | `init` = alias for `new`; default `hello` template is zero-code runnable |
+| `resume`, `new`, `init` | **Shipped** | `init` = alias for `new`; default `hello` template is zero-code runnable |
+| `tui` | **Companion** | Command exists; package not published |
 | `skills doctor`, `list`, `resolve` | **Shipped** | |
 | `skills show`, `skills new` | **Planned** | Documented in spec, not implemented |
-| `mcp tools`, `mcp auth *` | **Shipped** | |
+| `mcp tools`, `mcp auth *` | **Companion** | Lazy-load unpublished `@veloxdevworks/flowgraph-mcp` |
 | `dev` | **Planned** | Watch/step mode |
 | Global `--config`, `--env-file`, `--otel`, `--quiet` | **Planned** | Dotenv loaded silently from cwd |
 | `run --checkpoint`, `--max-usd` | **Planned** | Use `runtime.checkpoint` / `runtime.budget` in YAML |
@@ -46,10 +48,11 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 
 | API | Status | Notes |
 |-----|--------|-------|
-| `compileGraph`, `CompiledGraph.run`, `.resume`, `.getState` | **Shipped** | |
+| `compileGraph`, `CompiledGraph.run`, `.resume`, `.continueRun`, `.stream`, `.getState` | **Shipped** | |
 | `getStateHistory` | **Shipped** | On `CompiledGraph`; not exposed in CLI |
-| `resumeFrom` | **Planned** | Referenced in [07 — Runtime](./07-runtime-and-execution.md) |
-| `runGraph.step` / `flowgraph dev --step` | **Planned** | Time-travel debugging |
+| `resumeFrom` | **Planned** | Not an API today — do not document as shipped |
+| `runGraph` / `runGraph.stream` | **Does not exist** | Use `compiled.run` / `compiled.stream` |
+| `CompiledGraph.step` / `flowgraph dev --step` | **Planned** | Time-travel debugging |
 | `flowgraph.config.ts` auto-discovery | **Planned** | Register nodes/providers via imports in YAML today |
 
 ## Known limitations
@@ -72,7 +75,7 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 | review-loop | Yes | Yes (`register.ts`) | Yes |
 | hitl | Yes | Yes (scripted provider in test) | Yes |
 | fs-agent | Yes | Yes (API key for live run) | Yes |
-| mcp | Yes | Yes (mock + optional OAuth) | — |
+| mcp | — | **No folder** in this repo | — |
 | claude-agent, cursor-agent, reducers | Yes | Yes | reducers: Yes |
 | software-factory | Yes | Yes | Yes |
 
@@ -83,6 +86,6 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 | `docs/00`–`12` | Design specifications (target + shipped, mixed) |
 | `docs/13`–`15` | User-facing operational guides |
 | `examples/*/README.md` | Runnable walkthroughs |
-| Hosted docs site | `@velox/flowgraph-docs` in private `flowgraph-app` repo (markdown source stays in `docs/`) |
+| Hosted docs site | Private `flowgraph-app` companion — **will lag** until that repo syncs (markdown source stays in `docs/`) |
 
 When adding features, update this file and the relevant CLI/spec doc in the same PR.

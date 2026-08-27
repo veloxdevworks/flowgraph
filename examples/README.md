@@ -49,7 +49,7 @@ cd examples/quickstart && pnpm start
 | Fan out work in parallel | [composition](./composition/) or [reducers](./reducers/) |
 | Write automated tests | [composition/composition.test.ts](./composition/composition.test.ts) |
 
-Looking for MCP examples (stdio mock, OAuth, agent tools)? Those ship alongside the optional `@veloxdevworks/flowgraph-mcp` package — see [15 — MCP operations](../docs/15-mcp-operations.md).
+MCP examples are not in this repo. `@veloxdevworks/flowgraph-mcp` is a companion package and is **not published** with 0.1 — see [15 — MCP operations](../docs/15-mcp-operations.md).
 
 Examples with `*.test.ts` files are golden-run integration tests (`pnpm test` in the example directory or `pnpm test` at repo root).
 

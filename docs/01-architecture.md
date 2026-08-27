@@ -121,7 +121,8 @@ flowgraph/                      (repo root)
     ├── checkpoint-sqlite/     @veloxdevworks/flowgraph-checkpoint-sqlite  — durable file/sqlite checkpointer
     ├── checkpoint-postgres/   @veloxdevworks/flowgraph-checkpoint-postgres— durable pg checkpointer
     ├── observability-otel/    @veloxdevworks/flowgraph-observability-otel — OpenTelemetry exporter wiring
-    └── tools-fs/              @veloxdevworks/flowgraph-tools-fs           — sandboxed local filesystem tools
+    ├── tools-fs/              @veloxdevworks/flowgraph-tools-fs           — sandboxed local filesystem tools
+    └── server/                @veloxdevworks/flowgraph-server             — HTTP run server (**not in 0.1 npm**)
 ```
 
 ### Package dependency rules
@@ -152,28 +153,28 @@ testing ── (dev) ── all
 The CLI is a thin wrapper over a small, stable programmatic API in `@veloxdevworks/flowgraph-core`:
 
 ```ts
-import { loadGraph, compileGraph, runGraph } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, compileGraph } from "@veloxdevworks/flowgraph-core";
 
 // 1. Load + validate (no side effects)
-const spec = await loadGraph("./triage.graph.yaml");
+const { spec } = await loadGraph("./triage.graph.yaml");
 
 // 2. Compile to a LangGraph StateGraph (resolves registry/providers/skills)
 const compiled = await compileGraph(spec, {
-  registry,                 // optional: extra node types
+  extraFactories,           // optional: extra node types
   providers,                // optional: registered provider adapters
-  checkpointer,             // optional: durability backend
+  checkpointer,             // instance, "memory", or "none" — not a YAML backend name
   hooks,                    // optional: hook registrations
-  observability,            // optional: OTel exporter
+  sinks,                    // optional: event sinks (console, jsonl, otelSink)
 });
 
-// 3. Run — invoke or stream events
-const result = await runGraph(compiled, {
+// 3. Run — invoke, resume, continue, or stream events
+const result = await compiled.run({
   input: { issue: {/*...*/} },
   threadId: "issue-123",    // enables checkpoint/resume
   signal,                   // AbortSignal
 });
 
-for await (const event of runGraph.stream(compiled, { input })) {
+for await (const event of compiled.stream({ input })) {
   // structured lifecycle events (see docs/06)
 }
 ```
@@ -218,7 +219,7 @@ Designing the engine as a clean standalone with a stable event stream and schema
 
 | Concern | Choice | Notes |
 |---|---|---|
-| Language | TypeScript (ESM, Node ≥ 20) | Strict mode; types are part of the public contract |
+| Language | TypeScript (ESM, Node ≥ 22.13) | Strict mode; types are part of the public contract |
 | Engine | `@langchain/langgraph` | L0; not abstracted away |
 | Schema/validation | Zod → JSON Schema | One source of truth; JSON Schema generated for editors |
 | Expression language | custom safe evaluator (`@veloxdevworks/flowgraph-expr`) | No `eval`; sandboxed, see [05](./05-state-and-data.md) |

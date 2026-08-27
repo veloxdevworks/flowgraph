@@ -2,7 +2,7 @@
 
 The CLI is a thin surface over the `@veloxdevworks/flowgraph-core` programmatic API ([Architecture §6](./01-architecture.md#6-public-api-surface-programmatic)). It is the primary way to run graphs headless in CI and interactively on a desktop.
 
-Binary name: `flowgraph`. Distributed as `@veloxdevworks/flowgraph-cli`, runnable via `npx flowgraph` or installed globally/per-project.
+Binary name: `flowgraph`. Distributed as `@veloxdevworks/flowgraph-cli`, runnable via `npx @veloxdevworks/flowgraph-cli` or installed globally/per-project. Unscoped `npx flowgraph` is a different 2015 npm package.
 
 > **Implementation status:** Commands marked **shipped** are in `@veloxdevworks/flowgraph-cli` today. **Planned** items are design targets — see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
 
@@ -17,34 +17,34 @@ Binary name: `flowgraph`. Distributed as `@veloxdevworks/flowgraph-cli`, runnabl
 | `flowgraph migrate <graph>` | **shipped** | Migrate a spec toward `flowgraph/v1` |
 | `flowgraph resume <graph>` | **shipped** | Resume an interrupted run by threadId |
 | `flowgraph skills …` | **partial** | `doctor`, `list`, `resolve` shipped; `show`, `new` planned |
-| `flowgraph mcp …` | **shipped** | `tools`, `auth login|status|logout` |
-| `flowgraph tui [graph]` | **shipped** | Interactive TUI (requires `@veloxdevworks/flowgraph-tui`) |
+| `flowgraph mcp …` | **partial** | Commands exist; they lazy-load companion `@veloxdevworks/flowgraph-mcp` (**not published** with 0.1) |
+| `flowgraph tui [graph]` | **companion** | Lazy-loads `@veloxdevworks/flowgraph-tui` — **not in this repo and not published** with 0.1 |
 | `flowgraph new <name>` | **shipped** | Scaffold a graph from a template |
 | `flowgraph init <name>` | **shipped** | Alias for `new` (single `.graph.yaml`, not a full project) |
 | `flowgraph dev <graph>` | **planned** | Watch + re-validate + run with stepping |
 
 Per-command flags use `--cwd <dir>` where noted. The CLI loads `.env` from the working directory silently on `run` and `resume` (no `--env-file` flag yet).
 
-> **Interactive TUI:** For a full-screen, keyboard-driven experience, see [12 — Interactive TUI](./12-tui.md) (`flowgraph tui`).
+> **Interactive TUI:** Designed as a companion package — see [12 — Interactive TUI](./12-tui.md). It is not part of the 0.1 npm set.
 
 ## 1.1 Optional CLI packages
 
 `@veloxdevworks/flowgraph-cli` ships a slim core install. These features load **on demand** when referenced in a graph — install only what you need:
 
-| Feature | Graph signal | Package |
-|---------|--------------|---------|
-| MCP servers | `mcpServers:` block, `mcp` nodes, agent MCP tools | `@veloxdevworks/flowgraph-mcp` |
-| Local filesystem tools | `localTools.fs:` block | `@veloxdevworks/flowgraph-tools-fs` |
-| Durable SQLite checkpoints | `runtime.checkpoint.backend: sqlite` | `@veloxdevworks/flowgraph-checkpoint-sqlite` |
-| Interactive TUI | `flowgraph tui` | `@veloxdevworks/flowgraph-tui` |
+| Feature | Graph signal | Package | 0.1 |
+|---------|--------------|---------|-----|
+| Local filesystem tools | `localTools.fs:` block | `@veloxdevworks/flowgraph-tools-fs` | published |
+| Durable SQLite checkpoints | `runtime.checkpoint.backend: sqlite` | `@veloxdevworks/flowgraph-checkpoint-sqlite` | published (CLI injects the saver) |
+| Built-in mock provider | `provider: mock` | (CLI registers `mockProvider`) | published — **not** auto-registered by core |
+| MCP servers | `mcpServers:` block, `mcp` nodes, agent MCP tools | `@veloxdevworks/flowgraph-mcp` | **companion / not published** |
+| Interactive TUI | `flowgraph tui` | `@veloxdevworks/flowgraph-tui` | **companion / not published** |
 
 ```bash
-pnpm add @veloxdevworks/flowgraph-mcp              # MCP integrations
-pnpm add @veloxdevworks/flowgraph-tools-fs         # sandboxed fs_read / fs_write tools
+pnpm add @veloxdevworks/flowgraph-tools-fs           # sandboxed fs_read / fs_write tools
 pnpm add @veloxdevworks/flowgraph-checkpoint-sqlite  # resume after process restart
 ```
 
-If a graph references a feature whose package is not installed, the CLI fails fast with an install hint.
+Do **not** `pnpm add @veloxdevworks/flowgraph-mcp` or `@veloxdevworks/flowgraph-tui` as if they ship from this repo. If a graph references a published plugin that is not installed, the CLI fails fast with an install hint.
 
 ## 2. `flowgraph run` — **shipped**
 
@@ -76,11 +76,12 @@ flowgraph run ./triage.graph.yaml \
 - If the graph declares `inputs:`, resolves defaults and validates `--input` (and any `input:` seed defaults) **before** the run starts. Missing required keys or type mismatches exit `1` with an aggregated error listing every issue — never an interactive prompt.
 - Checkpoint backend comes from `runtime.checkpoint` in the YAML (not a CLI flag).
 - Budget limits come from `runtime.budget` in the YAML (not `--max-usd`).
-- Skill preflight runs when a **skill node executes**, not upfront at run start.
+- Skill and agent **preflight always run** before the run starts (`preflightGraphSkills` / `preflightGraphAgents`). Missing env/bin or invalid `AGENT.md` fails fast.
+- `provider: mock` is registered by the CLI (core does not auto-register it).
 - With `--stream` / `--json`, events go to configured sinks; otherwise a compact summary prints at the end.
 - On interrupt under `--on-interrupt fail`, exits `3` and prints resume instructions.
 
-**Planned flags:** `--checkpoint`, `--max-usd`, `--otel`, global `--config`, `--env-file`, `--log-level`, `--quiet`.
+**Planned flags:** `--checkpoint`, `--max-usd`, `--otel` (the OTel **package** exists; this flag is unwired), global `--config`, `--env-file`, `--log-level`, `--quiet`.
 
 ## 3. `flowgraph validate` — **shipped**
 
@@ -94,7 +95,7 @@ flowgraph validate ./my.graph.yaml --strict --format json
 - `--format json` emits machine-readable diagnostics.
 - Exit `2` on errors; `0` on success.
 
-> **`--preflight`:** The flag exists but **does not yet run skill env checks** during validate. Use `flowgraph skills doctor` for env readiness.
+`--preflight` **does** run skill env/bin checks and agent `AGENT.md` preflight (same helpers as `flowgraph run`). `flowgraph skills doctor` remains useful for checking a skill directory without a graph.
 
 ## 4. `flowgraph graph` — **shipped**
 
@@ -217,10 +218,10 @@ Developer loop: watch graph + skills, re-validate on change, pretty streaming, `
 - run: pnpm build
 - run: |
     for f in graphs/*.graph.yaml; do
-      npx flowgraph validate "$f" --strict
+      npx @veloxdevworks/flowgraph-cli validate "$f" --strict
     done
 - run: |
-    npx flowgraph run graphs/triage.graph.yaml \
+    npx @veloxdevworks/flowgraph-cli run graphs/triage.graph.yaml \
       --input issue=@"$GITHUB_EVENT_PATH" \
       --thread "issue-${{ github.event.issue.number }}" \
       --on-interrupt fail \
