@@ -10,6 +10,7 @@ export type EventType =
   | "run.aborted"
   | "run.paused"
   | "run.continued"
+  | "run.issue"
   | "node.start"
   | "node.end"
   | "node.error"

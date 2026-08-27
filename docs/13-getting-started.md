@@ -24,7 +24,7 @@ pnpm install
 pnpm build
 ```
 
-The CLI binary is at `packages/cli/dist/bin.js`. Examples use workspace-linked `@veloxdevworks/flowgraph-cli`.
+The CLI binary is at `packages/cli/dist/bin.js`. Examples use workspace-linked `@flowgraph/cli`.
 
 ## Your first run (zero TypeScript)
 
@@ -91,7 +91,7 @@ flowgraph uses a **hybrid model**: YAML declares topology and config; logic live
 |---------|-------------|----------------------|
 | **`skill` node** + on-disk `handler.js` | Portable, shareable units with contracts | No — see [quickstart](../examples/quickstart/) |
 | **`function` node** + `registerFunction()` | Custom in-process TS/JS logic | Yes — see [triage-issue](../examples/triage-issue/) |
-| **`agent` node** | LLM agent with tool loop | LangChain vendor SDK (e.g. `@langchain/openai`) + API key — adapter is built into `@veloxdevworks/flowgraph-core` / CLI |
+| **`agent` node** | LLM agent with tool loop | LangChain vendor SDK (e.g. `@langchain/openai`) + API key — adapter is built into `@flowgraph/core` / CLI |
 | **`mcp` node** or agent MCP tools | External tool servers | MCP config + optional OAuth |
 
 **Rule of thumb:** If your handler can be a plain ESM module on disk, use a **skill**. If you need tight integration with your app's runtime, use **`code`** with registration.

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as path from "node:path";
 import * as url from "node:url";
-import { loadGraph, compileForTest, eventsOfType } from "@veloxdevworks/flowgraph-testing";
+import { loadGraph, compileForTest, eventsOfType } from "@flowgraph/testing";
 import "./register.js";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));

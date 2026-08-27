@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadGraph, validateSpec } from "@veloxdevworks/flowgraph-core";
-import { isError } from "@veloxdevworks/flowgraph-spec";
+import { loadGraph, validateSpec } from "@flowgraph/core";
+import { isError } from "@flowgraph/spec";
 import { migrateSpec } from "./migrate.js";
 import { templateFor, listTemplates } from "./templates.js";
 

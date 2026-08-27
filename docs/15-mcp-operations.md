@@ -2,7 +2,7 @@
 
 Operational guide for Model Context Protocol integrations in flowgraph. MCP is the primary way to connect external tools and APIs; see [08 — Providers §MCP](./08-providers.md#mcp-first-integrations-v1) for schema and configuration details.
 
-> **Install:** MCP support is provided by the optional `@veloxdevworks/flowgraph-mcp` package (`pnpm add @veloxdevworks/flowgraph-mcp`). It is not bundled in the default `@veloxdevworks/flowgraph-cli` install — see [09 — CLI §1.1](./09-cli.md#11-optional-cli-packages).
+> **Install:** MCP support is provided by the optional `@flowgraph/mcp` package (`pnpm add @flowgraph/mcp`). It is not bundled in the default `@flowgraph/cli` install — see [09 — CLI §1.1](./09-cli.md#11-optional-cli-packages).
 
 ## Declaring MCP servers
 
@@ -30,7 +30,7 @@ mcpServers:
 | **Deterministic** | `type: mcp` node | Call a specific tool with mapped args |
 | **Agentic** | `tools: [{ mcp: atlassian }]` on `intelligent` | Expand server tools into the agent loop |
 
-Both modes share one MCP client hub (`@veloxdevworks/flowgraph-mcp`). Tool invocations route through flowgraph's runtime (events, hooks, HITL).
+Both modes share one MCP client hub (`@flowgraph/mcp`). Tool invocations route through flowgraph's runtime (events, hooks, HITL).
 
 ## Stdio vs HTTP transport
 
@@ -86,10 +86,10 @@ MCP OAuth tokens are **independent** of LLM API keys. Agent nodes reuse the same
 
 | Provider | Package | Environment variable | Notes |
 |----------|---------|---------------------|-------|
-| LangChain / OpenAI | `@veloxdevworks/flowgraph-core` + `@langchain/openai` | `OPENAI_API_KEY` | Also supports Anthropic, xAI, Ollama, Google via `providers` block |
-| LangChain / Anthropic | `@veloxdevworks/flowgraph-core` + `@langchain/anthropic` | `ANTHROPIC_API_KEY` | `vendor: anthropic` in `providers` |
-| Claude Agent SDK | `@veloxdevworks/flowgraph-provider-claude` | `ANTHROPIC_API_KEY` | Optional `apiKeyEnv` override in YAML |
-| Cursor SDK | `@veloxdevworks/flowgraph-provider-cursor` | `CURSOR_API_KEY` | `runtime: local` or `cloud` |
+| LangChain / OpenAI | `@flowgraph/core` + `@langchain/openai` | `OPENAI_API_KEY` | Also supports Anthropic, xAI, Ollama, Google via `providers` block |
+| LangChain / Anthropic | `@flowgraph/core` + `@langchain/anthropic` | `ANTHROPIC_API_KEY` | `vendor: anthropic` in `providers` |
+| Claude Agent SDK | `@flowgraph/provider-claude` | `ANTHROPIC_API_KEY` | Optional `apiKeyEnv` override in YAML |
+| Cursor SDK | `@flowgraph/provider-cursor` | `CURSOR_API_KEY` | `runtime: local` or `cloud` |
 
 ### MCP auth (non-OAuth)
 

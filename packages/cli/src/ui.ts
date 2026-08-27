@@ -1,5 +1,5 @@
 import pc from "picocolors";
-import type { Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import type { Diagnostic } from "@flowgraph/spec";
 
 export function printDiagnostics(diagnostics: Diagnostic[], filePath?: string): void {
   if (diagnostics.length === 0) return;

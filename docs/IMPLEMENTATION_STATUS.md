@@ -12,15 +12,15 @@ Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint 
 | Compiler + runtime (`loadGraph` → `compileGraph` → `run`/`resume`) | **Shipped** |
 | Built-in node types (incl. `script`, `demo`, `service`, `port`) | **Shipped** |
 | Skills loader, contracts, preflight | **Shipped** |
-| Expression language (`@veloxdevworks/flowgraph-expr`) | **Shipped** |
+| Expression language (`@flowgraph/expr`) | **Shipped** |
 | Events + console/jsonl sinks | **Shipped** (nested subgraph events forward with `parentSpanId`) |
 | Hooks (YAML subset + guardrails) | **Shipped** (partial defaults) |
 | HITL + in-memory checkpointing | **Shipped** |
 | Providers: LangChain (in core), Claude, Cursor | **Shipped** |
-| MCP hub (stdio, HTTP, OAuth) | **Shipped** (`@veloxdevworks/flowgraph-mcp` optional peer of CLI) |
-| Local FS tools + governance | **Shipped** (`@veloxdevworks/flowgraph-tools-fs` optional peer of CLI) |
-| SQLite checkpointing (CLI) | **Shipped** (`@veloxdevworks/flowgraph-checkpoint-sqlite` optional peer of CLI) |
-| TUI (`@veloxdevworks/flowgraph-tui`) | **Shipped** |
+| MCP hub (stdio, HTTP, OAuth) | **Shipped** (`@flowgraph/mcp` optional peer of CLI) |
+| Local FS tools + governance | **Shipped** (`@flowgraph/tools-fs` optional peer of CLI) |
+| SQLite checkpointing (CLI) | **Shipped** (`@flowgraph/checkpoint-sqlite` optional peer of CLI) |
+| TUI (`@flowgraph/tui`) | **Shipped** |
 | Postgres checkpointer package | **Shipped** (no CLI default, no example) |
 | OTel package | **Shipped** (not wired to CLI `--otel`) |
 | `software-factory` example | **Shipped** (lifecycle demo; map fan-out covered by `composition`) |
@@ -55,7 +55,7 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 ## Known limitations
 
 1. **Skill preflight scope** — Upfront preflight scans top-level `skill` nodes only; nested skill refs inside `map`/`subgraph`/agent tools are not scanned yet.
-2. **OTel CLI wiring** — `@veloxdevworks/flowgraph-observability-otel` exists; attach sinks programmatically or wait for `--otel`.
+2. **OTel CLI wiring** — `@flowgraph/observability-otel` exists; attach sinks programmatically or wait for `--otel`.
 3. **Schema hosting** — `https://veloxdevworks.com/flowgraph/schema/v1.json` published when docs site deploys; local via `flowgraph schema --out`.
 4. **Map per-item event scope** — `map` inner events share the parent bus but do not set `parentSpanId` per iteration (no per-item canvas node). Subgraph nesting does set `parentSpanId`.
 5. **README phase label** — Root README updated to reflect Phases 1–4 progress; some numbered docs still describe future targets inline.

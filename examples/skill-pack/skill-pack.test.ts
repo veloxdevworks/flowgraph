@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
-import { loadSkill } from "@veloxdevworks/flowgraph-skills";
+import { loadSkill } from "@flowgraph/skills";
 import slugify from "./skills/slugify/handler.js";
 import wordCount from "./skills/word-count/handler.js";
 

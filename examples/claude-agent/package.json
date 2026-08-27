@@ -9,9 +9,9 @@
     "validate": "flowgraph validate claude-agent.graph.yaml"
   },
   "dependencies": {
-    "@veloxdevworks/flowgraph-cli": "workspace:*",
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-provider-claude": "workspace:*",
+    "@flowgraph/cli": "workspace:*",
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/provider-claude": "workspace:*",
     "@anthropic-ai/claude-agent-sdk": "^0.1.29"
   },
   "devDependencies": {

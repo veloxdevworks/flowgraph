@@ -1,10 +1,10 @@
 # 09 — CLI (`flowgraph`)
 
-The CLI is a thin surface over the `@veloxdevworks/flowgraph-core` programmatic API ([Architecture §6](./01-architecture.md#6-public-api-surface-programmatic)). It is the primary way to run graphs headless in CI and interactively on a desktop.
+The CLI is a thin surface over the `@flowgraph/core` programmatic API ([Architecture §6](./01-architecture.md#6-public-api-surface-programmatic)). It is the primary way to run graphs headless in CI and interactively on a desktop.
 
-Binary name: `flowgraph`. Distributed as `@veloxdevworks/flowgraph-cli`, runnable via `npx flowgraph` or installed globally/per-project.
+Binary name: `flowgraph`. Distributed as `@flowgraph/cli`, runnable via `npx flowgraph` or installed globally/per-project.
 
-> **Implementation status:** Commands marked **shipped** are in `@veloxdevworks/flowgraph-cli` today. **Planned** items are design targets — see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
+> **Implementation status:** Commands marked **shipped** are in `@flowgraph/cli` today. **Planned** items are design targets — see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
 
 ## 1. Command overview
 
@@ -18,7 +18,7 @@ Binary name: `flowgraph`. Distributed as `@veloxdevworks/flowgraph-cli`, runnabl
 | `flowgraph resume <graph>` | **shipped** | Resume an interrupted run by threadId |
 | `flowgraph skills …` | **partial** | `doctor`, `list`, `resolve` shipped; `show`, `new` planned |
 | `flowgraph mcp …` | **shipped** | `tools`, `auth login|status|logout` |
-| `flowgraph tui [graph]` | **shipped** | Interactive TUI (requires `@veloxdevworks/flowgraph-tui`) |
+| `flowgraph tui [graph]` | **shipped** | Interactive TUI (requires `@flowgraph/tui`) |
 | `flowgraph new <name>` | **shipped** | Scaffold a graph from a template |
 | `flowgraph init <name>` | **shipped** | Alias for `new` (single `.graph.yaml`, not a full project) |
 | `flowgraph dev <graph>` | **planned** | Watch + re-validate + run with stepping |
@@ -29,19 +29,19 @@ Per-command flags use `--cwd <dir>` where noted. The CLI loads `.env` from the w
 
 ## 1.1 Optional CLI packages
 
-`@veloxdevworks/flowgraph-cli` ships a slim core install. These features load **on demand** when referenced in a graph — install only what you need:
+`@flowgraph/cli` ships a slim core install. These features load **on demand** when referenced in a graph — install only what you need:
 
 | Feature | Graph signal | Package |
 |---------|--------------|---------|
-| MCP servers | `mcpServers:` block, `mcp` nodes, agent MCP tools | `@veloxdevworks/flowgraph-mcp` |
-| Local filesystem tools | `localTools.fs:` block | `@veloxdevworks/flowgraph-tools-fs` |
-| Durable SQLite checkpoints | `runtime.checkpoint.backend: sqlite` | `@veloxdevworks/flowgraph-checkpoint-sqlite` |
-| Interactive TUI | `flowgraph tui` | `@veloxdevworks/flowgraph-tui` |
+| MCP servers | `mcpServers:` block, `mcp` nodes, agent MCP tools | `@flowgraph/mcp` |
+| Local filesystem tools | `localTools.fs:` block | `@flowgraph/tools-fs` |
+| Durable SQLite checkpoints | `runtime.checkpoint.backend: sqlite` | `@flowgraph/checkpoint-sqlite` |
+| Interactive TUI | `flowgraph tui` | `@flowgraph/tui` |
 
 ```bash
-pnpm add @veloxdevworks/flowgraph-mcp              # MCP integrations
-pnpm add @veloxdevworks/flowgraph-tools-fs         # sandboxed fs_read / fs_write tools
-pnpm add @veloxdevworks/flowgraph-checkpoint-sqlite  # resume after process restart
+pnpm add @flowgraph/mcp              # MCP integrations
+pnpm add @flowgraph/tools-fs         # sandboxed fs_read / fs_write tools
+pnpm add @flowgraph/checkpoint-sqlite  # resume after process restart
 ```
 
 If a graph references a feature whose package is not installed, the CLI fails fast with an install hint.
@@ -116,7 +116,7 @@ flowgraph graph ./triage.graph.yaml --format json
 flowgraph schema --out schema/v1.json
 ```
 
-Prints or writes the Graph JSON Schema from `@veloxdevworks/flowgraph-spec`. Use in YAML headers for editor autocomplete:
+Prints or writes the Graph JSON Schema from `@flowgraph/spec`. Use in YAML headers for editor autocomplete:
 
 ```yaml
 # yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json

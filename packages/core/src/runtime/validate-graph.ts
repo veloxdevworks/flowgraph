@@ -2,11 +2,11 @@
  * Offline graph lint helpers used by validateSpec.
  */
 
-import type { GraphSpec, Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec, Diagnostic } from "@flowgraph/spec";
 import { registry } from "../registry.js";
 import { isOutputNone, OUTPUTS_CHANNEL } from "./apply-output.js";
 import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
-import { ONCE_CHANNEL } from "./state-annotation.js";
+import { RESERVED_STATE_CHANNELS } from "./state-annotation.js";
 
 function outgoingTargets(spec: GraphSpec, from: string): string[] {
   const targets: string[] = [];
@@ -316,10 +316,11 @@ export function channelNamesForCollisionCheck(spec: GraphSpec): Set<string> {
   for (const node of spec.nodes) {
     for (const channel of collectNodeWriteChannels(node)) names.add(channel);
   }
-  names.add(ONCE_CHANNEL);
+  for (const reserved of RESERVED_STATE_CHANNELS) names.add(reserved);
   // buildStateAnnotation adds a placeholder `result` channel when the
-  // annotation would otherwise be empty (aside from __once).
-  const userChannels = [...names].filter((n) => n !== ONCE_CHANNEL);
+  // annotation would otherwise be empty (aside from reserved channels).
+  const reservedSet = new Set<string>(RESERVED_STATE_CHANNELS);
+  const userChannels = [...names].filter((n) => !reservedSet.has(n));
   if (userChannels.length === 0) names.add("result");
   return names;
 }

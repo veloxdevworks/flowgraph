@@ -1,4 +1,4 @@
-# `@veloxdevworks/flowgraph-server`
+# `@flowgraph/server`
 
 HTTP run server for hosted flowgraph execution. One ARM64 container serves:
 
@@ -8,16 +8,15 @@ HTTP run server for hosted flowgraph execution. One ARM64 container serves:
 ## Quick start (local)
 
 ```bash
-pnpm --filter @veloxdevworks/flowgraph-server build
-DATABASE_URL=          # optional; omit for in-memory checkpoints
+pnpm --filter @flowgraph/server build
 FLOWGRAPH_AUTH_TOKEN=dev \
-FLOWGRAPH_GRAPH_STORE=/tmp/fg-graphs \
+FLOWGRAPH_GRAPH_STORE="$HOME/flowgraph-graphs" \
 node packages/server/dist/bin.js
 ```
 
 ```bash
-# Health
-curl -s http://127.0.0.1:8080/healthz
+# Health (includes process identity: version, node, hostname, graphStoreDir)
+curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8080/healthz
 
 # AgentCore ping
 curl -s http://127.0.0.1:8080/ping
@@ -32,6 +31,65 @@ curl -s -X POST http://127.0.0.1:8080/runs \
 curl -N -H "Authorization: Bearer dev" \
   http://127.0.0.1:8080/runs/t1/events
 ```
+
+## Auth
+
+REST requires `FLOWGRAPH_AUTH_TOKEN` unless you explicitly opt out with `FLOWGRAPH_AUTH_DISABLED=1` (local/dev only). AgentCore `/ping` and `/invocations` skip bearer auth (SigV4 at the edge).
+
+## Limits
+
+| Env | Default | Purpose |
+|---|---|---|
+| `FLOWGRAPH_MAX_BODY_BYTES` | `2000000` | JSON body cap for `POST /runs` and control endpoints (`0` = unlimited) |
+| `FLOWGRAPH_MAX_CONCURRENT_RUNS` | `16` | In-flight `running`/`started` threads per process (`0` = unlimited) |
+| `FLOWGRAPH_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. `GET /ping` access logs are `debug`. |
+| `FLOWGRAPH_GIT_SHA` | _(unset)_ | Optional build identity included on `/` and `/healthz`. |
+| `FLOWGRAPH_GRAPH_STORE` | `/tmp/flowgraph-graphs` | Uploaded YAML + `{threadId}.events.jsonl`. **Do not use `/tmp` on a lab host** — it is wiped on reboot. |
+
+## Lab / self-host
+
+Point stdout at a file (launchd `StandardOutPath` / `StandardErrorPath`, or a redirect):
+
+`~/Library/Logs/flowgraph-server.log`
+
+When a run fails, paste:
+
+1. `GET /healthz` JSON (identity + credentials presence, not secret values)
+2. Log tail covering start → failure
+3. `threadId` plus the graph-store files `{threadId}.graph.yaml` and `{threadId}.events.jsonl`
+
+Do not dump `process.env` or bearer tokens.
+
+Event dump without SSE:
+
+```bash
+curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8080/runs/t1/journal
+```
+
+## Listing and reattach
+
+```bash
+curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8080/runs
+curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8080/runs/t1
+```
+
+`POST /runs` accepts `dryRun: true` to compile with the mock provider only.
+
+## Control-plane connect (ADR-0014)
+
+Optional outbound WebSocket client. Off unless configured:
+
+```bash
+FLOWGRAPH_CONNECT_URL=wss://platform.example/connect \
+FLOWGRAPH_CONNECT_TOKEN=… \
+node packages/server/dist/bin.js
+```
+
+Handshake: client sends `{ type: "hello", protocolVersion: 1, token, capabilities }`; platform replies `{ type: "hello.ack", protocolVersion: 1, sessionId }`. Commands (`run.start|resume|cancel|pause|continue|state|history|list`) map onto `RunService`; engine events are batched as `{ type: "event.batch", threadId, events }`.
+
+## TLS
+
+Pass `certificate_arn` to Terraform to terminate HTTPS on the ALB (HTTP redirects to 443). HTTP-only ALB is for smoke tests — do not expose it on the public internet.
 
 ## v1 graph-source constraints
 

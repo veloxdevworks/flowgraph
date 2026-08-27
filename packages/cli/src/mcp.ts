@@ -1,13 +1,13 @@
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { renderDeep } from "@flowgraph/expr";
 import { stdin, stdout } from "node:process";
-import type { McpServerDefs } from "@veloxdevworks/flowgraph-mcp";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
-import type { CompileOptions, McpHub } from "@veloxdevworks/flowgraph-core";
+import type { McpServerDefs } from "@flowgraph/mcp";
+import type { GraphSpec } from "@flowgraph/spec";
+import type { CompileOptions, McpHub } from "@flowgraph/core";
 import { lazyOptionalImport } from "./optional-deps.js";
 
-const loadMcp = lazyOptionalImport<typeof import("@veloxdevworks/flowgraph-mcp")>(
-  "@veloxdevworks/flowgraph-mcp",
-  "Install it: pnpm add @veloxdevworks/flowgraph-mcp",
+const loadMcp = lazyOptionalImport<typeof import("@flowgraph/mcp")>(
+  "@flowgraph/mcp",
+  "Install it: pnpm add @flowgraph/mcp",
 );
 
 function buildRenderScope(spec: GraphSpec): Record<string, unknown> {

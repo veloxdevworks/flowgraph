@@ -14,7 +14,7 @@ Treat **`@langchain/langgraph` as the unforked L0 engine.** flowgraph compiles i
 ## Consequences
 
 - We inherit LangGraph's capabilities and improvements for free; lower maintenance surface.
-- We are coupled to LangGraph's API and version cadence; mitigated by isolating the integration inside `@veloxdevworks/flowgraph-core` (the `build` stage) so upstream changes touch one layer.
+- We are coupled to LangGraph's API and version cadence; mitigated by isolating the integration inside `@flowgraph/core` (the `build` stage) so upstream changes touch one layer.
 - Our differentiator stays where it belongs: the low-code/no-code packaging layer.
 - We must track LangGraph.js releases and pin/test against them.
 

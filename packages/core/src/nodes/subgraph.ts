@@ -13,8 +13,8 @@
  */
 
 import { z } from "zod";
-import { SubgraphWithSchema, type GraphSpec } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { SubgraphWithSchema, type GraphSpec } from "@flowgraph/spec";
+import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";

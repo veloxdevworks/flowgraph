@@ -1,5 +1,5 @@
 {
-  "name": "@veloxdevworks/flowgraph-core",
+  "name": "@flowgraph/core",
   "version": "0.1.0",
   "description": "Compiler, runtime, node registry, event bus, and built-in nodes for flowgraph",
   "license": "Apache-2.0",
@@ -22,9 +22,9 @@
   "dependencies": {
     "@langchain/core": "^1.2.0",
     "@langchain/langgraph": "^1.4.7",
-    "@veloxdevworks/flowgraph-expr": "workspace:*",
-    "@veloxdevworks/flowgraph-skills": "workspace:*",
-    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "@flowgraph/expr": "workspace:*",
+    "@flowgraph/skills": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
     "esbuild": "^0.25.12",
     "gray-matter": "^4.0.3",
     "yaml": "^2.9.0",

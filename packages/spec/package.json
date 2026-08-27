@@ -1,5 +1,5 @@
 {
-  "name": "@veloxdevworks/flowgraph-spec",
+  "name": "@flowgraph/spec",
   "version": "0.1.0",
   "description": "Zod schemas and JSON Schema for the flowgraph YAML graph specification",
   "license": "Apache-2.0",

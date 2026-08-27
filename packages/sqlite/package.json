@@ -1,0 +1,21 @@
+{
+  "name": "@flowgraph/sqlite",
+  "version": "0.1.0",
+  "description": "SQLite checkpointer alias used by the desktop sidecar (wraps LangGraph SqliteSaver)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "dependencies": {
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3"
+  },
+  "peerDependencies": {
+    "@langchain/langgraph": "^1.4.7"
+  }
+}

@@ -1,4 +1,4 @@
-import type { ReducerFn } from "@veloxdevworks/flowgraph-core";
+import type { ReducerFn } from "@flowgraph/core";
 
 const asItems = (v: unknown) => (Array.isArray(v) ? v : v != null ? [v] : []);
 

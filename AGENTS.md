@@ -1,7 +1,7 @@
 # AGENTS.md
 
 `flowgraph` is the open-source engine (pnpm + Turborepo monorepo). The proprietary
-repos `flowgraph-app` and `flowgraph-desktop` consume its `@veloxdevworks/flowgraph-*`
+repos `flowgraph-app` and `flowgraph-desktop` consume its `@flowgraph/*`
 packages via `link:` to a sibling checkout of this repo.
 
 ## Cursor Cloud specific instructions
@@ -13,7 +13,7 @@ packages via `link:` to a sibling checkout of this repo.
   that point at a sibling directory named **`ai-graph`** (e.g.
   `link:../../ai-graph/packages/core`). The startup update script creates
   `/agent/repos/ai-graph -> /agent/repos/flowgraph`. If `pnpm install` in a
-  downstream repo cannot resolve `@veloxdevworks/flowgraph-*`, recreate it:
+  downstream repo cannot resolve `@flowgraph/*`, recreate it:
   `sudo ln -sfn /agent/repos/flowgraph /agent/repos/ai-graph`.
 
 ### Build order
@@ -26,7 +26,7 @@ packages via `link:` to a sibling checkout of this repo.
   `^build`). If you isolate a core DTS/`typecheck` against a leftover
   `packages/spec/dist`, stale types can briefly reject new input field types
   (e.g. `"json"`) even though runtime JS is fine — rebuild
-  `@veloxdevworks/flowgraph-spec` first, or just run the root build.
+  `@flowgraph/spec` first, or just run the root build.
 - Standard commands live in `CONTRIBUTING.md` and `package.json`
   (`pnpm build`, `pnpm test`, `pnpm typecheck`).
 
@@ -42,10 +42,10 @@ packages via `link:` to a sibling checkout of this repo.
   fine** (tsup emits `dist/*.js` before DTS fails), so the engine is fully
   runnable. `packages/cli/dist/bin.js` is produced and works. To get a complete
   build without the aborted `cli` step, run
-  `pnpm --filter @veloxdevworks/flowgraph-cli build` after the top-level build.
+  `pnpm --filter @flowgraph/cli build` after the top-level build.
 - Because turbo's `test`/`typecheck` tasks depend on `build`, the aggregate
   `pnpm test` aborts before running specs. Run a package's tests directly instead,
-  e.g. `pnpm --filter @veloxdevworks/flowgraph-core exec vitest run` (core: 132
+  e.g. `pnpm --filter @flowgraph/core exec vitest run` (core: 132
   tests pass).
 - Downstream repos (`flowgraph-app`, `flowgraph-desktop`) still build/test fine
   against this checkout, since they consume `core`/`spec`/`expr`/`skills` (whose

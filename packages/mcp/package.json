@@ -1,0 +1,20 @@
+{
+  "name": "@flowgraph/mcp",
+  "version": "0.1.0",
+  "description": "MCP client hub for flowgraph (prebuilt dist; sources live with the engine MCP package)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "peerDependencies": {
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}

@@ -12,7 +12,7 @@ export ANTHROPIC_API_KEY=...
 Install the Claude provider and SDK if not already present:
 
 ```bash
-pnpm add @veloxdevworks/flowgraph-provider-claude @anthropic-ai/claude-agent-sdk
+pnpm add @flowgraph/provider-claude @anthropic-ai/claude-agent-sdk
 ```
 
 ## Run
@@ -32,7 +32,7 @@ pnpm run run:prompt
 ## What it does
 
 1. Uses `provider: claude` with `tools: [{ builtin: [Read, Edit, Glob] }]`.
-2. Native SDK tools are gated by the same `permission` / `runtime.hooks` model as `@veloxdevworks/flowgraph-tools-fs`.
+2. Native SDK tools are gated by the same `permission` / `runtime.hooks` model as `@flowgraph/tools-fs`.
 3. `permission: ask` routes each `Read`/`Edit` through human-in-the-loop before execution.
 
-For LangChain-only graphs, use `@veloxdevworks/flowgraph-tools-fs` instead — see [examples/fs-agent](../fs-agent/).
+For LangChain-only graphs, use `@flowgraph/tools-fs` instead — see [examples/fs-agent](../fs-agent/).

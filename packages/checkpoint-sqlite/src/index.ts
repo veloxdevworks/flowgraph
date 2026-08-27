@@ -5,7 +5,7 @@
  * process restarts. Pass the result to `compileGraph(spec, { checkpointer })`.
  *
  * @example
- * import { createSqliteCheckpointer } from "@veloxdevworks/flowgraph-checkpoint-sqlite";
+ * import { createSqliteCheckpointer } from "@flowgraph/checkpoint-sqlite";
  * const checkpointer = createSqliteCheckpointer(".flowgraph/checkpoints.db");
  * const compiled = await compileGraph(spec, { checkpointer });
  */

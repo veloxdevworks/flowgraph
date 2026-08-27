@@ -5,7 +5,7 @@
  * matching local CLI binary is on PATH, we auto-prefer `createCliProvider`.
  */
 
-import type { ProviderAdapter } from "@veloxdevworks/flowgraph-core";
+import type { ProviderAdapter } from "@flowgraph/core";
 import {
   createLangChainProviderFromConfig,
   isKnownLangChainVendor,
@@ -15,18 +15,18 @@ import {
   apiKeyEnvForProviderKind,
   hasApiKey,
   type CliVendor,
-} from "@veloxdevworks/flowgraph-core";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+} from "@flowgraph/core";
+import type { GraphSpec } from "@flowgraph/spec";
 
 async function loadClaudeFactory() {
   try {
-    const mod = await import("@veloxdevworks/flowgraph-provider-claude");
+    const mod = await import("@flowgraph/provider-claude");
     return mod.createClaudeProviderFromConfig;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("Cannot find") || msg.includes("ERR_MODULE_NOT_FOUND")) {
       throw new Error(
-        'Claude provider is not installed. Install it: pnpm add @veloxdevworks/flowgraph-provider-claude @anthropic-ai/claude-agent-sdk',
+        'Claude provider is not installed. Install it: pnpm add @flowgraph/provider-claude @anthropic-ai/claude-agent-sdk',
         { cause: err },
       );
     }
@@ -36,13 +36,36 @@ async function loadClaudeFactory() {
 
 async function loadCursorFactory() {
   try {
-    const mod = await import("@veloxdevworks/flowgraph-provider-cursor");
+    const mod = await import("@flowgraph/provider-cursor");
     return mod.createCursorProviderFromConfig;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("Cannot find") || msg.includes("ERR_MODULE_NOT_FOUND")) {
       throw new Error(
-        'Cursor provider is not installed. Install it: pnpm add @veloxdevworks/flowgraph-provider-cursor @cursor/sdk',
+        'Cursor provider is not installed. Install it: pnpm add @flowgraph/provider-cursor @cursor/sdk',
+        { cause: err },
+      );
+    }
+    throw err;
+  }
+}
+
+async function loadDeepAgentsFactory() {
+  const specifier = "@flowgraph/provider-deepagents";
+  try {
+    const mod = (await (Function("s", "return import(s)")(specifier) as Promise<{
+      createDeepAgentsProviderFromConfig: (
+        name: string,
+        cfg: unknown,
+        opts: { cwd?: string; spec?: GraphSpec },
+      ) => Promise<ProviderAdapter>;
+    }>));
+    return mod.createDeepAgentsProviderFromConfig;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("Cannot find") || msg.includes("ERR_MODULE_NOT_FOUND") || msg.includes("Failed to resolve")) {
+      throw new Error(
+        'Deep Agents provider is not installed. Install it: pnpm add @flowgraph/provider-deepagents deepagents',
         { cause: err },
       );
     }
@@ -137,6 +160,11 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
         }
         break;
       }
+      case "deepagents": {
+        const createDeep = await loadDeepAgentsFactory();
+        providers.push(await createDeep(name, cfg, { cwd, spec }));
+        break;
+      }
       default:
         throw new Error(`Provider "${name}": unsupported kind "${(cfg as { kind?: string }).kind}".`);
     }
@@ -168,6 +196,17 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
       );
     }
     built.add(defaultName);
+  }
+
+  const needsDeepHub =
+    spec.nodes.some((n) => (n.with as { hub?: string } | undefined)?.hub === "deepagents") ||
+    Object.values(spec.providers ?? {}).some((p) => p.kind === "deepagents");
+  if (needsDeepHub && !built.has("deepagents") && !providers.some((p) => p.name === "deepagents")) {
+    const createDeep = await loadDeepAgentsFactory();
+    providers.push(
+      await createDeep("deepagents", { kind: "deepagents" }, { cwd, spec }),
+    );
+    built.add("deepagents");
   }
 
   return providers;

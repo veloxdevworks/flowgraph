@@ -1,6 +1,6 @@
 # flowgraph — Documentation
 
-> **Name:** _flowgraph_. Plain and descriptive: a graph of AI/automation nodes. (Package scope `@veloxdevworks/flowgraph-*`, CLI `flowgraph`, spec token `apiVersion: flowgraph/v1`.)
+> **Name:** _flowgraph_. Plain and descriptive: a graph of AI/automation nodes. (Package scope `@flowgraph/*`, CLI `flowgraph`, spec token `apiVersion: flowgraph/v1`.)
 
 flowgraph is a **declarative orchestration layer on top of [LangGraph.js](https://langchain-ai.github.io/langgraphjs/)**. It lets you describe an agentic/automation graph in **YAML** (low-code today, no-code later) and compile it to a runnable LangGraph `StateGraph`, with first-class **events, hooks, skills, intelligent agent nodes, checkpointing, and human-in-the-loop**.
 
@@ -26,7 +26,7 @@ We are **not** building a new graph engine. LangGraph is the engine. flowgraph i
 | 11 | [Local Tools](./11-local-tools.md) | Sandboxed filesystem tools and governance |
 | 12 | [Interactive TUI](./12-tui.md) | `flowgraph tui` — keyboard-driven terminal UI |
 | 13 | [Getting started](./13-getting-started.md) | Install, first run, editor setup, hybrid authoring |
-| 14 | [Programmatic API](./14-programmatic-api.md) | `@veloxdevworks/flowgraph-core` + `@veloxdevworks/flowgraph-testing` |
+| 14 | [Programmatic API](./14-programmatic-api.md) | `@flowgraph/core` + `@flowgraph/testing` |
 | 15 | [MCP operations](./15-mcp-operations.md) | OAuth, CI patterns, provider env vars |
 | 16 | [Agent Definitions](./16-agents.md) | Reusable `AGENT.md` system prompts for agent nodes |
 | — | [Implementation status](./IMPLEMENTATION_STATUS.md) | Shipped vs planned feature matrix |
@@ -117,5 +117,5 @@ These were decided at kickoff and are recorded as ADRs:
 - **Checkpointing + HITL + durability are first-class in v1.** ([ADR-0005](./adr/0005-durability-and-hitl.md))
 - **Monorepo: pnpm + Turborepo + tsup + Vitest + Changesets.** ([ADR-0006](./adr/0006-monorepo-tooling.md))
 - **OpenTelemetry is the first-class observability target.** ([ADR-0007](./adr/0007-observability-otel.md))
-- **Name: `flowgraph`** (scope `@veloxdevworks/flowgraph-*`, CLI `flowgraph`, `apiVersion: flowgraph/v1`). ([ADR-0013](./adr/0013-rename-to-flowgraph.md), supersedes [ADR-0001](./adr/0001-naming.md))
+- **Name: `flowgraph`** (scope `@flowgraph/*`, CLI `flowgraph`, `apiVersion: flowgraph/v1`). ([ADR-0015](./adr/0015-flowgraph-npm-scope.md) for npm scope; [ADR-0013](./adr/0013-rename-to-flowgraph.md) for the product name, superseding [ADR-0001](./adr/0001-naming.md))
 - **License: Apache-2.0.** ([ADR-0008](./adr/0008-license.md))

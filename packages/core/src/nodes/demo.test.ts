@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DemoWithSchema, type GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import { DemoWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import type { FlowgraphEvent } from "../events.js";
 import type { NodeRunContext } from "../context.js";
@@ -48,6 +48,10 @@ describe("DemoWithSchema", () => {
       DemoWithSchema.safeParse({ screenshot: { url: "https://example.com" } }).success,
     ).toBe(true);
     expect(DemoWithSchema.safeParse({ file: { path: "./out.pdf" } }).success).toBe(true);
+    expect(DemoWithSchema.safeParse({ video: { url: "https://example.com" } }).success).toBe(true);
+    expect(
+      DemoWithSchema.safeParse({ simulator: { platform: "ios", capture: "screenshot" } }).success,
+    ).toBe(true);
   });
 });
 
@@ -170,6 +174,7 @@ describe("demo node", () => {
 
     const result = await compiled.run({ threadId: "demo-file-missing" });
     expect(result.status).toBe("completed");
+    expect(result.issues?.some((i) => i.code === "CAPTURE_FAILED")).toBe(true);
 
     const out = result.state["demo"] as { ok: boolean; kind: string; reason: string };
     expect(out.ok).toBe(false);
@@ -226,7 +231,7 @@ describe("demo node", () => {
       expect(out.path).toBeTruthy();
       expect(fs.existsSync(out.path!)).toBe(true);
     } else {
-      expect(out.reason).toMatch(/playwright|not installed|browser|launch|navigate|timeout/i);
+      expect(out.reason).toMatch(/playwright|not installed|browser|launch|navigate|timeout|screenshot|protocol|capture/i);
     }
 
     const manifest = readDemoManifest(workspace, "demo-screenshot");
@@ -265,6 +270,12 @@ describe("demo node", () => {
         throw new Error("unexpected interrupt");
       },
       once: async <T>(_k: string, fn: () => Promise<T> | T) => fn(),
+      issue: (input) => ({
+        ...input,
+        raisedAt: new Date().toISOString(),
+        nodeId: "file-tool",
+        nodeType: "demo",
+      }),
       _input: { label: "from-tool", path: "./note.txt" },
     } as unknown as NodeRunContext & { _input: Record<string, unknown> };
 

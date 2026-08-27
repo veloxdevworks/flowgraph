@@ -1,12 +1,12 @@
 # 08 — Providers (Intelligent-Node Backends)
 
-An **intelligent** node delegates its agent loop to a **provider**. flowgraph defines a **pluggable provider interface** first, then ships adapters as optional packages so you install only the backends your graphs reference. v1 targets three: **Claude Agent SDK**, **Cursor SDK**, and a generic **LangChain ChatModel** adapter (LangChain is also built into `@veloxdevworks/flowgraph-core` for convenience).
+An **intelligent** node delegates its agent loop to a **provider**. flowgraph defines a **pluggable provider interface** first, then ships adapters as optional packages so you install only the backends your graphs reference. v1 targets three: **Claude Agent SDK**, **Cursor SDK**, and a generic **LangChain ChatModel** adapter (LangChain is also built into `@flowgraph/core` for convenience).
 
 ## 1. Why an abstraction
 
 - The hub-and-spoke agent loop (tool-calling, multi-step, structured output) is conceptually the same across backends; only the SDK calls differ.
 - Decoupling lets graphs be **portable** (`provider:` swap) and lets the community add providers (Gemini, OpenAI Responses, local models) without touching core.
-- Heavy SDKs (which may bundle native binaries — e.g. Claude Agent SDK ships a Claude Code binary) stay out of `@veloxdevworks/flowgraph-core`.
+- Heavy SDKs (which may bundle native binaries — e.g. Claude Agent SDK ships a Claude Code binary) stay out of `@flowgraph/core`.
 
 ## 2. The `ProviderAdapter` interface
 
@@ -80,7 +80,7 @@ mcpServers:
       Authorization: "Bearer {{ secret.ATLASSIAN_TOKEN }}"
 ```
 
-Two consumption modes share one client (`@veloxdevworks/flowgraph-mcp`):
+Two consumption modes share one client (`@flowgraph/mcp`):
 
 1. **Deterministic** — `type: mcp` nodes call a specific tool or read a resource with arguments mapped from state.
 2. **Agentic** — `{ mcp: atlassian }` under `intelligent.with.tools` expands the server's tools at run time and routes invocations through `ctx.invokeTool` (hooks, HITL, events).
@@ -154,7 +154,9 @@ providers:
 
 **v1 limits:** the CLI provider is single-shot (prompt → text). It does not mediate flowgraph tools/MCP through the CLI; the installed CLI runs its own agent loop. For hub-and-spoke tool wiring, use the SDK providers (`claude` / `cursor` / `langchain`) with an API key.
 
-## 3. Adapter: Claude (`@veloxdevworks/flowgraph-provider-claude`)
+Cursor CLI (`vendor: cursor`) is always invoked with `-p --trust` so headless Desktop/sidecar runs skip the workspace-trust prompt. Claude CLI uses `-p --permission-mode dontAsk` (Claude `-p` already skips its trust dialog). Neither path passes `--force` / `--yolo` / `--always-approve` (those auto-allow shell commands).
+
+## 3. Adapter: Claude (`@flowgraph/provider-claude`)
 
 Wraps `@anthropic-ai/claude-agent-sdk` (`query({ prompt, options })`). Maps:
 
@@ -162,7 +164,7 @@ Wraps `@anthropic-ai/claude-agent-sdk` (`query({ prompt, options })`). Maps:
 - `tools.skill/node` → in-process SDK MCP tools (`createSdkMcpServer` / `tool`) that call back into flowgraph.
 - `tools.mcp` → MCP server config.
 - `schema` → structured output via a final tool/`output` contract.
-- `permission` → SDK permission mode / `canUseTool` callback (→ flowgraph HITL).
+- `permission` → SDK permission mode / `canUseTool` callback (→ flowgraph HITL). Unattended runs default to `dontAsk` (no TTY prompts); `permission: ask` keeps `default` so HITL can fire. Set `providers.claude.permissionMode` to override.
 - Streams SDK messages → `agent.step` / `agent.tool.call` / `agent.token` events.
 
 ```yaml
@@ -185,14 +187,14 @@ providers:
   claude:
     kind: claude
     model: claude-sonnet-4.5
-    permissionMode: acceptEdits   # default | acceptEdits | bypassPermissions | plan
+    permissionMode: acceptEdits   # default | acceptEdits | bypassPermissions | plan | dontAsk
     cwd: "{{ run.workspace }}"
     apiKeyEnv: ANTHROPIC_API_KEY  # optional override
 ```
 
 Auth: `ANTHROPIC_API_KEY` (env/secret, or `apiKeyEnv` override). Requirements documented for preflight (Node ≥ 18; bundled binary).
 
-## 4. Adapter: Cursor (`@veloxdevworks/flowgraph-provider-cursor`)
+## 4. Adapter: Cursor (`@flowgraph/provider-cursor`)
 
 ```yaml
 providers:
@@ -205,7 +207,9 @@ providers:
 
 Wraps `@cursor/sdk` (`Agent.create`/`prompt`/`stream`). Maps the same `AgentRequest` onto the Cursor agent loop, exposing skills/nodes as `local.customTools` and streaming run messages into flowgraph events. Supports Cursor's local vs. cloud runtime selection via `providers.cursor.runtime` or `with.cursor.runtime`. Auth via `CURSOR_API_KEY` (or `apiKeyEnv`), surfaced to preflight.
 
-**Governance note:** Custom tools (skills/nodes/functions) route through flowgraph `checkToolCall`/`reportToolResult`. Native Cursor builtin tools do not support per-call `canUseTool`; `validate()` warns when combining `tools.builtin` with `permission: ask` or `agent:beforeToolCall` hooks — use `provider: claude` or `@veloxdevworks/flowgraph-tools-fs` for fine-grained file-tool gating.
+Local runs always set `local.trust: true` (same idea as Cursor CLI `--trust`): flowgraph has already chosen the workspace, and there is no TTY to answer a trust prompt. That is not `--force` / `--yolo` (auto-allow shell).
+
+**Governance note:** Custom tools (skills/nodes/functions) route through flowgraph `checkToolCall`/`reportToolResult`. Native Cursor builtin tools do not support per-call `canUseTool`; `validate()` warns when combining `tools.builtin` with `permission: ask` or `agent:beforeToolCall` hooks — use `provider: claude` or `@flowgraph/tools-fs` for fine-grained file-tool gating.
 
 ```yaml
 - id: refactor
@@ -217,11 +221,11 @@ Wraps `@cursor/sdk` (`Agent.create`/`prompt`/`stream`). Maps the same `AgentRequ
     prompt: "Refactor {{ state.module }} to remove the deprecated API."
 ```
 
-## 5. Adapter: LangChain (built into `@veloxdevworks/flowgraph-core`)
+## 5. Adapter: LangChain (built into `@flowgraph/core`)
 
 The "works with any model" baseline. Wraps a LangChain `ChatModel` (`@langchain/anthropic`, `@langchain/openai`, etc.) and implements the agent loop with bound tools (`bindTools`) + a tool-execution cycle, or delegates to LangGraph's prebuilt ReAct agent. `schema` uses `withStructuredOutput`. No provider-native `builtin` tools (warns if requested); skills/nodes/MCP work as `StructuredTool`s.
 
-Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/openai`) and set the matching API key env var. The adapter itself ships with `@veloxdevworks/flowgraph-core` — no separate flowgraph provider package required.
+Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/openai`) and set the matching API key env var. The adapter itself ships with `@flowgraph/core` — no separate flowgraph provider package required.
 
 ```yaml
 - id: classify
@@ -237,13 +241,13 @@ Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/ope
 ## 6. Selection, defaults, and validation
 
 - Default provider/model come from `config.defaults` ([02 §config](./02-graph-spec.md#7-config)); per-node `provider:`/`model:` override.
-- On `flowgraph run`, the CLI reads `providers:` from the graph YAML, constructs LangChain adapters from the built-in core provider, or lazy-loads `@veloxdevworks/flowgraph-provider-claude` / `@veloxdevworks/flowgraph-provider-cursor` by `kind`, and passes them to `compileGraph({ providers })`. Missing vendor packages or API keys fail fast with install/env hints.
+- On `flowgraph run`, the CLI reads `providers:` from the graph YAML, constructs LangChain adapters from the built-in core provider, or lazy-loads `@flowgraph/provider-claude` / `@flowgraph/provider-cursor` by `kind`, and passes them to `compileGraph({ providers })`. Missing vendor packages or API keys fail fast with install/env hints.
 - `validate()` runs at compile time: unknown model, builtin tools unsupported by the provider, MCP requested where unsupported, or missing auth env ⇒ diagnostics before any model call.
 
 ## 7. Registering a custom provider
 
 ```ts
-import { defineProvider } from "@veloxdevworks/flowgraph-core";
+import { defineProvider } from "@flowgraph/core";
 
 export const gemini = defineProvider({
   name: "gemini",
@@ -260,14 +264,14 @@ Register via `compileGraph(spec, { providers: [gemini] })` or publish as `@scope
 
 | Provider | Package | Primary env var | Optional overrides |
 |----------|---------|-----------------|-------------------|
-| LangChain / OpenAI | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/openai` | `OPENAI_API_KEY` | `apiKeyEnv`, `baseUrl` in `providers` block |
-| LangChain / Anthropic | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/anthropic` | `ANTHROPIC_API_KEY` | `vendor: anthropic` |
-| LangChain / xAI | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/xai` | `XAI_API_KEY` | `vendor: xai` |
-| LangChain / Google | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/google-genai` | `GOOGLE_API_KEY` | `vendor: google` |
-| LangChain / Ollama | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/ollama` | _(none)_ | `baseUrl: http://localhost:11434` |
-| LangChain / Bedrock | `@veloxdevworks/flowgraph-core` (built-in) + `@langchain/aws` | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, or `AWS_PROFILE` | `vendor: bedrock`, `region`, inference-profile `model` ID |
-| Claude Agent SDK | `@veloxdevworks/flowgraph-provider-claude` | `ANTHROPIC_API_KEY` | `apiKeyEnv` in `providers.claude` |
-| Cursor SDK | `@veloxdevworks/flowgraph-provider-cursor` | `CURSOR_API_KEY` | `apiKeyEnv`, `runtime: local\|cloud` |
+| LangChain / OpenAI | `@flowgraph/core` (built-in) + `@langchain/openai` | `OPENAI_API_KEY` | `apiKeyEnv`, `baseUrl` in `providers` block |
+| LangChain / Anthropic | `@flowgraph/core` (built-in) + `@langchain/anthropic` | `ANTHROPIC_API_KEY` | `vendor: anthropic` |
+| LangChain / xAI | `@flowgraph/core` (built-in) + `@langchain/xai` | `XAI_API_KEY` | `vendor: xai` |
+| LangChain / Google | `@flowgraph/core` (built-in) + `@langchain/google-genai` | `GOOGLE_API_KEY` | `vendor: google` |
+| LangChain / Ollama | `@flowgraph/core` (built-in) + `@langchain/ollama` | _(none)_ | `baseUrl: http://localhost:11434` |
+| LangChain / Bedrock | `@flowgraph/core` (built-in) + `@langchain/aws` | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, or `AWS_PROFILE` | `vendor: bedrock`, `region`, inference-profile `model` ID |
+| Claude Agent SDK | `@flowgraph/provider-claude` | `ANTHROPIC_API_KEY` | `apiKeyEnv` in `providers.claude` |
+| Cursor SDK | `@flowgraph/provider-cursor` | `CURSOR_API_KEY` | `apiKeyEnv`, `runtime: local\|cloud` |
 
 MCP OAuth tokens (`.flowgraph/mcp-oauth/`) and LLM API keys are independent. For MCP setup, OAuth flows, and CI patterns, see [15 — MCP operations](./15-mcp-operations.md).
 

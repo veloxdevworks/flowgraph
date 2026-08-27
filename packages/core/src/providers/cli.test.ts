@@ -100,7 +100,90 @@ describe("createCliProvider", () => {
     expect(result.output).toBe("hello from claude");
     expect(execFileFn).toHaveBeenCalledWith(
       "claude",
-      expect.arrayContaining(["-p", "say hi", "--output-format", "json"]),
+      expect.arrayContaining(["-p", "say hi", "--output-format", "json", "--permission-mode", "dontAsk"]),
+      expect.objectContaining({ cwd: "/tmp/ws" }),
+    );
+  });
+
+  it("when a schema is set, appends it to the prompt and wraps non-JSON stdout", async () => {
+    const execFileFn = vi.fn(async () => ({ stdout: "**Status: ready**\n\nA plan.", stderr: "" }));
+    const provider = createCliProvider({
+      name: "local-cursor",
+      vendor: "cursor",
+      detectFn: async () => true,
+      execFileFn: execFileFn as never,
+    });
+    const schema = {
+      type: "object",
+      properties: { status: { type: "string" }, question: { type: "string" } },
+      required: ["status", "question"],
+    };
+    const result = await provider.run(
+      { prompt: "interview", tools: [], permission: "auto", schema },
+      fakeCtx(),
+    );
+    expect(result.output).toEqual({ text: "**Status: ready**\n\nA plan." });
+    const args = execFileFn.mock.calls[0]![1] as string[];
+    expect(args.join(" ")).toContain("Respond with JSON matching this schema");
+  });
+
+  it("when a schema is set, parses JSON stdout into the structured object", async () => {
+    const execFileFn = vi.fn(async () => ({
+      stdout: '{"status":"need_more","question":"Which port?"}',
+      stderr: "",
+    }));
+    const provider = createCliProvider({
+      name: "local-cursor",
+      vendor: "cursor",
+      detectFn: async () => true,
+      execFileFn: execFileFn as never,
+    });
+    const result = await provider.run(
+      {
+        prompt: "interview",
+        tools: [],
+        permission: "auto",
+        schema: { type: "object" },
+      },
+      fakeCtx(),
+    );
+    expect(result.output).toEqual({ status: "need_more", question: "Which port?" });
+  });
+
+  it("prefers the node's workspace over the provider default cwd", async () => {
+    const execFileFn = vi.fn(async () => ({ stdout: "ok", stderr: "" }));
+    const provider = createCliProvider({
+      name: "local-cursor",
+      vendor: "cursor",
+      cwd: "/Users/me/.velox/flow",
+      detectFn: async () => true,
+      execFileFn: execFileFn as never,
+    });
+    await provider.run({ prompt: "implement", tools: [], permission: "auto" }, fakeCtx({
+      node: {
+        workspace: "/Users/me/code/device-farm",
+        logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      } as never,
+    }));
+    expect(execFileFn).toHaveBeenCalledWith(
+      "cursor-agent",
+      expect.any(Array),
+      expect.objectContaining({ cwd: "/Users/me/code/device-farm" }),
+    );
+  });
+
+  it("passes --trust on cursor -p so headless runs skip the workspace prompt", async () => {
+    const execFileFn = vi.fn(async () => ({ stdout: "ok", stderr: "" }));
+    const provider = createCliProvider({
+      name: "local-cursor",
+      vendor: "cursor",
+      detectFn: async () => true,
+      execFileFn: execFileFn as never,
+    });
+    await provider.run({ prompt: "interview", tools: [], permission: "auto" }, fakeCtx());
+    expect(execFileFn).toHaveBeenCalledWith(
+      "cursor-agent",
+      ["-p", "--trust", "interview"],
       expect.objectContaining({ cwd: "/tmp/ws" }),
     );
   });

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import matter from "gray-matter";
-import type { Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import type { Diagnostic } from "@flowgraph/spec";
 import { AgentFrontMatterSchema, type AgentDef } from "./schema.js";
 
 /**

@@ -6,7 +6,7 @@ import {
   resetServiceManager,
   statusService,
 } from "../runtime/service-manager.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import "./list-services.js";
 
 afterEach(async () => {

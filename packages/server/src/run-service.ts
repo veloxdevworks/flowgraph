@@ -4,25 +4,32 @@ import {
   compileGraph,
   resolveAndValidateInput,
   isInputValidationError,
+  readRunIssues,
   type CompiledGraph,
   type FlowgraphEvent,
+  type RunIssue,
   type RunResult,
-} from "@veloxdevworks/flowgraph-core";
-import { createPostgresCheckpointer } from "@veloxdevworks/flowgraph-checkpoint-postgres";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+} from "@flowgraph/core";
+import { createPostgresCheckpointer } from "@flowgraph/checkpoint-postgres";
+import type { GraphSpec } from "@flowgraph/spec";
 import { rejectClientSecrets, applyServerCredentials } from "./credentials.js";
-import { parseGraphYaml, persistGraph, loadPersistedGraph } from "./graph-source.js";
+import { parseGraphYaml, persistGraph, loadPersistedGraph, updateGraphMeta, listPersistedGraphs, appendEventJournal, loadEventJournal } from "./graph-source.js";
 import { buildServerProviders } from "./providers.js";
 import { SessionRegistry } from "./session-registry.js";
-import { createMetrics, log } from "./metrics.js";
+import { createMetrics, errorFields, log } from "./metrics.js";
 import type {
   ControlResult,
   GetStateResult,
+  RunDetail,
+  RunListItem,
   ServerConfig,
+  ServerEvent,
   StartRunRequest,
   StartRunResult,
   ResumeRunRequest,
 } from "./types.js";
+
+import { TooManyRunsError } from "./errors.js";
 
 export class RunService {
   readonly registry: SessionRegistry;
@@ -31,7 +38,12 @@ export class RunService {
   private checkpointerPromise: Promise<BaseCheckpointSaver | "memory"> | null = null;
 
   constructor(readonly config: ServerConfig) {
-    this.registry = new SessionRegistry(config.eventBufferSize);
+    this.registry = new SessionRegistry(config.eventBufferSize, {
+      onPersist: (threadId, event) => {
+        appendEventJournal(config.graphStoreDir, threadId, event);
+      },
+      loadJournal: (threadId) => loadEventJournal(config.graphStoreDir, threadId),
+    });
     applyServerCredentials({
       ...(config.awsRegion ? { awsRegion: config.awsRegion } : {}),
     });
@@ -65,7 +77,7 @@ export class RunService {
   private async resolveSpec(
     threadId: string,
     yaml?: string,
-  ): Promise<{ spec: GraphSpec; yaml: string; cwd: string }> {
+  ): Promise<{ spec: GraphSpec; yaml: string; cwd: string; importsStripped: boolean }> {
     if (yaml) {
       const parsed = parseGraphYaml(yaml);
       if (!parsed.spec) {
@@ -80,6 +92,7 @@ export class RunService {
         spec: parsed.spec,
         yaml: parsed.yaml,
         cwd: this.config.graphStoreDir,
+        importsStripped: parsed.importsStripped,
       };
     }
 
@@ -93,6 +106,7 @@ export class RunService {
       spec: persisted.spec,
       yaml: persisted.yaml,
       cwd: this.config.graphStoreDir,
+      importsStripped: false,
     };
   }
 
@@ -101,9 +115,10 @@ export class RunService {
     cwd: string,
     threadId: string,
     onEvent: (ev: FlowgraphEvent) => void,
+    dryRun = false,
   ): Promise<CompiledGraph> {
     const checkpointer = await this.getCheckpointer();
-    const providers = await buildServerProviders(spec, cwd);
+    const providers = await buildServerProviders(spec, cwd, { dryRun });
     const graphPath = path.join(cwd, `${threadId.replace(/[^a-zA-Z0-9._-]/g, "_")}.graph.yaml`);
     return compileGraph(spec, {
       cwd,
@@ -123,7 +138,12 @@ export class RunService {
     if (!req.threadId?.trim()) throw new Error("threadId is required");
     if (!req.yaml?.trim()) throw new Error("yaml is required");
 
-    const { spec, yaml, cwd } = await this.resolveSpec(req.threadId, req.yaml);
+    const max = this.config.maxConcurrentRuns ?? 16;
+    if (max > 0 && this.registry.activeCount() >= max) {
+      throw new TooManyRunsError(max);
+    }
+
+    const { spec, yaml, cwd, importsStripped } = await this.resolveSpec(req.threadId, req.yaml);
     const graphName = spec.metadata?.name ?? "graph";
 
     // Pre-create session so events during compile/run are buffered.
@@ -133,11 +153,17 @@ export class RunService {
       graphName,
       ...(req.label ? { label: req.label } : {}),
       yaml,
+      ...(req.dryRun ? { dryRun: true } : {}),
+    });
+
+    await persistGraph(this.config.graphStoreDir, req.threadId, yaml, spec, {
+      ...(req.label ? { label: req.label } : {}),
+      status: "running",
     });
 
     const compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
       this.registry.pushEvent(req.threadId, ev);
-    });
+    }, Boolean(req.dryRun));
 
     let resolvedInput: Record<string, unknown>;
     try {
@@ -174,10 +200,11 @@ export class RunService {
         });
         this.applyResult(req.threadId, result);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log("error", "run.error", { threadId: req.threadId, message });
+        log("error", "run.error", { threadId: req.threadId, ...errorFields(err) });
         this.registry.setStatus(req.threadId, "error");
         this.metrics.recordResult("error");
+        void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "error" });
+        const message = err instanceof Error ? err.message : String(err);
         this.registry.pushEvent(req.threadId, {
           id: `err-${Date.now()}`,
           type: "run.error",
@@ -196,6 +223,7 @@ export class RunService {
       threadId: req.threadId,
       runId: compiled.runId,
       status: "started",
+      ...(importsStripped ? { importsStripped: true } : {}),
     };
   }
 
@@ -213,6 +241,7 @@ export class RunService {
     this.registry.setStatus(threadId, status);
     this.metrics.recordResult(result.status);
     log("info", "run.end", { threadId, status: result.status, runId: result.runId });
+    void updateGraphMeta(this.config.graphStoreDir, threadId, { status });
   }
 
   async resumeRun(req: ResumeRunRequest): Promise<ControlResult> {
@@ -239,11 +268,20 @@ export class RunService {
       session.yaml = resolvedYaml;
     }
 
-    const compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
-      this.registry.pushEvent(req.threadId, ev);
-    });
+    const dryRun = Boolean(existing?.dryRun);
+    const compiled = await this.compile(
+      spec,
+      cwd,
+      req.threadId,
+      (ev) => {
+        this.registry.pushEvent(req.threadId, ev);
+      },
+      dryRun,
+    );
     session.runId = compiled.runId;
+    session.dryRun = dryRun;
     this.registry.setStatus(req.threadId, "running");
+    void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "running" });
 
     // Fire-and-forget like start/continue — resumed execution can be long-running.
     void (async () => {
@@ -257,10 +295,11 @@ export class RunService {
         });
         this.applyResult(req.threadId, result);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log("error", "resume.error", { threadId: req.threadId, message });
+        log("error", "resume.error", { threadId: req.threadId, ...errorFields(err) });
         this.registry.setStatus(req.threadId, "error");
         this.metrics.recordResult("error");
+        void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "error" });
+        const message = err instanceof Error ? err.message : String(err);
         this.registry.pushEvent(req.threadId, {
           id: `err-${Date.now()}`,
           type: "run.error",
@@ -288,6 +327,7 @@ export class RunService {
     session.abort.abort();
     this.registry.setStatus(threadId, "cancelled");
     this.metrics.recordResult("cancelled");
+    void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "cancelled" });
     return { threadId, runId: session.runId, status: "cancelled" };
   }
 
@@ -295,6 +335,7 @@ export class RunService {
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
     session.pause.abort();
+    void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "paused" });
     return { threadId, runId: session.runId, status: "started" };
   }
 
@@ -320,11 +361,20 @@ export class RunService {
       session.pause = pause;
     }
 
-    const compiled = await this.compile(spec, cwd, threadId, (ev) => {
-      this.registry.pushEvent(threadId, ev);
-    });
+    const dryRun = Boolean(existing?.dryRun);
+    const compiled = await this.compile(
+      spec,
+      cwd,
+      threadId,
+      (ev) => {
+        this.registry.pushEvent(threadId, ev);
+      },
+      dryRun,
+    );
     session.runId = compiled.runId;
+    session.dryRun = dryRun;
     this.registry.setStatus(threadId, "running");
+    void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "running" });
 
     // Fire-and-forget like start (continue can be long-running)
     void (async () => {
@@ -337,10 +387,10 @@ export class RunService {
         });
         this.applyResult(threadId, result);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log("error", "continue.error", { threadId, message });
+        log("error", "continue.error", { threadId, ...errorFields(err) });
         this.registry.setStatus(threadId, "error");
         this.metrics.recordResult("error");
+        void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "error" });
       }
     })();
 
@@ -361,5 +411,77 @@ export class RunService {
     const compiled = await this.compile(spec, cwd, threadId, () => undefined);
     const history = await compiled.getStateHistory(threadId);
     return { history };
+  }
+
+  async listRuns(): Promise<RunListItem[]> {
+    const persisted = await listPersistedGraphs(this.config.graphStoreDir);
+    const byId = new Map<string, RunListItem>();
+    for (const meta of persisted) {
+      const live = this.registry.get(meta.threadId);
+      byId.set(meta.threadId, {
+        threadId: meta.threadId,
+        graphName: live?.graphName || meta.graphName || "graph",
+        ...(meta.label || live?.label ? { label: live?.label ?? meta.label } : {}),
+        status: live?.status ?? meta.status ?? "completed",
+        updatedAt: meta.updatedAt,
+        ...(live?.startedAt ? { startedAt: live.startedAt } : {}),
+        active: Boolean(
+          live && (live.status === "running" || live.status === "started"),
+        ),
+      });
+    }
+    for (const live of this.registry.list()) {
+      if (byId.has(live.threadId)) continue;
+      if (!live.runId) continue;
+      byId.set(live.threadId, {
+        threadId: live.threadId,
+        graphName: live.graphName,
+        ...(live.label ? { label: live.label } : {}),
+        status: live.status,
+        updatedAt: live.startedAt,
+        startedAt: live.startedAt,
+        active: live.status === "running" || live.status === "started",
+      });
+    }
+    return [...byId.values()].sort((a, b) =>
+      a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
+    );
+  }
+
+  async getRun(threadId: string): Promise<RunDetail | null> {
+    const persisted = await loadPersistedGraph(this.config.graphStoreDir, threadId);
+    const live = this.registry.get(threadId);
+    if (!persisted && !live) return null;
+    const meta = persisted?.meta;
+    return {
+      threadId,
+      graphName: live?.graphName || meta?.graphName || persisted?.spec.metadata?.name || "graph",
+      ...(live?.label || meta?.label ? { label: live?.label ?? meta?.label } : {}),
+      status: live?.status ?? meta?.status ?? "completed",
+      updatedAt: meta?.updatedAt ?? live?.startedAt ?? new Date().toISOString(),
+      ...(live?.startedAt ? { startedAt: live.startedAt } : {}),
+      active: Boolean(live && (live.status === "running" || live.status === "started")),
+      yaml: persisted?.yaml ?? live?.yaml ?? "",
+      issues: this.readIssues(threadId),
+    };
+  }
+
+  listIssues(threadId: string): RunIssue[] {
+    return this.readIssues(threadId);
+  }
+
+  /** In-memory events, or the on-disk journal after a process restart. */
+  getJournal(threadId: string): ServerEvent[] {
+    const live = this.registry.get(threadId);
+    if (live && live.events.length > 0) return live.events;
+    return loadEventJournal(this.config.graphStoreDir, threadId);
+  }
+
+  private readIssues(threadId: string): RunIssue[] {
+    try {
+      return readRunIssues(this.config.graphStoreDir, threadId);
+    } catch {
+      return [];
+    }
   }
 }

@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { SkillWithSchema } from "@veloxdevworks/flowgraph-spec";
+import { SkillWithSchema } from "@flowgraph/spec";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { loadResolvedSkill, runSkill } from "./skill-runner.js";

@@ -2,7 +2,7 @@
  * Registers the functions referenced by release-notes.graph.yaml.
  * Import this module before compiling/running the graph.
  */
-import { registerFunction } from "@veloxdevworks/flowgraph-core";
+import { registerFunction } from "@flowgraph/core";
 
 registerFunction("draftNotes", (input) => {
   const { version = "0.0.0" } = input as { version?: string };

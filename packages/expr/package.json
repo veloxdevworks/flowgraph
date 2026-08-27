@@ -1,5 +1,5 @@
 {
-  "name": "@veloxdevworks/flowgraph-expr",
+  "name": "@flowgraph/expr",
   "version": "0.1.0",
   "description": "Sandboxed expression language for flowgraph YAML specs",
   "license": "Apache-2.0",

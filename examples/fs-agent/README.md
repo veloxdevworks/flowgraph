@@ -1,6 +1,6 @@
 # Filesystem agent example
 
-Demonstrates governed local file tools (`@veloxdevworks/flowgraph-tools-fs`) with an agent node.
+Demonstrates governed local file tools (`@flowgraph/tools-fs`) with an agent node.
 
 ## Setup
 

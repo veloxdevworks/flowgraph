@@ -1,5 +1,5 @@
 {
-  "name": "@veloxdevworks/flowgraph-provider-claude",
+  "name": "@flowgraph/provider-claude",
   "version": "0.1.0",
   "description": "Claude Agent SDK provider adapter for flowgraph intelligent nodes",
   "license": "Apache-2.0",
@@ -20,13 +20,13 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
     "@anthropic-ai/claude-agent-sdk": "^0.1.0"
   },
   "devDependencies": {
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
     "@anthropic-ai/claude-agent-sdk": "^0.1.29",
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",

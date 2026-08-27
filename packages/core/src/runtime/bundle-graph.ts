@@ -7,7 +7,7 @@
  */
 
 import * as path from "node:path";
-import type { GraphSpec, NodeSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec, NodeSpec } from "@flowgraph/spec";
 import { loadGraph } from "../loader.js";
 import { resolveAgentPath } from "../agent-resolver.js";
 import { loadAgentDef } from "../agents/loader.js";

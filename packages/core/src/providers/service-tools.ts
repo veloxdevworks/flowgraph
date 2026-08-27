@@ -11,7 +11,7 @@
  */
 
 import { z } from "zod";
-import { ServiceReadySchema } from "@veloxdevworks/flowgraph-spec";
+import { ServiceReadySchema } from "@flowgraph/spec";
 import { registerTool } from "./registry.js";
 import type { NodeRunContext } from "../context.js";
 import {

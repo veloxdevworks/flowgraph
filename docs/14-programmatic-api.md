@@ -1,11 +1,11 @@
 # 14 — Programmatic API
 
-Use `@veloxdevworks/flowgraph-core` when you need to embed graphs in an application, register functions dynamically, or wire custom providers and sinks. The CLI is a thin wrapper around this API ([09 — CLI](./09-cli.md)).
+Use `@flowgraph/core` when you need to embed graphs in an application, register functions dynamically, or wire custom providers and sinks. The CLI is a thin wrapper around this API ([09 — CLI](./09-cli.md)).
 
 ## Minimal compile + run
 
 ```ts
-import { loadGraph, validateSpec, compileGraph, consoleSink } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, validateSpec, compileGraph, consoleSink } from "@flowgraph/core";
 
 const graphPath = "./my.graph.yaml";
 const cwd = new URL(".", import.meta.url).pathname;
@@ -49,7 +49,7 @@ For graph authors, the zero-setup option is a [`shell` node](./03-node-types.md#
 When embedding flowgraph in a host process, you can still use the legacy `function` node with `registerFunction` for in-process TypeScript handlers:
 
 ```ts
-import { registerFunction, loadGraph, compileGraph } from "@veloxdevworks/flowgraph-core";
+import { registerFunction, loadGraph, compileGraph } from "@flowgraph/core";
 
 registerFunction("classifyIssue", (input) => {
   const { title = "", body = "" } = input as { title?: string; body?: string };
@@ -89,7 +89,7 @@ See [release-notes](../examples/release-notes/register.ts) for `ctx.interrupt()`
 ## Custom providers
 
 ```ts
-import { compileGraph, defineProvider } from "@veloxdevworks/flowgraph-core";
+import { compileGraph, defineProvider } from "@flowgraph/core";
 
 const mock = defineProvider({
   name: "mock",
@@ -113,7 +113,7 @@ Graphs can also declare providers in YAML (`providers:` block) — the CLI build
 ## Events and hooks
 
 ```ts
-import { compileGraph, consoleSink, jsonlSink } from "@veloxdevworks/flowgraph-core";
+import { compileGraph, consoleSink, jsonlSink } from "@flowgraph/core";
 
 const compiled = await compileGraph(spec, {
   sinks: [
@@ -130,7 +130,7 @@ Hooks from the graph spec (`runtime.hooks`) are applied at compile time. Program
 When not using the CLI, pass an MCP hub to `compileGraph`:
 
 ```ts
-import { McpHub } from "@veloxdevworks/flowgraph-mcp";
+import { McpHub } from "@flowgraph/mcp";
 
 const mcp = new McpHub({ cwd, servers: spec.mcpServers });
 await mcp.connectAll();
@@ -142,13 +142,13 @@ await mcp.close();
 
 The CLI handles this via `mcpHubForRun` — see [15 — MCP operations](./15-mcp-operations.md).
 
-## Testing with `@veloxdevworks/flowgraph-testing`
+## Testing with `@flowgraph/testing`
 
 The testing package provides an in-memory harness — no CLI, no filesystem checkpoint:
 
 ```ts
 import { describe, it, expect } from "vitest";
-import { runInMemory, runGraphFile, compileForTest, eventsOfType } from "@veloxdevworks/flowgraph-testing";
+import { runInMemory, runGraphFile, compileForTest, eventsOfType } from "@flowgraph/testing";
 import "./register.js";  // registerFunction calls
 
 describe("my graph", () => {

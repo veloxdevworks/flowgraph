@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { compileGraph, registerTool, type GraphSpec } from "@veloxdevworks/flowgraph-core";
+import { compileGraph, registerTool, type GraphSpec } from "@flowgraph/core";
 import { createClaudeProvider, type ClaudeQueryFn } from "./provider.js";
 
 function fakeQuery(messages: unknown[]): ClaudeQueryFn {
@@ -21,7 +21,7 @@ const baseSpec = (withBlock: Record<string, unknown>): GraphSpec =>
     runtime: { checkpoint: { enabled: false } },
   }) as unknown as GraphSpec;
 
-describe("@veloxdevworks/flowgraph-provider-claude", () => {
+describe("@flowgraph/provider-claude", () => {
   it("returns text from a successful result message", async () => {
     const provider = createClaudeProvider({
       deps: {
@@ -65,6 +65,7 @@ describe("@veloxdevworks/flowgraph-provider-claude", () => {
     );
     await compiled.run({ input: {} });
     expect(capturedOptions?.["allowedTools"]).toEqual(expect.arrayContaining(["Read", "Grep"]));
+    expect(capturedOptions?.["permissionMode"]).toBe("dontAsk");
   });
 
   it("wraps function tools in an SDK MCP server and invokes them", async () => {

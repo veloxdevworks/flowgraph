@@ -6,6 +6,7 @@ export {
 
 export {
   createLangChainProviderFromConfig,
+  createLangChainChatModelFromConfig,
   isKnownLangChainVendor,
   LANGCHAIN_VENDORS,
   type LangChainProviderConfigInput,

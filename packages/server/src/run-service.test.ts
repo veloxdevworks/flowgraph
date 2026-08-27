@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { registerFunction } from "@veloxdevworks/flowgraph-core";
+import { registerFunction } from "@flowgraph/core";
 import { RunService } from "./run-service.js";
 import type { ServerConfig } from "./types.js";
 
@@ -101,6 +101,20 @@ describe("RunService", () => {
     expect(service.registry.get(threadId)?.status).toBe("completed");
   });
 
+  it("reports importsStripped on start", async () => {
+    const threadId = `imports-${Date.now()}`;
+    const yaml = COMPLETE_GRAPH.replace(
+      "kind: Graph\n",
+      "kind: Graph\nimports:\n  - { reducers: \"./register.ts\" }\n",
+    );
+    const result = await service.startRun({
+      threadId,
+      yaml,
+      input: { text: "hi" },
+    });
+    expect(result.importsStripped).toBe(true);
+  });
+
   it("persists uploaded yaml", async () => {
     const threadId = `persist-${Date.now()}`;
     await service.startRun({ threadId, yaml: COMPLETE_GRAPH, input: { text: "x" } });
@@ -189,5 +203,20 @@ runtime:
     expect(events).toContain("interrupt.raised");
     expect(events).toContain("run.end");
     expect(service.registry.get(threadId)?.status).toBe("completed");
+  });
+
+  it("includes persisted metadata after a start", async () => {
+    const threadId = `list-${Date.now()}`;
+    await service.startRun({
+      threadId,
+      yaml: COMPLETE_GRAPH,
+      input: { text: "hi" },
+      label: "Listed",
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const runs = await service.listRuns();
+    expect(runs.some((r) => r.threadId === threadId && r.label === "Listed")).toBe(true);
+    const detail = await service.getRun(threadId);
+    expect(detail?.yaml).toContain("hosted-complete");
   });
 });

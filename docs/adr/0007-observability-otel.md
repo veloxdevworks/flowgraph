@@ -9,7 +9,7 @@ The system must expose observability points across the whole flow. We need a pri
 
 ## Decision
 
-**OpenTelemetry is the first-class observability target.** The internal event tree maps to OTel **traces** (run/node/agent-step/tool-call/skill spans), **metrics** (durations, retries, tokens, cost, interrupts, error rates), and **logs** (trace-correlated). Follow OTel **GenAI** semantic conventions for LLM spans plus a small `flowgraph.*` namespace. Ship as an opt-in package `@veloxdevworks/flowgraph-observability-otel`; keep zero-dependency `console`/`jsonl` sinks in core.
+**OpenTelemetry is the first-class observability target.** The internal event tree maps to OTel **traces** (run/node/agent-step/tool-call/skill spans), **metrics** (durations, retries, tokens, cost, interrupts, error rates), and **logs** (trace-correlated). Follow OTel **GenAI** semantic conventions for LLM spans plus a small `flowgraph.*` namespace. Ship as an opt-in package `@flowgraph/observability-otel`; keep zero-dependency `console`/`jsonl` sinks in core.
 
 ## Consequences
 

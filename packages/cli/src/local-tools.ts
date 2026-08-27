@@ -1,10 +1,10 @@
 import * as path from "node:path";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import { lazyOptionalImport } from "./optional-deps.js";
 
-const loadToolsFs = lazyOptionalImport<typeof import("@veloxdevworks/flowgraph-tools-fs")>(
-  "@veloxdevworks/flowgraph-tools-fs",
-  "Install it: pnpm add @veloxdevworks/flowgraph-tools-fs",
+const loadToolsFs = lazyOptionalImport<typeof import("@flowgraph/tools-fs")>(
+  "@flowgraph/tools-fs",
+  "Install it: pnpm add @flowgraph/tools-fs",
 );
 
 function hasMutatingFsHook(spec: GraphSpec, mutatingToolNames: Set<string>): boolean {
@@ -35,7 +35,14 @@ export async function registerLocalTools(spec: GraphSpec, cwd = process.cwd()): 
   if (!fsCfg) return { warnings };
 
   const toolsFs = await loadToolsFs();
-  const workspaceRoot = path.resolve(cwd, fsCfg.workspaceRoot ?? ".");
+  const workspaceRoot = path.resolve(
+    spec.runtime?.workspace
+      ? path.isAbsolute(spec.runtime.workspace)
+        ? spec.runtime.workspace
+        : path.resolve(cwd, spec.runtime.workspace)
+      : cwd,
+    fsCfg.workspaceRoot ?? ".",
+  );
   const operations = fsCfg.operations;
 
   toolsFs.registerFsTools({ workspaceRoot, ...(operations ? { operations } : {}) });

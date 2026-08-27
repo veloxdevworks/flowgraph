@@ -2,8 +2,9 @@
  * Embedded HTTP ingress for `wait` nodes with `webhook: true`.
  *
  * Process-scoped: one listener per host:port. Routes are one-shot and live
- * only in memory — a process restart loses pending registrations.
- * No auth in v1 (local / trusted-network only).
+ * in memory — call `rehydrateWebhookRoute` after a process restart when the
+ * checkpoint still shows `mode: webhook`. Optional shared-secret auth via
+ * `runtime.webhookServer.token`.
  */
 
 import * as http from "node:http";
@@ -16,6 +17,8 @@ const MAX_BODY_BYTES = 1_048_576; // 1 MiB
 export interface WebhookServerConfig {
   host?: string;
   port?: number;
+  /** Shared secret; required on POST when set. */
+  token?: string;
 }
 
 export interface WebhookServerInfo {
@@ -43,10 +46,13 @@ interface ServerEntry {
   host: string;
   port: number;
   key: string;
+  token?: string;
 }
 
 const servers = new Map<string, ServerEntry>();
 const routes = new Map<string, PendingRoute>();
+/** Shared secret for inbound POST (process-scoped; last ensureWebhookServer wins). */
+let requiredToken: string | undefined;
 
 function serverKey(host: string, port: number): string {
   return `${host}:${port}`;
@@ -129,6 +135,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  if (requiredToken && !webhookAuthorized(req)) {
+    sendJson(res, 401, { error: "unauthorized", message: "Missing or invalid webhook token" });
+    return;
+  }
+
   let body: unknown = {};
   try {
     const raw = await readBody(req);
@@ -169,6 +180,15 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
 }
 
+function webhookAuthorized(req: http.IncomingMessage): boolean {
+  if (!requiredToken) return true;
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string" && auth === `Bearer ${requiredToken}`) return true;
+  const header = req.headers["x-flowgraph-token"];
+  if (typeof header === "string" && header === requiredToken) return true;
+  return false;
+}
+
 function listenOnce(
   host: string,
   port: number,
@@ -193,6 +213,7 @@ function listenOnce(
 export async function ensureWebhookServer(
   config: WebhookServerConfig = {},
 ): Promise<WebhookServerInfo> {
+  if (config.token) requiredToken = config.token;
   const host = config.host ?? DEFAULT_WEBHOOK_HOST;
   const preferredPort = config.port ?? DEFAULT_WEBHOOK_PORT;
   const preferredKey = serverKey(host, preferredPort);
@@ -276,6 +297,7 @@ export async function closeWebhookServers(): Promise<void> {
       }),
   );
   servers.clear();
+  requiredToken = undefined;
   await Promise.all(closing);
 }
 

@@ -38,9 +38,9 @@ Packages are tiered so `core` stays free of native bindings and optional SDKs:
 Prefer extending an existing package. Create a new one only when the capability needs an optional heavy or native dependency that must not land in `core`.
 
 1. **Decide the tier.** If it does not need an optional heavy/native dependency, it probably belongs inside `core`, not a new package.
-2. **Name it** `@veloxdevworks/flowgraph-<tier>-<name>` so it sorts with siblings (`provider-x`, `checkpoint-x`, etc.) under `packages/`.
+2. **Name it** `@flowgraph/<tier>-<name>` so it sorts with siblings (`provider-x`, `checkpoint-x`, etc.) under `packages/`.
 3. **Wire deps as peers**, not hard dependencies:
-   - `peerDependencies` on `@veloxdevworks/flowgraph-core` and the heavy SDK/driver
+   - `peerDependencies` on `@flowgraph/core` and the heavy SDK/driver
    - `peerDependenciesMeta` with `optional: true` when the CLI should lazy-load it
 4. **Update docs in the same PR:**
    - Root [README.md](./README.md) package tables (Foundation / Adapters / Runtime plugins)

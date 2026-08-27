@@ -1,6 +1,6 @@
 # 12 — Interactive TUI (`flowgraph tui`)
 
-The TUI is a keyboard-driven terminal interface for exploring graphs, running workflows live, answering human-in-the-loop (HITL) interrupts, and inspecting skills/MCP servers. It lives in `@veloxdevworks/flowgraph-tui` and is **optional** — the scriptable `flowgraph` CLI remains the stable surface for CI, automation, and a future GUI.
+The TUI is a keyboard-driven terminal interface for exploring graphs, running workflows live, answering human-in-the-loop (HITL) interrupts, and inspecting skills/MCP servers. It lives in `@flowgraph/tui` and is **optional** — the scriptable `flowgraph` CLI remains the stable surface for CI, automation, and a future GUI.
 
 ## Launch
 
@@ -12,7 +12,7 @@ flowgraph tui
 flowgraph tui ./triage.graph.yaml
 
 # Standalone binary (same package)
-npx @veloxdevworks/flowgraph-tui
+npx @flowgraph/tui
 flowgraph-tui ./my.graph.yaml
 ```
 
@@ -21,17 +21,17 @@ Requires an interactive terminal (TTY). In CI or piped shells, use `flowgraph ru
 Install the TUI package if `flowgraph tui` reports it is missing:
 
 ```bash
-pnpm add @veloxdevworks/flowgraph-tui
+pnpm add @flowgraph/tui
 ```
 
 ## Architecture
 
 The TUI is a thin Ink/React front-end over the same engine and helpers as the CLI:
 
-- `@veloxdevworks/flowgraph-core` — `loadGraph`, `validateSpec`, `compileGraph`, event bus
-- `@veloxdevworks/flowgraph-cli` — checkpointer, MCP hub, providers, local tools, interrupt parsing
+- `@flowgraph/core` — `loadGraph`, `validateSpec`, `compileGraph`, event bus
+- `@flowgraph/cli` — checkpointer, MCP hub, providers, local tools, interrupt parsing
 
-No parallel run engine. The CLI stays low-dependency; React/Ink ship only with `@veloxdevworks/flowgraph-tui`.
+No parallel run engine. The CLI stays low-dependency; React/Ink ship only with `@flowgraph/tui`.
 
 ## Screens
 
@@ -103,6 +103,6 @@ The TUI writes `.flowgraph/tui-history.json` (recent graphs and thread IDs). Thi
 |---------|-----|
 | Developer desktop | `flowgraph tui` or `flowgraph run --stream --on-interrupt prompt` |
 | CI / automation | `flowgraph run --json --on-interrupt fail` |
-| Future GUI | Same `@veloxdevworks/flowgraph-core` API; may shell out to CLI or embed the run controller |
+| Future GUI | Same `@flowgraph/core` API; may shell out to CLI or embed the run controller |
 
 See also: [09 — CLI](./09-cli.md).

@@ -13,7 +13,7 @@ cd examples/composition
 pnpm test
 ```
 
-Tests load `register.ts` (registers `square` and `sumList`), then run `sum-of-squares.graph.yaml` in memory via `@veloxdevworks/flowgraph-testing`.
+Tests load `register.ts` (registers `square` and `sumList`), then run `sum-of-squares.graph.yaml` in memory via `@flowgraph/testing`.
 
 ## Graph structure
 

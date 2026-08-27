@@ -4,7 +4,7 @@
  */
 import * as path from "node:path";
 import * as url from "node:url";
-import { loadGraph, validateSpec, compileGraph, registerFunction, consoleSink } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, validateSpec, compileGraph, registerFunction, consoleSink } from "@flowgraph/core";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 

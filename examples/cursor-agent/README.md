@@ -12,7 +12,7 @@ export CURSOR_API_KEY=...
 Install the Cursor provider and SDK if not already present:
 
 ```bash
-pnpm add @veloxdevworks/flowgraph-provider-cursor @cursor/sdk
+pnpm add @flowgraph/provider-cursor @cursor/sdk
 ```
 
 ## Run
@@ -27,4 +27,4 @@ Expose skills/nodes/functions via `with.tools`; the adapter maps them to `local.
 
 ## Limitations
 
-Unlike Claude's `canUseTool`, the Cursor SDK does not expose a per-call permission callback for **native** builtin tools. Use `provider: claude` or `@veloxdevworks/flowgraph-tools-fs` function tools when you need fine-grained `permission: ask` / `runtime.hooks` gating on file operations.
+Unlike Claude's `canUseTool`, the Cursor SDK does not expose a per-call permission callback for **native** builtin tools. Use `provider: claude` or `@flowgraph/tools-fs` function tools when you need fine-grained `permission: ask` / `runtime.hooks` gating on file operations.

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
-import * as core from "@veloxdevworks/flowgraph-core";
+import type { GraphSpec } from "@flowgraph/spec";
+import * as core from "@flowgraph/core";
 import { buildProviders } from "./providers.js";
 
 describe("buildProviders", () => {
@@ -61,7 +61,7 @@ describe("buildProviders", () => {
   });
 
   it("builds claude providers via dynamic import", async () => {
-    vi.doMock("@veloxdevworks/flowgraph-provider-claude", () => ({
+    vi.doMock("@flowgraph/provider-claude", () => ({
       createClaudeProviderFromConfig: vi.fn(async (name: string) => ({
         name,
         capabilities: { toolCalling: true, structuredOutput: true, streaming: true },

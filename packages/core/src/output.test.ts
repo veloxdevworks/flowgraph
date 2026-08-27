@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
 import { createScriptedProvider } from "./providers/index.js";

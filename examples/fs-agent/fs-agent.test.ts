@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
-import { loadGraph, compileGraph, createScriptedProvider } from "@veloxdevworks/flowgraph-core";
-import { registerFsTools } from "@veloxdevworks/flowgraph-tools-fs";
+import { loadGraph, compileGraph, createScriptedProvider } from "@flowgraph/core";
+import { registerFsTools } from "@flowgraph/tools-fs";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const graphPath = path.join(__dirname, "fs-agent.graph.yaml");

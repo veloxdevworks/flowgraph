@@ -10,7 +10,7 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.base.js
 COPY packages ./packages
 
 RUN corepack enable && pnpm install --frozen-lockfile
-RUN pnpm --filter @veloxdevworks/flowgraph-server... build
+RUN pnpm --filter @flowgraph/server... build
 
 # Optional LangChain vendor SDKs for Bedrock / OpenAI / etc.
 WORKDIR /src/packages/server

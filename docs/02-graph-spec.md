@@ -1,6 +1,6 @@
 # 02 — Graph Specification (YAML)
 
-This is the heart of the low-code layer: the declarative document that describes a graph. It is validated by a Zod schema in `@veloxdevworks/flowgraph-spec`, from which a JSON Schema is generated for editor autocomplete/validation.
+This is the heart of the low-code layer: the declarative document that describes a graph. It is validated by a Zod schema in `@flowgraph/spec`, from which a JSON Schema is generated for editor autocomplete/validation.
 
 > **Status:** target design. The schema below is the contract we are building toward; specifics (field names) are stable enough to author against and may receive additive, backward-compatible changes pre-1.0.
 
@@ -425,4 +425,4 @@ The same diagnostics power editor squiggles via the JSON Schema + a future Langu
 
 - `apiVersion: flowgraph/v1` is the stable contract. Breaking changes ⇒ `flowgraph/v2` with a documented migration and an optional `flowgraph migrate` codemod.
 - Additive fields ship within `v1` and are reflected in the JSON Schema.
-- `@veloxdevworks/flowgraph-spec` is independently versioned; the `apiVersion` token is decoupled from the package's semver.
+- `@flowgraph/spec` is independently versioned; the `apiVersion` token is decoupled from the package's semver.

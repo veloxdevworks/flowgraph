@@ -9,7 +9,7 @@ let _counter = 1;
 
 /**
  * @param {Record<string, unknown>} input
- * @param {import('@veloxdevworks/flowgraph-core').NodeRunContext} ctx
+ * @param {import('@flowgraph/core').NodeRunContext} ctx
  * @returns {Promise<{key: string, url: string, type: string, title: string}>}
  */
 export default async function createTicket(input, ctx) {

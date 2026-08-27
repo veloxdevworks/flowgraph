@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "./events.js";
 
 beforeAll(() => {
@@ -106,5 +106,52 @@ describe("pause / continueRun", () => {
     expect(result.state["a"]).toBe("a");
     expect(result.state["b"]).toBe("b");
     expect(result.state["c"]).toBe("c");
+  });
+
+  it("resumeFrom continues from a historical checkpoint id", async () => {
+    const compiled = await compileGraph(threeStepSpec());
+    const threadId = "resume-from-t1";
+    const pause = new AbortController();
+    const unsub = compiled.events.subscribe((ev) => {
+      if (ev.type === "node.end" && ev.scope.nodeId === "n1") pause.abort();
+    });
+    const paused = await compiled.run({
+      threadId,
+      pauseSignal: pause.signal,
+      onInterrupt: "fail",
+    });
+    unsub();
+    expect(paused.status).toBe("paused");
+
+    const history = await compiled.getStateHistory(threadId);
+    expect(history.length).toBeGreaterThan(0);
+    const afterN1 = history.find((s) => s.values["a"] === "a" && s.values["b"] == null);
+    expect(afterN1?.checkpointId).toBeTruthy();
+
+    const resumed = await compiled.resumeFrom({
+      threadId,
+      checkpointId: afterN1!.checkpointId!,
+      resume: true,
+      onInterrupt: "fail",
+    });
+    expect(resumed.status).toBe("completed");
+    expect(resumed.state["a"]).toBe("a");
+    expect(resumed.state["b"]).toBe("b");
+    expect(resumed.state["c"]).toBe("c");
+  });
+
+  it("step advances a single superstep", async () => {
+    const compiled = await compileGraph(threeStepSpec());
+    const threadId = "step-t1";
+    const pause = new AbortController();
+    const unsub = compiled.events.subscribe((ev) => {
+      if (ev.type === "node.end" && ev.scope.nodeId === "n1") pause.abort();
+    });
+    await compiled.run({ threadId, pauseSignal: pause.signal, onInterrupt: "fail" });
+    unsub();
+
+    const stepped = await compiled.step({ threadId, onInterrupt: "fail" });
+    expect(["paused", "completed", "interrupted"]).toContain(stepped.status);
+    expect(stepped.state["a"]).toBe("a");
   });
 });

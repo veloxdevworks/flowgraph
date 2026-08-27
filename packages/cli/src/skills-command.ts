@@ -6,8 +6,8 @@ import { Command } from "commander";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import pc from "picocolors";
-import { loadSkill, preflightSkill, formatPreflightReport } from "@veloxdevworks/flowgraph-skills";
-import { resolveSkillPath } from "@veloxdevworks/flowgraph-core";
+import { loadSkill, preflightSkill, formatPreflightReport } from "@flowgraph/skills";
+import { resolveSkillPath } from "@flowgraph/core";
 import { printError, printSuccess } from "./ui.js";
 
 export function buildSkillsCommand(): Command {

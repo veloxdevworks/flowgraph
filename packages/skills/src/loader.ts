@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import matter from "gray-matter";
 import { SkillFrontMatterSchema, type SkillDef } from "./schema.js";
-import type { Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import type { Diagnostic } from "@flowgraph/spec";
 
 /**
  * Load and parse a SKILL.md file (or a directory containing one).

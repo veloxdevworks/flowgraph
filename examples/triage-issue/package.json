@@ -8,8 +8,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-testing": "workspace:*"
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/testing": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^4.1.9"

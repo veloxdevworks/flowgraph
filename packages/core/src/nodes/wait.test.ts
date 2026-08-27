@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { compileGraph } from "../compiler.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "../events.js";
 import { closeWebhookServers } from "../runtime/webhook-server.js";
 
@@ -180,5 +180,29 @@ describe("wait node", () => {
     });
     expect(r2.status).toBe("interrupted");
     expect(interruptData(r2.interrupts)["mode"]).toBe("until");
+  });
+
+  it("expires overdue waits with timedOut on the next resume", async () => {
+    const compiled = await compileGraph(
+      waitGraph({ signal: "deploy-finished", timeout: "1ms", output: { to: "approval" } }),
+      {},
+    );
+    const r1 = await compiled.run({ threadId: "wait-deadline", onInterrupt: "fail" });
+    expect(r1.status).toBe("interrupted");
+    expect(r1.interrupts?.[0]?.deadlineAt).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 40));
+    const snap = await compiled.getState("wait-deadline");
+    const fromSnap = snap?.values["approval"];
+    if (fromSnap && typeof fromSnap === "object" && (fromSnap as { timedOut?: boolean }).timedOut) {
+      expect(fromSnap).toEqual({ timedOut: true });
+      return;
+    }
+    const r2 = await compiled.resume({
+      threadId: "wait-deadline",
+      resume: { deployFinished: true },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("completed");
+    expect(r2.state["approval"]).toEqual({ timedOut: true });
   });
 });

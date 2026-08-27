@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as path from "node:path";
 import * as url from "node:url";
-import { runGraphFile } from "@veloxdevworks/flowgraph-testing";
+import { runGraphFile } from "@flowgraph/testing";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const graphPath = path.join(__dirname, "parallel-fanout.graph.yaml");

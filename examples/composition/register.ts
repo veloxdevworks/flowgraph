@@ -1,4 +1,4 @@
-import { registerFunction } from "@veloxdevworks/flowgraph-core";
+import { registerFunction } from "@flowgraph/core";
 
 registerFunction("square", (input) => {
   const n = (input as { n?: number }).n ?? 0;

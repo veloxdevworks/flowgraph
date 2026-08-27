@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PropertySchema } from "@veloxdevworks/flowgraph-spec";
+import { PropertySchema } from "@flowgraph/spec";
 
 // ---------------------------------------------------------------------------
 // Skill front-matter schema

@@ -34,7 +34,7 @@ const spec: GraphSpec = {
   runtime: { checkpoint: { enabled: false } },
 } as unknown as GraphSpec;
 
-describe("LangChain provider (built into @veloxdevworks/flowgraph-core)", () => {
+describe("LangChain provider (built into @flowgraph/core)", () => {
   it("returns model text when there are no tool calls", async () => {
     const model = fakeModel([new AIMessage({ content: "All done." })]);
     const provider = createLangChainProvider(model);
@@ -73,12 +73,10 @@ describe("LangChain provider (built into @veloxdevworks/flowgraph-core)", () => 
     expect(events).toContain("agent.tool.call");
     // Bedrock Converse (and similar) require DynamicStructuredTool, not plain objects.
     expect(bound.length).toBeGreaterThan(0);
+    const names = bound.map((t) => (t as { name?: string }).name);
+    expect(names).toContain("weather");
+    expect(names).toContain("report_issue");
     for (const t of bound) {
-      expect(t).toEqual(
-        expect.objectContaining({
-          name: "weather",
-        }),
-      );
       expect(typeof (t as { invoke?: unknown }).invoke === "function" || typeof (t as { func?: unknown }).func === "function").toBe(true);
     }
   });
@@ -221,5 +219,68 @@ describe("LangChain provider (built into @veloxdevworks/flowgraph-core)", () => 
     expect(second.status).toBe("completed");
     expect((second.state["answer"] as { text: string }).text).toBe("Fresh answer.");
     expect(invokes).toBe(2);
+  });
+
+  it("survives process restart by hydrating replay from the interrupt payload", async () => {
+    let toolRuns = 0;
+    registerTool({
+      name: "lookup-restart",
+      handler: () => {
+        toolRuns += 1;
+        return { fact: "restarted" };
+      },
+    });
+
+    let invokes = 0;
+    const responses = [
+      new AIMessage({ content: "", tool_calls: [{ name: "lookup-restart", args: {}, id: "t1" }] }),
+      new AIMessage({ content: "Restarted fact." }),
+    ];
+    const model: ChatModelLike = {
+      async invoke() {
+        const r = responses[Math.min(invokes, responses.length - 1)];
+        invokes += 1;
+        return r!;
+      },
+      bindTools() {
+        return this;
+      },
+    };
+    const provider = createLangChainProvider(model);
+    const askSpec = {
+      metadata: { name: "ask-restart" },
+      state: { channels: { answer: { type: "object" } } },
+      nodes: [{
+        id: "agent",
+        type: "agent",
+        provider: "langchain",
+        with: {
+          prompt: "look it up",
+          tools: [{ function: "lookup-restart" }],
+          permission: "ask",
+          output: { to: "answer" },
+        },
+      }],
+      edges: [
+        { from: "START", to: "agent" },
+        { from: "agent", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: true, backend: "memory" } },
+    } as unknown as GraphSpec;
+
+    const compiled = await compileGraph(askSpec, { providers: [provider] });
+    const threadId = `ask-restart-${Date.now()}`;
+    const first = await compiled.run({ input: {}, threadId, onInterrupt: "fail" });
+    expect(first.status).toBe("interrupted");
+    expect(invokes).toBe(1);
+
+    const { clearAllReplayCaches } = await import("../replay-cache.js");
+    clearAllReplayCaches();
+
+    const resumed = await compiled.resume({ threadId, resume: true, onInterrupt: "fail" });
+    expect(resumed.status).toBe("completed");
+    expect((resumed.state["answer"] as { text: string }).text).toBe("Restarted fact.");
+    expect(invokes).toBe(2);
+    expect(toolRuns).toBe(1);
   });
 });

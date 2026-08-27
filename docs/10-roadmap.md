@@ -34,12 +34,12 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 
 **Goal:** YAML → LangGraph `StateGraph` for deterministic nodes. The make-or-break slice.
 
-- `@veloxdevworks/flowgraph-spec`: Zod schema for `apiVersion/kind/metadata/state/nodes/edges/config/runtime`; JSON Schema generation.
-- `@veloxdevworks/flowgraph-expr`: safe expression parser/evaluator + stdlib + compile-time reference checking.
-- `@veloxdevworks/flowgraph-core`: load → parse → validate → resolve → build pipeline; Node Registry; reducers; built-in nodes `http`, `code`, `router` (rules mode), `wait`.
+- `@flowgraph/spec`: Zod schema for `apiVersion/kind/metadata/state/nodes/edges/config/runtime`; JSON Schema generation.
+- `@flowgraph/expr`: safe expression parser/evaluator + stdlib + compile-time reference checking.
+- `@flowgraph/core`: load → parse → validate → resolve → build pipeline; Node Registry; reducers; built-in nodes `http`, `code`, `router` (rules mode), `wait`.
 - Event bus + `console`/`jsonl` sinks; node middleware (events only).
-- `@veloxdevworks/flowgraph-cli`: `validate`, `graph`, `run` (basic), `init`.
-- `@veloxdevworks/flowgraph-testing`: in-memory harness + golden-run helper.
+- `@flowgraph/cli`: `validate`, `graph`, `run` (basic), `init`.
+- `@flowgraph/testing`: in-memory harness + golden-run helper.
 
 **Exit:** the `triage-issue` example runs end-to-end using `http` + `router` + `code` (no LLM), fully traced via events; `flowgraph validate` catches a curated set of bad specs. ✓
 
@@ -47,7 +47,7 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 
 **Goal:** portable, contract-bearing, env-aware skills.
 
-- `@veloxdevworks/flowgraph-skills`: `SKILL.md` front-matter parser; `inputs`/`outputs` contract validation; `kind_of: executable | command`; `ctx` (secrets/http/logger/emit).
+- `@flowgraph/skills`: `SKILL.md` front-matter parser; `inputs`/`outputs` contract validation; `kind_of: executable | command`; `ctx` (secrets/http/logger/emit).
 - `skill` node type; skill resolution (alias/path/package); skill packs.
 - Preflight (`env.vars/bin/network/node/packages`) + `flowgraph skills doctor`.
 - Secret provider (env/dotenv) + redaction layer.
@@ -58,7 +58,7 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 
 **Goal:** checkpoint, interrupt, resume — proven across a process restart.
 
-- Checkpointer adapter over LangGraph `BaseCheckpointSaver`; `MemorySaver` + `@veloxdevworks/flowgraph-checkpoint-sqlite`.
+- Checkpointer adapter over LangGraph `BaseCheckpointSaver`; `MemorySaver` + `@flowgraph/checkpoint-sqlite`.
 - `ctx.interrupt()`, static breakpoints, `wait` (signal / webhook) nodes.
 - `flowgraph resume`; `--on-interrupt` policies; `ctx.once` idempotency.
 - Time-travel: `getStateHistory` ✓; `resumeFrom`, `flowgraph dev --step` — **planned**.
@@ -70,7 +70,7 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 **Goal:** hub-and-spoke agent nodes with pluggable backends.
 
 - `ProviderAdapter` interface + tool normalization + `agent` node ([ADR-0003](./adr/0003-intelligent-node-hub-and-spoke.md)).
-- LangChain provider built into `@veloxdevworks/flowgraph-core` (broadest model coverage, simplest loop); `@veloxdevworks/flowgraph-provider-claude` (Claude Agent SDK) and `@veloxdevworks/flowgraph-provider-cursor` as optional lazy-loaded packages.
+- LangChain provider built into `@flowgraph/core` (broadest model coverage, simplest loop); `@flowgraph/provider-claude` (Claude Agent SDK) and `@flowgraph/provider-cursor` as optional lazy-loaded packages.
 - Skills/nodes/MCP as tools; structured output (`schema`); `permission: ask` → HITL.
 - `intelligent.*` events; token/cost accounting + `runtime.budget`.
 - `router` model mode.
@@ -91,7 +91,7 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 
 **Goal:** production-grade observability and the enhancement surface.
 
-- `@veloxdevworks/flowgraph-observability-otel` ✓ (package shipped; CLI `--otel` wiring pending).
+- `@flowgraph/observability-otel` ✓ (package shipped; CLI `--otel` wiring pending).
 - Full hook system (all phases, mutate/veto/route/retry/interrupt); YAML-bindable hook subset.
 - Default guardrail hooks (redaction, budget, max-steps) as overridable defaults.
 - Audit-log sink; cost dashboards via metrics.
@@ -105,7 +105,7 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 - Tutorials + cookbook (the three north-star examples as guided walkthroughs) — **partial** ([13 — Getting started](./13-getting-started.md), example READMEs).
 - JSON Schema published for editor autocomplete ✓ (`flowgraph schema`); hosted at `veloxdevworks.com/flowgraph/` — **in progress**; `flowgraph new` templates ✓.
 - API reference (typedoc) — **planned**; semantic-versioning policy — **planned**; `flowgraph migrate` ✓ (shipped, no longer skeleton-only).
-- `@veloxdevworks/flowgraph-checkpoint-postgres`; durable LangGraph `Store` backends (in-memory `ctx.store` shipped early).
+- `@flowgraph/checkpoint-postgres`; durable LangGraph `Store` backends (in-memory `ctx.store` shipped early).
 - Performance pass; fuzz/property tests for spec + expr; example skill pack published to npm.
 
 **Exit:** v1.0.0 release via Changesets; external user authors+runs a non-trivial graph with zero TS; stable `flowgraph/v1` contract.
@@ -126,11 +126,11 @@ See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for the detailed ship
 
 ## Decided
 
-- **Name:** `flowgraph` (scope `@veloxdevworks/flowgraph-*`, CLI `flowgraph`, `apiVersion: flowgraph/v1`) — [ADR-0013](./adr/0013-rename-to-flowgraph.md).
+- **Name:** `flowgraph` (scope `@flowgraph/*`, CLI `flowgraph`, `apiVersion: flowgraph/v1`) — [ADR-0013](./adr/0013-rename-to-flowgraph.md), npm scope [ADR-0015](./adr/0015-flowgraph-npm-scope.md).
 - **License:** Apache-2.0 — [ADR-0008](./adr/0008-license.md).
 
 ## Open items to confirm (tracked)
 
-- Verify `@veloxdevworks/flowgraph-*` package names and `veloxdevworks/flowgraph` GitHub repo availability before first publish ([ADR-0013](./adr/0013-rename-to-flowgraph.md)).
+- Verify `@flowgraph/*` package names and `veloxdevworks/flowgraph` GitHub repo availability before first publish ([ADR-0015](./adr/0015-flowgraph-npm-scope.md)).
 - CLI framework choice (clipanion vs commander+prompts) — decided in Phase 1.
 - Minimum supported Node version (proposed ≥ 20).

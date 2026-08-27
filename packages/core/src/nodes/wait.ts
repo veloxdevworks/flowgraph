@@ -8,8 +8,8 @@
  */
 
 import { z } from "zod";
-import { WaitWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { evalGuard } from "@veloxdevworks/flowgraph-expr";
+import { WaitWithSchema } from "@flowgraph/spec";
+import { evalGuard } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { parseDuration, sleep } from "../runtime/duration.js";
@@ -55,9 +55,15 @@ export const waitNode = defineNode<Config>({
             data: {
               mode: "webhook",
               ...(schema ? { schema } : {}),
-              ...(config.timeout ? { timeout: config.timeout } : {}),
+              ...(config.timeout ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) } : {}),
             },
           });
+
+          if (isTimedOut(payload)) {
+            const result = { timedOut: true };
+            ctx.emit("node.output", { wait: { mode: "webhook", result } });
+            return { update: applyOutput(config.output, result, { nodeId, scope }) };
+          }
 
           const result = normalizePayload(payload);
           validateSchema(result, schema, nodeId);
@@ -90,7 +96,7 @@ export const waitNode = defineNode<Config>({
               data: {
                 mode: "until",
                 until: config.until,
-                ...(config.timeout ? { timeout: config.timeout } : {}),
+                ...(config.timeout ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) } : {}),
               },
             });
           }
@@ -104,9 +110,18 @@ export const waitNode = defineNode<Config>({
             data: {
               mode: "signal",
               signal: config.signal,
-              ...(config.timeout ? { timeout: config.timeout } : {}),
+              ...(config.timeout ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) } : {}),
             },
           });
+          if (isTimedOut(payload)) {
+            const result = { timedOut: true };
+            return {
+              update: applyOutput(config.output, result, {
+                nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+                scope,
+              }),
+            };
+          }
           // Resume value (if any) is available; surface it as the node output
           const result =
             payload && typeof payload === "object" ? payload : { value: payload };
@@ -123,6 +138,18 @@ export const waitNode = defineNode<Config>({
     };
   },
 });
+
+function deadlineIso(timeout: string): string {
+  return new Date(Date.now() + parseDuration(timeout)).toISOString();
+}
+
+function isTimedOut(payload: unknown): boolean {
+  if (payload === "timedOut") return true;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return (payload as { timedOut?: unknown }).timedOut === true;
+  }
+  return false;
+}
 
 function normalizePayload(payload: unknown): Record<string, unknown> {
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {

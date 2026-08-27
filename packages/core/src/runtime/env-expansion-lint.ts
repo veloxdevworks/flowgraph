@@ -10,7 +10,7 @@
  */
 
 import { parse as parseYaml } from "yaml";
-import type { Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import type { Diagnostic } from "@flowgraph/spec";
 
 /** Same pattern as `expandEnvVars` in loader.ts. */
 export const LOAD_TIME_ENV_VAR_RE = /\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g;

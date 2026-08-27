@@ -6,8 +6,8 @@
  */
 
 import { z } from "zod";
-import { AgentWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep, stringifyRendered } from "@veloxdevworks/flowgraph-expr";
+import { AgentWithSchema } from "@flowgraph/spec";
+import { renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { getProvider, listProviders } from "../providers/registry.js";
@@ -18,10 +18,14 @@ import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
 import { applyOutput } from "./output.js";
 import {
+  hydrateReplay,
   isGraphInterrupt,
   memoryReplayCache,
   replayCacheKey,
 } from "../providers/replay-cache.js";
+import { REPLAY_CHANNEL, ISSUES_CHANNEL } from "../runtime/state-annotation.js";
+import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
+import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
 
 const configSchema = AgentWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -46,6 +50,7 @@ export const agentNode = defineNode<Config>({
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const providerName =
+          (config.hub === "deepagents" ? "deepagents" : undefined) ??
           nodeProvider ?? ctx.config.defaults?.provider ?? defaultProviderName();
         if (!providerName) {
           throw new Error(
@@ -81,9 +86,10 @@ export const agentNode = defineNode<Config>({
         } else if (config.system) {
           system = stringifyRendered(renderDeep(config.system, scope));
         }
+        system = prependKnownIssues(system, state);
 
         const { normalized, mcpRefs } = normalizeTools(config.tools as ToolRef[] | undefined, wiring);
-        let { specs, executors } = normalized;
+        let { specs, executors } = mergeTools(normalized, reportIssueTool());
         if (mcpRefs.length > 0) {
           const expanded = await expandMcpTools(mcpRefs, requireMcpHub(ctx));
           ({ specs, executors } = mergeTools({ specs, executors }, expanded));
@@ -107,6 +113,10 @@ export const agentNode = defineNode<Config>({
         };
 
         const cacheKey = replayCacheKey(ctx.meta.threadId ?? ctx.meta.runId, ctx.nodeId);
+        const persisted = (state[REPLAY_CHANNEL] as Record<string, unknown> | undefined)?.[cacheKey];
+        if (persisted && typeof persisted === "object" && !Array.isArray(persisted)) {
+          hydrateReplay(cacheKey, persisted as Record<string, unknown>);
+        }
         let toolSeq = 0;
 
         const providerCtx: ProviderRunContext = {
@@ -150,6 +160,14 @@ export const agentNode = defineNode<Config>({
             ctx.logger.warn(
               `agent node "${String(nodeSpec["id"])}" stopped after maxSteps (${maxSteps}) tool-loop iterations.`,
             );
+            ctx.issue({
+              code: ISSUE_CODE.MAX_STEPS,
+              severity: "warning",
+              message: `agent stopped after maxSteps (${maxSteps}) tool-loop iterations`,
+              impact: "The agent may not have finished its task.",
+              remediation: "Raise with.maxSteps or split the work across more nodes.",
+              detail: { maxSteps },
+            });
           }
 
           if (result.usage) {
@@ -160,10 +178,13 @@ export const agentNode = defineNode<Config>({
           memoryReplayCache.clear(cacheKey);
 
           return {
-            update: applyOutput(config.output, result.output, {
-              nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
-              scope,
-            }),
+            update: {
+              ...applyOutput(config.output, result.output, {
+                nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+                scope,
+              }),
+              [REPLAY_CHANNEL]: { [cacheKey]: null },
+            },
           };
         } catch (err) {
           if (!isGraphInterrupt(err)) memoryReplayCache.clear(cacheKey);
@@ -173,6 +194,62 @@ export const agentNode = defineNode<Config>({
     };
   },
 });
+
+function prependKnownIssues(system: string | undefined, state: Record<string, unknown>): string | undefined {
+  const issues = (state[ISSUES_CHANNEL] as RunIssue[] | undefined) ?? [];
+  if (issues.length === 0) return system;
+  const block = issues
+    .map((i) => {
+      const loc = i.nodeId ? ` [${i.nodeId}]` : "";
+      const impact = i.impact ? ` Impact: ${i.impact}` : "";
+      const fix = i.remediation ? ` Remediation: ${i.remediation}` : "";
+      return `- [${i.severity}] ${i.code}${loc}: ${i.message}.${impact}${fix}`;
+    })
+    .join("\n");
+  const section =
+    `Known issues so far (these may affect result quality; try to remediate if you can, or report remaining gaps with report_issue):\n${block}`;
+  return system ? `${system}\n\n${section}` : section;
+}
+
+function reportIssueTool(): NormalizedTools {
+  const executors = new Map<string, ToolExecutor>();
+  executors.set("report_issue", async (args, ctx) => {
+    const rec = (args ?? {}) as Record<string, unknown>;
+    const message = String(rec["message"] ?? "").trim();
+    if (!message) return { ok: false, error: "message is required" };
+    const severity = rec["severity"] === "error" ? "error" : "warning";
+    const issue = ctx.issue({
+      code: ISSUE_CODE.AGENT_REPORTED,
+      severity,
+      message,
+      ...(typeof rec["impact"] === "string" && rec["impact"] ? { impact: rec["impact"] } : {}),
+      ...(typeof rec["remediation"] === "string" && rec["remediation"] ? { remediation: rec["remediation"] } : {}),
+    });
+    return { ok: true, issue };
+  });
+  return {
+    specs: [
+      {
+        name: "report_issue",
+        kind: "function",
+        ref: "report_issue",
+        description:
+          "Record a non-fatal issue that may affect result quality (missing tools, skipped verification, unverifiable claims). Use this when you could not complete a check you believe is important.",
+        schema: {
+          type: "object",
+          properties: {
+            message: { type: "string", description: "What went wrong or could not be verified" },
+            impact: { type: "string", description: "How this might affect the result" },
+            remediation: { type: "string", description: "What would fix it on a later run" },
+            severity: { type: "string", enum: ["warning", "error"] },
+          },
+          required: ["message"],
+        },
+      },
+    ],
+    executors,
+  };
+}
 
 function defaultProviderName(): string | undefined {
   const all = listProviders();
@@ -198,5 +275,13 @@ function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number; costU
     ctx.interrupt({ reason: `Budget exceeded (${detail})`, data: { usedTokens: budget.usedTokens, usedUSD: budget.usedUSD } });
   } else {
     ctx.logger.warn(`Budget exceeded (${detail}) — continuing (onExceed: warn).`);
+    ctx.issue({
+      code: ISSUE_CODE.BUDGET_EXCEEDED,
+      severity: "warning",
+      message: `Budget exceeded (${detail}) — continuing (onExceed: warn)`,
+      impact: "Later agent steps may be truncated or lower quality.",
+      remediation: "Raise runtime.budget.maxTokens / maxUSD, or set onExceed: fail to stop instead of degrading.",
+      detail: { usedTokens: budget.usedTokens, usedUSD: budget.usedUSD },
+    });
   }
 }

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { compileGraph, registerFunction, type GraphSpec } from "@veloxdevworks/flowgraph-core";
+import { compileGraph, registerFunction, type GraphSpec } from "@flowgraph/core";
 import { createSqliteCheckpointer } from "./index.js";
 
 registerFunction("publish", () => true);
@@ -35,7 +35,7 @@ const spec = {
   ],
 } as unknown as GraphSpec;
 
-describe("@veloxdevworks/flowgraph-checkpoint-sqlite durability", () => {
+describe("@flowgraph/checkpoint-sqlite durability", () => {
   it("persists an interrupt and resumes from a fresh compile (new process simulation)", async () => {
     const dbPath = tmpDb();
     const threadId = "release-1";

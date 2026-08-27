@@ -11,8 +11,8 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-skills": "workspace:*",
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/skills": "workspace:*",
     "vitest": "^4.1.9"
   },
   "keywords": [

@@ -1,0 +1,57 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: factory-isolated
+  description: >
+    Proof graph for factory runtime: map two packages through isolated worktrees,
+    stamp a file, then a review HITL. Uses sqlite checkpoints so resume survives restart.
+
+imports:
+  - { reducers: ./register.ts }
+
+state:
+  channels:
+    packages: { type: array }
+    results: { type: array }
+    review: { type: object }
+
+nodes:
+  - id: isolate-and-stamp
+    type: map
+    with:
+      over: "{{ state.packages }}"
+      as: pkg
+      concurrency: 2
+      node:
+        type: function
+        with:
+          fn: stampPackage
+          input:
+            pkg: "{{ item.pkg }}"
+      collect: { to: results }
+
+  - id: review-changes
+    type: hitl
+    with:
+      mode: review
+      message: "Review stamped packages before opening a PR-shaped change."
+      diff:
+        before: "{{ state.results.0.diff.before }}"
+        after: "{{ state.results.0.diff.after }}"
+      decision: [approve, request-changes]
+      output: { to: review }
+
+edges:
+  - { from: START, to: isolate-and-stamp }
+  - { from: isolate-and-stamp, to: review-changes }
+  - { from: review-changes, to: END }
+
+runtime:
+  workspace: "."
+  checkpoint:
+    enabled: true
+    backend: sqlite
+    path: .flowgraph/factory-isolated.db
+  hitl:
+    onInterrupt: fail

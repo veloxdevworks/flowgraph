@@ -2,7 +2,7 @@
  * Build a LangChain ChatModel from declarative provider config (YAML `providers` block).
  */
 
-import type { LangChainVendor, ProviderConfig } from "@veloxdevworks/flowgraph-spec";
+import type { LangChainVendor, ProviderConfig } from "@flowgraph/spec";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -226,6 +226,29 @@ export async function createLangChainProviderFromConfig(
   }
 
   return createLangChainProvider(model, providerOpts);
+}
+
+/** Load the vendor ChatModel without wrapping it in a provider adapter. */
+export async function createLangChainChatModelFromConfig(
+  name: string,
+  cfg: LangChainProviderConfigInput | ProviderConfig,
+  options: LangChainProviderFromConfigOptions = {},
+): Promise<ChatModelLike> {
+  if (cfg.kind !== undefined && cfg.kind !== "langchain") {
+    throw new Error(`Provider "${name}": only kind "langchain" is supported (got "${cfg.kind}").`);
+  }
+  const cwd = options.cwd ?? process.cwd();
+  return loadVendorModel(
+    {
+      vendor: cfg.vendor,
+      model: cfg.model,
+      options: cfg.options,
+      baseUrl: cfg.baseUrl,
+      apiKeyEnv: cfg.apiKeyEnv,
+      region: "region" in cfg ? cfg.region : undefined,
+    },
+    cwd,
+  );
 }
 
 /** Known vendor ids for shorthand `config.defaults.provider: anthropic`. */

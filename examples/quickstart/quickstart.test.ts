@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
-import { loadGraph, validateSpec, compileGraph } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, validateSpec, compileGraph } from "@flowgraph/core";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 

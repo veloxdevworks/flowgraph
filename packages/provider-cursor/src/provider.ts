@@ -10,7 +10,7 @@ import type {
   AgentStep,
   TokenUsage,
   ToolSpec,
-} from "@veloxdevworks/flowgraph-core";
+} from "@flowgraph/core";
 
 export type CursorRuntime = "local" | "cloud";
 
@@ -87,10 +87,19 @@ async function defaultAgentFactory(options: Record<string, unknown>): Promise<Cu
 function tryParseJson(text: string): unknown {
   const trimmed = text.trim();
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
-  const candidate = fenced?.[1] ?? trimmed;
+  const candidate = (fenced?.[1] ?? trimmed).trim();
   try {
     return JSON.parse(candidate);
   } catch {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(candidate.slice(start, end + 1));
+      } catch {
+        /* fall through */
+      }
+    }
     return undefined;
   }
 }
@@ -126,7 +135,7 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
           severity: "warning",
           message:
             "Cursor provider cannot gate native builtin tools per-call (no canUseTool callback). " +
-            "Use function tools (@veloxdevworks/flowgraph-tools-fs) or switch to provider: claude for per-call HITL on Read/Edit/Bash.",
+            "Use function tools (@flowgraph/tools-fs) or switch to provider: claude for per-call HITL on Read/Edit/Bash.",
         });
       }
 
@@ -141,6 +150,11 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
     },
 
     async run(req: AgentRequest, ctx: ProviderRunContext): Promise<AgentResult> {
+      const cachedResult = ctx.replay?.get("provider:result");
+      if (isRecord(cachedResult) && "output" in cachedResult) {
+        return cachedResult as unknown as AgentResult;
+      }
+
       const runtime = options.runtime ?? "local";
       const model = req.model ?? options.model ?? "composer-2.5";
       const apiKey = options.apiKey ?? process.env["CURSOR_API_KEY"];
@@ -157,9 +171,11 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
         agentOptions["cloud"] = { repos: [] };
       } else {
         agentOptions["local"] = {
-          cwd: options.cwd ?? ctx.node.workspace,
+          cwd: ctx.node.workspace ?? options.cwd,
           customTools,
           settingSources: [],
+          // Headless embedder: no TTY for Cursor's workspace-trust prompt.
+          trust: true,
           ...(req.permission === "ask" ? { autoReview: true } : {}),
         };
       }
@@ -230,7 +246,9 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
         output = { text: finalText };
       }
 
-      return { output, steps, usage, stopReason };
+      const agentResult = { output, steps, usage, stopReason };
+      ctx.replay?.set("provider:result", agentResult);
+      return agentResult;
     },
   };
 }

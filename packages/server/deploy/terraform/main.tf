@@ -38,7 +38,25 @@ variable "image_uri" {
 variable "auth_token" {
   type        = string
   sensitive   = true
-  description = "Bearer token for REST auth (FLOWGRAPH_AUTH_TOKEN)"
+  description = "Bearer token for REST auth (FLOWGRAPH_AUTH_TOKEN). Required; do not leave empty."
+}
+
+variable "certificate_arn" {
+  type        = string
+  default     = ""
+  description = "ACM certificate ARN for HTTPS on the ALB. Empty = HTTP only (not recommended for production)."
+}
+
+variable "max_body_bytes" {
+  type        = number
+  default     = 2000000
+  description = "FLOWGRAPH_MAX_BODY_BYTES — JSON body cap for POST /runs."
+}
+
+variable "max_concurrent_runs" {
+  type        = number
+  default     = 16
+  description = "FLOWGRAPH_MAX_CONCURRENT_RUNS — in-flight run cap per task."
 }
 
 variable "desired_count" {
@@ -125,6 +143,12 @@ resource "aws_security_group" "alb" {
   ingress {
     from_port   = 80
     to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -295,6 +319,8 @@ resource "aws_ecs_task_definition" "server" {
       { name = "FLOWGRAPH_HOST", value = "0.0.0.0" },
       { name = "FLOWGRAPH_PORT", value = "8080" },
       { name = "FLOWGRAPH_AUTH_TOKEN", value = var.auth_token },
+      { name = "FLOWGRAPH_MAX_BODY_BYTES", value = tostring(var.max_body_bytes) },
+      { name = "FLOWGRAPH_MAX_CONCURRENT_RUNS", value = tostring(var.max_concurrent_runs) },
       { name = "DATABASE_URL", value = local.database_url },
       { name = "AWS_REGION", value = var.aws_region },
       { name = "AWS_DEFAULT_REGION", value = var.aws_region },
@@ -348,9 +374,38 @@ resource "aws_lb_target_group" "server" {
 }
 
 resource "aws_lb_listener" "http" {
+  count             = var.certificate_arn == "" ? 1 : 0
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.server.arn
+  }
+}
+
+resource "aws_lb_listener" "http_redirect" {
+  count             = var.certificate_arn != "" ? 1 : 0
+  load_balancer_arn = aws_lb.main.arn
+  port              = 80
+  protocol          = "HTTP"
+  default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+resource "aws_lb_listener" "https" {
+  count             = var.certificate_arn != "" ? 1 : 0
+  load_balancer_arn = aws_lb.main.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.certificate_arn
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.server.arn
@@ -373,11 +428,11 @@ resource "aws_ecs_service" "server" {
     container_name   = "flowgraph-server"
     container_port   = 8080
   }
-  depends_on = [aws_lb_listener.http, aws_rds_cluster_instance.pg]
+  depends_on = [aws_lb_listener.http, aws_lb_listener.http_redirect, aws_lb_listener.https, aws_rds_cluster_instance.pg]
 }
 
 output "alb_url" {
-  value = "http://${aws_lb.main.dns_name}"
+  value = var.certificate_arn != "" ? "https://${aws_lb.main.dns_name}" : "http://${aws_lb.main.dns_name}"
 }
 
 output "ecr_repository_url" {

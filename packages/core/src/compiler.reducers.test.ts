@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
 import { validateSpec } from "./loader.js";
 import { registerFunction } from "./nodes/function.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "./events.js";
 
 beforeAll(() => {

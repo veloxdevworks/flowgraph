@@ -1,5 +1,5 @@
 {
-  "name": "@veloxdevworks/flowgraph-skills",
+  "name": "@flowgraph/skills",
   "version": "0.1.0",
   "description": "SKILL.md loader, contract validation, and environment preflight for flowgraph",
   "license": "Apache-2.0",
@@ -20,7 +20,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
     "gray-matter": "^4.0.3",
     "zod": "^3.24.0"
   },

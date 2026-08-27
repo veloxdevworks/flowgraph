@@ -38,8 +38,8 @@ Checkpointing is **first-class in v1**. A checkpointer persists graph state at e
 | Backend | Package | Use |
 |---|---|---|
 | `memory` | core (`MemorySaver`) | tests, ephemeral CI runs |
-| `sqlite` | `@veloxdevworks/flowgraph-checkpoint-sqlite` | desktop/local, single-machine CI artifact (a `.db` file) |
-| `postgres` | `@veloxdevworks/flowgraph-checkpoint-postgres` | shared/durable, multi-worker (later milestone) |
+| `sqlite` | `@flowgraph/checkpoint-sqlite` | desktop/local, single-machine CI artifact (a `.db` file) |
+| `postgres` | `@flowgraph/checkpoint-postgres` | shared/durable, multi-worker (later milestone) |
 | custom | implement `CheckpointerAdapter` | bring your own (Redis, S3, etc.) |
 
 ```yaml

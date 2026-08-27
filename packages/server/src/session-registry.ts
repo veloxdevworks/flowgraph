@@ -1,6 +1,7 @@
 import type { ServerEvent, RunStatus } from "./types.js";
 
 export type EventListener = (event: ServerEvent) => void;
+export type GlobalEventListener = (threadId: string, event: ServerEvent) => void;
 
 export interface ActiveSession {
   threadId: string;
@@ -17,14 +18,26 @@ export interface ActiveSession {
   listeners: Set<EventListener>;
   /** Highest seq seen (from engine events). */
   lastSeq: number;
+  dryRun?: boolean;
 }
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, ActiveSession>();
   private readonly maxEvents: number;
+  private readonly globalListeners = new Set<GlobalEventListener>();
+  private readonly onPersist?: (threadId: string, event: ServerEvent) => void;
+  private readonly loadJournal?: (threadId: string) => ServerEvent[];
 
-  constructor(maxEvents = 5000) {
+  constructor(
+    maxEvents = 5000,
+    opts: {
+      onPersist?: (threadId: string, event: ServerEvent) => void;
+      loadJournal?: (threadId: string) => ServerEvent[];
+    } = {},
+  ) {
     this.maxEvents = maxEvents;
+    this.onPersist = opts.onPersist;
+    this.loadJournal = opts.loadJournal;
   }
 
   get(threadId: string): ActiveSession | undefined {
@@ -53,6 +66,7 @@ export class SessionRegistry {
     graphName: string;
     label?: string;
     yaml: string;
+    dryRun?: boolean;
   }): ActiveSession {
     const existing = this.sessions.get(opts.threadId);
     // Placeholder from an early SSE subscribe (empty runId) can be upgraded in place.
@@ -84,6 +98,7 @@ export class SessionRegistry {
       events,
       listeners,
       lastSeq,
+      ...(opts.dryRun ? { dryRun: true } : {}),
     };
     this.sessions.set(opts.threadId, session);
     return session;
@@ -109,6 +124,11 @@ export class SessionRegistry {
     if (s.events.length > this.maxEvents) {
       s.events.splice(0, s.events.length - this.maxEvents);
     }
+    try {
+      this.onPersist?.(threadId, stamped);
+    } catch {
+      // persist is best-effort
+    }
     for (const listener of s.listeners) {
       try {
         listener(stamped);
@@ -116,6 +136,21 @@ export class SessionRegistry {
         // ignore listener errors
       }
     }
+    for (const listener of this.globalListeners) {
+      try {
+        listener(threadId, stamped);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /** Subscribe to every thread's events (connect client / fan-out). */
+  onGlobal(listener: GlobalEventListener): () => void {
+    this.globalListeners.add(listener);
+    return () => {
+      this.globalListeners.delete(listener);
+    };
   }
 
   /**
@@ -130,7 +165,12 @@ export class SessionRegistry {
     let s = this.sessions.get(threadId);
     if (!s) {
       // Cold subscribe: create a placeholder so clients can attach before start
-      // completes, or after process restart (events only while this process lives).
+      // completes, or after process restart (replay from the on-disk journal).
+      const loaded = this.loadJournal?.(threadId) ?? [];
+      let lastSeq = 0;
+      for (const ev of loaded) {
+        if (typeof ev.seq === "number" && ev.seq > lastSeq) lastSeq = ev.seq;
+      }
       s = {
         threadId,
         runId: "",
@@ -140,11 +180,19 @@ export class SessionRegistry {
         yaml: "",
         abort: new AbortController(),
         pause: new AbortController(),
-        events: [],
+        events: loaded,
         listeners: new Set(),
-        lastSeq: 0,
+        lastSeq,
       };
       this.sessions.set(threadId, s);
+    } else if (s.events.length === 0 && this.loadJournal) {
+      const loaded = this.loadJournal(threadId);
+      if (loaded.length > 0) {
+        s.events = loaded;
+        for (const ev of loaded) {
+          if (typeof ev.seq === "number" && ev.seq > s.lastSeq) s.lastSeq = ev.seq;
+        }
+      }
     }
 
     if (afterSeq != null && afterSeq >= 0) {

@@ -4,7 +4,7 @@
  *   - `defaultGuardrailHooks` — overridable defaults (redaction) installed at low priority.
  */
 
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import { createRedactor, DEFAULT_REDACT_PATTERNS } from "../secrets.js";
 import type { Hook, HookDirective, HookPhase, HookWhere } from "./types.js";
 

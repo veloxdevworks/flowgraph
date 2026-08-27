@@ -1,7 +1,7 @@
 /**
  * McpHub — abstraction for MCP server connections.
  *
- * Implemented by @veloxdevworks/flowgraph-mcp; core depends only on this interface so the
+ * Implemented by @flowgraph/mcp; core depends only on this interface so the
  * SDK stays out of the minimal core dependency graph.
  */
 

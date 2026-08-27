@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
 import { compileGraph } from "../compiler.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import {
   closeWebhookServers,
   ensureWebhookServer,

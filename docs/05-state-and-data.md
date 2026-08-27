@@ -116,7 +116,9 @@ edges:
 
 Use explicit `output: { to: … }` when multiple parallel nodes must fan in to one reducer-backed channel, or when you want a stable typed contract name independent of the node id.
 
-**Artifacts (e.g. from `demo` nodes)** are files on disk under `<workspace>/.flowgraph/demo/<nodeId>/`. State holds **paths and metadata** (`path`, `mimeType`, `sizeBytes`, …) — not inline binary blobs. Downstream nodes and UIs read those paths from `state.outputs.<nodeId>` (or a projected channel).
+**Artifacts (e.g. from `demo` nodes)** are files on disk under `<workspace>/.flowgraph/demo/<nodeId>/`. State holds **paths and metadata** (`path`, `mimeType`, `sizeBytes`, …) — not inline binary blobs. Downstream nodes and UIs read those paths from `state.outputs.<nodeId>` (or a projected channel). Screenshot mode with `video: true` also tracks a `.webm` extra artifact.
+
+**Run issues** are append-only records of degradations that may affect how trustworthy a result is (missing `go`, skipped tests, failed captures). They live on disk at `<workspace>/.flowgraph/runs/<threadId>/issues.jsonl` and a capped copy is kept in the reserved `__issues` channel. Templates can read them as `{{ issues }}`. They are stripped from the public `RunResult.state` (reserved) but attached as `RunResult.issues`.
 
 For **accumulating results** (e.g. from a `map` fan-out or repeated writes), declare `reducer: append` on an array channel:
 
@@ -141,7 +143,7 @@ runtime:
   recursionLimit: 50
 ```
 
-## 4. The expression language (`@veloxdevworks/flowgraph-expr`)
+## 4. The expression language (`@flowgraph/expr`)
 
 `{{ ... }}` blocks are evaluated by a **purpose-built, sandboxed evaluator** — **not** JavaScript `eval`. This keeps specs safe to share/run and statically analyzable. ([Design principle: no embedded arbitrary code.](./00-vision.md#6-design-principles))
 
@@ -211,6 +213,7 @@ nodes:
 | `secret` | secret accessor — `secret.JIRA_TOKEN` (values redacted in events/logs/checkpoints) |
 | `env` | non-secret environment values explicitly exposed to the graph |
 | `run` | run metadata: `run.id`, `run.threadId`, `run.startedAt`, `run.labels` |
+| `issues` | accumulated `RunIssue[]` for this thread (also in reserved `__issues`) |
 
 `secret.*` resolves lazily and is special-cased: its values are **never** serialized into state, checkpoints, events, or logs (the redaction layer masks them). See [07 §Secrets](./07-runtime-and-execution.md#8-secrets--redaction).
 

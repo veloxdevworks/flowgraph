@@ -46,6 +46,7 @@ interface flowgraphEvent<T = unknown> {
 
 ```
 run.start            run.end            run.error          run.aborted
+run.paused           run.continued      run.issue
 graph.compile.start  graph.compile.end  graph.compile.error
 node.start           node.end           node.error         node.skipped(when=false)
 node.retry           node.timeout
@@ -98,7 +99,7 @@ const compiled = await compileGraph(spec, {
     sinks: [
       consoleSink({ format: "pretty" }),
       jsonlSink({ path: "run.jsonl" }),
-      otelSink(),                       // from @veloxdevworks/flowgraph-observability-otel
+      otelSink(),                       // from @flowgraph/observability-otel
       myWebhookSink("https://..."),     // custom
     ],
   },
@@ -106,6 +107,22 @@ const compiled = await compileGraph(spec, {
 ```
 
 A **sink** is just `(event) => void | Promise<void>`. Sinks are isolated: a throwing/slow sink never blocks or breaks the run (errors surface as `hook.error`-style internal diagnostics, and slow sinks are buffered with backpressure/drop policy).
+
+## 3b. Run issues
+
+Non-fatal degradations (missing toolchain, skipped verification, failed demo capture, budget warning, swallowed node errors) are first-class **run issues**, not just log lines.
+
+`ctx.issue({ code, severity, message, impact?, remediation? })`:
+
+- emits `run.issue`
+- appends one JSON line to `<workspace>/.flowgraph/runs/<threadId|runId>/issues.jsonl`
+- merges into the reserved `__issues` state channel (capped; full history is on disk)
+
+`RunResult.issues` is populated at every terminal return (completed, paused, interrupted, error, aborted). Agents see accumulated issues via `{{ issues }}` and a "Known issues so far" block prepended to the system prompt, and can self-declare gaps with the built-in `report_issue` tool.
+
+CLI prints an `Issues (N)` block after a successful run (`--fail-on-issues` exits 1). Server exposes `GET /runs/:threadId/issues`. Desktop surfaces them on the Runner Issues tab and in the summarize-run report.
+
+Well-known codes: `TOOL_NOT_FOUND`, `CAPTURE_FAILED`, `STEP_SKIPPED`, `BUDGET_EXCEEDED`, `MAX_STEPS`, `ROUTE_EVAL_ERROR`, `ERROR_SWALLOWED`, `AGENT_REPORTED`.
 
 ## 4. Hook model
 
@@ -156,7 +173,7 @@ Hooks are **ordered** (priority) and **composable**; the first `veto`/`route`/`i
 
 ## 5. Observability: OpenTelemetry first-class ([ADR-0007](./adr/0007-observability-otel.md))
 
-`@veloxdevworks/flowgraph-observability-otel` maps the event tree to OTel signals with zero user instrumentation:
+`@flowgraph/observability-otel` maps the event tree to OTel signals with zero user instrumentation:
 
 - **Traces** — a span per run/node/agent-step/tool-call/skill, nested via `parentSpanId`. Span attributes: `flowgraph.graph`, `flowgraph.node.id/type`, `flowgraph.provider`, `flowgraph.attempt`, token usage, etc. This is the end-to-end trace promised in [Vision §Success criteria](./00-vision.md#7-success-criteria).
 - **Metrics** — counters/histograms: node duration, retries, token usage, cost, interrupts raised, hook latency, error rates by node type.
@@ -164,7 +181,7 @@ Hooks are **ordered** (priority) and **composable**; the first `veto`/`route`/`i
 
 It uses standard OTel SDK exporters (OTLP), so it drops into any collector (Datadog, Honeycomb, Grafana/Tempo, Jaeger, Langfuse via OTLP, etc.). Semantic conventions: we follow OTel **GenAI** conventions for LLM spans (model, tokens, etc.) where applicable, plus a small `flowgraph.*` namespace.
 
-Other sinks (`console`, `jsonl`) ship in `@veloxdevworks/flowgraph-core` for zero-dependency local/CI use; OTel is an opt-in package so core stays light.
+Other sinks (`console`, `jsonl`) ship in `@flowgraph/core` for zero-dependency local/CI use; OTel is an opt-in package so core stays light.
 
 ## 6. Cost & token accounting
 

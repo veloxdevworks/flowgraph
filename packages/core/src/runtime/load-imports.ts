@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import * as esbuild from "esbuild";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import { registry, type NodeFactory, type ReducerFn } from "../registry.js";
 import { registerProvider, type ProviderAdapter } from "../providers/index.js";
 

@@ -1,7 +1,7 @@
 import * as childProcess from "node:child_process";
 import * as util from "node:util";
 import type { SkillDef, EnvVarDecl, BinDecl } from "./schema.js";
-import type { Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import type { Diagnostic } from "@flowgraph/spec";
 
 const exec = util.promisify(childProcess.exec);
 

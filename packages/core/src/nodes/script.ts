@@ -20,12 +20,13 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
-import { ScriptWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { ScriptWithSchema } from "@flowgraph/spec";
+import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
+import { findMissingBins, missingToolIssue } from "../runtime/requires.js";
 
 const configSchema = ScriptWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -306,6 +307,27 @@ export const scriptNode = defineNode<Config>({
 
         const timeoutMs = config.timeout ? parseDuration(config.timeout) : DEFAULT_TIMEOUT_MS;
         const permissions = normalizeScriptPermissions(config.permissions);
+
+        const missing = await findMissingBins(config.requires);
+        if (missing.length > 0) {
+          const skip = config.onMissingTool === "skip";
+          ctx.issue(missingToolIssue(missing, { command: "script", skipped: skip }));
+          if (skip) {
+            const result = {
+              ok: false,
+              skipped: true,
+              missing: missing.map((m) => m.bin),
+            };
+            ctx.emit("node.output", result);
+            return {
+              update: applyOutput(config.output, result, {
+                nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+                scope,
+              }),
+            };
+          }
+          throw new Error(missingToolIssue(missing, { command: "script", skipped: false }).message);
+        }
 
         ctx.logger.debug("script exec", {
           timeoutMs,

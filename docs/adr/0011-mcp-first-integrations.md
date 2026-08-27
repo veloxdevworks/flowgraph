@@ -11,14 +11,14 @@ The Model Context Protocol (MCP) is an emerging standard with vendor-maintained 
 
 ## Decision
 
-**MCP is the primary integration substrate.** Build one client layer (`@veloxdevworks/flowgraph-mcp`) and consume MCP in two modes:
+**MCP is the primary integration substrate.** Build one client layer (`@flowgraph/mcp`) and consume MCP in two modes:
 
 1. **Deterministic** — a new `mcp` node type calls a specific tool or reads a resource with arguments mapped from state (no model in the loop).
 2. **Agentic** — `{ mcp: <server> }` under an `intelligent` node's `tools` expands the server's tools and hands them to the provider; existing hooks (`intelligent:beforeToolCall`) gate side effects.
 
 Graph specs declare servers in a top-level `mcpServers` block (familiar from Claude/Cursor). The CLI builds an `McpHub` from that config and injects it at compile time.
 
-**Core stays dependency-light:** `McpHub` is an interface in `@veloxdevworks/flowgraph-core`; the `@modelcontextprotocol/sdk` dependency lives only in `@veloxdevworks/flowgraph-mcp`.
+**Core stays dependency-light:** `McpHub` is an interface in `@flowgraph/core`; the `@modelcontextprotocol/sdk` dependency lives only in `@flowgraph/mcp`.
 
 **Skills are retained** for the long tail (no MCP server), pure deterministic glue, and typed wrappers over coarse MCP tools.
 
@@ -34,6 +34,6 @@ Graph specs declare servers in a top-level `mcpServers` block (familiar from Cla
 
 ## Alternatives considered
 
-- **Per-vendor skill packs (`@veloxdevworks/flowgraph-skills-jira`, etc.):** rejected as primary strategy due to maintenance cost and no OAuth story.
+- **Per-vendor skill packs (`@flowgraph/skills-jira`, etc.):** rejected as primary strategy due to maintenance cost and no OAuth story.
 - **MCP only for agents (no deterministic node):** rejected; deterministic orchestration is core to flowgraph's positioning.
 - **MCP SDK in core:** rejected; violates minimal-deps-in-core (ADR-0006).

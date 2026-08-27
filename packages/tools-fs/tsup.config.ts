@@ -6,5 +6,5 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: ["@veloxdevworks/flowgraph-core"],
+  external: ["@flowgraph/core"],
 });

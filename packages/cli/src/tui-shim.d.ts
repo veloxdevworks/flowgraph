@@ -1,4 +1,4 @@
-declare module "@veloxdevworks/flowgraph-tui" {
+declare module "@flowgraph/tui" {
   export interface LaunchTuiOptions {
     graphPath?: string;
     cwd?: string;

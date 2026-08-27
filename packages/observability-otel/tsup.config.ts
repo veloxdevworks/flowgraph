@@ -5,5 +5,5 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: ["@opentelemetry/api", "@veloxdevworks/flowgraph-core"],
+  external: ["@opentelemetry/api", "@flowgraph/core"],
 });

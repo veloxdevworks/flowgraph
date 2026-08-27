@@ -6,7 +6,7 @@
  * `compileGraph(spec, { checkpointer })`.
  *
  * @example
- * import { createPostgresCheckpointer } from "@veloxdevworks/flowgraph-checkpoint-postgres";
+ * import { createPostgresCheckpointer } from "@flowgraph/checkpoint-postgres";
  * const checkpointer = await createPostgresCheckpointer(process.env.DATABASE_URL!);
  * const compiled = await compileGraph(spec, { checkpointer });
  *

@@ -3,9 +3,9 @@
  */
 
 import * as path from "node:path";
-import { loadGraph, validateSpec, compileGraph, loadGraphImports } from "@veloxdevworks/flowgraph-core";
-import type { FlowgraphEvent, CompiledGraph, CompileOptions, InterruptInfo, InterruptPolicy } from "@veloxdevworks/flowgraph-core";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import { loadGraph, validateSpec, compileGraph, loadGraphImports } from "@flowgraph/core";
+import type { FlowgraphEvent, CompiledGraph, CompileOptions, InterruptInfo, InterruptPolicy } from "@flowgraph/core";
+import type { GraphSpec } from "@flowgraph/spec";
 
 export interface TestCompileOptions {
   store?: CompileOptions["store"];

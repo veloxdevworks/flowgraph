@@ -40,7 +40,7 @@ npx flowgraph run triage.graph.yaml --input issue=@payload.json
 
 ```bash
 # Optional package — install once per project
-pnpm add @veloxdevworks/flowgraph-tui
+pnpm add @flowgraph/tui
 
 # Launch the TUI (graph browser, live runs, HITL prompts)
 flowgraph tui
@@ -67,12 +67,12 @@ Packages are grouped so core stays free of native bindings and optional SDKs. In
 
 | Package | Description |
 |---|---|
-| `@veloxdevworks/flowgraph-core` | Compiler, runtime, node registry, event bus, built-in nodes, **built-in LangChain provider** |
-| `@veloxdevworks/flowgraph-spec` | Zod schemas + generated JSON Schema (editor autocomplete) |
-| `@veloxdevworks/flowgraph-expr` | Sandboxed `{{ expression }}` evaluator |
-| `@veloxdevworks/flowgraph-skills` | `SKILL.md` loader, contract validation, preflight |
-| `@veloxdevworks/flowgraph-cli` | The `flowgraph` binary |
-| `@veloxdevworks/flowgraph-testing` | In-memory test harness |
+| `@flowgraph/core` | Compiler, runtime, node registry, event bus, built-in nodes, **built-in LangChain provider** |
+| `@flowgraph/spec` | Zod schemas + generated JSON Schema (editor autocomplete) |
+| `@flowgraph/expr` | Sandboxed `{{ expression }}` evaluator |
+| `@flowgraph/skills` | `SKILL.md` loader, contract validation, preflight |
+| `@flowgraph/cli` | The `flowgraph` binary |
+| `@flowgraph/testing` | In-memory test harness |
 
 ### Adapters
 
@@ -80,8 +80,8 @@ Peer-depend on `core` plus one provider SDK.
 
 | Package | Description |
 |---|---|
-| `@veloxdevworks/flowgraph-provider-claude` | Claude Agent SDK adapter |
-| `@veloxdevworks/flowgraph-provider-cursor` | Cursor SDK adapter |
+| `@flowgraph/provider-claude` | Claude Agent SDK adapter |
+| `@flowgraph/provider-cursor` | Cursor SDK adapter |
 
 ### Runtime plugins
 
@@ -89,12 +89,12 @@ Peer-depend on `core` plus one optional capability (native driver, OTel, sandbox
 
 | Package | Description |
 |---|---|
-| `@veloxdevworks/flowgraph-checkpoint-sqlite` | Durable SQLite checkpointer |
-| `@veloxdevworks/flowgraph-checkpoint-postgres` | Durable Postgres checkpointer |
-| `@veloxdevworks/flowgraph-observability-otel` | OpenTelemetry exporter |
-| `@veloxdevworks/flowgraph-tools-fs` | Sandboxed local filesystem tools |
+| `@flowgraph/checkpoint-sqlite` | Durable SQLite checkpointer |
+| `@flowgraph/checkpoint-postgres` | Durable Postgres checkpointer |
+| `@flowgraph/observability-otel` | OpenTelemetry exporter |
+| `@flowgraph/tools-fs` | Sandboxed local filesystem tools |
 
-`flowgraph tui` (interactive terminal UI) and MCP server integration ship as separate optional packages (`@veloxdevworks/flowgraph-tui`, `@veloxdevworks/flowgraph-mcp`) built from a companion repo — install them independently when you need them.
+`flowgraph tui` (interactive terminal UI) and MCP server integration ship as separate optional packages (`@flowgraph/tui`, `@flowgraph/mcp`) built from a companion repo — install them independently when you need them.
 
 ## Docs
 

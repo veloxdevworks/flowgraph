@@ -1,6 +1,15 @@
 export { RunService } from "./run-service.js";
+export { TooManyRunsError } from "./errors.js";
 export { SessionRegistry } from "./session-registry.js";
-export { parseGraphYaml, persistGraph, loadPersistedGraph } from "./graph-source.js";
+export {
+  parseGraphYaml,
+  persistGraph,
+  loadPersistedGraph,
+  listPersistedGraphs,
+  updateGraphMeta,
+  appendEventJournal,
+  loadEventJournal,
+} from "./graph-source.js";
 export { buildServerProviders } from "./providers.js";
 export {
   rejectClientSecrets,
@@ -8,10 +17,13 @@ export {
   credentialStatus,
   ClientSecretsRejectedError,
 } from "./credentials.js";
-export { checkBearerAuth, isAgentCorePath } from "./auth.js";
+export { checkBearerAuth, isAgentCorePath, AUTH_REQUIRED_MESSAGE } from "./auth.js";
 export { createHttpServer, listen } from "./http/app.js";
-export { createMetrics, log } from "./metrics.js";
+export { createMetrics, errorFields, log } from "./metrics.js";
+export { processIdentity, isEphemeralGraphStore } from "./diagnostics.js";
 export { defaultServerConfig } from "./types.js";
+export { ConnectClient, startConnectClient } from "./connect/client.js";
+export { CONNECT_PROTOCOL_VERSION } from "./connect/protocol.js";
 export type {
   ServerConfig,
   ServerEvent,
@@ -22,4 +34,7 @@ export type {
   GetStateResult,
   RunStatus,
   PersistedGraph,
+  RunListItem,
+  RunDetail,
+  GraphMeta,
 } from "./types.js";

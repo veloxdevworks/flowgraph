@@ -1,5 +1,5 @@
 {
-  "name": "@veloxdevworks/flowgraph-testing",
+  "name": "@flowgraph/testing",
   "version": "0.1.0",
   "description": "Test harness for flowgraph graphs",
   "license": "Apache-2.0",
@@ -19,8 +19,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-spec": "workspace:*"
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.0.1",

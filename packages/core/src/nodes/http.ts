@@ -5,8 +5,8 @@
  */
 
 import { z } from "zod";
-import { HttpWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { HttpWithSchema } from "@flowgraph/spec";
+import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import type { NodeResult } from "../registry.js";

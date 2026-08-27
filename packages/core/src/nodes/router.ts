@@ -6,13 +6,14 @@
  */
 
 import { z } from "zod";
-import { RouterWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { evalGuard, renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { RouterWithSchema } from "@flowgraph/spec";
+import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { getProvider, listProviders } from "../providers/registry.js";
 import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
 import { applyOutput } from "./output.js";
+import { ISSUE_CODE } from "../runtime/run-issues.js";
 
 const configSchema = RouterWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -56,6 +57,14 @@ export const routerNode = defineNode<Config>({
               ctx.logger.warn(`router: error evaluating route "${key}" condition`, {
                 when: route.when,
                 error: String(err),
+              });
+              ctx.issue({
+                code: ISSUE_CODE.ROUTE_EVAL_ERROR,
+                severity: "warning",
+                message: `error evaluating route "${key}" condition; falling through`,
+                impact: "This route was skipped, so the default (or no route) may have been chosen instead.",
+                remediation: "Fix the `when` expression on this route.",
+                detail: { route: key, when: route.when, error: String(err) },
               });
             }
           }

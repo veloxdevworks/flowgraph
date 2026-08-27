@@ -28,7 +28,7 @@
     "release": "turbo run build --filter=\"./packages/*\" && changeset publish"
   },
   "devDependencies": {
-    "@veloxdevworks/flowgraph-cli": "workspace:*",
+    "@flowgraph/cli": "workspace:*",
     "@changesets/cli": "^2.31.0",
     "@types/node": "^26.0.1",
     "@typescript-eslint/eslint-plugin": "^8.0.0",

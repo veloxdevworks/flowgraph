@@ -15,7 +15,7 @@ Operators also need to audit what leaves their network — putting the dial-out 
 ## Decision
 
 1. Amend the non-goal to: **No proprietary cloud control-plane *server* in this repository.** Hosted multi-tenant control plane remains in Velox Platform.
-2. Ship an **optional, config-gated outbound connect client** inside `@veloxdevworks/flowgraph-server` (`packages/server`) that dials Platform over WebSocket when configured.
+2. Ship an **optional, config-gated outbound connect client** inside `@flowgraph/server` (`packages/server`) that dials Platform over WebSocket when configured.
 3. Keep the client **transport-only**: map connect `command` messages onto the existing `RunService`; emit `event.batch` from the engine event bus. No org/authz/library business logic in ai-graph.
 4. Pin a **versioned protocol schema** (Platform `@velox/flow-protocol` or published conformance package) so engine releases do not couple to Platform feature cadence.
 5. Default remains local/direct REST+SSE; connect is off unless explicitly configured.
@@ -31,7 +31,7 @@ Operators also need to audit what leaves their network — putting the dial-out 
 
 | Option | Why not |
 |---|---|
-| Separate proprietary `@veloxdevworks/flowgraph-connect` image | Two images to ship; same binary surface as config-gated module |
+| Separate proprietary `@flowgraph/connect` image | Two images to ship; same binary surface as config-gated module |
 | Platform dials runner | Inbound ports / NAT; weaker security posture |
 | No cloud connect in OSS | Forces proprietary fork; harder for operators to audit |
 

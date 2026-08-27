@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { InterruptInfo } from "@veloxdevworks/flowgraph-core";
+import type { InterruptInfo } from "@flowgraph/core";
 import {
   formatInterruptPrompt,
   parseInterruptAnswer,
@@ -43,6 +43,28 @@ describe("formatInterruptPrompt", () => {
     expect(prompt).toContain("1. alpha");
     expect(prompt).toContain("2. beta");
   });
+
+  it("formats form and review prompts", () => {
+    const form = formatInterruptPrompt(
+      info({
+        id: "1",
+        reason: "Fill in",
+        kind: "form",
+        payload: { data: { schema: { type: "object" } } },
+      }),
+    );
+    expect(form).toContain("JSON Schema");
+    const review = formatInterruptPrompt(
+      info({
+        id: "1",
+        reason: "Review",
+        kind: "review",
+        payload: { data: { diffStat: "1 file changed", decision: ["approve", "request-changes"] } },
+      }),
+    );
+    expect(review).toContain("1 file changed");
+    expect(review).toContain("approve, request-changes");
+  });
 });
 
 describe("parseInterruptAnswer", () => {
@@ -57,10 +79,16 @@ describe("parseInterruptAnswer", () => {
     ).toEqual({ answer: "my answer" });
   });
 
-  it("parses choice by index or text", () => {
-    const it = info({ id: "1", kind: "choice", choices: ["alpha", "beta"] });
-    expect(parseInterruptAnswer(it, "2")).toEqual({ choice: "beta" });
-    expect(parseInterruptAnswer(it, "alpha")).toEqual({ choice: "alpha" });
+  it("parses form JSON and review decisions", () => {
+    expect(
+      parseInterruptAnswer(info({ id: "1", kind: "form" }), '{"title":"Epic"}'),
+    ).toEqual({ title: "Epic" });
+    expect(parseInterruptAnswer(info({ id: "1", kind: "review" }), "approve")).toEqual({
+      decision: "approve",
+    });
+    expect(parseInterruptAnswer(info({ id: "1", kind: "review" }), "no")).toEqual({
+      decision: "request-changes",
+    });
   });
 });
 
