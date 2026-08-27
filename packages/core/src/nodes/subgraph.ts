@@ -12,6 +12,7 @@
  * nested run scope.
  */
 
+import * as path from "node:path";
 import { z } from "zod";
 import { SubgraphWithSchema, type GraphSpec } from "@veloxdevworks/flowgraph-spec";
 import { renderDeep } from "@veloxdevworks/flowgraph-expr";
@@ -132,6 +133,7 @@ async function loadChild(
   const { compileGraphForEmbedding } = await import("../compiler.js");
 
   let spec: GraphSpec;
+  let childGraphPath: string | undefined;
   if (inlineSpec) {
     spec = inlineSpec;
   } else {
@@ -147,6 +149,7 @@ async function loadChild(
       );
     }
     spec = loaded.spec;
+    childGraphPath = loaded.resolvedPath;
   }
 
   const forwardSink = (event: FlowgraphEvent) => {
@@ -156,8 +159,12 @@ async function loadChild(
     });
   };
 
+  // File-backed children compile as if they were the top-level graph: `imports`
+  // (and nested `uses`) resolve against the subgraph file's directory, not the
+  // parent's. Inline `spec` has no file, so it keeps the parent workspace.
   const { compiledLg } = await compileGraphForEmbedding(spec, {
-    cwd: ctx.workspace,
+    cwd: childGraphPath != null ? path.dirname(childGraphPath) : ctx.workspace,
+    ...(childGraphPath != null ? { graphPath: childGraphPath } : {}),
     sinks: [forwardSink],
   });
 

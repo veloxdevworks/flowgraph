@@ -1,0 +1,19 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: nested-import-parent
+state:
+  channels:
+    result: { type: object }
+nodes:
+  - id: quality-gates
+    type: subgraph
+    uses: ./subgraphs/child.graph.yaml
+    with:
+      stateMap:
+        out: { result: result }
+edges:
+  - { from: START, to: quality-gates }
+  - { from: quality-gates, to: END }
+runtime:
+  checkpoint: { enabled: false }
