@@ -435,3 +435,77 @@ edges:
     expect(await s.getRun("m1", principal("ursula", false))).toBeNull();
   });
 });
+
+describe("untrusted agent tools, function nodes and host programs", () => {
+  const codes = (yaml: string, opts: { allowTools?: string[]; allowFunctions?: string[] } = {}) => {
+    const parsed = parseGraphYaml(yaml, { expandEnv: false });
+    expect(parsed.diagnostics.filter((d) => d.severity === "error"), JSON.stringify(parsed.diagnostics)).toEqual([]);
+    return checkUntrustedUpload(yaml, parsed.spec!, opts).map((v) => `${v.code} ${v.path}`);
+  };
+  const agent = (tools: string) => graph(`  - { id: a, type: agent, with: { provider: mock, prompt: hi, tools: ${tools} } }`);
+
+  it("refuses service tools and other registered tools outside the allow list", () => {
+    for (const t of ["start_service", "restart_service", "stop_service", "fs_bash", "my_tool"]) {
+      expect(codes(agent(`[ { function: ${t} } ]`))).toEqual(["UPLOAD_AGENT_TOOL_BLOCKED nodes.a.with.tools[0]"]);
+    }
+    expect(codes(agent(`[ { builtin: [Bash, Read] } ]`))).toEqual([
+      "UPLOAD_AGENT_TOOL_BLOCKED nodes.a.with.tools[0]",
+      "UPLOAD_AGENT_TOOL_BLOCKED nodes.a.with.tools[0]",
+    ]);
+    const mapped = graph(`  - id: a
+    type: map
+    with:
+      over: "{{ state.items }}"
+      node: { id: inner, type: agent, with: { provider: mock, prompt: hi, tools: [ { function: start_service } ] } }`);
+    expect(codes(mapped)).toContain("UPLOAD_AGENT_TOOL_BLOCKED nodes.a.map.inner.with.tools[0]");
+    expect(codes(agent(`[ { function: ask_human }, { function: list_services }, { function: service_status } ]`))).toEqual([]);
+    expect(codes(agent(`[ { function: my_tool } ]`), { allowTools: ["my_tool"] })).toEqual([]);
+  });
+
+  it("refuses function nodes unless the operator allows the function", () => {
+    const fn = graph(`  - { id: a, type: function, with: { fn: lookup, output: { to: out } } }`);
+    expect(codes(fn)).toEqual(["UPLOAD_FUNCTION_BLOCKED nodes.a.with.fn"]);
+    expect(codes(fn, { allowFunctions: ["lookup"] })).toEqual([]);
+  });
+
+  it("refuses a workshop diff that runs git but allows before/after text", () => {
+    const ws = (diff: string) => graph(`  - { id: a, type: workshop, with: { agenda: ["ok?"], diff: ${diff} } }`);
+    expect(codes(ws(`{ cwd: "/" }`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.diff"]);
+    expect(codes(ws(`{ before: "a", after: "b" }`))).toEqual([]);
+  });
+
+  it("compiles untrusted graphs with the tool and function allow lists", () => {
+    expect(UNTRUSTED_NODE_POLICY).toMatchObject({ allowedTools: ["ask_human", "list_services", "service_status"], allowedFunctions: [], blockHostExec: true });
+    const p = untrustedNodePolicy({ allowTools: ["my_tool"], allowFunctions: ["lookup"] });
+    expect(p.allowedTools).toEqual(["ask_human", "list_services", "service_status", "my_tool"]);
+    expect(p.allowedFunctions).toEqual(["lookup"]);
+  });
+
+  it("refuses an untrusted upload with start_service on the server", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-svc-"));
+    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, auth: OIDC });
+    await s.init();
+    try {
+      const yaml = agent(`[ { function: start_service } ]`).replace("upload-check", "svc-tool");
+      await expect(s.startRun({ threadId: "svc1", yaml }, principal("ursula", false))).rejects.toMatchObject({ status: 403, code: "UPLOAD_AGENT_TOOL_BLOCKED" });
+      expect(await s.getRun("svc1", principal("ursula", false))).toBeNull();
+    } finally {
+      await s.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses start_service at call time under the untrusted policy, even when allow-listed", async () => {
+    const marker = path.join(os.tmpdir(), `fg-review-svc-${process.pid}-${Date.now()}`);
+    const { getTool, NODE_POLICY } = await import("@flowgraph/core");
+    for (const policy of [UNTRUSTED_NODE_POLICY, untrustedNodePolicy({ allowTools: ["start_service"] })]) {
+      const ctx = { nodeId: "a", workspace: os.tmpdir(), meta: { threadId: "svc", runId: "r" }, emit: () => undefined, [NODE_POLICY]: policy };
+      const err = await Promise.resolve()
+        .then(() => getTool("start_service")!.handler({ name: "x", command: "sh", args: ["-c", `id > ${marker}`], keepAlive: true }, ctx as never))
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "NODE_TYPE_BLOCKED" });
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    await expect(fs.stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});

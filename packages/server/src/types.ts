@@ -173,6 +173,19 @@ export interface ServerConfig {
    * Env: `FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS` (comma-separated). Default: none.
    */
   untrustedHttpAllowHosts?: string[];
+  /**
+   * Registered agent function tools (registerTool) graphs from untrusted
+   * authors may call, beyond ask_human, list_services and service_status.
+   * Service start/stop tools stay refused. Env: `FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS`
+   * (comma-separated). Default: none.
+   */
+  untrustedAllowTools?: string[];
+  /**
+   * Registered functions (registerFunction) that `function` nodes in graphs
+   * from untrusted authors may call. Env: `FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS`
+   * (comma-separated). Default: none.
+   */
+  untrustedAllowFunctions?: string[];
   /** Directory for persisted uploaded graphs. */
   graphStoreDir: string;
   /** Max events retained per thread for SSE replay. */
@@ -404,6 +417,17 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
     }
   }
   if (allowHosts.length) config.untrustedHttpAllowHosts = allowHosts;
+  const names = (key: "FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS" | "FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS"): string[] => {
+    const list = (env[key] ?? "").split(",").map((n) => n.trim()).filter(Boolean);
+    for (const n of list) {
+      if (!/^[A-Za-z0-9_.:-]+$/.test(n)) throw new Error(`${key}: "${n}" is not a registered tool or function name`);
+    }
+    return list;
+  };
+  const allowTools = names("FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS");
+  if (allowTools.length) config.untrustedAllowTools = allowTools;
+  const allowFunctions = names("FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS");
+  if (allowFunctions.length) config.untrustedAllowFunctions = allowFunctions;
   const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION;
   if (region) config.awsRegion = region;
   if (env.FLOWGRAPH_CONNECT_URL?.trim()) config.connectUrl = env.FLOWGRAPH_CONNECT_URL.trim();

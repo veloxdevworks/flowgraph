@@ -51,7 +51,7 @@ import type {
 } from "./types.js";
 
 import { ServerRequestError, TooManyRunsError } from "./errors.js";
-import { assertUntrustedUploadAllowed, untrustedNodePolicy } from "./upload-policy.js";
+import { assertUntrustedUploadAllowed, untrustedNodePolicy, type UntrustedUploadOptions } from "./upload-policy.js";
 import { authModeOf, createAuthenticator, singleUserPrincipal, type Authenticator, type Principal } from "./identity.js";
 
 /** sqlite memory is optional: the package is loaded only when configured. */
@@ -198,8 +198,12 @@ export class RunService {
     return work;
   }
 
-  private get uploadOptions(): { allowHosts?: readonly string[] } {
-    return this.config.untrustedHttpAllowHosts ? { allowHosts: this.config.untrustedHttpAllowHosts } : {};
+  private get uploadOptions(): UntrustedUploadOptions {
+    return {
+      ...(this.config.untrustedHttpAllowHosts ? { allowHosts: this.config.untrustedHttpAllowHosts } : {}),
+      ...(this.config.untrustedAllowTools ? { allowTools: this.config.untrustedAllowTools } : {}),
+      ...(this.config.untrustedAllowFunctions ? { allowFunctions: this.config.untrustedAllowFunctions } : {}),
+    };
   }
 
   /** True when callers are told apart (OIDC); token and none modes have one principal. */
@@ -429,7 +433,7 @@ export class RunService {
       checkpointer,
       legacyStoreBackend: this.legacyStoreBackend,
       ...(identity ? { memoryIdentity: identity } : {}),
-      ...(principal.trusted ? {} : { nodePolicy: untrustedNodePolicy(this.config.untrustedHttpAllowHosts) }),
+      ...(principal.trusted ? {} : { nodePolicy: untrustedNodePolicy(this.uploadOptions) }),
       ...(this.durableMemory && identity
         ? { memory: { backend: this.durableMemory.backend, identity } }
         : { memoryUnavailableHint: SERVER_MEMORY_HINT }),
