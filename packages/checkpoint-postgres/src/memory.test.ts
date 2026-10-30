@@ -140,6 +140,33 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
     }
   });
 
+  it("an idle connection the server terminates is reported, not a crash", async () => {
+    const app = `fgt_idle_${randomUUID().slice(0, 8)}`;
+    const errors: Array<{ code?: string }> = [];
+    const b = await openPostgresBackend({
+      connectionString: DB!,
+      schema: freshSchema(),
+      poolConfig: { max: 2, application_name: app },
+      onPoolError: (err) => errors.push(err as { code?: string }),
+    });
+    try {
+      await b.pool.query("SELECT 1");
+      const killed = await admin!.query<{ ok: boolean }>(
+        "SELECT pg_terminate_backend(pid) AS ok FROM pg_stat_activity WHERE application_name = $1 AND pid <> pg_backend_pid()",
+        [app],
+      );
+      expect(killed.rows.length).toBeGreaterThan(0);
+      const deadline = Date.now() + 5_000;
+      while (errors.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+      expect(errors[0]?.code).toBe("57P01");
+      // The pool replaces the connection.
+      expect((await b.pool.query("SELECT 1 AS one")).rows[0]).toEqual({ one: 1 });
+      await b.memory.write({ kind: "put", tuple: tu(), key: "after", value: 1, limits: MEMORY_DEFAULT_LIMITS });
+    } finally {
+      await b.close();
+    }
+  });
+
   it("does not end a pool it was given", async () => {
     const pool = new pg.Pool({ connectionString: DB, max: 2 });
     const b = await openPostgresBackend({ pool, schema: freshSchema() });

@@ -105,6 +105,13 @@ export interface PostgresBackendOptions {
   sweepIntervalMs?: number;
   /** Extra pg.Pool settings when this call creates the pool (e.g. max, allowExitOnIdle). */
   poolConfig?: Omit<pg.PoolConfig, "connectionString">;
+  /**
+   * Called when an idle pooled connection fails, e.g. the server terminated it
+   * (57P01) or the network dropped. The pool discards that connection and opens
+   * a new one on the next query. Only used when this call creates the pool.
+   * Default: a one-line console.warn.
+   */
+  onPoolError?: (err: Error) => void;
 }
 
 export interface PostgresBackend {
@@ -137,6 +144,16 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
   quoteSchema(schema);
   const owned = !opts.pool;
   const pool = opts.pool ?? new pg.Pool({ ...opts.poolConfig, connectionString: opts.connectionString });
+  // Without a listener, an idle connection's error is an unhandled 'error' event that crashes the process.
+  if (owned) {
+    pool.on(
+      "error",
+      opts.onPoolError ??
+        ((err: Error) => {
+          console.warn(`flowgraph: postgres idle connection error (${(err as { code?: string }).code ?? err.message}); it will be replaced`);
+        }),
+    );
+  }
   try {
     const saver = new PostgresSaver(pool, undefined, { schema });
     const setup = opts.setup !== false;

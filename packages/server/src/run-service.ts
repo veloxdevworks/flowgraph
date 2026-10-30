@@ -135,7 +135,10 @@ export class RunService {
         }
         if (this.config.databaseUrl) {
           if (memBackend === "postgres") {
-            const pg = await openPostgresBackend(this.config.databaseUrl);
+            const pg = await openPostgresBackend({
+              connectionString: this.config.databaseUrl,
+              onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
+            });
             this.closers.push(() => pg.close());
             this.useDurableMemory(pg.memory);
             this.checkpointer = pg.checkpointer;
