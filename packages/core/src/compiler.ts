@@ -157,12 +157,22 @@ export interface CompiledGraph {
   getStateHistory(threadId: string): Promise<StateSnapshot[]>;
   /** Continue from a historical checkpoint id (thin wrapper on getStateHistory). */
   resumeFrom(opts: ResumeOptions & { checkpointId: string }): Promise<RunResult>;
-  /** Run a single superstep of a paused/checkpointed thread. */
+  /**
+   * Run exactly one superstep of a paused/checkpointed thread, then stop with
+   * `status: "paused"` (or `completed` / `interrupted` if that step finished
+   * the graph or raised a HITL interrupt). Requires a checkpointer.
+   */
   step(opts: ContinueOptions): Promise<RunResult>;
   stream(opts?: RunOptions): AsyncIterable<FlowgraphEvent>;
 }
 
 type ExecuteMode = "start" | "resume" | "continue";
+
+/** Per-invocation execution options (never written back to the shared spec). */
+interface InvokeOverrides {
+  /** Stop after one superstep (LangGraph invoke-time `interruptAfter: "*"`). */
+  singleStep?: boolean;
+}
 
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
 export interface EmbeddedCompiledGraph {
@@ -215,6 +225,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     payload: Record<string, unknown> | Command | null,
     runOpts: RunOptions | ResumeOptions | ContinueOptions,
     mode: ExecuteMode,
+    overrides: InvokeOverrides = {},
   ): Promise<RunResult> => {
     const startMs = Date.now();
     const threadId = runOpts.threadId ?? `thread-${runId}`;
@@ -233,6 +244,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const unsubs = (runOpts.sinks ?? []).map((s) => events.subscribe(s));
     const policy = runOpts.onInterrupt ?? defaultPolicy;
     const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
+    if (overrides.singleStep) cfg["interruptAfter"] = "*";
     const workspace = (baseCtx as RunContext).workspace;
     const finish = (r: RunResult): RunResult => {
       try {
@@ -329,6 +341,15 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             threadId,
             durationMs: Date.now() - startMs,
           });
+        }
+
+        if (interrupts.length === 0 && overrides.singleStep && checkpointer) {
+          const snap = await compiledLg.getState(cfg);
+          if (snap && Array.isArray(snap.next) && snap.next.length > 0) {
+            const clean = stripReserved(result);
+            events.emit("run.paused", { state: clean, next: [...snap.next], step: true, durationMs: Date.now() - startMs });
+            return finish({ status: "paused", state: clean, runId, threadId, durationMs: Date.now() - startMs });
+          }
         }
 
         if (interrupts.length === 0) {
@@ -456,7 +477,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     };
   };
 
-  const continueRun = async (continueOpts: ContinueOptions): Promise<RunResult> => {
+  const continueRun = async (
+    continueOpts: ContinueOptions,
+    overrides: InvokeOverrides = {},
+  ): Promise<RunResult> => {
     let payload: Record<string, unknown> | Command | null = null;
     if (checkpointer) {
       const snap = await compiledLg.getState({ configurable: { thread_id: continueOpts.threadId } });
@@ -468,7 +492,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         payload = new Command({ resume: true });
       }
     }
-    return executeInvoke(payload, continueOpts, "continue");
+    return executeInvoke(payload, continueOpts, "continue", overrides);
   };
 
   const resume = async (resumeOpts: ResumeOptions): Promise<RunResult> => {
@@ -495,7 +519,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     events,
     run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, "start"),
     resume,
-    continueRun,
+    continueRun: (opts: ContinueOptions) => continueRun(opts),
     getState: async (threadId: string) => {
       if (!checkpointer) return null;
       let snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
@@ -521,15 +545,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       return resume({ ...opts, checkpointId: opts.checkpointId });
     },
     step: async (opts: ContinueOptions) => {
-      const prev = graphSpec.runtime?.recursionLimit;
-      if (!graphSpec.runtime) (graphSpec as { runtime: Record<string, unknown> }).runtime = {};
-      graphSpec.runtime!.recursionLimit = 1;
-      try {
-        return await continueRun(opts);
-      } finally {
-        if (prev === undefined) delete graphSpec.runtime!.recursionLimit;
-        else graphSpec.runtime!.recursionLimit = prev;
+      if (!checkpointer) {
+        throw new Error("step() needs a checkpointer: stepping resumes a checkpointed thread one superstep at a time.");
       }
+      // Per-invocation interruptAfter: "*" — the shared spec / compiled graph is
+      // never mutated, so concurrent run()/step() calls don't affect each other.
+      return continueRun(opts, { singleStep: true });
     },
     stream: async function* (runOpts: RunOptions = {}) {
       const streamP = events.stream();

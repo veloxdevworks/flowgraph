@@ -181,10 +181,26 @@ describe("my graph", () => {
 
 Examples using this pattern: [composition](../examples/composition/composition.test.ts), [quickstart](../examples/quickstart/quickstart.test.ts), [release-notes](../examples/release-notes/release-notes.test.ts).
 
+## Stepping and time travel
+
+Both need a checkpointer (`runtime.checkpoint`, on by default with the memory backend).
+
+```ts
+const compiled = await compileGraph(spec);
+await compiled.run({ threadId, pauseSignal, onInterrupt: "fail" }); // paused mid-run
+
+const s = await compiled.step({ threadId });   // exactly one superstep
+s.status;                                      // "paused" | "completed" | "interrupted" | "error"
+(await compiled.getState(threadId))?.next;     // nodes the next step() will run
+
+await compiled.resumeFrom({ threadId, checkpointId, resume: true }); // re-run from a checkpoint
+```
+
+`step()` runs one LangGraph superstep (all tasks scheduled together, e.g. a `map` fan-out, count as one step) using a per-invocation `interruptAfter: "*"`. It does not touch the compiled graph or `spec.runtime`, so it is safe alongside concurrent `run()` calls on the same `CompiledGraph`. If the step raises a HITL interrupt the result is `interrupted` as usual; answer it with `resume()`.
+
 ## Planned API (not yet shipped)
 
-- `resumeFrom(checkpointId)` — time-travel resume from a specific checkpoint
-- `CompiledGraph.step()` — superstep debugging
+- `flowgraph dev --step` — CLI front-end for `CompiledGraph.step()`
 - `flowgraph.config.ts` — project-level auto-registration
 
 See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).

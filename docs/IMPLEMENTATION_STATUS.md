@@ -48,8 +48,9 @@ See [09 — CLI](./09-cli.md) for the authoritative command reference.
 |-----|--------|-------|
 | `compileGraph`, `CompiledGraph.run`, `.resume`, `.getState` | **Shipped** | |
 | `getStateHistory` | **Shipped** | On `CompiledGraph`; not exposed in CLI |
-| `resumeFrom` | **Planned** | Referenced in [07 — Runtime](./07-runtime-and-execution.md) |
-| `runGraph.step` / `flowgraph dev --step` | **Planned** | Time-travel debugging |
+| `resumeFrom` | **Shipped** | On `CompiledGraph`; see [07 — Runtime](./07-runtime-and-execution.md) |
+| `CompiledGraph.step` | **Shipped** | One superstep per call (per-invocation `interruptAfter: "*"`); needs a checkpointer |
+| `flowgraph dev --step` | **Planned** | CLI front-end for `step()` |
 | `flowgraph.config.ts` auto-discovery | **Planned** | Register nodes/providers via imports in YAML today |
 
 ## Known limitations

@@ -58,8 +58,9 @@ The adapter interface wraps LangGraph's `BaseCheckpointSaver` (`put`, `putWrites
 Because every superstep is checkpointed, the runtime exposes:
 
 ```ts
-const history = await getStateHistory(compiled, { threadId });   // list of StateSnapshots
-await resumeFrom(compiled, { threadId, checkpointId });          // fork/replay from a point
+const history = await compiled.getStateHistory(threadId);                  // list of StateSnapshots
+await compiled.resumeFrom({ threadId, checkpointId, resume: true });       // fork/replay from a point
+await compiled.step({ threadId });                                         // run exactly one superstep, then pause
 ```
 
 This powers `flowgraph run --resume`, debugging, and "what if I re-run from here" flows.

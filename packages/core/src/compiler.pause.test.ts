@@ -151,7 +151,53 @@ describe("pause / continueRun", () => {
     unsub();
 
     const stepped = await compiled.step({ threadId, onInterrupt: "fail" });
-    expect(["paused", "completed", "interrupted"]).toContain(stepped.status);
+    expect(stepped.status).toBe("paused");
     expect(stepped.state["a"]).toBe("a");
+    expect(stepped.state["b"]).toBe("b");
+    expect(stepped.state["c"] ?? undefined).toBeUndefined();
+    expect((await compiled.getState(threadId))?.next).toEqual(["n3"]);
+
+    const last = await compiled.step({ threadId, onInterrupt: "fail" });
+    expect(last.status).toBe("completed");
+    expect(last.state["c"]).toBe("c");
+    expect((await compiled.getState(threadId))?.next).toEqual([]);
+  });
+
+  it("step does not mutate the shared spec or limit concurrent runs", async () => {
+    const spec = threeStepSpec();
+    (spec.runtime as Record<string, unknown>)["recursionLimit"] = 10;
+    const compiled = await compileGraph(spec);
+    const threadId = "step-shared";
+    const pause = new AbortController();
+    const unsub = compiled.events.subscribe((ev) => {
+      if (ev.type === "node.end" && ev.scope.nodeId === "n1") pause.abort();
+    });
+    await compiled.run({ threadId, pauseSignal: pause.signal, onInterrupt: "fail" });
+    unsub();
+
+    // A full run on another thread overlapping the step must not inherit any
+    // step-only limit (the old implementation set runtime.recursionLimit = 1).
+    const seenLimits: unknown[] = [];
+    const unsubSeen = compiled.events.subscribe((ev) => {
+      if (ev.type === "node.start") seenLimits.push(compiled.spec.runtime?.recursionLimit);
+    });
+    const [stepped, other] = await Promise.all([
+      compiled.step({ threadId, onInterrupt: "fail" }),
+      compiled.run({ threadId: "step-shared-other", onInterrupt: "fail" }),
+    ]);
+    expect(stepped.status).toBe("paused");
+    expect(other.status).toBe("completed");
+    expect(other.state["c"]).toBe("c");
+    unsubSeen();
+    expect(seenLimits.length).toBeGreaterThan(0);
+    expect(new Set(seenLimits)).toEqual(new Set([10]));
+    expect(compiled.spec.runtime?.recursionLimit).toBe(10);
+  });
+
+  it("step without a checkpointer fails clearly", async () => {
+    const spec = threeStepSpec();
+    (spec.runtime as Record<string, unknown>)["checkpoint"] = { enabled: false };
+    const compiled = await compileGraph(spec);
+    await expect(compiled.step({ threadId: "x" })).rejects.toThrow(/needs a checkpointer/);
   });
 });
