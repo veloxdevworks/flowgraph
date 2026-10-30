@@ -25,6 +25,12 @@ export interface NodePolicy {
    * checked after DNS and on every redirect). Unset: plain fetch.
    */
   outboundHttp?: OutboundHttpPolicy | undefined;
+  /** Refuse `mcpServers` and run without an MCP hub, so no node or agent can reach an MCP server. */
+  blockMcp?: boolean | undefined;
+  /** Refuse `localTools` (host filesystem tools for agents). */
+  blockLocalTools?: boolean | undefined;
+  /** Refuse `requires` binary checks, which reveal what is installed on the host. */
+  blockHostProbes?: boolean | undefined;
   /** Who set the policy, for error messages (e.g. "uploaded graphs from untrusted authors"). */
   reason?: string | undefined;
 }
@@ -34,7 +40,10 @@ export type NodePolicyErrorCode =
   | "SUBGRAPH_FILE_BLOCKED"
   | "SECRET_REFERENCE_BLOCKED"
   | "OUTBOUND_ADDRESS_BLOCKED"
-  | "OUTBOUND_URL_BLOCKED";
+  | "OUTBOUND_URL_BLOCKED"
+  | "MCP_BLOCKED"
+  | "LOCAL_TOOLS_BLOCKED"
+  | "HOST_PROBE_BLOCKED";
 
 export class NodePolicyError extends Error {
   constructor(
@@ -71,6 +80,30 @@ export function assertSecretAllowed(policy: NodePolicy | undefined, name: string
   throw new NodePolicyError(
     "SECRET_REFERENCE_BLOCKED",
     `${where}: secret.${name} reads the host environment, which is not allowed here${suffix(policy)}`,
+  );
+}
+
+/** Throws MCP_BLOCKED / LOCAL_TOOLS_BLOCKED when a graph declares what the policy refuses. */
+export function assertGraphToolsAllowed(
+  policy: NodePolicy | undefined,
+  graph: { mcpServers?: Record<string, unknown> | undefined; localTools?: unknown },
+  where: string,
+): void {
+  if (!policy) return;
+  if (policy.blockMcp && graph.mcpServers && Object.keys(graph.mcpServers).length > 0) {
+    throw new NodePolicyError("MCP_BLOCKED", `${where}: mcpServers start or reach MCP servers from the host, which is not allowed here${suffix(policy)}`);
+  }
+  if (policy.blockLocalTools && graph.localTools !== undefined && graph.localTools !== null) {
+    throw new NodePolicyError("LOCAL_TOOLS_BLOCKED", `${where}: localTools give agents the host filesystem, which is not allowed here${suffix(policy)}`);
+  }
+}
+
+/** Throws HOST_PROBE_BLOCKED when the policy refuses `requires` binary checks. */
+export function assertHostProbeAllowed(policy: NodePolicy | undefined, requires: readonly unknown[] | undefined, where: string): void {
+  if (!policy?.blockHostProbes || !requires?.length) return;
+  throw new NodePolicyError(
+    "HOST_PROBE_BLOCKED",
+    `${where}: requires checks which binaries are installed on the host, which is not allowed here${suffix(policy)}`,
   );
 }
 

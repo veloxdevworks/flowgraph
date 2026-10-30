@@ -97,4 +97,48 @@ describe("node policy", () => {
       delete process.env["FG_POLICY_TEST_SECRET"];
     }
   });
+
+  it("refuses mcpServers and localTools, including in inline subgraphs", async () => {
+    const policy: NodePolicy = { blockMcp: true, blockLocalTools: true };
+    const router = { id: "h", type: "http", with: { url: "http://example.invalid/" } };
+    const withMcp = { ...graph([router]), mcpServers: { gh: { transport: "stdio", command: "gh-mcp" } } } as GraphSpec;
+    const withTools = { ...graph([router]), localTools: { fs: { workspaceRoot: "/" } } } as GraphSpec;
+    await expectCode(compileGraph(withMcp, { checkpointer: "none", nodePolicy: policy }), "MCP_BLOCKED");
+    await expectCode(compileGraph(withTools, { checkpointer: "none", nodePolicy: policy }), "LOCAL_TOOLS_BLOCKED");
+    await expect(compileGraph(withMcp, { checkpointer: "none" })).resolves.toBeDefined();
+    const compiled = await compileGraph(graph([{ id: "child", type: "subgraph", spec: withMcp }]), { checkpointer: "memory", nodePolicy: policy });
+    expect(await runError(compiled.run({ threadId: "sub-mcp" }))).toMatch(/^MCP_BLOCKED /);
+  });
+
+  it("withholds the host's MCP hub when MCP is blocked", async () => {
+    const calls: string[] = [];
+    const hub = {
+      listTools: async () => [],
+      callTool: async (server: string, name: string) => {
+        calls.push(`${server}.${name}`);
+        return { ok: true };
+      },
+      readResource: async () => ({}),
+      close: async () => undefined,
+    };
+    const node = { id: "m", type: "mcp", with: { server: "gh", tool: "whoami", output: { to: "out" } } };
+    const open = await compileGraph(graph([node]), { checkpointer: "memory", mcp: hub });
+    expect((await open.run({ threadId: "mcp-open" })).status).toBe("completed");
+    const closed = await compileGraph(graph([node]), { checkpointer: "memory", mcp: hub, nodePolicy: { blockMcp: true } });
+    expect(await runError(closed.run({ threadId: "mcp-closed" }))).toMatch(/MCP is not configured/);
+    expect(calls).toEqual(["gh.whoami"]);
+  });
+
+  it("refuses requires binary checks, including on map inner nodes", async () => {
+    const policy: NodePolicy = { blockHostProbes: true };
+    const probe = { id: "sh", type: "shell", with: { command: "true", requires: [{ bin: "kubectl" }], onMissingTool: "skip", output: { to: "out" } } };
+    await expectCode(compileGraph(graph([probe]), { checkpointer: "none", nodePolicy: policy }), "HOST_PROBE_BLOCKED");
+    const map = {
+      id: "m",
+      type: "map",
+      with: { over: "{{ state.items }}", as: "x", node: { type: "shell", with: { command: "true", requires: [{ bin: "aws" }] } }, collect: { to: "out" } },
+    };
+    await expectCode(compileGraph(graph([map]), { checkpointer: "none", nodePolicy: policy }), "HOST_PROBE_BLOCKED");
+    await expect(compileGraph(graph([probe]), { checkpointer: "none" })).resolves.toBeDefined();
+  });
 });

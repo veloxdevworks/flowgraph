@@ -58,7 +58,13 @@ import { hooksFromSpec, defaultGuardrailHooks } from "./hooks/builtin.js";
 import "./nodes/index.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
-import { NODE_POLICY, assertNodeTypeAllowed, type NodePolicy } from "./node-policy.js";
+import {
+  NODE_POLICY,
+  assertGraphToolsAllowed,
+  assertHostProbeAllowed,
+  assertNodeTypeAllowed,
+  type NodePolicy,
+} from "./node-policy.js";
 
 export type InterruptPolicy = "prompt" | "fail" | "approve" | "webhook";
 
@@ -754,7 +760,10 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     };
   }
 
-  const toolWiring: ToolWiring = { mcp: opts.mcp };
+  assertGraphToolsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
+  // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
+  const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
+  const toolWiring: ToolWiring = { mcp: mcpHub };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();
 
   const hooks: HookBus = createHookBus(events);
@@ -778,7 +787,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     workspace: graphWorkspace,
     budget,
     hooks,
-    mcp: opts.mcp,
+    mcp: mcpHub,
     store,
   };
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
@@ -791,9 +800,11 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
 
   for (const nodeSpec of spec.nodes) {
     assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
+    assertHostProbeAllowed(opts.nodePolicy, (nodeSpec.with as { requires?: unknown[] } | undefined)?.requires, `node "${nodeSpec.id}"`);
     if (nodeSpec.type === "map") {
-      const innerType = (nodeSpec.with as { node?: { type?: unknown } } | undefined)?.node?.type;
-      if (typeof innerType === "string") assertNodeTypeAllowed(opts.nodePolicy, innerType, `map node "${nodeSpec.id}" inner node`);
+      const inner = (nodeSpec.with as { node?: { type?: unknown; with?: { requires?: unknown[] } } } | undefined)?.node;
+      if (typeof inner?.type === "string") assertNodeTypeAllowed(opts.nodePolicy, inner.type, `map node "${nodeSpec.id}" inner node`);
+      assertHostProbeAllowed(opts.nodePolicy, inner?.with?.requires, `map node "${nodeSpec.id}" inner node`);
     }
     const factory = registry.get(nodeSpec.type);
     if (!factory) throw new Error(`Node type "${nodeSpec.type}" is not registered.`);
