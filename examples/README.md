@@ -12,6 +12,8 @@ Runnable vertical slices demonstrating flowgraph features. Each example includes
 | [hitl](./hitl/) | `hitl` node + interactive/CI resume | Scripted provider in test | [README](./hitl/README.md) |
 | [review-loop](./review-loop/) | Branching + revise loop until approved | `register.ts` | [README](./review-loop/README.md) |
 | [software-factory](./software-factory/) | SDLC: prototype vs production, HITL, quality gates, mock Jira/chat | `register.ts` | [README](./software-factory/README.md) |
+| [self-healing](./self-healing/) | Memory: incident subjects, agent recall budget, `similarSubjects` ("what fixed this last time") | Scripted provider + sqlite in test | [README](./self-healing/README.md) |
+| [react-factory](./react-factory/) | Memory: project conventions, user preferences, agent `remember` tool | Scripted provider + sqlite in test | [README](./react-factory/README.md) |
 | [composition](./composition/) | `map` + `subgraph` fan-out | `register.ts` | [README](./composition/README.md) |
 | [reducers](./reducers/) | Custom reducers + parallel fan-out | `register.ts` | [README](./reducers/README.md) |
 | [skill-pack](./skill-pack/) | Portable skill packaging | None | [README](./skill-pack/README.md) |
@@ -46,6 +48,7 @@ cd examples/quickstart && pnpm start
 | Loop until human approves | [review-loop](./review-loop/) |
 | See a full SDLC (prototype vs production) | [software-factory](./software-factory/) |
 | Run an LLM agent | [claude-agent](./claude-agent/) or [cursor-agent](./cursor-agent/) |
+| Remember things across runs (memory) | [self-healing](./self-healing/) or [react-factory](./react-factory/) |
 | Fan out work in parallel | [composition](./composition/) or [reducers](./reducers/) |
 | Write automated tests | [composition/composition.test.ts](./composition/composition.test.ts) |
 

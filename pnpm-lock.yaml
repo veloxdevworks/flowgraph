@@ -160,6 +160,22 @@ importers:
         specifier: ^4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
 
+  examples/react-factory:
+    dependencies:
+      '@flowgraph/checkpoint-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/checkpoint-sqlite
+      '@flowgraph/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@flowgraph/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
+
   examples/reducers:
     dependencies:
       '@flowgraph/cli':
@@ -200,6 +216,22 @@ importers:
       '@flowgraph/testing':
         specifier: workspace:*
         version: link:../../packages/testing
+    devDependencies:
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
+
+  examples/self-healing:
+    dependencies:
+      '@flowgraph/checkpoint-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/checkpoint-sqlite
+      '@flowgraph/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@flowgraph/core':
+        specifier: workspace:*
+        version: link:../../packages/core
     devDependencies:
       vitest:
         specifier: ^4.1.9

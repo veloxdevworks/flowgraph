@@ -1,0 +1,102 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: self-healing
+  description: >
+    On-call auto-remediation with memory. Each incident (alert fingerprint) is a
+    memory subject. The fixer agent recalls what was already tried on this
+    incident, what fixed similar incidents (same service + signature) before,
+    and project runbook notes; after the fix is verified the attempt is written
+    back to the incident so the next run (or the next similar incident) knows.
+
+state:
+  channels:
+    alert: { type: object }
+    fix: { type: object }
+    result: { type: object }
+
+runtime:
+  checkpoint: { backend: sqlite }
+  memory:
+    subject:
+      type: incident
+      key: "{{ input.alert.fingerprint }}"
+      required: true
+      ttl: 90d
+
+nodes:
+  - id: diagnose
+    type: agent
+    provider: oncall
+    with:
+      system: You are the on-call fixer for the {{ state.alert.service }} service. Propose exactly one remediation.
+      prompt: |
+        Alert: {{ state.alert.summary }} (service {{ state.alert.service }}, signature {{ state.alert.signature }}).
+
+        Already tried on this incident:
+        {{ memory.thisIncident }}
+
+        What fixed similar incidents before:
+        {{ memory.priorFixes }}
+
+        Reply with JSON {action, reason}. Do not repeat an action that already failed here.
+      schema:
+        type: object
+        properties:
+          action: { type: string }
+          reason: { type: string }
+        required: [action]
+      memory:
+        maxTokens: 1200
+        recall:
+          - { id: thisIncident, scopes: [subject], prefix: attempt/, limit: 10 }
+          # Not referenced in a template: appended to the system prompt as fenced data.
+          - { id: runbook, scopes: [project, org], prefix: runbook/, limit: 10, onError: skip }
+          - id: priorFixes
+            prefix: attempt/
+            similarSubjects:
+              type: incident
+              match: { service: "{{ state.alert.service }}", signature: "{{ state.alert.signature }}" }
+              where: { outcome: resolved }
+              limit: 5
+              perSubject: 2
+      output: { to: fix }
+
+  - id: apply-and-verify
+    type: function
+    with:
+      fn: selfHealing.applyAndVerify
+      input:
+        action: "{{ state.fix.action }}"
+        service: "{{ state.alert.service }}"
+      output: { to: result }
+
+  - id: record-attempt
+    type: memory
+    with:
+      op: put
+      scope: subject
+      key: "attempt/{{ state.result.action }}"
+      value:
+        action: "{{ state.result.action }}"
+        outcome: "{{ state.result.outcome }}"
+        reason: "{{ state.fix.reason }}"
+      attrs:
+        service: "{{ state.alert.service }}"
+        signature: "{{ state.alert.signature }}"
+        outcome: "{{ state.result.outcome }}"
+
+  - id: count-attempt
+    type: memory
+    with:
+      op: increment
+      scope: project
+      key: "stats/{{ state.alert.service }}"
+      field: attempts
+
+edges:
+  - { from: START, to: diagnose }
+  - { from: diagnose, to: apply-and-verify }
+  - { from: apply-and-verify, to: record-attempt }
+  - { from: record-attempt, to: count-attempt }
+  - { from: count-attempt, to: END }
