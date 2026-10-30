@@ -22,10 +22,11 @@
     "clean": "turbo run clean",
     "dev": "turbo run dev --parallel",
     "format": "prettier --write \"**/*.{ts,tsx,md,json,yaml,yml}\" --ignore-path .gitignore",
+    "check:packages": "node scripts/check-workspace-packages.mjs",
     "format:check": "prettier --check \"**/*.{ts,tsx,md,json,yaml,yml}\" --ignore-path .gitignore",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "turbo run build --filter=\"./packages/*\" && changeset publish"
+    "release": "node scripts/check-workspace-packages.mjs && turbo run build --filter=\"./packages/*\" && changeset publish"
   },
   "devDependencies": {
     "@flowgraph/cli": "workspace:*",
