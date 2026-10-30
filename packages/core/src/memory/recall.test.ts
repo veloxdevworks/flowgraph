@@ -380,4 +380,17 @@ describe("agent memory validation", () => {
       /runtime\.memory needs a memory backend for its postgres checkpointer, and this host provided none\. .*openPostgresBackend\(url\)\.memory from @flowgraph\/checkpoint-postgres/,
     );
   });
+
+  it("a host's memoryUnavailableHint replaces the CLI and library advice", async () => {
+    const spec = {
+      ...agentGraph({ prompt: "x" }),
+      runtime: { checkpoint: { backend: "postgres" }, memory: {} },
+    } as unknown as GraphSpec;
+    const err = await compileGraph(spec, { checkpointer: "memory", memoryUnavailableHint: "Set HOST_MEMORY=on." }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(String(err)).toMatch(/runtime\.memory needs a durable memory backend, and this host has none configured\. Set HOST_MEMORY=on\./);
+    expect(String(err)).not.toMatch(/flowgraph CLI|CompileOptions/);
+  });
 });

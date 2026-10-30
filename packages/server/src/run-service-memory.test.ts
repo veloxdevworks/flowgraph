@@ -76,7 +76,10 @@ describe("RunService durable memory", () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-srvmem-"));
     dirs.push(dir);
     const s = await service(dir, { backend: "memory" });
-    await expect(runToEnd(s, "t-default")).rejects.toThrow(/MEMORY_BACKEND_UNAVAILABLE/);
+    const err = await runToEnd(s, "t-default").then(() => undefined, (e: unknown) => e);
+    expect(String(err)).toMatch(/MEMORY_BACKEND_UNAVAILABLE/);
+    expect(String(err)).toMatch(/FLOWGRAPH_MEMORY_BACKEND=postgres/);
+    expect(String(err)).not.toMatch(/flowgraph CLI|CompileOptions/);
   });
 
   it("sqlite memory survives a service restart", async () => {

@@ -47,6 +47,10 @@ async function loadSqlite(): Promise<typeof import("@flowgraph/checkpoint-sqlite
   }
 }
 
+const SERVER_MEMORY_HINT =
+  "Start the server with FLOWGRAPH_MEMORY_BACKEND=postgres (memory shares DATABASE_URL) or FLOWGRAPH_MEMORY_BACKEND=sqlite, " +
+  "plus FLOWGRAPH_ORG.";
+
 export class RunService {
   readonly registry: SessionRegistry;
   readonly metrics = createMetrics();
@@ -203,7 +207,7 @@ export class RunService {
       graphPath,
       checkpointer,
       legacyStoreBackend: this.legacyStoreBackend,
-      ...(this.durableMemory ? { memory: this.durableMemory } : {}),
+      ...(this.durableMemory ? { memory: this.durableMemory } : { memoryUnavailableHint: SERVER_MEMORY_HINT }),
       providers,
       sinks: [
         (event) => {
