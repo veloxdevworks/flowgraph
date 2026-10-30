@@ -55,8 +55,21 @@ describe("sqlite memory backend", () => {
     const b = await backend(p);
     const tables = (b.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`).all() as Array<{ name: string }>).map((r) => r.name);
     expect(tables).toEqual(expect.arrayContaining(["fg_memory_items", "fg_memory_ops", "fg_threads", "fg_schema_migrations", "fg_meta"]));
-    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 1 });
+    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 2 });
     expect(b.db.pragma("busy_timeout", { simple: true })).toBe(5000);
+  });
+
+  it("migration 2 adds the op fingerprint column to an existing v1 database", async () => {
+    const p = tmpDb();
+    const a = await backend(p);
+    // Roll the file back to the v1 shape, with an op row written before fingerprints existed.
+    a.db.exec(`ALTER TABLE fg_memory_ops DROP COLUMN fingerprint`);
+    a.db.prepare(`DELETE FROM fg_schema_migrations WHERE component='memory' AND version=2`).run();
+    a.close();
+    const b = await backend(p);
+    const cols = (b.db.prepare(`PRAGMA table_info(fg_memory_ops)`).all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toContain("fingerprint");
+    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 2 });
   });
 
   it("refuses a database migrated by a newer flowgraph", async () => {
@@ -215,11 +228,11 @@ describe("runtime.memory on sqlite (graph integration)", () => {
     const spec = fnGraph("triage", "subjectNote", {
       memory: { subject: { type: "incident", key: "{{ input.alert.fp }}", required: true } },
     });
-    const r1 = await runOn(p, spec, { threadId: "t1", input: { alert: { fp: "INC-42" } } });
-    const r2 = await runOn(p, spec, { threadId: "t2", input: { alert: { fp: "INC-42" } } });
-    const r3 = await runOn(p, spec, { threadId: "t3", input: { alert: { fp: "INC-7" } } });
+    const r1 = await runOn(p, spec, { threadId: "t1", input: { alert: { fp: "inc-42" } } });
+    const r2 = await runOn(p, spec, { threadId: "t2", input: { alert: { fp: "inc-42" } } });
+    const r3 = await runOn(p, spec, { threadId: "t3", input: { alert: { fp: "inc-7" } } });
     expect(r1.state["out"]).toMatchObject({ notes: ["t1"] });
-    expect(r2.state["out"]).toMatchObject({ notes: ["t1", "t2"], scope: { subject: { type: "incident", key: "INC-42" } } });
+    expect(r2.state["out"]).toMatchObject({ notes: ["t1", "t2"], scope: { subject: { type: "incident", key: "inc-42" } } });
     expect(r3.state["out"]).toMatchObject({ notes: ["t3"] });
     const missing = await runOn(p, spec, { threadId: "t4", input: {} });
     expect(missing.status).toBe("error");

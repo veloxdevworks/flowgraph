@@ -82,6 +82,11 @@ CREATE TABLE fg_meta (
 ) WITHOUT ROWID;
 `,
   },
+  {
+    // Op-id dedupe only matches the same write: tuple, key, kind and arguments.
+    version: 2,
+    sql: `ALTER TABLE fg_memory_ops ADD COLUMN fingerprint TEXT;`,
+  },
 ];
 
 /** Apply pending migrations in one IMMEDIATE transaction. Forward-only. */
@@ -183,7 +188,7 @@ class SqliteMemoryTable implements MemoryTable {
       usage: p(`SELECT COUNT(*) AS items, COALESCE(SUM(bytes), 0) AS bytes FROM fg_memory_items WHERE ${T} AND ${LIVE}`),
       oldest: p(`SELECT * FROM fg_memory_items WHERE ${T} AND key <> ? AND ${LIVE} ORDER BY updated_at ASC, id ASC LIMIT ?`),
       list: p(`SELECT * FROM fg_memory_items WHERE ${T} AND ${LIVE}
-        AND (? IS NULL OR substr(key, 1, length(?)) = ?) ORDER BY updated_at DESC, id DESC`),
+        AND (? IS NULL OR substr(key, 1, length(?)) = ?) ORDER BY updated_at DESC, id DESC LIMIT ?`),
       touchSubject: p(`UPDATE fg_memory_items SET expires_at = ?
         WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ? AND subject_key = ?`),
       subjectsByAge: p(`SELECT subject_key AS k, MAX(updated_at) AS last FROM fg_memory_items
@@ -191,14 +196,12 @@ class SqliteMemoryTable implements MemoryTable {
         GROUP BY subject_key ORDER BY last ASC`),
       removeSubject: p(`DELETE FROM fg_memory_items
         WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ? AND subject_key = ?`),
-      opGet: p(`SELECT version, value FROM fg_memory_ops WHERE op_id = ?`),
-      opPut: p(`INSERT OR IGNORE INTO fg_memory_ops (op_id, version, value, applied_at) VALUES (?, ?, ?, ?)`),
+      opGet: p(`SELECT version, value, fingerprint FROM fg_memory_ops WHERE op_id = ?`),
+      opPut: p(`INSERT OR REPLACE INTO fg_memory_ops (op_id, version, value, applied_at, fingerprint) VALUES (?, ?, ?, ?, ?)`),
       putThread: p(`INSERT INTO fg_threads
         (thread_id, org, project, graph, usr, subject_type, subject_key, principal_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (thread_id) DO UPDATE SET org = excluded.org, project = excluded.project, graph = excluded.graph,
-          usr = excluded.usr, subject_type = excluded.subject_type, subject_key = excluded.subject_key,
-          principal_id = excluded.principal_id`),
+        ON CONFLICT (thread_id) DO NOTHING`),
       getThread: p(`SELECT * FROM fg_threads WHERE thread_id = ?`),
       sweepItems: p(`DELETE FROM fg_memory_items WHERE expires_at IS NOT NULL AND expires_at <= ?`),
       sweepOps: p(`DELETE FROM fg_memory_ops WHERE applied_at < ?`),
@@ -233,9 +236,9 @@ class SqliteMemoryTable implements MemoryTable {
   oldest(t: MemoryTuple, limit: number, excludeKey: string, now: number) {
     return (this.s["oldest"]!.all(...tp(t), excludeKey, now, limit) as RawRow[]).map(fromRaw);
   }
-  list(t: MemoryTuple, prefix: string | undefined, now: number) {
+  list(t: MemoryTuple, prefix: string | undefined, now: number, limit?: number) {
     const pfx = prefix ?? null;
-    return (this.s["list"]!.all(...tp(t), now, pfx, pfx, pfx) as RawRow[]).map(fromRaw);
+    return (this.s["list"]!.all(...tp(t), now, pfx, pfx, pfx, limit ?? -1) as RawRow[]).map(fromRaw);
   }
   similar(q: MemorySimilarQuery & { now: number }) {
     const conds: string[] = [];
@@ -291,11 +294,13 @@ class SqliteMemoryTable implements MemoryTable {
     return this.s["removeSubject"]!.run(org, project, type, key).changes;
   }
   opGet(opId: string) {
-    const r = this.s["opGet"]!.get(opId) as { version: number; value: string | null } | undefined;
-    return r ? { version: r.version, value: r.value === null ? null : (JSON.parse(r.value) as unknown) } : undefined;
+    const r = this.s["opGet"]!.get(opId) as { version: number; value: string | null; fingerprint: string | null } | undefined;
+    return r
+      ? { version: r.version, value: r.value === null ? null : (JSON.parse(r.value) as unknown), fingerprint: r.fingerprint }
+      : undefined;
   }
-  opPut(opId: string, result: { version: number; value: unknown }, now: number) {
-    this.s["opPut"]!.run(opId, result.version, JSON.stringify(result.value ?? null), now);
+  opPut(opId: string, result: { version: number; value: unknown }, now: number, fingerprint: string | null) {
+    this.s["opPut"]!.run(opId, result.version, JSON.stringify(result.value ?? null), now, fingerprint);
   }
   putThread(b: MemoryThreadBinding) {
     this.s["putThread"]!.run(

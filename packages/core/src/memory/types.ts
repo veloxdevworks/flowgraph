@@ -55,6 +55,7 @@ export interface MemoryRecord {
 
 export type MemoryErrorCode =
   | "MEMORY_SUBJECT_UNRESOLVED"
+  | "MEMORY_SCOPE_MISMATCH"
   | "MEMORY_VALUE_TOO_LARGE"
   | "MEMORY_SCOPE_FULL"
   | "MEMORY_VERSION_CONFLICT"
@@ -150,8 +151,18 @@ export interface MemoryWriteOp {
   ttlMs?: number | undefined;
   /** Sliding TTL for subject scope (ms); refreshed on every write to the subject. */
   subjectTtlMs?: number | undefined;
-  /** Replay-safe write id; a repeated id is a no-op returning the first result. */
+  /**
+   * Replay-safe write id. A repeated id whose stored fingerprint matches is a
+   * no-op returning the first result; a mismatched fingerprint (a retry that
+   * made a different write at the same position) is applied as a new write.
+   */
   opId?: string | undefined;
+  /**
+   * Identity of the write for op-id dedupe. Defaults to a hash of the tuple,
+   * key, kind and arguments; `update()` passes tuple + key so a CAS loop whose
+   * computed value changes on retry still dedupes.
+   */
+  fingerprint?: string | undefined;
   limits: MemoryLimits;
   /** Skip secret detection (legacy ctx.store adapter only). */
   allowSecrets?: boolean | undefined;
@@ -225,7 +236,7 @@ export interface MemoryThreadBinding {
 
 /**
  * Storage backend for scoped memory. Implementations: in-memory (tests),
- * sqlite (`@flowgraph/checkpoint-sqlite`), postgres (phase 4).
+ * sqlite (`@flowgraph/checkpoint-sqlite`), postgres (not yet available).
  */
 export interface MemoryBackend {
   readonly kind: string;
@@ -240,6 +251,10 @@ export interface MemoryBackend {
    */
   similarSubjects(q: MemorySimilarQuery): Promise<MemorySimilarGroup[]>;
   /** Insert or replace the thread's binding. */
+  /**
+   * Bind a thread if it has no binding yet. Never overwrites an existing
+   * binding; callers re-read with {@link getThread} to detect a conflict.
+   */
   bindThread(binding: MemoryThreadBinding): Promise<void>;
   getThread(threadId: string): Promise<MemoryThreadBinding | null>;
   /** Delete expired rows and old op ids; returns rows removed. */
@@ -253,4 +268,6 @@ export interface MemoryIdentity {
   project: string;
   /** Absent when no user can be determined; user-scope writes then fail. */
   user?: string | undefined;
+  /** Authenticated principal (server hosts); stored with each thread binding. */
+  principalId?: string | undefined;
 }

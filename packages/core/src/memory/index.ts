@@ -20,7 +20,7 @@ export {
   MEMORY_OP_RETENTION_MS,
   type MemoryTable,
 } from "./engine.js";
-export { createInMemoryMemoryBackend } from "./in-memory.js";
+export { createInMemoryMemoryBackend, type InMemoryMemoryBackendOptions } from "./in-memory.js";
 export {
   createScopedMemory,
   defaultMemoryPolicy,

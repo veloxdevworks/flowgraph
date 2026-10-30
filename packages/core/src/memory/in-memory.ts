@@ -13,15 +13,19 @@ class InMemoryTable implements MemoryTable {
   private nextId = 1;
   private readonly rows = new Map<number, MemoryRow>();
   private readonly byKey = new Map<string, number>();
-  private readonly ops = new Map<string, { version: number; value: unknown; at: number }>();
+  private readonly ops = new Map<string, { version: number; value: unknown; at: number; fingerprint: string | null }>();
   private readonly threads = new Map<string, MemoryThreadBinding>();
+  /** Row ids per tuple, so per-scope operations don't scan every row. */
+  private readonly byTuple = new Map<string, Set<number>>();
+
+  constructor(private readonly maxItems: number) {}
 
   private k(t: MemoryTuple, key: string) {
     return `${tupleKey(t)}\u0001${key}`;
   }
   private inTuple(t: MemoryTuple): MemoryRow[] {
-    const tk = tupleKey(t);
-    return [...this.rows.values()].filter((r) => tupleKey(r) === tk);
+    const ids = this.byTuple.get(tupleKey(t));
+    return ids ? [...ids].map((id) => this.rows.get(id)!) : [];
   }
 
   find(t: MemoryTuple, key: string) {
@@ -33,6 +37,16 @@ class InMemoryTable implements MemoryTable {
     const id = this.nextId++;
     this.rows.set(id, clone({ ...row, id }));
     this.byKey.set(this.k(row, row.key), id);
+    const tk = tupleKey(row);
+    let ids = this.byTuple.get(tk);
+    if (!ids) this.byTuple.set(tk, (ids = new Set()));
+    ids.add(id);
+    // Process-wide bound: drop the oldest inserted rows (Map keeps insertion order).
+    while (this.rows.size > this.maxItems) {
+      const oldest = this.rows.keys().next().value;
+      if (oldest === undefined || oldest === id) break;
+      this.remove(oldest);
+    }
   }
   update(row: MemoryRow) {
     this.rows.set(row.id, clone(row));
@@ -42,6 +56,10 @@ class InMemoryTable implements MemoryTable {
     if (!r) return;
     this.rows.delete(id);
     this.byKey.delete(this.k(r, r.key));
+    const tk = tupleKey(r);
+    const ids = this.byTuple.get(tk);
+    ids?.delete(id);
+    if (ids && ids.size === 0) this.byTuple.delete(tk);
   }
   removeExpired(t: MemoryTuple, now: number) {
     for (const r of this.inTuple(t)) if (!live(r, now)) this.remove(r.id);
@@ -59,11 +77,11 @@ class InMemoryTable implements MemoryTable {
       .slice(0, limit)
       .map(clone);
   }
-  list(t: MemoryTuple, prefix: string | undefined, now: number) {
-    return this.inTuple(t)
+  list(t: MemoryTuple, prefix: string | undefined, now: number, limit?: number) {
+    const rows = this.inTuple(t)
       .filter((r) => live(r, now) && (prefix === undefined || r.key.startsWith(prefix)))
-      .sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id)
-      .map(clone);
+      .sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id);
+    return (limit !== undefined ? rows.slice(0, limit) : rows).map(clone);
   }
   similar(q: MemorySimilarQuery & { now: number }) {
     const byKey = new Map<string, MemoryRow[]>();
@@ -107,13 +125,13 @@ class InMemoryTable implements MemoryTable {
   }
   opGet(opId: string) {
     const o = this.ops.get(opId);
-    return o ? { version: o.version, value: clone(o.value) } : undefined;
+    return o ? { version: o.version, value: clone(o.value), fingerprint: o.fingerprint } : undefined;
   }
-  opPut(opId: string, result: { version: number; value: unknown }, now: number) {
-    this.ops.set(opId, { ...clone(result), at: now });
+  opPut(opId: string, result: { version: number; value: unknown }, now: number, fingerprint: string | null) {
+    this.ops.set(opId, { ...clone(result), at: now, fingerprint });
   }
   putThread(b: MemoryThreadBinding) {
-    this.threads.set(b.threadId, { ...b });
+    if (!this.threads.has(b.threadId)) this.threads.set(b.threadId, { ...b });
   }
   getThread(threadId: string) {
     const b = this.threads.get(threadId);
@@ -127,7 +145,16 @@ class InMemoryTable implements MemoryTable {
   }
 }
 
+export interface InMemoryMemoryBackendOptions {
+  /**
+   * Process-wide item cap (default 100,000). Past it the oldest inserted items
+   * are dropped, so a long-lived host sharing one backend stays bounded.
+   */
+  maxItems?: number | undefined;
+}
+
 /** Create a non-durable, process-local memory backend. */
-export function createInMemoryMemoryBackend(): EngineMemoryBackend {
-  return new EngineMemoryBackend("memory", false, new InMemoryTable(), (fn) => fn());
+export function createInMemoryMemoryBackend(opts: InMemoryMemoryBackendOptions = {}): EngineMemoryBackend {
+  const maxItems = Math.max(1, opts.maxItems ?? 100_000);
+  return new EngineMemoryBackend("memory", false, new InMemoryTable(maxItems), (fn) => fn());
 }

@@ -42,8 +42,8 @@ export const conformanceTuples = {
   graphB: T({ project: "github.com/acme/web", graph: "b" }),
   userA1: T({ project: "github.com/acme/web", graph: "a", usr: "u1@x" }),
   userA2: T({ project: "github.com/acme/web", graph: "a", usr: "u2@x" }),
-  subject1: T({ project: "github.com/acme/web", subjectType: "incident", subjectKey: "INC-1" }),
-  subject2: T({ project: "github.com/acme/web", subjectType: "incident", subjectKey: "INC-2" }),
+  subject1: T({ project: "github.com/acme/web", subjectType: "incident", subjectKey: "inc-1" }),
+  subject2: T({ project: "github.com/acme/web", subjectType: "incident", subjectKey: "inc-2" }),
 };
 
 function limits(over: Partial<MemoryLimits> = {}): MemoryLimits {
@@ -259,19 +259,19 @@ export function describeMemoryBackendConformance(
 
     it("similarSubjects: other subjects of one type, newest first, grouped per subject", withBackend(async (b) => {
       let t = 1;
-      for (const k of ["INC-1", "INC-2", "INC-3", "INC-ME"]) {
+      for (const k of ["inc-1", "inc-2", "inc-3", "inc-ME"]) {
         for (let i = 0; i < 3; i++) {
           await b.write(op({ kind: "put", tuple: subj(k), key: `attempt/${i}`, value: { k, i }, attrs: { service: "db", outcome: "resolved" }, now: t++ }));
         }
       }
-      // INC-1 gets the most recent activity.
-      await b.write(op({ kind: "put", tuple: subj("INC-1"), key: "attempt/9", value: 9, attrs: { service: "db", outcome: "resolved" }, now: 50 }));
-      expect(keys(await similar(b, { excludeSubjectKey: "INC-ME" }))).toEqual([
-        "INC-1:attempt/9,attempt/2",
-        "INC-3:attempt/2,attempt/1",
-        "INC-2:attempt/2,attempt/1",
+      // inc-1 gets the most recent activity.
+      await b.write(op({ kind: "put", tuple: subj("inc-1"), key: "attempt/9", value: 9, attrs: { service: "db", outcome: "resolved" }, now: 50 }));
+      expect(keys(await similar(b, { excludeSubjectKey: "inc-ME" }))).toEqual([
+        "inc-1:attempt/9,attempt/2",
+        "inc-3:attempt/2,attempt/1",
+        "inc-2:attempt/2,attempt/1",
       ]);
-      expect(keys(await similar(b, { excludeSubjectKey: "INC-ME", limit: 1, perSubject: 1 }))).toEqual(["INC-1:attempt/9"]);
+      expect(keys(await similar(b, { excludeSubjectKey: "inc-ME", limit: 1, perSubject: 1 }))).toEqual(["inc-1:attempt/9"]);
       // limits are clamped, not trusted
       const wide = await similar(b, { limit: 10_000, perSubject: 10_000 });
       expect(wide.length).toBe(4);
@@ -309,13 +309,35 @@ export function describeMemoryBackendConformance(
       expect(keys(await similar(b, { now: 100 }))).toEqual(["NEW:a"]);
     }));
 
-    it("stores and replaces thread bindings", withBackend(async (b) => {
+    it("stores thread bindings insert-only, with the principal", withBackend(async (b) => {
       expect(await b.getThread("t1")).toBeNull();
-      const base = { threadId: "t1", org: "acme", project: "p", graph: "g", usr: "u", subjectType: "", subjectKey: "" };
+      const base = { threadId: "t1", org: "acme", project: "p", graph: "g", usr: "u", principalId: "p-1", subjectType: "incident", subjectKey: "inc-9" };
       await b.bindThread(base);
       expect(await b.getThread("t1")).toMatchObject(base);
-      await b.bindThread({ ...base, subjectType: "incident", subjectKey: "INC-9" });
-      expect(await b.getThread("t1")).toMatchObject({ subjectType: "incident", subjectKey: "INC-9" });
+      // A second bind never overwrites the first (callers re-read and compare).
+      await b.bindThread({ ...base, usr: "mallory", principalId: "p-2", subjectKey: "inc-1" });
+      expect(await b.getThread("t1")).toMatchObject(base);
+    }));
+
+    it("op ids dedupe only the same write (fingerprint)", withBackend(async (b) => {
+      await b.write(op({ kind: "put", tuple: tu.graphA, key: "fix-a", value: 1, opId: "fp-1", fingerprint: "A" }));
+      // Same op id, different write: applied, never silently dropped.
+      const other = await b.write(op({ kind: "put", tuple: tu.userA1, key: "pref-b", value: 2, opId: "fp-1", fingerprint: "B" }));
+      expect(other.deduped).toBe(false);
+      expect((await b.get(tu.userA1, "pref-b"))?.value).toBe(2);
+      // Same op id and fingerprint: deduped.
+      expect((await b.write(op({ kind: "put", tuple: tu.userA1, key: "pref-b", value: 2, opId: "fp-1", fingerprint: "B" }))).deduped).toBe(true);
+      // Without an explicit fingerprint one is derived from the write itself.
+      await b.write(op({ kind: "put", tuple: tu.graphA, key: "x", value: 1, opId: "fp-2" }));
+      expect((await b.write(op({ kind: "put", tuple: tu.graphA, key: "x", value: 1, opId: "fp-2" }))).deduped).toBe(true);
+      expect((await b.write(op({ kind: "put", tuple: tu.graphA, key: "x", value: 5, opId: "fp-2" }))).deduped).toBe(false);
+      expect((await b.get(tu.graphA, "x"))?.value).toBe(5);
+    }));
+
+    it("list honours a limit", withBackend(async (b) => {
+      for (let i = 0; i < 5; i++) await b.write(op({ kind: "put", tuple: tu.graphA, key: `l/${i}`, value: i }));
+      expect(await b.list(tu.graphA, { prefix: "l/", limit: 3 })).toHaveLength(3);
+      expect(await b.list(tu.graphA, { prefix: "l/" })).toHaveLength(5);
     }));
 
     it("survives reopen when durable", withBackend(async (b, h) => {

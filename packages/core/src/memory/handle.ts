@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { parseDuration } from "../runtime/duration.js";
-import { availableScopes, isMemoryScopeName, tupleForScope, type MemoryBinding } from "./scope.js";
+import { availableScopes, isMemoryScopeName, tupleForScope, tupleKey, type MemoryBinding } from "./scope.js";
 import {
   MemoryError,
   MEMORY_READ_PRECEDENCE,
@@ -304,12 +304,15 @@ export function createScopedMemory(
       const tuple = tupleForScope(binding, s);
       const retries = Math.max(0, opts?.retries ?? 5);
       const opId = nextOpId();
+      // The computed value may differ on a replay (it depends on the current
+      // value), so an update dedupes on its target alone.
+      const fingerprint = createHash("sha256").update([tupleKey(tuple), key, "update"].join("\u0000")).digest("hex");
       for (let attempt = 0; ; attempt++) {
         const row = await backend.get(tuple, key);
         const version = row?.version ?? 0;
         const next = await fn(row ? row.value : undefined, version);
         try {
-          return await write("put", s, key, { value: next }, { ...opts, ifVersion: version }, opId);
+          return await write("put", s, key, { value: next, fingerprint }, { ...opts, ifVersion: version }, opId);
         } catch (err) {
           if (err instanceof MemoryError && err.code === "MEMORY_VERSION_CONFLICT" && attempt < retries) {
             await new Promise((r) => setTimeout(r, Math.random() * Math.min(200, 4 * 2 ** attempt)));

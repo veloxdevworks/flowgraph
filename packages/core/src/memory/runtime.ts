@@ -16,7 +16,21 @@ import {
   type MemoryBackend,
   type MemoryIdentity,
   type MemoryLimits,
+  type MemoryThreadBinding,
 } from "./types.js";
+
+function bindingOf(stored: MemoryThreadBinding): MemoryBinding {
+  return {
+    org: stored.org,
+    project: stored.project,
+    graph: stored.graph,
+    user: stored.usr,
+    ...(stored.subjectType ? { subject: { type: stored.subjectType, key: stored.subjectKey } } : {}),
+  };
+}
+
+const describeSubject = (b: Pick<MemoryThreadBinding, "subjectType" | "subjectKey">): string =>
+  b.subjectType ? `${b.subjectType}:${b.subjectKey}` : "(none)";
 
 /** Parsed `runtime.memory` block (mirrors the spec schema). */
 export interface RuntimeMemoryConfig {
@@ -125,13 +139,9 @@ export class MemoryRuntime {
       if (cached) return cached;
       const stored = await this.backend.getThread(threadId);
       if (stored) {
-        const b: MemoryBinding = {
-          org: stored.org,
-          project: stored.project,
-          graph: stored.graph,
-          user: stored.usr,
-          ...(stored.subjectType ? { subject: { type: stored.subjectType, key: stored.subjectKey } } : {}),
-        };
+        // A resume keeps the thread's scopes, but only for the identity that started it.
+        this.checkOwner(threadId, stored, mode);
+        const b = bindingOf(stored);
         this.bindings.set(threadId, b);
         return b;
       }
@@ -149,7 +159,7 @@ export class MemoryRuntime {
         );
       }
     }
-    await this.backend.bindThread({
+    const want: MemoryThreadBinding = {
       threadId,
       org: binding.org,
       project: binding.project,
@@ -157,9 +167,42 @@ export class MemoryRuntime {
       usr: binding.user,
       subjectType: binding.subject?.type ?? "",
       subjectKey: binding.subject?.key ?? "",
-    });
+      principalId: this.identity.principalId ?? null,
+    };
+    // Insert-only: an existing thread keeps its binding. Re-read to detect a
+    // thread id that is already bound to another identity or subject.
+    await this.backend.bindThread(want);
+    const stored = await this.backend.getThread(threadId);
+    if (stored) {
+      this.checkOwner(threadId, stored, mode);
+      if (stored.subjectType !== want.subjectType || stored.subjectKey !== want.subjectKey) {
+        throw new MemoryError(
+          "MEMORY_SCOPE_MISMATCH",
+          `thread "${threadId}" is already bound to subject ${describeSubject(stored)}; this run resolved ${describeSubject(want)}. ` +
+            `Start a new thread id for a different subject.`,
+        );
+      }
+    }
     this.bindings.set(threadId, binding);
     return binding;
+  }
+
+  /** Fail when a thread's stored binding belongs to another org, project, graph, user or principal. */
+  private checkOwner(threadId: string, stored: MemoryThreadBinding, mode: string): void {
+    const cur = this.baseBinding();
+    const diffs: string[] = [];
+    if (stored.org !== cur.org) diffs.push("org");
+    if (stored.project !== cur.project) diffs.push("project");
+    if (stored.graph !== cur.graph) diffs.push("graph");
+    if (stored.usr !== cur.user) diffs.push("user");
+    const p = this.identity.principalId;
+    if (stored.principalId && p && stored.principalId !== p) diffs.push("principal");
+    if (diffs.length > 0) {
+      throw new MemoryError(
+        "MEMORY_SCOPE_MISMATCH",
+        `cannot ${mode} thread "${threadId}": it is bound to a different ${diffs.join(", ")} than the current identity`,
+      );
+    }
   }
 
   bindingFor(threadId: string | undefined): MemoryBinding {

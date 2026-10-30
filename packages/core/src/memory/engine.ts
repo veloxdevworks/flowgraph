@@ -5,8 +5,9 @@
  * run {@link applyMemoryWrite} inside one transaction, so every backend gets the
  * same atomic increment/append/merge, CAS, op-id dedupe, limits and TTL rules.
  */
+import { createHash } from "node:crypto";
 import { DEFAULT_REDACT_PATTERNS } from "../secrets.js";
-import { scopeOfTuple } from "./scope.js";
+import { scopeOfTuple, tupleKey } from "./scope.js";
 import {
   MemoryError,
   MEMORY_APPEND_DEFAULT_MAX,
@@ -39,7 +40,7 @@ export interface MemoryTable {
   /** Least recently updated live rows in this tuple, oldest first. */
   oldest(t: MemoryTuple, limit: number, excludeKey: string, now: number): MemoryRow[];
   /** Live rows in this tuple, most recently updated first, filtered by key prefix. */
-  list(t: MemoryTuple, prefix: string | undefined, now: number): MemoryRow[];
+  list(t: MemoryTuple, prefix: string | undefined, now: number, limit?: number): MemoryRow[];
   /**
    * Live rows of other subjects matching {@link MemorySimilarQuery}: at most
    * `limit` subjects (most recent matching item first, ties by subject key) and
@@ -51,8 +52,10 @@ export interface MemoryTable {
   /** Distinct live subject keys of a type in a project, least recently written first. */
   subjectsByAge(org: string, project: string, type: string, now: number): string[];
   removeSubject(org: string, project: string, type: string, key: string): number;
-  opGet(opId: string): { version: number; value: unknown } | undefined;
-  opPut(opId: string, result: { version: number; value: unknown }, now: number): void;
+  opGet(opId: string): { version: number; value: unknown; fingerprint: string | null } | undefined;
+  /** Insert or replace the op record. */
+  opPut(opId: string, result: { version: number; value: unknown }, now: number, fingerprint: string | null): void;
+  /** Insert the binding unless the thread already has one (never overwrites). */
   putThread(b: MemoryThreadBinding): void;
   getThread(threadId: string): MemoryThreadBinding | undefined;
   sweep(now: number, opsBefore: number): number;
@@ -72,6 +75,9 @@ export function validateMemoryKey(key: unknown, maxChars: number): string {
   }
   if (key.length > maxChars) {
     throw new MemoryError("MEMORY_KEY_INVALID", `memory key is longer than ${maxChars} characters`);
+  }
+  if (/[\p{Cc}\u2028\u2029]/u.test(key)) {
+    throw new MemoryError("MEMORY_KEY_INVALID", `memory key ${JSON.stringify(key)} contains control or line-separator characters`);
   }
   return key;
 }
@@ -97,7 +103,6 @@ function validateAttrs(
   return out;
 }
 
-/** True when the text matches one of the default secret redaction patterns. */
 /** Well-known credential shapes, on top of the event redaction patterns. */
 const MEMORY_SECRET_PATTERNS: RegExp[] = [
   /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b/,
@@ -163,6 +168,19 @@ function nextValue(op: MemoryWriteOp, current: unknown, exists: boolean): unknow
   }
 }
 
+/** Stable identity of a write for op-id dedupe: tuple, key, kind and arguments. */
+export function writeFingerprint(op: Pick<MemoryWriteOp, "kind" | "tuple" | "key" | "value" | "attrs" | "field" | "by" | "max" | "ifVersion" | "ttlMs">): string {
+  let args: string;
+  try {
+    args = JSON.stringify([op.value ?? null, op.attrs ?? null, op.field ?? null, op.by ?? null, op.max ?? null, op.ifVersion ?? null, op.ttlMs ?? null]);
+  } catch {
+    args = String(Math.random()); // unserializable: never treat as a replay
+  }
+  return createHash("sha256")
+    .update([tupleKey(op.tuple), op.key, op.kind, args].join("\u0000"))
+    .digest("hex");
+}
+
 /**
  * Apply one write. MUST be called inside a single transaction by the backend
  * (it reads then writes). Throws {@link MemoryError}; the caller's transaction
@@ -175,9 +193,14 @@ export function applyMemoryWrite(table: MemoryTable, op: MemoryWriteOp): MemoryW
   const limits = op.limits;
   validateMemoryKey(op.key, limits.keyChars);
 
+  const fingerprint = op.opId ? (op.fingerprint ?? writeFingerprint(op)) : null;
   if (op.opId) {
     const prior = table.opGet(op.opId);
-    if (prior) return { version: prior.version, value: prior.value, deduped: true, evicted: 0 };
+    // Only the same write (same tuple, key, kind and arguments) is a replay. A
+    // retry that made a different write at this position is applied, never dropped.
+    if (prior && prior.fingerprint === fingerprint) {
+      return { version: prior.version, value: prior.value, deduped: true, evicted: 0 };
+    }
   }
 
   table.removeExpired(t, now);
@@ -201,7 +224,7 @@ export function applyMemoryWrite(table: MemoryTable, op: MemoryWriteOp): MemoryW
   if (op.kind === "delete") {
     if (existing) table.remove(existing.id);
     const result = { version: 0, value: null };
-    if (op.opId) table.opPut(op.opId, result, now);
+    if (op.opId) table.opPut(op.opId, result, now, fingerprint);
     return { ...result, deduped: false, evicted: 0 };
   }
 
@@ -310,7 +333,7 @@ export function applyMemoryWrite(table: MemoryTable, op: MemoryWriteOp): MemoryW
   }
 
   const result = { version, value };
-  if (op.opId) table.opPut(op.opId, result, now);
+  if (op.opId) table.opPut(op.opId, result, now, fingerprint);
   return { ...result, deduped: false, evicted };
 }
 
@@ -382,8 +405,10 @@ export class EngineMemoryBackend implements MemoryBackend {
   async list(tuple: MemoryTuple, opts: MemoryListOptions = {}): Promise<MemoryRow[]> {
     scopeOfTuple(tuple);
     const now = opts.now ?? Date.now();
+    const limit = opts.limit !== undefined ? Math.max(0, opts.limit) : undefined;
+    if (!opts.attrs || Object.keys(opts.attrs).length === 0) return this.table.list(tuple, opts.prefix, now, limit);
     const rows = this.table.list(tuple, opts.prefix, now).filter((r) => matchesAttrs(r, opts.attrs));
-    return opts.limit !== undefined ? rows.slice(0, Math.max(0, opts.limit)) : rows;
+    return limit !== undefined ? rows.slice(0, limit) : rows;
   }
 
   async similarSubjects(q: MemorySimilarQuery): Promise<MemorySimilarGroup[]> {
