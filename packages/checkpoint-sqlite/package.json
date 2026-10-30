@@ -1,7 +1,7 @@
 {
   "name": "@flowgraph/checkpoint-sqlite",
   "version": "0.1.0",
-  "description": "Durable SQLite checkpointer for flowgraph",
+  "description": "Durable SQLite checkpointer and scoped memory backend for flowgraph",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,10 +20,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3"
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "better-sqlite3": "^12.11.1"
   },
   "peerDependencies": {
-    "@langchain/langgraph": "^1.4.7"
+    "@langchain/langgraph": "^1.4.7",
+    "@flowgraph/core": "workspace:^"
   },
   "devDependencies": {
     "@flowgraph/core": "workspace:*",
@@ -31,6 +33,7 @@
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "@flowgraph/testing": "workspace:*"
   }
 }
