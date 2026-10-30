@@ -164,6 +164,32 @@ export function describeMemoryBackendConformance(
       await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "a", value: 1, attrs: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, i])) })), "MEMORY_ATTRS_INVALID");
     }));
 
+    it("rejects NUL characters in keys, values, attrs, scopes and queries", withBackend(async (b) => {
+      const nul = "a\u0000b";
+      const NUL = "MEMORY_NUL_CHARACTER";
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: nul, value: 1 })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: nul })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: { deep: [{ x: nul }] } })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: { [nul]: 1 } })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: 1, attrs: { tag: nul } })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: 1, attrs: { [nul]: 1 } })), NUL);
+      await expectCode(b.write(op({ kind: "append", tuple: tu.graphA, key: "log", value: nul, max: 10 })), NUL);
+      await expectCode(b.write(op({ kind: "patch", tuple: tu.graphA, key: "obj", value: { a: nul } })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: { ...tu.subject1, subjectKey: nul }, key: "k", value: 1 })), NUL);
+      await expectCode(b.get(tu.graphA, nul), NUL);
+      await expectCode(b.list(tu.graphA, { prefix: nul }), NUL);
+      await expectCode(b.list(tu.graphA, { attrs: { tag: nul } }), NUL);
+      await expectCode(b.similarSubjects({ org: "acme", project: tu.subject1.project, subjectType: "incident", prefix: nul, limit: 5, perSubject: 1 }), NUL);
+      await expectCode(b.bindThread({ threadId: nul, org: "acme", project: "p", graph: "g", usr: "", subjectType: "", subjectKey: "" }), NUL);
+      await expectCode(b.getThread(nul), NUL);
+      expect(await b.list(tu.graphA)).toEqual([]);
+      // The escaped text "\u0000" (backslash, u, digits) is ordinary data.
+      await b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: { s: "\\u0000" }, attrs: { t: "\\u0000" } }));
+      const row = await b.get(tu.graphA, "k");
+      expect(row?.value).toEqual({ s: "\\u0000" });
+      expect(row?.attrs).toEqual({ t: "\\u0000" });
+    }));
+
     it("evicts oldest items when a graph/user/subject scope is full", withBackend(async (b) => {
       const l = limits({ itemsPerScope: 5 });
       let now = 1_000;
