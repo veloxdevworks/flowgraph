@@ -233,6 +233,85 @@ const BaseWithSchema = z.object({
   output: OutputMappingSchema.optional(),
 });
 
+export const MemoryScopeSchema = z.enum(["org", "project", "graph", "user", "subject"], {
+  errorMap: (issue, ctx) =>
+    issue.code === "invalid_enum_value"
+      ? { message: `must be one of org | project | graph | user | subject (got "${String(issue.received)}")` }
+      : { message: ctx.defaultError },
+});
+
+// ── agent memory (recall + remember) ──────────────────────────────────────
+
+/** Identifier usable as `{{ memory.<id> }}`. */
+const RecallIdSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "recall id must be an identifier ([A-Za-z_][A-Za-z0-9_]*)");
+
+export const SimilarSubjectsSchema = z
+  .object({
+    /** Subject type; defaults to runtime.memory.subject.type and must match it. */
+    type: z.string().optional(),
+    /** Exact match on item attrs (templates ok). */
+    match: z.record(z.unknown()).optional(),
+    /** More exact attr filters (e.g. outcome: resolved). */
+    where: z.record(z.unknown()).optional(),
+    /** Max subjects (default 5, max 50). */
+    limit: z.number().int().min(1).max(50).optional(),
+    /** Newest items per subject (default 2, max 10). */
+    perSubject: z.number().int().min(1).max(10).optional(),
+  })
+  .strict();
+
+export const MemoryRecallBlockSchema = z
+  .object({
+    id: RecallIdSchema,
+    /** Scopes to read (default: user > subject > graph > project > org). */
+    scopes: z.array(MemoryScopeSchema).min(1).optional(),
+    /** Key prefix (templates ok). */
+    prefix: z.string().optional(),
+    /** Exact attr filters (templates ok). */
+    attrs: z.record(z.unknown()).optional(),
+    /** Max items from this block before the node budget applies (default 20, max 200). */
+    limit: z.number().int().min(1).max(200).optional(),
+    /** Collapse the same key across scopes, narrowest wins (default true). */
+    dedupe: z.boolean().optional(),
+    /** Search other subjects of the same type in this project instead of this run's scopes. */
+    similarSubjects: SimilarSubjectsSchema.optional(),
+    /** fail (default): a backend error fails the node. skip: record a run issue and continue. */
+    onError: z.enum(["fail", "skip"]).optional(),
+  })
+  .strict()
+  .superRefine((b, ctx) => {
+    if (b.similarSubjects && (b.scopes || b.dedupe !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a similarSubjects block cannot also set scopes or dedupe", path: ["scopes"] });
+    }
+  });
+
+export const AgentMemoryWritesSchema = z
+  .object({
+    /** Scopes the `remember` tool may write to; the model must name one. */
+    scopes: z.array(MemoryScopeSchema).min(1),
+    /** Max remember calls per run of this node (default 5, max 50). */
+    maxPerRun: z.number().int().min(1).max(50).optional(),
+    /** Prefix added to every key the model chooses (default "agent/"). */
+    keyPrefix: z.string().optional(),
+    /** Attrs added to every write (templates ok); they override the model's attrs. */
+    attrs: z.record(z.unknown()).optional(),
+    /** Per-item TTL for non-subject writes, e.g. 90d. */
+    ttl: DurationSchema.optional(),
+  })
+  .strict();
+
+export const AgentMemorySchema = z
+  .object({
+    /** Token budget for all recalled memory in this node (estimated bytes/4; default 1000, cap 4000). */
+    maxTokens: z.number().int().positive().optional(),
+    /** Max recalled items across all blocks (default 20, max 200). */
+    maxItems: z.number().int().min(1).max(200).optional(),
+    recall: z.array(MemoryRecallBlockSchema).optional(),
+    /** Enables the builtin `remember` tool. */
+    agentWrites: AgentMemoryWritesSchema.optional(),
+  })
+  .strict();
+
 // agent node (formerly "intelligent")
 export const AgentWithSchema = BaseWithSchema.extend({
   /** Reference to a reusable agent definition (AGENT.md), resolved at run time. */
@@ -259,6 +338,8 @@ export const AgentWithSchema = BaseWithSchema.extend({
    * graph's LangChain ChatModel/key (see `@flowgraph/provider-deepagents`).
    */
   hub: z.enum(["deepagents"]).optional(),
+  /** Long-term memory: recall into the prompt within a token budget, and the `remember` tool. */
+  memory: AgentMemorySchema.optional(),
   // provider-namespaced escape hatches (any shape)
   claude: z.record(z.unknown()).optional(),
   cursor: z.record(z.unknown()).optional(),
@@ -424,13 +505,6 @@ export const FunctionWithSchema = BaseWithSchema.extend({
 });
 
 // memory node — read/write scoped durable memory (requires runtime.memory)
-export const MemoryScopeSchema = z.enum(["org", "project", "graph", "user", "subject"], {
-  errorMap: (issue, ctx) =>
-    issue.code === "invalid_enum_value"
-      ? { message: `must be one of org | project | graph | user | subject (got "${String(issue.received)}")` }
-      : { message: ctx.defaultError },
-});
-
 export const MemoryOpSchema = z.enum(["get", "search", "put", "patch", "increment", "append", "delete"]);
 
 export const MemoryWithSchema = BaseWithSchema.extend({
