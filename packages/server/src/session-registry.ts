@@ -25,8 +25,8 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, ActiveSession>();
   private readonly maxEvents: number;
   private readonly globalListeners = new Set<GlobalEventListener>();
-  private readonly onPersist?: (threadId: string, event: ServerEvent) => void;
-  private readonly loadJournal?: (threadId: string) => ServerEvent[];
+  private readonly onPersist: ((threadId: string, event: ServerEvent) => void) | undefined;
+  private readonly loadJournal: ((threadId: string) => ServerEvent[]) | undefined;
 
   constructor(
     maxEvents = 5000,

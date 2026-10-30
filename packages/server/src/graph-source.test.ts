@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { persistGraph, listPersistedGraphs, loadPersistedGraph, parseGraphYaml, appendEventJournal, loadEventJournal } from "./graph-source.js";
 import { SessionRegistry } from "./session-registry.js";
+import type { ServerEvent } from "./types.js";
 
 const MINIMAL = `
 apiVersion: flowgraph/v1
@@ -90,7 +91,7 @@ describe("event journal", () => {
   it("appends and reloads events; cold subscribe replays jsonl", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-journal-"));
     try {
-      const event = {
+      const event: ServerEvent = {
         id: "e1",
         type: "node.end",
         ts: "2026-01-01T00:00:00.000Z",

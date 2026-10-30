@@ -123,7 +123,7 @@ describe("createCliProvider", () => {
       fakeCtx(),
     );
     expect(result.output).toEqual({ text: "**Status: ready**\n\nA plan." });
-    const args = execFileFn.mock.calls[0]![1] as string[];
+    const args = (execFileFn.mock.calls[0] as unknown[])[1] as string[];
     expect(args.join(" ")).toContain("Respond with JSON matching this schema");
   });
 

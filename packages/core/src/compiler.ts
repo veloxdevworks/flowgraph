@@ -1014,8 +1014,10 @@ function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpo
   const enabled = spec.runtime?.checkpoint?.enabled !== false;
   if (!enabled) return undefined;
   if (opts.checkpointer === "none") return undefined;
+  // An explicit caller choice of "memory" (tests, ephemeral runs) is not a silent fallback.
+  if (opts.checkpointer === "memory") return new MemorySaver();
 
-  const backend = spec.runtime?.checkpoint?.backend ?? (opts.checkpointer as string) ?? "memory";
+  const backend = spec.runtime?.checkpoint?.backend ?? "memory";
   if (backend === "memory") return new MemorySaver();
   if (backend === "postgres" || backend === "sqlite") {
     throw new Error(

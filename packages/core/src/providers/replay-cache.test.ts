@@ -4,7 +4,6 @@ import {
   clearAllReplayCaches,
   clearThreadReplayCache,
   deserializeReplayValue,
-  hydrateReplay,
   hydrateReplayFromInterruptPayload,
   isGraphInterrupt,
   memoryReplayCache,

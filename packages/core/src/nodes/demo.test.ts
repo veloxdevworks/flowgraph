@@ -270,7 +270,7 @@ describe("demo node", () => {
         throw new Error("unexpected interrupt");
       },
       once: async <T>(_k: string, fn: () => Promise<T> | T) => fn(),
-      issue: (input) => ({
+      issue: (input: Record<string, unknown>) => ({
         ...input,
         raisedAt: new Date().toISOString(),
         nodeId: "file-tool",

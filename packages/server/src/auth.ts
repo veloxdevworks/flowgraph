@@ -13,7 +13,7 @@ export const AUTH_REQUIRED_MESSAGE =
  */
 export function checkBearerAuth(
   req: IncomingMessage,
-  opts: { authToken?: string; authDisabled?: boolean },
+  opts: { authToken?: string | undefined; authDisabled?: boolean | undefined },
 ): AuthResult {
   if (opts.authDisabled) return { ok: true };
   if (!opts.authToken) {

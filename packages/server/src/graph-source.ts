@@ -163,10 +163,8 @@ export async function persistGraph(
     storedAt,
     updatedAt: now,
     graphName: spec.metadata?.name ?? "graph",
-    ...(extras.label ?? existing?.label ? { label: extras.label ?? existing?.label } : {}),
-    ...(extras.status ?? existing?.status
-      ? { status: extras.status ?? existing?.status }
-      : { status: "started" }),
+    ...((extras.label ?? existing?.label) ? { label: (extras.label ?? existing?.label) as string } : {}),
+    status: extras.status ?? existing?.status ?? "started",
   };
   await writeGraphMeta(dir, threadId, meta);
   return {

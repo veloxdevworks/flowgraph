@@ -456,7 +456,7 @@ export class RunService {
     return {
       threadId,
       graphName: live?.graphName || meta?.graphName || persisted?.spec.metadata?.name || "graph",
-      ...(live?.label || meta?.label ? { label: live?.label ?? meta?.label } : {}),
+      ...(live?.label || meta?.label ? { label: (live?.label || meta?.label) as string } : {}),
       status: live?.status ?? meta?.status ?? "completed",
       updatedAt: meta?.updatedAt ?? live?.startedAt ?? new Date().toISOString(),
       ...(live?.startedAt ? { startedAt: live.startedAt } : {}),
