@@ -38,18 +38,20 @@ const config = (threadId: string, checkpointId?: string) => ({
 describe("FlowgraphMemorySaver retention", () => {
   it("stores an unchanged channel once and still returns it", async () => {
     const saver = new FlowgraphMemorySaver(resolveCheckpointRetention({ maxCheckpoints: 20, finishedTtl: null }));
-    const pad = "p".repeat(4000);
+    const pad = "p".repeat(8000);
     await saver.put(config("t"), checkpoint("b", { pad, n: 1 }, { pad: 1, n: 1 }), meta(1), { pad: 1, n: 1 });
     await saver.put(config("t", "b"), checkpoint("c", { pad, n: 2 }, { pad: 1, n: 2 }), meta(2), { n: 2 });
+    await saver.put(config("t", "c"), checkpoint("d", { pad, n: 3 }, { pad: 1, n: 3 }), meta(3), { n: 3 });
     const tuple = await saver.getTuple(config("t"));
     expect(tuple?.checkpoint.channel_values["pad"]).toBe(pad);
-    expect(tuple?.checkpoint.channel_values["n"]).toBe(2);
+    expect(tuple?.checkpoint.channel_values["n"]).toBe(3);
     expect(saver.storedVersions("t", "", "pad")).toEqual(["1"]);
     const doubled = new FlowgraphMemorySaver(
       resolveCheckpointRetention({ maxCheckpoints: 20, dedupeChannels: false, finishedTtl: null }),
     );
     await doubled.put(config("t"), checkpoint("b", { pad, n: 1 }, { pad: 1, n: 1 }), meta(1), { pad: 1, n: 1 });
     await doubled.put(config("t", "b"), checkpoint("c", { pad, n: 2 }, { pad: 1, n: 2 }), meta(2), { n: 2 });
+    await doubled.put(config("t", "c"), checkpoint("d", { pad, n: 3 }, { pad: 1, n: 3 }), meta(3), { n: 3 });
     expect(saver.byteSize()).toBeLessThan(doubled.byteSize());
   });
 

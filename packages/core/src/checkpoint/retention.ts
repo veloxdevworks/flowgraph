@@ -14,6 +14,14 @@
  * and paused threads are never deleted.
  */
 
+/**
+ * Channel values at most this large stay inside the checkpoint row.
+ * A separate blob row costs a page of overhead, so externalizing small or
+ * one-off values makes a database of many short threads larger, not smaller.
+ * Larger values are stored once when a later checkpoint repeats the version.
+ */
+export const CHECKPOINT_INLINE_MAX_BYTES = 4096;
+
 /** Pending-write channels that mark a checkpoint as an interrupt or resume point. */
 export const CHECKPOINT_PIN_CHANNELS: ReadonlySet<string> = new Set([
   "__interrupt__",

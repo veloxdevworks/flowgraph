@@ -16,6 +16,7 @@ import type { RunnableConfig } from "@langchain/core/runnables";
 
 type ChannelVersions = Record<string, string | number>;
 import {
+  CHECKPOINT_INLINE_MAX_BYTES,
   CHECKPOINT_PIN_CHANNELS,
   selectRetainedCheckpointIds,
   resolveCheckpointRetention,
@@ -109,13 +110,14 @@ export class FlowgraphMemorySaver extends MemorySaver {
     let stored: Checkpoint = checkpoint;
     if (policy.enabled && policy.dedupeChannels && typeof threadId === "string") {
       stored = copyCheckpoint(checkpoint);
-      await this.writeBlobs(threadId, ns, checkpoint, newVersions);
-      stored.channel_values = {};
+      const parentId = config.configurable?.checkpoint_id;
+      await this.externalizeRepeats(threadId, ns, stored, typeof parentId === "string" ? parentId : undefined, newVersions);
     }
     const result = await super.put(config, stored, metadata);
     if (policy.enabled && typeof threadId === "string") {
-      this.touch(threadId, "active", Date.now(), policy);
+      if (threadDeletionRequested(policy)) this.touch(threadId, "active", Date.now(), policy);
       await this.pruneNamespace(threadId, ns, policy);
+      this.compactWrites(threadId, ns);
     }
     return result;
   }
@@ -150,8 +152,9 @@ export class FlowgraphMemorySaver extends MemorySaver {
     const policy = this.policyFor(threadId);
     if (!policy.enabled) return;
     if (status === "paused") this.pinHead(threadId, now);
+    if (!threadDeletionRequested(policy)) return;
     this.touch(threadId, status, now, policy);
-    if (status !== "finished" || !threadDeletionRequested(policy)) return;
+    if (status !== "finished") return;
     const cap = policy.maxFinishedThreads;
     const capped = [...this.threads.values()].filter((row) => row.deletable && row.status === "finished" && row.maxFinished !== null);
     const overCap = cap !== null && capped.length > cap;
@@ -266,26 +269,64 @@ export class FlowgraphMemorySaver extends MemorySaver {
     }
   }
 
-  private async writeBlobs(
+  private compactWrites(threadId: string, ns: string): void {
+    const bucket = this.storage[threadId]?.[ns];
+    if (!bucket) return;
+    const parents = new Set<string>();
+    for (const id of Object.keys(bucket)) {
+      const parent = bucket[id]?.[2];
+      if (typeof parent === "string") parents.add(parent);
+    }
+    const pins = new Set(
+      (this.pins.get(threadId) ?? []).filter((pin) => pin.ns === ns).map((pin) => pin.checkpointId),
+    );
+    for (const key of Object.keys(this.writes)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(key);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(parsed) || parsed[0] !== threadId || parsed[1] !== ns) continue;
+      const id = String(parsed[2]);
+      if (!bucket[id] || (parents.has(id) && !pins.has(id))) delete this.writes[key];
+    }
+  }
+
+  /** Omit a large channel value once an earlier checkpoint already stored that version. */
+  private async externalizeRepeats(
     threadId: string,
     ns: string,
     checkpoint: Checkpoint,
+    parentId: string | undefined,
     newVersions: ChannelVersions | undefined,
   ): Promise<void> {
     void newVersions;
     const values = checkpoint.channel_values ?? {};
     const versions = checkpoint.channel_versions ?? {};
-    const threadBlobs = (this.blobs[threadId] ??= blank());
-    const nsBlobs = (threadBlobs[ns] ??= blank());
+    const parent = parentId ? this.storage[threadId]?.[ns]?.[parentId] : undefined;
+    let parentVersions: Record<string, unknown> | undefined;
+    if (parent) {
+      try {
+        const loaded = (await this.serde.loadsTyped("json", parent[0])) as Checkpoint;
+        parentVersions = loaded.channel_versions ?? {};
+      } catch {
+        parentVersions = undefined;
+      }
+    }
     for (const channel of Object.keys(values)) {
       const version = versions[channel];
       if (version === undefined) continue;
       const verKey = String(version);
-      const channelBlobs = (nsBlobs[channel] ??= blank());
-      // Same version means the channel did not change. Store the bytes once.
-      if (channelBlobs[verKey]) continue;
       const [type, bytes] = await this.serde.dumpsTyped(values[channel]);
-      channelBlobs[verKey] = { type, value: bytes };
+      if (bytes.byteLength <= CHECKPOINT_INLINE_MAX_BYTES) continue;
+      const channelBlobs = (this.blobs[threadId] ??= blank());
+      const nsBlobs = (channelBlobs[ns] ??= blank());
+      const versionsForChannel = (nsBlobs[channel] ??= blank());
+      const repeated = parentVersions !== undefined && String(parentVersions[channel]) === verKey;
+      if (!versionsForChannel[verKey] && !repeated) continue;
+      if (!versionsForChannel[verKey]) versionsForChannel[verKey] = { type, value: bytes };
+      delete checkpoint.channel_values[channel];
     }
   }
 

@@ -153,9 +153,10 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     const policy = this.policyFor(threadId);
     if (!policy.enabled) return result;
     const ns = config.configurable?.checkpoint_ns ?? "";
-    await this.touch(threadId, "active", Date.now(), policy);
+    if (threadDeletionRequested(policy)) await this.touch(threadId, "active", Date.now(), policy);
     const deleted = await this.pruneNamespace(threadId, ns, policy);
-    await this.maybeVacuum(deleted, policy);
+    const droppedWrites = await this.compactWrites(threadId, ns);
+    await this.maybeVacuum(deleted + droppedWrites, policy);
     return result;
   }
 
@@ -197,8 +198,9 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     const policy = this.policyFor(threadId);
     if (!policy.enabled) return;
     if (status === "paused") await this.pinHead(threadId, now);
+    if (!threadDeletionRequested(policy)) return;
     await this.touch(threadId, status, now, policy);
-    if (status !== "finished" || !threadDeletionRequested(policy)) return;
+    if (status !== "finished") return;
     const cap = policy.maxFinishedThreads;
     let overCap = false;
     if (cap !== null && cap > 0) {
@@ -252,6 +254,28 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     for (const table of ["checkpoints", "checkpoint_blobs", "checkpoint_writes", "fg_checkpoint_threads"]) {
       await this.db().query(`VACUUM ${this.q}.${table}`);
     }
+  }
+
+  /** Drop pending writes superseded by a child checkpoint. Leaves and pins keep theirs. */
+  private async compactWrites(threadId: string, ns: string): Promise<number> {
+    const result = await this.db().query(
+      `DELETE FROM ${this.q}.checkpoint_writes w
+       WHERE w.thread_id = $1 AND w.checkpoint_ns = $2
+         AND EXISTS (
+           SELECT 1 FROM ${this.q}.checkpoints child
+           WHERE child.thread_id = w.thread_id
+             AND child.checkpoint_ns = w.checkpoint_ns
+             AND child.parent_checkpoint_id = w.checkpoint_id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ${this.q}.fg_checkpoint_pins p
+           WHERE p.thread_id = w.thread_id
+             AND p.checkpoint_ns = w.checkpoint_ns
+             AND p.checkpoint_id = w.checkpoint_id
+         )`,
+      [threadId, ns],
+    );
+    return result.rowCount ?? 0;
   }
 
   private policyFor(threadId: string): ResolvedCheckpointRetention {

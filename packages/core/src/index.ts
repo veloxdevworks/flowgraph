@@ -24,6 +24,7 @@ export { compileGraph, ResumeAttemptsExhaustedError } from "./compiler.js";
 export type { MemoryHostOptions } from "./compiler.js";
 export { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 export {
+  CHECKPOINT_INLINE_MAX_BYTES,
   CHECKPOINT_PIN_CHANNELS,
   DEFAULT_CHECKPOINT_RETENTION,
   isRetentionSaver,

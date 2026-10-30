@@ -10,6 +10,7 @@
 import { copyCheckpoint, type Checkpoint, type CheckpointTuple } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import {
+  CHECKPOINT_INLINE_MAX_BYTES,
   CHECKPOINT_PIN_CHANNELS,
   selectRetainedCheckpointIds,
   threadDeletionRequested,
@@ -229,9 +230,8 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     if (policy.enabled && policy.dedupeChannels && typeof threadId === "string") {
       this.setup();
       stored = copyCheckpoint(checkpoint);
-      await this.writeBlobs(threadId, ns, checkpoint);
-      stored.channel_values = {};
-      deduped = true;
+      const parentId = config.configurable?.checkpoint_id;
+      deduped = await this.writeBlobs(threadId, ns, stored, typeof parentId === "string" ? parentId : undefined);
     }
     const result = await super.put(config, stored, metadata);
     if (deduped && typeof threadId === "string") {
@@ -242,9 +242,10 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
         .run(FG_CHECKPOINT_TYPE, threadId, ns, checkpoint.id);
     }
     if (policy.enabled && typeof threadId === "string") {
-      this.touch(threadId, "active", Date.now(), policy);
+      if (threadDeletionRequested(policy)) this.touch(threadId, "active", Date.now(), policy);
       const deleted = await this.pruneNamespace(threadId, ns, policy);
-      this.maybeVacuum(deleted, policy);
+      const droppedWrites = this.compactWrites(threadId, ns);
+      this.maybeVacuum(deleted + droppedWrites, policy);
     }
     return result;
   }
@@ -275,8 +276,9 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     if (!policy.enabled) return;
     this.setup();
     if (status === "paused") this.pinHead(threadId, now);
+    if (!threadDeletionRequested(policy)) return;
     this.touch(threadId, status, now, policy);
-    if (status !== "finished" || !threadDeletionRequested(policy)) return;
+    if (status !== "finished") return;
     const cap = policy.maxFinishedThreads;
     const overCap = cap !== null && this.finishedOverCap(cap);
     if (cap === 0 || overCap || now - this.lastSweepAt >= 60_000) {
@@ -417,26 +419,88 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     return n;
   }
 
-  private async writeBlobs(threadId: string, ns: string, checkpoint: Checkpoint): Promise<void> {
+  /**
+   * Pending writes are only required on a branch tip (nothing has superseded
+   * them) and on interrupt/resume pins. Drop the rest.
+   */
+  private compactWrites(threadId: string, ns: string): number {
+    const result = this.sqlite
+      .prepare(
+        `DELETE FROM writes
+         WHERE thread_id = ? AND checkpoint_ns = ?
+           AND checkpoint_id NOT IN (
+             SELECT c.checkpoint_id FROM checkpoints c
+             WHERE c.thread_id = ? AND c.checkpoint_ns = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM checkpoints child
+                 WHERE child.thread_id = c.thread_id
+                   AND child.checkpoint_ns = c.checkpoint_ns
+                   AND child.parent_checkpoint_id = c.checkpoint_id
+               )
+           )
+           AND checkpoint_id NOT IN (
+             SELECT checkpoint_id FROM fg_checkpoint_pins
+             WHERE thread_id = ? AND checkpoint_ns = ?
+           )`,
+      )
+      .run(threadId, ns, threadId, ns, threadId, ns);
+    return result.changes;
+  }
+
+  /**
+   * Leave small and one-off values in the checkpoint row. A value larger than
+   * {@link CHECKPOINT_INLINE_MAX_BYTES} is copied to `fg_checkpoint_blobs` only
+   * when this version was already stored, and then omitted from this row.
+   * Returns true when the stored checkpoint no longer contains every value.
+   */
+  private async writeBlobs(threadId: string, ns: string, checkpoint: Checkpoint, parentId: string | undefined): Promise<boolean> {
     const values = checkpoint.channel_values ?? {};
     const versions = checkpoint.channel_versions ?? {};
+    const parentVersions = parentId ? await this.parentChannelVersions(threadId, ns, parentId) : undefined;
     const insert = this.sqlite.prepare(
       `INSERT OR IGNORE INTO fg_checkpoint_blobs (thread_id, checkpoint_ns, channel, version, type, value)
        VALUES (?, ?, ?, ?, ?, ?)`,
     );
+    const hasBlob = this.sqlite.prepare(
+      `SELECT 1 AS n FROM fg_checkpoint_blobs
+       WHERE thread_id = ? AND checkpoint_ns = ? AND channel = ? AND version = ?`,
+    );
+    let omitted = false;
     for (const channel of Object.keys(values)) {
       const version = versions[channel];
       if (version === undefined) continue;
       const verKey = String(version);
-      const existing = this.sqlite
-        .prepare(
-          `SELECT 1 AS n FROM fg_checkpoint_blobs
-           WHERE thread_id = ? AND checkpoint_ns = ? AND channel = ? AND version = ?`,
-        )
-        .get(threadId, ns, channel, verKey);
-      if (existing) continue;
       const [type, bytes] = await this.serde.dumpsTyped(values[channel]);
-      insert.run(threadId, ns, channel, verKey, type, Buffer.from(bytes));
+      if (bytes.byteLength <= CHECKPOINT_INLINE_MAX_BYTES) continue;
+      const already = hasBlob.get(threadId, ns, channel, verKey);
+      const repeated = parentVersions !== undefined && String(parentVersions[channel]) === verKey;
+      if (!already && !repeated) continue;
+      if (!already) insert.run(threadId, ns, channel, verKey, type, Buffer.from(bytes));
+      delete checkpoint.channel_values[channel];
+      omitted = true;
+    }
+    return omitted;
+  }
+
+  private async parentChannelVersions(
+    threadId: string,
+    ns: string,
+    parentId: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    const row = asRow<{ type: string | null; checkpoint: Uint8Array }>(
+      this.sqlite
+        .prepare(
+          `SELECT type, checkpoint FROM checkpoints
+           WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
+        )
+        .get(threadId, ns, parentId),
+    );
+    if (!row) return undefined;
+    try {
+      const checkpoint = (await this.serde.loadsTyped(row.type ?? "json", row.checkpoint)) as Checkpoint;
+      return checkpoint.channel_versions ?? {};
+    } catch {
+      return undefined;
     }
   }
 
@@ -571,7 +635,8 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     if (!policy.enabled || policy.vacuum === "never" || deleted <= 0) return;
     if (policy.vacuum === "auto") {
       try {
-        this.sqlite.pragma("incremental_vacuum(32)");
+        // No argument reclaims every free page. A no-op unless auto_vacuum is INCREMENTAL.
+        this.sqlite.pragma("incremental_vacuum");
       } catch {
         /* auto_vacuum is not INCREMENTAL on this file */
       }

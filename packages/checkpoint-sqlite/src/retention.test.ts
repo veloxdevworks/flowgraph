@@ -132,7 +132,7 @@ describe("sqlite checkpoint retention", () => {
       put(config: unknown, checkpoint: unknown, metadata: unknown, versions?: unknown): Promise<unknown>;
       getTuple(config: unknown): Promise<{ checkpoint: { channel_values: Record<string, unknown> } } | undefined>;
     };
-    const pad = "z".repeat(3000);
+    const pad = "z".repeat(8000);
     const base = {
       v: 4,
       ts: new Date().toISOString(),
@@ -151,20 +151,21 @@ describe("sqlite checkpoint retention", () => {
       { n: 2 },
     );
     const stats = sqliteCheckpointStats(backend.db);
-    expect(stats.blobs).toBe(3);
     const padRows = backend.db
       .prepare(`SELECT COUNT(*) AS n FROM fg_checkpoint_blobs WHERE channel = 'pad'`)
       .get() as { n: number };
     expect(padRows.n).toBe(1);
+    expect(stats.blobs).toBe(1);
     const tuple = await saver.getTuple({ configurable: { thread_id: "blob", checkpoint_ns: "" } });
     expect(tuple?.checkpoint.channel_values["pad"]).toBe(pad);
     expect(tuple?.checkpoint.channel_values["n"]).toBe(2);
-    expect(stats.checkpointBytes).toBeLessThan(pad.length);
     const stamped = backend.db.prepare(`SELECT type FROM checkpoints WHERE checkpoint_id = '2'`).get() as { type: string };
     expect(stamped.type).toBe(FG_CHECKPOINT_TYPE);
+    const writes = backend.db.prepare(`SELECT COUNT(*) AS n FROM writes WHERE thread_id = 'blob'`).get() as { n: number };
+    expect(writes.n).toBe(0);
   });
 
-  it("reads deduped checkpoints when dedupe or retention is turned off, and a stock saver refuses them", async () => {
+  it("reads deduped checkpoints when dedupe or retention is turned off, and a stock saver refuses externalized rows", async () => {
     const dbPath = tmpDb();
     const threadId = "dedupe-read";
     const spec = {
@@ -192,8 +193,39 @@ describe("sqlite checkpoint retention", () => {
     }
 
     const raw = SqliteSaver.fromConnString(dbPath);
-    await expect(raw.getTuple({ configurable: { thread_id: threadId, checkpoint_ns: "" } })).rejects.toThrow(/serialization type/);
+    const plain = await raw.getTuple({ configurable: { thread_id: threadId, checkpoint_ns: "" } });
+    expect(plain?.checkpoint.channel_values["tag"]).toBe("done");
     raw.db.close();
+
+    const big = "b".repeat(8000);
+    const seeded = createSqliteCheckpointer({ path: dbPath });
+    const seededSaver = seeded as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      db: { close(): void };
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    await seededSaver.put(
+      { configurable: { thread_id: "big", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { pad: big }, channel_versions: { pad: 1 } },
+      { source: "loop", step: 1, parents: {} },
+    );
+    await seededSaver.put(
+      { configurable: { thread_id: "big", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "2", channel_values: { pad: big }, channel_versions: { pad: 1 } },
+      { source: "loop", step: 2, parents: {} },
+    );
+    seededSaver.db.close();
+    const stock = SqliteSaver.fromConnString(dbPath);
+    await expect(stock.getTuple({ configurable: { thread_id: "big", checkpoint_ns: "", checkpoint_id: "2" } })).rejects.toThrow(
+      /serialization type/,
+    );
+    stock.db.close();
+    const reread = createSqliteCheckpointer({ path: dbPath, retention: { dedupeChannels: false } });
+    const loaded = await (reread as unknown as {
+      getTuple(config: unknown): Promise<{ checkpoint: { channel_values: Record<string, unknown> } } | undefined>;
+    }).getTuple({ configurable: { thread_id: "big", checkpoint_ns: "" } });
+    expect(loaded?.checkpoint.channel_values["pad"]).toBe(big);
+    (reread as unknown as { db: { close(): void } }).db.close();
   });
 
   it("does not delete checkpoints it never recorded, even when thread deletion is on", async () => {
@@ -221,6 +253,33 @@ describe("sqlite checkpoint retention", () => {
     expect(after).toBe(before);
     expect(after).toBeGreaterThan(0);
     (reader as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("drops superseded pending writes and reclaims sqlite pages", async () => {
+    const dbPath = tmpDb();
+    const saver = createSqliteCheckpointer({ path: dbPath });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    expect(db.pragma("auto_vacuum", { simple: true })).toBe(2);
+    const put = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    const big = "w".repeat(100);
+    await put.put(
+      { configurable: { thread_id: "w", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: 1 } },
+      { source: "loop", step: 1, parents: {} },
+    );
+    await put.putWrites({ configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "1" } }, [["n", big]], "task");
+    await put.put(
+      { configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "2", channel_values: { n: 2 }, channel_versions: { n: 2 } },
+      { source: "loop", step: 2, parents: {} },
+    );
+    const left = db.prepare(`SELECT checkpoint_id FROM writes WHERE thread_id = 'w'`).all() as { checkpoint_id: string }[];
+    expect(left.map((row) => row.checkpoint_id)).not.toContain("1");
+    expect(Number(db.pragma("freelist_count", { simple: true }))).toBe(0);
   });
 
   it("refuses a checkpoint schema newer than this build", () => {
