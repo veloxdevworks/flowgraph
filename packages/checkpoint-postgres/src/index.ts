@@ -50,9 +50,46 @@ export async function createPostgresCheckpointer(
 
   const saver = PostgresSaver.fromConnString(connectionString);
   if (doSetup) {
-    await saver.setup();
+    await withSetupLock({ connectionString }, "public", () => saver.setup());
   }
   return saver as unknown as BaseCheckpointSaver;
+}
+
+/**
+ * Run schema setup (the upstream checkpointer's CREATE SCHEMA / CREATE TABLE
+ * IF NOT EXISTS, which race on a fresh database) under a session-level
+ * advisory lock per schema, so concurrent cold starts serialize.
+ *
+ * The lock lives on a dedicated client, not one from the shared pool: the
+ * setup itself takes pool connections, and holding the lock on one of them
+ * would deadlock a pool of size 1.
+ */
+async function withSetupLock<T>(config: pg.ClientConfig, schema: string, fn: () => Promise<T>): Promise<T> {
+  const client = new pg.Client(config);
+  // An error on this idle client (e.g. the server terminated it) must not crash the process.
+  client.on("error", () => undefined);
+  await client.connect();
+  try {
+    await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [setupLockKey(schema)]);
+    try {
+      return await fn();
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [setupLockKey(schema)]).catch(() => undefined);
+    }
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+}
+
+function setupLockKey(schema: string): string {
+  return `flowgraph:setup:${schema}`;
+}
+
+/** Connection settings for a dedicated client that reaches the same database as `pool`. */
+function clientConfigOf(pool: pg.Pool): pg.ClientConfig {
+  const { max: _max, min: _min, idleTimeoutMillis: _i, allowExitOnIdle: _a, maxUses: _m, log: _l, Client: _c, ...rest } =
+    pool.options as pg.PoolOptions & { log?: unknown; Client?: unknown; maxUses?: unknown };
+  return rest as pg.ClientConfig;
 }
 
 export interface PostgresBackendOptions {
@@ -81,8 +118,9 @@ export interface PostgresBackend {
 
 /**
  * Open one Postgres database for both checkpoints and scoped memory, over one
- * pool. Runs checkpointer setup and memory migrations (forward-only, under an
- * advisory lock so concurrent hosts are safe), then sweeps expired memory when
+ * pool. Runs checkpointer setup and memory migrations (forward-only) under a
+ * per-schema advisory lock, so concurrent cold starts on many hosts are safe,
+ * then sweeps expired memory when
  * the last sweep is older than an hour.
  *
  * @example
@@ -101,8 +139,13 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
   const pool = opts.pool ?? new pg.Pool({ ...opts.poolConfig, connectionString: opts.connectionString });
   try {
     const saver = new PostgresSaver(pool, undefined, { schema });
-    if (opts.setup !== false) await saver.setup();
-    const memory = await createPostgresMemoryBackend(pool, { schema, migrate: opts.setup !== false });
+    const setup = opts.setup !== false;
+    const memory = setup
+      ? await withSetupLock(clientConfigOf(pool), schema, async () => {
+          await saver.setup();
+          return createPostgresMemoryBackend(pool, { schema });
+        })
+      : await createPostgresMemoryBackend(pool, { schema, migrate: false });
     await maybeSweepPostgres(memory, opts.sweepIntervalMs ?? 3_600_000);
     let closed = false;
     return {

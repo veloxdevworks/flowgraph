@@ -88,6 +88,38 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
     }
   });
 
+  it("concurrent cold opens all succeed, on a fresh database and a fresh named schema", async () => {
+    const adminClient = new pg.Client({ connectionString: DB });
+    await adminClient.connect();
+    try {
+      for (let round = 0; round < 3; round++) {
+        // Default schema of a brand-new database.
+        const name = `fgt_cold_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        await adminClient.query(`CREATE DATABASE ${name}`);
+        const url = new URL(DB!);
+        url.pathname = `/${name}`;
+        try {
+          const opened = await Promise.allSettled(
+            Array.from({ length: 8 }, () => openPostgresBackend({ connectionString: url.toString(), poolConfig: { max: 1 } })),
+          );
+          for (const r of opened) if (r.status === "fulfilled") await r.value.close();
+          expect(opened.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+        } finally {
+          await adminClient.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+        }
+        // A named schema that does not exist yet.
+        const schema = freshSchema();
+        const opened = await Promise.allSettled(
+          Array.from({ length: 8 }, () => openPostgresBackend({ connectionString: DB!, schema, poolConfig: { max: 1 } })),
+        );
+        for (const r of opened) if (r.status === "fulfilled") await r.value.close();
+        expect(opened.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+      }
+    } finally {
+      await adminClient.end();
+    }
+  }, 120_000);
+
   it("does not end a pool it was given", async () => {
     const pool = new pg.Pool({ connectionString: DB, max: 2 });
     const b = await openPostgresBackend({ pool, schema: freshSchema() });
