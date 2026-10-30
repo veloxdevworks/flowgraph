@@ -40,7 +40,9 @@ Checkpointing is **first-class in v1**. A checkpointer persists graph state at e
 | `memory` | core (`MemorySaver`) | tests, ephemeral CI runs |
 | `sqlite` | `@flowgraph/checkpoint-sqlite` | desktop/local, single-machine CI artifact (a `.db` file) |
 | `postgres` | `@flowgraph/checkpoint-postgres` | shared/durable, multi-worker (later milestone) |
-| custom | implement `CheckpointerAdapter` | bring your own (Redis, S3, etc.) |
+| custom | pass a `BaseCheckpointSaver` instance to `compileGraph` | bring your own (Redis, S3, etc.) |
+
+`runtime.checkpoint.backend` must be `memory`, `sqlite`, or `postgres`; anything else is a load-time schema error. `sqlite` and `postgres` need the host to supply a saver (the CLI does this); `compileGraph` without one throws instead of falling back to memory. The long-term store follows the same rule (see [05 — State and data §8](./05-state-and-data.md)).
 
 ```yaml
 runtime:

@@ -233,7 +233,7 @@ For data that must persist **across** threads/runs (user preferences, learned fa
 runtime:
   store:
     enabled: true      # default: true
-    backend: memory    # default: memory; durable backends via CompileOptions.store instance
+    backend: memory    # memory | none | sqlite | postgres; default memory
 ```
 
 ```ts
@@ -250,4 +250,16 @@ registerFunction("rememberAnswer", async (input, ctx) => {
 });
 ```
 
-By default a process-local `InMemoryStore` is attached when `runtime.store.enabled` is not `false`. Pass a shared `BaseStore` instance to `compileGraph(spec, { store })` for tests or custom backends. Durable Postgres store integration is planned for a later milestone (see [10 — Roadmap](./10-roadmap.md)).
+How the store is chosen (first match wins):
+
+1. A `BaseStore` instance passed as `compileGraph(spec, { store })` — always used.
+2. `runtime.store.enabled: false`, `backend: none`, or `{ store: "none" }` — no store; `ctx.store` is `undefined`.
+3. `{ store: "memory" }` from the caller (e.g. `@flowgraph/testing`) — a fresh process-local `InMemoryStore`.
+4. `backend: memory` (the default) — a fresh process-local `InMemoryStore`. It is **ephemeral**: it is lost when the process exits and is not shared between CLI invocations.
+5. `backend: sqlite` / `postgres` without an injected instance — **compile error**. There is no silent fallback to memory. The CLI and server do not wire a durable store yet, so such YAML fails in `flowgraph run` until they do.
+
+Any other `backend` value is a schema error at load time.
+
+**Subgraphs share the parent's store.** A `subgraph` node passes the parent's `ctx.store` to the child, so memory written in a child is visible to the parent and to later runs that share the store. The child's own `runtime.store.backend` is ignored (the host picks the backend); a child with `runtime.store.enabled: false` or `backend: none` gets no store.
+
+Scoped, durable memory (org / project / graph / user / subject namespaces on sqlite and Postgres) is planned; see [10 — Roadmap](./10-roadmap.md).
