@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph";
+import type { BaseCheckpointSaver } from "@langchain/langgraph";
+import { FlowgraphMemorySaver } from "@flowgraph/core";
 import {
   compileGraph,
   createInMemoryMemoryBackend,
@@ -157,10 +158,10 @@ export class RunService {
           this.checkpointer = cp;
           return cp;
         }
-        // One MemorySaver shared by every compile. Letting compileGraph create its own
+        // One saver shared by every compile. Letting compileGraph create its own
         // per call gave each start/resume/getState an empty saver, so HITL resume
         // "completed" without running the remaining nodes.
-        const cp = new MemorySaver();
+        const cp = new FlowgraphMemorySaver();
         this.checkpointer = cp;
         return cp;
       })();

@@ -1123,6 +1123,37 @@ export const RuntimeMemorySchema = z
   })
   .strict();
 
+export const CheckpointRetentionSchema = z.union([
+  z.boolean(),
+  z
+    .object({
+      /** Default true. `false` keeps every checkpoint and finished thread. */
+      enabled: z.boolean().optional(),
+      /** Newest checkpoints kept per thread namespace. Default 40. Minimum 1. */
+      maxCheckpoints: z.number().int().positive().optional(),
+      /**
+       * Interrupt and resume checkpoints kept outside that window, newest first.
+       * Default 8. The newest checkpoint is always kept.
+       */
+      maxInterruptPoints: z.number().int().nonnegative().optional(),
+      /**
+       * Delete finished threads older than this (`14d`, `12h`). `null` disables
+       * the age sweep. Default 14 days. Paused threads are never deleted.
+       */
+      finishedTtl: z.union([DurationSchema, z.null()]).optional(),
+      /**
+       * How many finished threads to keep. Oldest are deleted first. `null`
+       * disables the cap. Default 200. Paused threads do not count.
+       */
+      maxFinishedThreads: z.number().int().nonnegative().nullable().optional(),
+      /** Store each channel version once. Default true. */
+      dedupeChannels: z.boolean().optional(),
+      /** `auto` VACUUMs sqlite when free pages exceed live data. Default auto. */
+      vacuum: z.enum(["auto", "always", "never"]).optional(),
+    })
+    .strict(),
+]);
+
 export const RuntimeSchema = z.object({
   checkpoint: z
     .object({
@@ -1130,6 +1161,8 @@ export const RuntimeSchema = z.object({
       backend: CheckpointBackendSchema.optional().default("memory"),
       path: z.string().optional(),
       namespace: z.string().optional(),
+      /** Bound checkpoint history. Omitted means the default retention policy. */
+      retention: CheckpointRetentionSchema.optional(),
     })
     .optional(),
   store: z

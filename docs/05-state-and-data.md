@@ -221,7 +221,7 @@ nodes:
 
 Because state lives entirely in channels, it is exactly what the checkpointer persists. On resume, channels are restored from the checkpoint and execution continues. This means:
 
-- Keep large/binary blobs **out** of state where possible (store a reference/URI); checkpoints serialize whole state per superstep.
+- Keep large/binary blobs **out** of state where possible (store a reference/URI). Each checkpoint records channel values, and a channel that changes stores a new full copy of its value. Retention (see [07 — Checkpointing](./07-runtime-and-execution.md#3-checkpointing--durability)) keeps that history bounded; it does not delta-compress a value that grows on every run.
 - Secrets are never in state, so checkpoints are safe to persist and inspect.
 - `messages` channels grow over a run; for long agent loops, prefer the agent node's internal context management over stuffing everything into a graph channel.
 

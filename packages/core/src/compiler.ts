@@ -3,7 +3,7 @@
  * plus run/resume/inspect with durability, HITL, and retry/timeout.
  */
 
-import { START, END, StateGraph, MemorySaver, Command, Send, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
+import { START, END, StateGraph, Command, Send, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
@@ -22,6 +22,13 @@ import {
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
 import { buildStateAnnotation, ONCE_CHANNEL, REPLAY_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
+import {
+  isRetentionSaver,
+  resolveCheckpointRetention,
+  retentionStatusForRun,
+  type CheckpointRetentionInput,
+} from "./checkpoint/retention.js";
 import {
   appendRunIssue,
   issueDedupeKey,
@@ -68,6 +75,13 @@ export interface CompileOptions {
   sinks?: EventSink[];
   runConfig?: RunConfig;
   checkpointer?: "memory" | "none" | BaseCheckpointSaver;
+  /**
+   * Retention for the in-memory checkpointer this compile creates. Host
+   * fields override `runtime.checkpoint.retention`. Ignored when `checkpointer`
+   * is an instance — that saver already has its own policy. `false` keeps
+   * every checkpoint.
+   */
+  checkpointRetention?: boolean | CheckpointRetentionInput | null;
   /**
    * Legacy `ctx.store`. A BaseStore instance is used as-is and is NOT scoped
    * (every graph sharing it sees every key). "none" disables ctx.store; the
@@ -308,12 +322,22 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
     if (overrides.singleStep) cfg["interruptAfter"] = "*";
     const workspace = (baseCtx as RunContext).workspace;
-    const finish = (r: RunResult): RunResult => {
+    const finish = async (r: RunResult): Promise<RunResult> => {
       try {
         const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
         if (issues.length > 0) r.issues = issues;
       } catch {
         /* ignore unreadable issue logs */
+      }
+      if (checkpointer && isRetentionSaver(checkpointer)) {
+        try {
+          await checkpointer.noteThreadStatus(
+            threadId,
+            retentionStatusForRun(r.status, (r.interrupts?.length ?? 0) > 0),
+          );
+        } catch {
+          // Retention bookkeeping must not fail a run that already finished.
+        }
       }
       return r;
     };
@@ -1174,6 +1198,12 @@ function buildInvokeConfig(
   };
 }
 
+function memoryCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpointSaver {
+  return new FlowgraphMemorySaver(
+    resolveCheckpointRetention(spec.runtime?.checkpoint?.retention, opts.checkpointRetention),
+  );
+}
+
 function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpointSaver | undefined {
   // Explicit object instance wins
   if (opts.checkpointer && typeof opts.checkpointer === "object") {
@@ -1183,15 +1213,15 @@ function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpo
   if (!enabled) return undefined;
   if (opts.checkpointer === "none") return undefined;
   // An explicit caller choice of "memory" (tests, ephemeral runs) is not a silent fallback.
-  if (opts.checkpointer === "memory") return new MemorySaver();
+  if (opts.checkpointer === "memory") return memoryCheckpointer(spec, opts);
 
   const backend = spec.runtime?.checkpoint?.backend ?? "memory";
-  if (backend === "memory") return new MemorySaver();
+  if (backend === "memory") return memoryCheckpointer(spec, opts);
   if (backend === "postgres" || backend === "sqlite") {
     throw new Error(
       `runtime.checkpoint.backend "${backend}" requires passing a checkpointer instance to compileGraph ` +
         `(the CLI wires sqlite/postgres from runtime.checkpoint.path / DATABASE_URL). ` +
-        `Silent MemorySaver fallback is not allowed.`,
+        `Silent in-memory fallback is not allowed.`,
     );
   }
   throw new Error(`Unknown checkpoint backend "${String(backend)}".`);

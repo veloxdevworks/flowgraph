@@ -22,6 +22,23 @@ export {
 } from "./inputs.js";
 export { compileGraph, ResumeAttemptsExhaustedError } from "./compiler.js";
 export type { MemoryHostOptions } from "./compiler.js";
+export { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
+export {
+  CHECKPOINT_PIN_CHANNELS,
+  DEFAULT_CHECKPOINT_RETENTION,
+  isRetentionSaver,
+  resolveCheckpointRetention,
+  retentionDurationMs,
+  retentionStatusForRun,
+  selectRetainedCheckpointIds,
+} from "./checkpoint/retention.js";
+export type {
+  CheckpointRetentionInput,
+  CheckpointRetentionSaver,
+  CheckpointThreadStatus,
+  CheckpointVacuum,
+  ResolvedCheckpointRetention,
+} from "./checkpoint/retention.js";
 export * from "./memory/index.js";
 export { memoryNode } from "./nodes/memory.js";
 export {

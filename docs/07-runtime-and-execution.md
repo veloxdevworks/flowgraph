@@ -51,7 +51,20 @@ runtime:
     backend: sqlite
     path: ".flowgraph/checkpoints.db"
     namespace: "{{ metadata.name }}"     # default
+    retention:
+      maxCheckpoints: 40                 # newest checkpoints kept per thread namespace
+      maxInterruptPoints: 8              # extra interrupt/resume points outside that window
+      finishedTtl: 14d                   # delete finished threads after this; null keeps them
+      maxFinishedThreads: 200            # also cap how many finished threads are kept
+      dedupeChannels: true               # store each channel version once
+      vacuum: auto                       # reclaim free pages after deletes (sqlite, and postgres after ~100 dropped checkpoints)
 ```
+
+Every superstep writes a checkpoint and its pending writes. Without a limit, a long-lived thread and a series of short runs both keep that history forever, and sqlite repeats every channel value inside every checkpoint. `runtime.checkpoint.retention` bounds that. The default keeps the newest 40 checkpoints of each thread namespace, plus up to 8 interrupt or resume points outside that window, and deletes finished threads after 14 days or once 200 of them have accumulated. The newest checkpoint is always kept. A paused, interrupted, or aborted thread is never deleted, so resume still works after pruning and after a process restart. Set `retention: false` to keep the full history.
+
+Host options override the graph: `createSqliteCheckpointer({ path, retention })`, `openSqliteBackend`, `createPostgresCheckpointer`, `openPostgresBackend`, and `compileGraph(spec, { checkpointRetention })` for the in-memory saver. A checkpointer instance you pass in already carries its own policy. Postgres already versions channel blobs; retention deletes versions no remaining checkpoint references. Sqlite and the in-memory saver store those versions in a side table (`fg_checkpoint_blobs` for sqlite) and leave `fg_memory_*` rows alone.
+
+`node scripts/checkpoint-growth-bench.mjs --runs 2000` runs the same small graph with and without retention and prints file size, row counts, and byte totals. Set `FLOWGRAPH_TEST_POSTGRES_URL` to include Postgres.
 
 The adapter interface wraps LangGraph's `BaseCheckpointSaver` (`put`, `putWrites`, `getTuple`, `list`) so any LangGraph checkpointer is usable, and ours add lifecycle events (`checkpoint.write/load`) and the `checkpoint:beforeWrite` hook (for redaction/transform).
 

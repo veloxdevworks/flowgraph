@@ -20,6 +20,7 @@ Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint 
 | MCP hub (stdio, HTTP, OAuth) | **Shipped** (`@flowgraph/mcp` optional peer of CLI) |
 | Local FS tools + governance | **Shipped** (`@flowgraph/tools-fs` optional peer of CLI) |
 | SQLite checkpointing (CLI) | **Shipped** (`@flowgraph/checkpoint-sqlite` optional peer of CLI) |
+| Checkpoint retention | **Shipped** | Newest checkpoints per thread, interrupt/resume points, finished-thread TTL and cap. Sqlite, Postgres, and in-memory. `runtime.checkpoint.retention`. |
 | TUI (`@flowgraph/tui`) | **Shipped** |
 | Postgres checkpointer package | **Shipped** (no CLI default, no example) |
 | OTel package | **Shipped** (not wired to CLI `--otel`) |
