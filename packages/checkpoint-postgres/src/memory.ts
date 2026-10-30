@@ -59,8 +59,6 @@ CREATE TABLE {s}.fg_memory_items (
 );
 CREATE INDEX fg_memory_scope_recent
   ON {s}.fg_memory_items (org, project, graph, usr, subject_type, subject_key, updated_at);
-CREATE INDEX fg_memory_subject_recent
-  ON {s}.fg_memory_items (org, project, subject_type, updated_at DESC) WHERE subject_type <> '';
 CREATE INDEX fg_memory_expires
   ON {s}.fg_memory_items (expires_at) WHERE expires_at IS NOT NULL;
 CREATE TABLE {s}.fg_memory_ops (
@@ -94,12 +92,18 @@ CREATE TABLE {s}.fg_memory_meta (
   },
   {
     // Covering index for the per-type subject cap and cross-subject search.
+    // Schemas first migrated by an earlier build created fg_memory_subject_recent
+    // in version 1; fresh ones never do, hence IF EXISTS. Plain CREATE INDEX,
+    // not CONCURRENTLY: migrations run in one transaction with their version
+    // row (CONCURRENTLY cannot run inside one, and a failed concurrent build
+    // leaves an invalid index that IF NOT EXISTS would then skip), and this
+    // table is new in the same release, so the build never locks a large table.
     version: 3,
     sql: `
 CREATE INDEX fg_memory_subject_keys
   ON {s}.fg_memory_items (org, project, subject_type, subject_key, updated_at) INCLUDE (expires_at, key)
   WHERE subject_type <> '';
-DROP INDEX {s}.fg_memory_subject_recent;
+DROP INDEX IF EXISTS {s}.fg_memory_subject_recent;
 `,
   },
 ];

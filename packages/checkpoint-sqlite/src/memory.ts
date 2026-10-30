@@ -54,8 +54,6 @@ CREATE TABLE fg_memory_items (
 );
 CREATE INDEX fg_memory_scope_recent
   ON fg_memory_items (org, project, graph, usr, subject_type, subject_key, updated_at);
-CREATE INDEX fg_memory_subject_recent
-  ON fg_memory_items (org, project, subject_type, updated_at DESC) WHERE subject_type <> '';
 CREATE INDEX fg_memory_expires
   ON fg_memory_items (expires_at) WHERE expires_at IS NOT NULL;
 CREATE TABLE fg_memory_ops (
@@ -90,11 +88,13 @@ CREATE TABLE fg_meta (
   {
     // Covering index for the per-type subject cap and cross-subject search
     // (group by subject without reading rows); memory-specific table names.
+    // Files first migrated by an earlier release created fg_memory_subject_recent
+    // in version 1; fresh files never do, hence IF EXISTS.
     version: 3,
     sql: `
 CREATE INDEX fg_memory_subject_keys
   ON fg_memory_items (org, project, subject_type, subject_key, updated_at, expires_at, key) WHERE subject_type <> '';
-DROP INDEX fg_memory_subject_recent;
+DROP INDEX IF EXISTS fg_memory_subject_recent;
 ALTER TABLE fg_threads RENAME TO fg_memory_threads;
 ALTER TABLE fg_meta RENAME TO fg_memory_meta;
 `,

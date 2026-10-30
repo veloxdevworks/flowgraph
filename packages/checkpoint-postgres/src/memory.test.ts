@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
 import { describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
-import { openPostgresBackend, createPostgresMemoryBackend, migratePostgresMemorySchema, type PostgresBackend } from "./index.js";
+import { openPostgresBackend, createPostgresMemoryBackend, migratePostgresMemorySchema, POSTGRES_MEMORY_MIGRATIONS, type PostgresBackend } from "./index.js";
 
 const DB = process.env["FLOWGRAPH_TEST_POSTGRES_URL"];
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -173,6 +173,27 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
     await b.close();
     expect((await pool.query("SELECT 1 AS one")).rows[0]).toEqual({ one: 1 });
     await pool.end();
+  });
+
+  it("a fresh schema never builds the index migration 3 drops; an older one loses it", async () => {
+    const indexes = async (schema: string) =>
+      (await admin!.query<{ n: string }>(`SELECT indexname AS n FROM pg_indexes WHERE schemaname = $1`, [schema])).rows.map((r) => r.n);
+    const fresh = freshSchema();
+    await migratePostgresMemorySchema(admin!, fresh);
+    expect(await indexes(fresh)).toContain("fg_memory_subject_keys");
+    expect(await indexes(fresh)).not.toContain("fg_memory_subject_recent");
+    // A schema an earlier build migrated to version 1 still has the old index.
+    const old = freshSchema();
+    await admin!.query(`CREATE SCHEMA "${old}"`);
+    await admin!.query(`CREATE TABLE "${old}".fg_schema_migrations (component TEXT NOT NULL, version INTEGER NOT NULL, applied_at BIGINT NOT NULL, PRIMARY KEY (component, version))`);
+    await admin!.query(POSTGRES_MEMORY_MIGRATIONS[0]!.sql.replaceAll("{s}", `"${old}"`));
+    await admin!.query(
+      `CREATE INDEX fg_memory_subject_recent ON "${old}".fg_memory_items (org, project, subject_type, updated_at DESC) WHERE subject_type <> ''`,
+    );
+    await admin!.query(`INSERT INTO "${old}".fg_schema_migrations VALUES ('memory', 1, 0)`);
+    expect(await migratePostgresMemorySchema(admin!, old)).toBe(2);
+    expect(await indexes(old)).toContain("fg_memory_subject_keys");
+    expect(await indexes(old)).not.toContain("fg_memory_subject_recent");
   });
 
   it("refuses a schema migrated by a newer flowgraph", async () => {
