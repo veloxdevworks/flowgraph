@@ -31,6 +31,18 @@ export interface NodePolicy {
   blockLocalTools?: boolean | undefined;
   /** Refuse `requires` binary checks, which reveal what is installed on the host. */
   blockHostProbes?: boolean | undefined;
+  /**
+   * Agent function tools (`{ function: name }`, and builtins mapped onto a
+   * registered tool) a graph may call, by registered name. Any other is
+   * refused when the agent is built and again when the tool is called. Unset:
+   * every registered tool. Tools that start host processes (start_service,
+   * restart_service, stop_service) also obey `blockedTypes` for "service".
+   */
+  allowedTools?: readonly string[] | undefined;
+  /** Registered functions a `function` node may call, by name. Unset: every registered function. */
+  allowedFunctions?: readonly string[] | undefined;
+  /** Refuse node features that run a host program outside `blockedTypes`: a workshop `diff` that runs git. */
+  blockHostExec?: boolean | undefined;
   /** Who set the policy, for error messages (e.g. "uploaded graphs from untrusted authors"). */
   reason?: string | undefined;
 }
@@ -43,7 +55,10 @@ export type NodePolicyErrorCode =
   | "OUTBOUND_URL_BLOCKED"
   | "MCP_BLOCKED"
   | "LOCAL_TOOLS_BLOCKED"
-  | "HOST_PROBE_BLOCKED";
+  | "HOST_PROBE_BLOCKED"
+  | "TOOL_BLOCKED"
+  | "FUNCTION_BLOCKED"
+  | "HOST_EXEC_BLOCKED";
 
 export class NodePolicyError extends Error {
   constructor(
@@ -105,6 +120,82 @@ export function assertHostProbeAllowed(policy: NodePolicy | undefined, requires:
     "HOST_PROBE_BLOCKED",
     `${where}: requires checks which binaries are installed on the host, which is not allowed here${suffix(policy)}`,
   );
+}
+
+/** Throws TOOL_BLOCKED when `allowedTools` does not list the registered tool `name`. */
+export function assertToolAllowed(policy: NodePolicy | undefined, name: string, where: string): void {
+  if (!policy?.allowedTools || policy.allowedTools.includes(name)) return;
+  throw new NodePolicyError(
+    "TOOL_BLOCKED",
+    `${where}: tool function "${name}" is not allowed here${suffix(policy)}` +
+      (policy.allowedTools.length ? `; allowed: ${policy.allowedTools.join(", ")}` : ""),
+  );
+}
+
+/** Throws FUNCTION_BLOCKED when `allowedFunctions` does not list the registered function `name`. */
+export function assertFunctionAllowed(policy: NodePolicy | undefined, name: string, where: string): void {
+  if (!policy?.allowedFunctions || policy.allowedFunctions.includes(name)) return;
+  throw new NodePolicyError("FUNCTION_BLOCKED", `${where}: registered function "${name}" is not allowed here${suffix(policy)}`);
+}
+
+/** Throws HOST_EXEC_BLOCKED when the policy refuses running a host program for `what`. */
+export function assertHostExecAllowed(policy: NodePolicy | undefined, what: string, where: string): void {
+  if (!policy?.blockHostExec) return;
+  throw new NodePolicyError("HOST_EXEC_BLOCKED", `${where}: ${what} runs a program on the host, which is not allowed here${suffix(policy)}`);
+}
+
+/**
+ * Registered tools an agent tool list refers to: `{ function }` names and
+ * builtins mapped onto registered tools (see BUILTIN_TOOL_TARGETS).
+ */
+export function registeredToolNamesOf(tools: unknown): string[] {
+  if (!Array.isArray(tools)) return [];
+  const out: string[] = [];
+  for (const t of tools) {
+    if (!t || typeof t !== "object") continue;
+    const r = t as Record<string, unknown>;
+    if (typeof r.function === "string") out.push(r.function);
+    if (Array.isArray(r.builtin)) {
+      for (const b of r.builtin) {
+        const target = typeof b === "string" ? BUILTIN_TOOL_TARGETS[b] : undefined;
+        if (target) out.push(target);
+      }
+    }
+  }
+  return out;
+}
+
+/** Claude/Cursor-style builtin names that run a registered localTools handler when one exists. */
+export const BUILTIN_TOOL_TARGETS: Readonly<Record<string, string>> = {
+  Read: "fs_read",
+  Write: "fs_write",
+  Edit: "fs_edit",
+  Glob: "fs_list",
+  Bash: "fs_bash",
+};
+
+/**
+ * Build-time checks for one node spec beyond its type: agent tools against
+ * `allowedTools`, a function node's `fn` against `allowedFunctions`, and a
+ * workshop git diff against `blockHostExec`. Used by the compiler for every
+ * node and map inner node, and by map at run time.
+ */
+export function assertNodeSpecAllowed(policy: NodePolicy | undefined, node: { type?: unknown; with?: unknown }, where: string): void {
+  if (!policy) return;
+  const type = String(node.type ?? "");
+  const w = (node.with ?? {}) as Record<string, unknown>;
+  if (type === "agent" || type === "intelligent") {
+    for (const name of registeredToolNamesOf(w.tools)) assertToolAllowed(policy, name, `${where} agent tool`);
+  }
+  if (type === "function" || type === "code") {
+    if (typeof w.fn === "string") assertFunctionAllowed(policy, w.fn, where);
+  }
+  if (type === "workshop") {
+    const diff = w.diff as Record<string, unknown> | undefined;
+    if (diff && typeof diff === "object" && diff.before == null && diff.after == null) {
+      assertHostExecAllowed(policy, "workshop diff (git)", where);
+    }
+  }
 }
 
 /** The policy a host compiled this run with, if any. */

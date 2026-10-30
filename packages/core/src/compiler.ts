@@ -62,6 +62,7 @@ import {
   NODE_POLICY,
   assertGraphToolsAllowed,
   assertHostProbeAllowed,
+  assertNodeSpecAllowed,
   assertNodeTypeAllowed,
   type NodePolicy,
 } from "./node-policy.js";
@@ -801,10 +802,12 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   for (const nodeSpec of spec.nodes) {
     assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
     assertHostProbeAllowed(opts.nodePolicy, (nodeSpec.with as { requires?: unknown[] } | undefined)?.requires, `node "${nodeSpec.id}"`);
+    assertNodeSpecAllowed(opts.nodePolicy, nodeSpec, `node "${nodeSpec.id}"`);
     if (nodeSpec.type === "map") {
       const inner = (nodeSpec.with as { node?: { type?: unknown; with?: { requires?: unknown[] } } } | undefined)?.node;
       if (typeof inner?.type === "string") assertNodeTypeAllowed(opts.nodePolicy, inner.type, `map node "${nodeSpec.id}" inner node`);
       assertHostProbeAllowed(opts.nodePolicy, inner?.with?.requires, `map node "${nodeSpec.id}" inner node`);
+      if (inner) assertNodeSpecAllowed(opts.nodePolicy, inner, `map node "${nodeSpec.id}" inner node`);
     }
     const factory = registry.get(nodeSpec.type);
     if (!factory) throw new Error(`Node type "${nodeSpec.type}" is not registered.`);
