@@ -5,5 +5,5 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: ["@langchain/langgraph", "@langchain/langgraph-checkpoint-postgres", "pg"],
+  external: ["@langchain/langgraph", "@langchain/langgraph-checkpoint-postgres", "pg", "@flowgraph/core"],
 });

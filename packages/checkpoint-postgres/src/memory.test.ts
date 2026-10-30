@@ -1,0 +1,307 @@
+import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import pg from "pg";
+import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
+import { describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
+import { openPostgresBackend, createPostgresMemoryBackend, migratePostgresMemorySchema, type PostgresBackend } from "./index.js";
+
+const DB = process.env["FLOWGRAPH_TEST_POSTGRES_URL"];
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+// Every test gets its own schema, dropped afterwards, so runs never collide.
+const schemas: string[] = [];
+let admin: pg.Pool | undefined;
+function freshSchema(): string {
+  const s = `fgt_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+  schemas.push(s);
+  return s;
+}
+afterAll(async () => {
+  if (!admin) return;
+  for (const s of schemas) await admin.query(`DROP SCHEMA IF EXISTS "${s}" CASCADE`);
+  await admin.end();
+});
+
+const tu = (o: Partial<{ org: string; project: string; graph: string; usr: string; subjectType: string; subjectKey: string }> = {}) => ({
+  org: "acme", project: "p", graph: "", usr: "", subjectType: "", subjectKey: "", ...o,
+});
+
+describe.skipIf(!DB)("postgres memory backend (integration)", () => {
+  beforeAll(() => {
+    admin = new pg.Pool({ connectionString: DB, max: 2 });
+  });
+
+  describeMemoryBackendConformance("postgres", async () => {
+    const schema = freshSchema();
+    let pool = new pg.Pool({ connectionString: DB, max: 8 });
+    return {
+      backend: await createPostgresMemoryBackend(pool, { schema }),
+      async reopen() {
+        await pool.end();
+        pool = new pg.Pool({ connectionString: DB, max: 8 });
+        return createPostgresMemoryBackend(pool, { schema });
+      },
+      async cleanup() {
+        await pool.end();
+      },
+    };
+  });
+
+  async function open(schema = freshSchema()): Promise<PostgresBackend> {
+    return openPostgresBackend({ connectionString: DB!, schema });
+  }
+
+  it("shares one pool with the checkpointer and migrates idempotently", async () => {
+    const schema = freshSchema();
+    await (await open(schema)).close();
+    const b = await open(schema);
+    try {
+      const tables = (
+        await b.pool.query<{ t: string }>(`SELECT table_name AS t FROM information_schema.tables WHERE table_schema = $1`, [schema])
+      ).rows.map((r) => r.t);
+      expect(tables).toEqual(
+        expect.arrayContaining(["fg_memory_items", "fg_memory_ops", "fg_memory_threads", "fg_memory_meta", "fg_schema_migrations", "checkpoints"]),
+      );
+      const n = await b.pool.query(`SELECT COUNT(*)::int AS n FROM "${schema}".fg_schema_migrations WHERE component = 'memory'`);
+      expect(n.rows[0]).toEqual({ n: 3 });
+      expect(b.memory.durable).toBe(true);
+      expect(b.memory.kind).toBe("postgres");
+    } finally {
+      await b.close();
+    }
+  });
+
+  it("concurrent starts run each migration once", async () => {
+    const schema = freshSchema();
+    const pools = Array.from({ length: 6 }, () => new pg.Pool({ connectionString: DB, max: 1 }));
+    try {
+      const applied = await Promise.all(pools.map((p) => migratePostgresMemorySchema(p, schema)));
+      expect(applied.reduce((a, b) => a + b, 0)).toBe(3);
+      expect(applied.filter((n) => n === 3)).toHaveLength(1);
+    } finally {
+      await Promise.all(pools.map((p) => p.end()));
+    }
+  });
+
+  it("does not end a pool it was given", async () => {
+    const pool = new pg.Pool({ connectionString: DB, max: 2 });
+    const b = await openPostgresBackend({ pool, schema: freshSchema() });
+    await b.close();
+    expect((await pool.query("SELECT 1 AS one")).rows[0]).toEqual({ one: 1 });
+    await pool.end();
+  });
+
+  it("refuses a schema migrated by a newer flowgraph", async () => {
+    const schema = freshSchema();
+    const b = await open(schema);
+    await b.pool.query(`INSERT INTO "${schema}".fg_schema_migrations VALUES ('memory', 99, 0)`);
+    await b.close();
+    await expect(open(schema)).rejects.toThrow(/newer than this flowgraph supports/);
+  });
+
+  it("rejects an invalid schema name", async () => {
+    await expect(openPostgresBackend({ connectionString: DB!, schema: 'x"; drop' })).rejects.toThrow(/invalid postgres schema/);
+  });
+
+  it("the DDL rejects malformed scope tuples even outside the engine", async () => {
+    const schema = freshSchema();
+    const b = await open(schema);
+    try {
+      const ins = (...v: string[]) =>
+        b.pool.query(
+          `INSERT INTO "${schema}".fg_memory_items (org, project, graph, usr, subject_type, subject_key, key, value, bytes, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'k', '1', 1, 0, 0)`,
+          v,
+        );
+      await expect(ins("o", "", "g", "", "", "")).rejects.toThrow(/check constraint/);
+      await expect(ins("o", "p", "g", "", "incident", "x")).rejects.toThrow(/check constraint/);
+      await expect(ins("o", "p", "", "", "incident", "")).rejects.toThrow(/check constraint/);
+      await expect(ins("", "p", "", "", "", "")).rejects.toThrow(/check constraint/);
+    } finally {
+      await b.close();
+    }
+  });
+
+  it("the subject cap and cross-subject search can use the covering subject index", async () => {
+    const schema = freshSchema();
+    const b = await open(schema);
+    const c = await b.pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SET LOCAL enable_seqscan = off");
+      const plan = async (sql: string, params: unknown[]) =>
+        (await c.query<{ "QUERY PLAN": string }>(`EXPLAIN ${sql}`, params)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+      const cap = await plan(
+        `SELECT subject_key AS k, MAX(updated_at) AS last FROM "${schema}".fg_memory_items
+          WHERE org = $1 AND project = $2 AND subject_type = $3 AND subject_type <> '' AND subject_key <> $4
+            AND (expires_at IS NULL OR expires_at > $5)
+          GROUP BY subject_key ORDER BY last DESC, k DESC OFFSET $6`,
+        ["o", "p", "t", "k", 0, 1],
+      );
+      expect(cap).toMatch(/Index Only Scan (Backward )?using fg_memory_subject_keys/);
+      // Capture the cross-subject query the backend actually runs.
+      let similar: { sql: string; params: unknown[] } | undefined;
+      const orig = b.pool.query.bind(b.pool);
+      (b.pool as { query: unknown }).query = (sql: string, params: unknown[]) => {
+        if (typeof sql === "string" && sql.startsWith("WITH s AS")) similar = { sql, params };
+        return orig(sql, params);
+      };
+      try {
+        await b.memory.similarSubjects({ org: "o", project: "p", subjectType: "t", limit: 5, perSubject: 2 });
+      } finally {
+        (b.pool as { query: unknown }).query = orig;
+      }
+      const sp = await plan(similar!.sql, similar!.params);
+      expect(sp).toMatch(/Index Only Scan (Backward )?using fg_memory_subject_keys on fg_memory_items f/);
+      expect(sp).toMatch(/Index Scan (Backward )?using fg_memory_subject_keys on fg_memory_items i/);
+      expect(sp).not.toMatch(/Seq Scan/);
+      await c.query("ROLLBACK");
+    } finally {
+      c.release();
+      await b.close();
+    }
+  });
+
+  it("the sweeper removes expired items and old op records, and claims each interval once", async () => {
+    const b = await open();
+    try {
+      const t = tu();
+      await b.memory.write({ kind: "put", tuple: t, key: "gone", value: 1, ttlMs: 10, now: 1_000, limits: MEMORY_DEFAULT_LIMITS });
+      await b.memory.write({ kind: "put", tuple: t, key: "kept", value: 2, opId: "op-1", now: 1_000, limits: MEMORY_DEFAULT_LIMITS });
+      const { maybeSweepPostgres } = await import("./index.js");
+      // open() already swept at the wall clock; the next interval starts an hour later.
+      const now = Date.now() + 2 * 3_600_000;
+      const results = await Promise.all([1, 2, 3].map(() => maybeSweepPostgres(b.memory, 60_000, now)));
+      expect(results.reduce((a, x) => a + x, 0)).toBe(1);
+      expect(await maybeSweepPostgres(b.memory, 60_000, now + 1)).toBe(0);
+      expect((await b.memory.get(t, "kept", now))?.value).toBe(2);
+      const ops = await b.pool.query(`SELECT COUNT(*)::int AS n FROM "${b.memory.schema}".fg_memory_ops`);
+      expect(ops.rows[0]).toEqual({ n: 0 });
+    } finally {
+      await b.close();
+    }
+  });
+
+  it("no increments are lost across concurrent processes", async () => {
+    const schema = freshSchema();
+    await (await open(schema)).close();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fg-pgmem-"));
+    const script = path.join(dir, "inc.mjs");
+    const dist = path.resolve(here, "../dist/index.js");
+    fs.writeFileSync(
+      script,
+      `import { openPostgresBackend } from ${JSON.stringify(dist)};
+const MEMORY_DEFAULT_LIMITS = ${JSON.stringify(MEMORY_DEFAULT_LIMITS)};
+const b = await openPostgresBackend({ connectionString: process.argv[2], schema: process.argv[3] });
+const t = { org: "acme", project: "p", graph: "", usr: "", subjectType: "", subjectKey: "" };
+await Promise.all([0, 1].map(async (lane) => {
+  for (let i = 0; i < 15; i++) {
+    await b.memory.write({ kind: "increment", tuple: t, key: "hits", field: "n", limits: MEMORY_DEFAULT_LIMITS });
+    await b.memory.write({ kind: "append", tuple: t, key: "log", value: process.pid + ":" + lane + ":" + i, max: 1000, limits: MEMORY_DEFAULT_LIMITS });
+    await b.memory.write({ kind: "increment", tuple: t, key: "once", field: "n", opId: "shared-" + i, limits: MEMORY_DEFAULT_LIMITS });
+  }
+}));
+await b.close();
+`,
+    );
+    const runOne = () =>
+      new Promise<void>((resolve, reject) => {
+        const c = spawn(process.execPath, [script, DB!, schema], { cwd: here, stdio: ["ignore", "inherit", "pipe"] });
+        let err = "";
+        c.stderr.on("data", (d) => (err += String(d)));
+        c.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`child exited ${code}: ${err}`))));
+      });
+    try {
+      await Promise.all([runOne(), runOne(), runOne(), runOne()]);
+      const b = await open(schema);
+      try {
+        const t = tu();
+        expect((await b.memory.get(t, "hits"))?.value).toEqual({ n: 120 });
+        expect(((await b.memory.get(t, "log"))?.value as unknown[]).length).toBe(120);
+        // Same op id from every process and lane: applied once each.
+        expect((await b.memory.get(t, "once"))?.value).toEqual({ n: 15 });
+      } finally {
+        await b.close();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+// ── graph-level integration ─────────────────────────────────────────────────
+
+const identity: MemoryIdentity = { org: "acme", project: "github.com/acme/web", user: "dev@acme.test" };
+
+describe.skipIf(!DB)("runtime.memory on postgres (graph integration)", () => {
+  beforeAll(() => {
+    admin ??= new pg.Pool({ connectionString: DB, max: 2 });
+    registerFunction("pgMemBump", async (_i, ctx: NodeRunContext) => {
+      const g = await ctx.memory!.increment("graph", "runs", "n");
+      return { graph: g.value, scope: ctx.memory!.scope };
+    });
+    registerFunction("pgBumpThenAsk", async (_i, ctx: NodeRunContext) => {
+      const r = await ctx.memory!.increment("graph", "replayed", "n");
+      const answer = ctx.interrupt<string>({ reason: "continue?" });
+      return { n: (r.value as { n: number }).n, answer, scope: ctx.memory!.scope };
+    });
+  });
+
+  function fnGraph(name: string, fn: string, memory: Record<string, unknown> = {}): GraphSpec {
+    return {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name },
+      state: { channels: { out: { type: "object" } } },
+      nodes: [{ id: "n", type: "function", with: { fn, output: { to: "out" } } }],
+      edges: [
+        { from: "START", to: "n" },
+        { from: "n", to: "END" },
+      ],
+      runtime: { checkpoint: { backend: "postgres" }, memory },
+    } as unknown as GraphSpec;
+  }
+
+  it("ctx.memory survives a restart and counts every run", async () => {
+    const schema = freshSchema();
+    let last: Record<string, unknown> = {};
+    for (let i = 0; i < 3; i++) {
+      const b = await openPostgresBackend({ connectionString: DB!, schema });
+      const compiled = await compileGraph(fnGraph("counter", "pgMemBump"), { checkpointer: b.checkpointer, memory: { backend: b.memory, identity } });
+      const r = await compiled.run({ threadId: `t-${i}`, onInterrupt: "fail" });
+      expect(r.status).toBe("completed");
+      last = r.state;
+      await b.close();
+    }
+    expect(last["out"]).toMatchObject({ graph: { n: 3 } });
+  });
+
+  it("resume on a new pool reuses the thread's binding and does not double-apply writes", async () => {
+    const schema = freshSchema();
+    const spec = fnGraph("replay", "pgBumpThenAsk", { subject: { type: "ticket", key: "{{ input.ticket }}" } });
+    const a = await openPostgresBackend({ connectionString: DB!, schema });
+    const first = await (await compileGraph(spec, { checkpointer: a.checkpointer, memory: { backend: a.memory, identity } })).run({
+      threadId: "rt",
+      input: { ticket: "T-1" },
+      onInterrupt: "fail",
+    });
+    expect(first.status).toBe("interrupted");
+    await a.close();
+    const b = await openPostgresBackend({ connectionString: DB!, schema });
+    try {
+      const compiled = await compileGraph(spec, { checkpointer: b.checkpointer, memory: { backend: b.memory, identity } });
+      const r = await compiled.resume({ threadId: "rt", resume: "yes", onInterrupt: "fail" });
+      expect(r.status).toBe("completed");
+      expect(r.state["out"]).toMatchObject({ n: 1, answer: "yes", scope: { subject: { type: "ticket", key: "T-1" } } });
+      const t = tu({ project: "github.com/acme/web", graph: "replay" });
+      expect((await b.memory.get(t, "replayed"))?.value).toEqual({ n: 1 });
+    } finally {
+      await b.close();
+    }
+  });
+});
