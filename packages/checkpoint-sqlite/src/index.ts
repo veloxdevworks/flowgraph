@@ -14,8 +14,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
+import type { GraphNameRegistry } from "@flowgraph/core";
 import {
   createSqliteMemoryBackend,
+  createSqliteGraphNameRegistry,
   maybeSweep,
   openDatabase,
   type SqliteDatabase,
@@ -58,6 +60,8 @@ export interface SqliteBackend {
   db: SqliteDatabase;
   checkpointer: BaseCheckpointSaver;
   memory: SqliteMemoryBackend;
+  /** Graph-name ownership (first registrant owns a name within an org), in the same file. */
+  graphNames: GraphNameRegistry;
   close(): void;
 }
 
@@ -76,12 +80,14 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
   if (dbPath !== ":memory:") fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = openDatabase(dbPath, opts.busyTimeoutMs);
   const memory = createSqliteMemoryBackend(db);
+  const graphNames = createSqliteGraphNameRegistry(db);
   await maybeSweep(memory, opts.sweepIntervalMs ?? 3_600_000);
   const checkpointer = new SqliteSaver(db as never) as unknown as BaseCheckpointSaver;
   return {
     db,
     checkpointer,
     memory,
+    graphNames,
     close() {
       if (db.open) db.close();
     },
@@ -91,6 +97,7 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
 export { SqliteSaver };
 export {
   createSqliteMemoryBackend,
+  createSqliteGraphNameRegistry,
   migrateMemorySchema,
   maybeSweep,
   MEMORY_MIGRATIONS,

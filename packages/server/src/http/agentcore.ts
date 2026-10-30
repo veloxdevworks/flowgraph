@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ClientSecretsRejectedError } from "../credentials.js";
 import type { RunService } from "../run-service.js";
+import { refusalOf } from "../errors.js";
+import type { Principal } from "../identity.js";
 import { streamEventsUntilTerminal } from "./sse.js";
 import { readJsonBody, sendJson } from "./util.js";
 
@@ -16,6 +18,7 @@ export async function handleAgentCore(
   res: ServerResponse,
   service: RunService,
   pathname: string,
+  principal?: Principal,
 ): Promise<boolean> {
   const method = req.method ?? "GET";
 
@@ -52,7 +55,7 @@ export async function handleAgentCore(
             ...(body.input ? { input: body.input } : {}),
             ...(body.label ? { label: body.label } : {}),
             ...(body.env ? { env: body.env } : {}),
-          });
+          }, principal);
           if (body.stream !== false) {
             await streamEventsUntilTerminal(
               res,
@@ -70,7 +73,7 @@ export async function handleAgentCore(
             threadId: body.threadId ?? "",
             resume: body.resume,
             ...(body.yaml ? { yaml: body.yaml } : {}),
-          });
+          }, principal);
           if (body.stream !== false) {
             await streamEventsUntilTerminal(
               res,
@@ -84,32 +87,33 @@ export async function handleAgentCore(
           return true;
         }
         case "state": {
-          const result = await service.getState(body.threadId ?? "", body.yaml);
+          const result = await service.getState(body.threadId ?? "", body.yaml, principal);
           sendJson(res, 200, result);
           return true;
         }
         case "history": {
-          const result = await service.getHistory(body.threadId ?? "", body.yaml);
+          const result = await service.getHistory(body.threadId ?? "", body.yaml, principal);
           sendJson(res, 200, result);
           return true;
         }
         case "cancel": {
-          sendJson(res, 200, await service.cancelRun(body.threadId ?? ""));
+          sendJson(res, 200, await service.cancelRun(body.threadId ?? "", principal));
           return true;
         }
         case "pause": {
-          sendJson(res, 200, await service.pauseRun(body.threadId ?? ""));
+          sendJson(res, 200, await service.pauseRun(body.threadId ?? "", principal));
           return true;
         }
         case "continue": {
           sendJson(
             res,
             200,
-            await service.continueRun(body.threadId ?? "", body.yaml),
+            await service.continueRun(body.threadId ?? "", body.yaml, principal),
           );
           return true;
         }
         case "events": {
+          await service.authorizeEvents(body.threadId ?? "", principal);
           await streamEventsUntilTerminal(
             res,
             service.registry,
@@ -125,6 +129,12 @@ export async function handleAgentCore(
           return true;
       }
     } catch (err) {
+      const refusal = refusalOf(err);
+      if (refusal) {
+        const { status, ...rest } = refusal;
+        sendJson(res, status, { error: (err as Error).message, ...rest });
+        return true;
+      }
       if (err instanceof ClientSecretsRejectedError) {
         sendJson(res, 400, { error: err.message, code: "CLIENT_SECRETS_REJECTED" });
         return true;

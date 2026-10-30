@@ -7,8 +7,10 @@ import {
   resolveAndValidateInput,
   isInputValidationError,
   readRunIssues,
+  createInMemoryGraphNameRegistry,
   type CompiledGraph,
   type FlowgraphEvent,
+  type GraphNameRegistry,
   type MemoryBackend,
   type MemoryIdentity,
   type MemorySweeper,
@@ -19,7 +21,17 @@ import {
 import { createPostgresCheckpointer, maybeSweepPostgres, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
 import type { GraphSpec } from "@flowgraph/spec";
 import { rejectClientSecrets, applyServerCredentials } from "./credentials.js";
-import { parseGraphYaml, persistGraph, loadPersistedGraph, updateGraphMeta, listPersistedGraphs, appendEventJournal, loadEventJournal } from "./graph-source.js";
+import {
+  parseGraphYaml,
+  persistGraph,
+  loadPersistedGraph,
+  readPersistedGraphYaml,
+  readGraphMeta,
+  updateGraphMeta,
+  listPersistedGraphs,
+  appendEventJournal,
+  loadEventJournal,
+} from "./graph-source.js";
 import { buildServerProviders } from "./providers.js";
 import { SessionRegistry } from "./session-registry.js";
 import { createMetrics, errorFields, log } from "./metrics.js";
@@ -28,14 +40,19 @@ import type {
   GetStateResult,
   RunDetail,
   RunListItem,
+  GraphMeta,
+  RunStatus,
   ServerConfig,
   ServerEvent,
+  ThreadOwner,
   StartRunRequest,
   StartRunResult,
   ResumeRunRequest,
 } from "./types.js";
 
-import { TooManyRunsError } from "./errors.js";
+import { ServerRequestError, TooManyRunsError } from "./errors.js";
+import { assertUntrustedUploadAllowed, untrustedNodePolicy } from "./upload-policy.js";
+import { authModeOf, createAuthenticator, singleUserPrincipal, type Authenticator, type Principal } from "./identity.js";
 
 /** sqlite memory is optional: the package is loaded only when configured. */
 async function loadSqlite(): Promise<typeof import("@flowgraph/checkpoint-sqlite")> {
@@ -52,6 +69,11 @@ const SERVER_MEMORY_HINT =
   "Start the server with FLOWGRAPH_MEMORY_BACKEND=postgres (memory shares DATABASE_URL) or FLOWGRAPH_MEMORY_BACKEND=sqlite, " +
   "plus FLOWGRAPH_ORG.";
 
+/** How long close() waits for runs in flight before aborting them. */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+/** How long aborted runs get to settle before pools are closed anyway. */
+const SHUTDOWN_ABORT_GRACE_MS = 2_000;
+
 export class RunService {
   readonly registry: SessionRegistry;
   readonly metrics = createMetrics();
@@ -65,9 +87,24 @@ export class RunService {
    */
   private readonly legacyStoreBackend: MemoryBackend = createInMemoryMemoryBackend({ maxItems: 50_000 });
   /** Durable memory for graphs that declare runtime.memory (config.memory.backend postgres | sqlite). */
-  private durableMemory: { backend: MemoryBackend; identity: MemoryIdentity } | undefined;
+  private durableMemory: { backend: MemoryBackend } | undefined;
+  /** Graph-name ownership: next to durable memory when configured, else process-local. */
+  private graphNames: GraphNameRegistry | undefined;
+  private singleUser: Principal | undefined;
   private sweeper: MemorySweeper | undefined;
   private closers: Array<() => Promise<void> | void> = [];
+  private auth: Authenticator | undefined;
+  /** Set by close(): new runs and graph reads are refused from then on. */
+  private closing = false;
+  private closed: Promise<void> | undefined;
+  /** Requests being set up and runs executing, which close() waits for. */
+  private readonly inFlight = new Set<Promise<unknown>>();
+
+  /** Resolves callers to principals (OIDC, the legacy token, or none), built from config.auth. */
+  get authenticator(): Authenticator {
+    this.auth ??= createAuthenticator(this.config);
+    return this.auth;
+  }
 
   constructor(readonly config: ServerConfig) {
     this.registry = new SessionRegistry(config.eventBufferSize, {
@@ -84,7 +121,8 @@ export class RunService {
     if (sweepMs !== undefined && !(Number.isInteger(sweepMs) && sweepMs >= 1_000 && sweepMs <= MEMORY_SWEEP_MAX_INTERVAL_MS)) {
       throw new Error(`memory.sweepIntervalMs must be a whole number of milliseconds from 1000 to ${MEMORY_SWEEP_MAX_INTERVAL_MS} (got ${sweepMs})`);
     }
-    if (memBackend !== "memory" && !config.memory?.identity?.org?.trim()) {
+    // With OIDC each caller's token names its org; single-user servers need FLOWGRAPH_ORG.
+    if (memBackend !== "memory" && authModeOf(config) !== "oidc" && !config.memory?.identity?.org?.trim()) {
       throw new Error(
         `FLOWGRAPH_MEMORY_BACKEND=${memBackend} needs FLOWGRAPH_ORG: durable memory on the server is owned by one org ` +
           "(and FLOWGRAPH_PROJECT, default \"local\"). Set FLOWGRAPH_ORG, or unset FLOWGRAPH_MEMORY_BACKEND to keep " +
@@ -102,21 +140,171 @@ export class RunService {
     });
   }
 
-  /** Stop the memory sweeper and close durable memory / database pools. */
-  async close(): Promise<void> {
+  /**
+   * Shut down: refuse new runs (503 SERVER_CLOSING), wait up to
+   * `shutdownTimeoutMs` for requests and runs in flight, abort what is still
+   * running and give it a moment to settle, then stop the memory sweeper and
+   * close durable memory and database pools. Safe to call more than once.
+   */
+  close(): Promise<void> {
+    this.closed ??= this.shutdown();
+    return this.closed;
+  }
+
+  private async shutdown(): Promise<void> {
+    this.closing = true;
     this.sweeper?.stop();
     this.sweeper = undefined;
+    const timeoutMs = this.config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    if (!(await this.drain(timeoutMs))) {
+      const running = this.registry.list().filter((s) => s.status === "running" || s.status === "started");
+      log("warn", "shutdown.abort", { runs: running.length, timeoutMs });
+      for (const s of running) s.abort.abort(new Error("server is shutting down"));
+      if (!(await this.drain(SHUTDOWN_ABORT_GRACE_MS))) {
+        log("warn", "shutdown.unsettled", { pending: this.inFlight.size });
+      }
+    }
     for (const c of this.closers.splice(0).reverse()) await c();
   }
 
-  private memoryIdentity(): MemoryIdentity {
-    // The constructor refuses durable memory without an org.
-    const id = this.config.memory!.identity!;
+  /** True when everything in flight (including work started meanwhile) settled within `ms`. */
+  private async drain(ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (this.inFlight.size > 0) {
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = await Promise.race([
+        Promise.allSettled([...this.inFlight]).then(() => false),
+        new Promise<boolean>((r) => {
+          timer = setTimeout(() => r(true), left);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (timedOut) return false;
+    }
+    return true;
+  }
+
+  private assertOpen(): void {
+    if (this.closing) throw new ServerRequestError(503, "SERVER_CLOSING", "The server is shutting down; retry against another instance");
+  }
+
+  /** Keep `work` in flight until it settles; close() waits for it. */
+  private track<T>(work: Promise<T>): Promise<T> {
+    this.inFlight.add(work);
+    const done = () => this.inFlight.delete(work);
+    work.then(done, done);
+    return work;
+  }
+
+  private get uploadOptions(): { allowHosts?: readonly string[] } {
+    return this.config.untrustedHttpAllowHosts ? { allowHosts: this.config.untrustedHttpAllowHosts } : {};
+  }
+
+  /** True when callers are told apart (OIDC); token and none modes have one principal. */
+  get multiUser(): boolean {
+    return authModeOf(this.config) === "oidc";
+  }
+
+  /** The caller, or the single-user principal when the server has only one. */
+  principalFor(principal?: Principal): Principal {
+    if (principal) return principal;
+    if (this.multiUser) throw new ServerRequestError(401, "AUTH_REQUIRED", "This server identifies callers with OIDC: send an access token");
+    this.singleUser ??= singleUserPrincipal(this.config);
+    return this.singleUser;
+  }
+
+  /**
+   * Memory identity for a caller. Multi-user servers scope memory to the token's org,
+   * project and subject, and bind threads to the principal; single-user servers keep
+   * FLOWGRAPH_ORG / FLOWGRAPH_PROJECT / FLOWGRAPH_USER.
+   */
+  memoryIdentityFor(principal: Principal): MemoryIdentity | undefined {
+    if (this.multiUser) {
+      return { org: principal.org, project: principal.project ?? "local", user: principal.subject, principalId: principal.id };
+    }
+    const id = this.config.memory?.identity;
+    if (!id?.org?.trim()) return undefined;
     return { org: id.org, project: id.project, ...(id.user ? { user: id.user } : {}) };
   }
 
+  private ownerOf(principal: Principal): ThreadOwner {
+    return { id: principal.id, org: principal.org };
+  }
+
+  /**
+   * Refuse a thread another principal created. Only multi-user servers check; a
+   * thread stored before owners were recorded is refused there too.
+   */
+  private async checkThreadAccess(
+    threadId: string,
+    principal: Principal,
+    opts: { mustExist?: boolean } = {},
+  ): Promise<GraphMeta | null> {
+    const meta = await readGraphMeta(this.config.graphStoreDir, threadId);
+    if (meta && meta.threadId !== threadId) {
+      // Thread ids map to file names with unsafe characters replaced ("a/b" and "a_b").
+      throw new ServerRequestError(
+        409,
+        "THREAD_ID_CONFLICT",
+        `Thread id "${threadId}" collides with stored thread "${meta.threadId}"; use another id`,
+      );
+    }
+    if (!this.multiUser) return meta;
+    const live = this.registry.get(threadId);
+    const owner = meta?.owner ?? live?.owner;
+    if (owner) {
+      if (owner.id !== principal.id) {
+        throw new ServerRequestError(403, "THREAD_NOT_OWNED", `Thread "${threadId}" belongs to another user`);
+      }
+      return meta;
+    }
+    if (meta || (live && live.runId)) {
+      throw new ServerRequestError(
+        403,
+        "THREAD_NOT_OWNED",
+        `Thread "${threadId}" has no recorded owner (it was stored before this server identified callers); use a new thread id`,
+      );
+    }
+    if (opts.mustExist) throw new ServerRequestError(404, "THREAD_NOT_FOUND", `No run "${threadId}"`);
+    return null;
+  }
+
+  /** Check a caller may watch a thread's events (multi-user servers refuse unknown threads). */
+  async authorizeEvents(threadId: string, principal?: Principal): Promise<void> {
+    await this.checkThreadAccess(threadId, this.principalFor(principal), { mustExist: true });
+  }
+
+  private graphNameRegistry(): GraphNameRegistry {
+    if (!this.graphNames) {
+      this.graphNames = createInMemoryGraphNameRegistry();
+      if (this.multiUser) {
+        log("warn", "graph-names.process-local", {
+          message:
+            "Graph-name ownership is kept in memory and resets on restart; set FLOWGRAPH_MEMORY_BACKEND=postgres or sqlite to store it durably.",
+        });
+      }
+    }
+    return this.graphNames;
+  }
+
+  /** On multi-user servers a graph name belongs to the first principal in its org that uploads it. */
+  private async claimGraphName(spec: GraphSpec, principal: Principal): Promise<void> {
+    if (!this.multiUser) return;
+    const name = spec.metadata?.name ?? "graph";
+    const claim = await this.graphNameRegistry().claim(principal.org, name, principal.id);
+    if (claim.owner !== principal.id) {
+      throw new ServerRequestError(
+        409,
+        "GRAPH_NAME_TAKEN",
+        `Graph name "${name}" is registered to another user in org "${principal.org}"; rename metadata.name`,
+      );
+    }
+  }
+
   private useDurableMemory(backend: MemoryBackend, sweep?: (intervalMs: number, now: number) => Promise<number>): void {
-    this.durableMemory = { backend, identity: this.memoryIdentity() };
+    this.durableMemory = { backend };
     const intervalMs = this.config.memory?.sweepIntervalMs ?? 3_600_000;
     this.sweeper = startMemorySweeper(backend, {
       intervalMs,
@@ -139,21 +327,27 @@ export class RunService {
           const b = await sqlite.openSqliteBackend(file);
           this.closers.push(() => b.close());
           this.useDurableMemory(b.memory);
+          this.graphNames = b.graphNames;
         }
         if (this.config.databaseUrl) {
           if (memBackend === "postgres") {
             const pg = await openPostgresBackend({
               connectionString: this.config.databaseUrl,
+              ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
               onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
             });
             this.closers.push(() => pg.close());
             // Replicas share the database: each interval is claimed by one of
             // them (a little early, so timer drift never skips an interval).
             this.useDurableMemory(pg.memory, (intervalMs, now) => maybeSweepPostgres(pg.memory, intervalMs * 0.9, now));
+            this.graphNames = pg.graphNames;
             this.checkpointer = pg.checkpointer;
             return pg.checkpointer;
           }
-          const cp = await createPostgresCheckpointer(this.config.databaseUrl);
+          const cp = await createPostgresCheckpointer({
+            connectionString: this.config.databaseUrl,
+            ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
+          });
           this.checkpointer = cp;
           return cp;
         }
@@ -170,32 +364,45 @@ export class RunService {
 
   private async resolveSpec(
     threadId: string,
-    yaml?: string,
+    yaml: string | undefined,
+    principal: Principal,
+    extras: { label?: string; status?: RunStatus } = {},
   ): Promise<{ spec: GraphSpec; yaml: string; cwd: string; importsStripped: boolean }> {
     if (yaml) {
-      const parsed = parseGraphYaml(yaml);
+      // Untrusted uploads never see the server environment.
+      const parsed = parseGraphYaml(yaml, { expandEnv: principal.trusted });
       if (!parsed.spec) {
         const msg = parsed.diagnostics.map((d) => d.message).join("; ");
         throw new Error(`Invalid graph YAML: ${msg}`);
       }
+      if (!principal.trusted) assertUntrustedUploadAllowed(yaml, parsed.spec, this.uploadOptions);
       if (parsed.importsStripped) {
         log("warn", "stripped client imports from uploaded graph", { threadId });
       }
-      await persistGraph(this.config.graphStoreDir, threadId, parsed.yaml, parsed.spec);
+      await this.claimGraphName(parsed.spec, principal);
+      // Store and hand back the YAML as uploaded: expanded values never reach
+      // the graph store, the session or getRun, and are filled again per run.
+      await persistGraph(this.config.graphStoreDir, threadId, yaml, parsed.spec, {
+        ...extras,
+        owner: this.ownerOf(principal),
+        yamlFormat: "raw",
+      });
       return {
         spec: parsed.spec,
-        yaml: parsed.yaml,
+        yaml,
         cwd: this.config.graphStoreDir,
         importsStripped: parsed.importsStripped,
       };
     }
 
-    const persisted = await loadPersistedGraph(this.config.graphStoreDir, threadId);
+    const persisted = await loadPersistedGraph(this.config.graphStoreDir, threadId, { expandEnv: principal.trusted });
     if (!persisted) {
       throw new Error(
         `No persisted graph for thread "${threadId}". Provide yaml on start/resume.`,
       );
     }
+    // Trust is checked again on every run: the author may have lost it since the upload.
+    if (!principal.trusted) assertUntrustedUploadAllowed(persisted.yaml, persisted.spec, this.uploadOptions);
     return {
       spec: persisted.spec,
       yaml: persisted.yaml,
@@ -209,17 +416,23 @@ export class RunService {
     cwd: string,
     threadId: string,
     onEvent: (ev: FlowgraphEvent) => void,
+    principal: Principal,
     dryRun = false,
   ): Promise<CompiledGraph> {
     const checkpointer = await this.getCheckpointer();
-    const providers = await buildServerProviders(spec, cwd, { dryRun });
+    const providers = await buildServerProviders(spec, cwd, { dryRun, untrusted: !principal.trusted });
+    const identity = this.memoryIdentityFor(principal);
     const graphPath = path.join(cwd, `${threadId.replace(/[^a-zA-Z0-9._-]/g, "_")}.graph.yaml`);
     return compileGraph(spec, {
       cwd,
       graphPath,
       checkpointer,
       legacyStoreBackend: this.legacyStoreBackend,
-      ...(this.durableMemory ? { memory: this.durableMemory } : { memoryUnavailableHint: SERVER_MEMORY_HINT }),
+      ...(identity ? { memoryIdentity: identity } : {}),
+      ...(principal.trusted ? {} : { nodePolicy: untrustedNodePolicy(this.config.untrustedHttpAllowHosts) }),
+      ...(this.durableMemory && identity
+        ? { memory: { backend: this.durableMemory.backend, identity } }
+        : { memoryUnavailableHint: SERVER_MEMORY_HINT }),
       providers,
       sinks: [
         (event) => {
@@ -229,17 +442,31 @@ export class RunService {
     });
   }
 
-  async startRun(req: StartRunRequest): Promise<StartRunResult> {
+  startRun(req: StartRunRequest, caller?: Principal): Promise<StartRunResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.startRunNow(req, caller));
+  }
+
+  private async startRunNow(req: StartRunRequest, caller?: Principal): Promise<StartRunResult> {
     rejectClientSecrets(req.env);
     if (!req.threadId?.trim()) throw new Error("threadId is required");
     if (!req.yaml?.trim()) throw new Error("yaml is required");
+    const principal = this.principalFor(caller);
+    await this.checkThreadAccess(req.threadId, principal);
 
     const max = this.config.maxConcurrentRuns ?? 16;
     if (max > 0 && this.registry.activeCount() >= max) {
       throw new TooManyRunsError(max);
     }
 
-    const { spec, yaml, cwd, importsStripped } = await this.resolveSpec(req.threadId, req.yaml);
+    const { spec, yaml, cwd, importsStripped } = await this.resolveSpec(req.threadId, req.yaml, principal, {
+      ...(req.label ? { label: req.label } : {}),
+      status: "running",
+    });
     const graphName = spec.metadata?.name ?? "graph";
 
     // Pre-create session so events during compile/run are buffered.
@@ -250,16 +477,20 @@ export class RunService {
       ...(req.label ? { label: req.label } : {}),
       yaml,
       ...(req.dryRun ? { dryRun: true } : {}),
+      owner: this.ownerOf(principal),
     });
 
-    await persistGraph(this.config.graphStoreDir, req.threadId, yaml, spec, {
-      ...(req.label ? { label: req.label } : {}),
-      status: "running",
-    });
-
-    const compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
-      this.registry.pushEvent(req.threadId, ev);
-    }, Boolean(req.dryRun));
+    let compiled: CompiledGraph;
+    try {
+      compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
+        this.registry.pushEvent(req.threadId, ev);
+      }, principal, Boolean(req.dryRun));
+    } catch (err) {
+      // Don't leave a "running" placeholder behind for a run that never started.
+      if (this.registry.get(req.threadId) === placeholder) this.registry.remove(req.threadId);
+      void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "error" });
+      throw err;
+    }
 
     let resolvedInput: Record<string, unknown>;
     try {
@@ -285,7 +516,7 @@ export class RunService {
       graph: graphName,
     });
 
-    void (async () => {
+    void this.track((async () => {
       try {
         const result = await compiled.run({
           input: resolvedInput,
@@ -313,7 +544,7 @@ export class RunService {
           seq: -1,
         });
       }
-    })();
+    })());
 
     return {
       threadId: req.threadId,
@@ -340,12 +571,23 @@ export class RunService {
     void updateGraphMeta(this.config.graphStoreDir, threadId, { status });
   }
 
-  async resumeRun(req: ResumeRunRequest): Promise<ControlResult> {
+  resumeRun(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.resumeRunNow(req, caller));
+  }
+
+  private async resumeRunNow(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
     if (!req.threadId?.trim()) throw new Error("threadId is required");
+    const principal = this.principalFor(caller);
+    await this.checkThreadAccess(req.threadId, principal, { mustExist: true });
 
     const existing = this.registry.get(req.threadId);
     const yaml = req.yaml ?? existing?.yaml;
-    const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(req.threadId, yaml);
+    const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(req.threadId, yaml, principal);
     const graphName = spec.metadata?.name ?? "graph";
 
     const abort = new AbortController();
@@ -357,6 +599,7 @@ export class RunService {
         runId: "pending",
         graphName,
         yaml: resolvedYaml,
+        owner: this.ownerOf(principal),
       });
     } else {
       session.abort = abort;
@@ -372,6 +615,7 @@ export class RunService {
       (ev) => {
         this.registry.pushEvent(req.threadId, ev);
       },
+      principal,
       dryRun,
     );
     session.runId = compiled.runId;
@@ -380,7 +624,7 @@ export class RunService {
     void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "running" });
 
     // Fire-and-forget like start/continue — resumed execution can be long-running.
-    void (async () => {
+    void this.track((async () => {
       try {
         const result = await compiled.resume({
           threadId: req.threadId,
@@ -408,7 +652,7 @@ export class RunService {
           seq: -1,
         });
       }
-    })();
+    })());
 
     return {
       threadId: req.threadId,
@@ -417,7 +661,8 @@ export class RunService {
     };
   }
 
-  async cancelRun(threadId: string): Promise<ControlResult> {
+  async cancelRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+    await this.checkThreadAccess(threadId, this.principalFor(caller), { mustExist: true });
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
     session.abort.abort();
@@ -427,7 +672,8 @@ export class RunService {
     return { threadId, runId: session.runId, status: "cancelled" };
   }
 
-  async pauseRun(threadId: string): Promise<ControlResult> {
+  async pauseRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+    await this.checkThreadAccess(threadId, this.principalFor(caller), { mustExist: true });
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
     session.pause.abort();
@@ -435,12 +681,20 @@ export class RunService {
     return { threadId, runId: session.runId, status: "started" };
   }
 
-  async continueRun(threadId: string, yaml?: string): Promise<ControlResult> {
+  continueRun(threadId: string, yaml?: string, caller?: Principal): Promise<ControlResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.continueRunNow(threadId, yaml, caller));
+  }
+
+  private async continueRunNow(threadId: string, yaml?: string, caller?: Principal): Promise<ControlResult> {
+    const principal = this.principalFor(caller);
+    await this.checkThreadAccess(threadId, principal, { mustExist: true });
     const existing = this.registry.get(threadId);
-    const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(
-      threadId,
-      yaml ?? existing?.yaml,
-    );
+    const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
 
     const abort = new AbortController();
     const pause = new AbortController();
@@ -451,6 +705,7 @@ export class RunService {
         runId: "pending",
         graphName: spec.metadata?.name ?? "graph",
         yaml: resolvedYaml,
+        owner: this.ownerOf(principal),
       });
     } else {
       session.abort = abort;
@@ -465,6 +720,7 @@ export class RunService {
       (ev) => {
         this.registry.pushEvent(threadId, ev);
       },
+      principal,
       dryRun,
     );
     session.runId = compiled.runId;
@@ -473,7 +729,7 @@ export class RunService {
     void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "running" });
 
     // Fire-and-forget like start (continue can be long-running)
-    void (async () => {
+    void this.track((async () => {
       try {
         const result = await compiled.continueRun({
           threadId,
@@ -488,31 +744,57 @@ export class RunService {
         this.metrics.recordResult("error");
         void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "error" });
       }
-    })();
+    })());
 
     return { threadId, runId: compiled.runId, status: "started" };
   }
 
-  async getState(threadId: string, yaml?: string): Promise<GetStateResult> {
+  getState(threadId: string, yaml?: string, caller?: Principal): Promise<GetStateResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.getStateNow(threadId, yaml, caller));
+  }
+
+  private async getStateNow(threadId: string, yaml?: string, caller?: Principal): Promise<GetStateResult> {
+    const principal = this.principalFor(caller);
+    await this.checkThreadAccess(threadId, principal, { mustExist: true });
     const existing = this.registry.get(threadId);
-    const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml);
-    const compiled = await this.compile(spec, cwd, threadId, () => undefined);
+    const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
+    const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
     const state = await compiled.getState(threadId);
     return { state };
   }
 
-  async getHistory(threadId: string, yaml?: string): Promise<{ history: unknown[] }> {
+  getHistory(threadId: string, yaml?: string, caller?: Principal): Promise<{ history: unknown[] }> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.getHistoryNow(threadId, yaml, caller));
+  }
+
+  private async getHistoryNow(threadId: string, yaml?: string, caller?: Principal): Promise<{ history: unknown[] }> {
+    const principal = this.principalFor(caller);
+    await this.checkThreadAccess(threadId, principal, { mustExist: true });
     const existing = this.registry.get(threadId);
-    const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml);
-    const compiled = await this.compile(spec, cwd, threadId, () => undefined);
+    const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
+    const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
     const history = await compiled.getStateHistory(threadId);
     return { history };
   }
 
-  async listRuns(): Promise<RunListItem[]> {
+  async listRuns(caller?: Principal): Promise<RunListItem[]> {
+    const principal = this.principalFor(caller);
+    // Multi-user servers list only the caller's threads.
+    const mine = (owner: ThreadOwner | undefined) => !this.multiUser || owner?.id === principal.id;
     const persisted = await listPersistedGraphs(this.config.graphStoreDir);
     const byId = new Map<string, RunListItem>();
     for (const meta of persisted) {
+      if (!mine(meta.owner)) continue;
       const live = this.registry.get(meta.threadId);
       byId.set(meta.threadId, {
         threadId: meta.threadId,
@@ -529,6 +811,7 @@ export class RunService {
     for (const live of this.registry.list()) {
       if (byId.has(live.threadId)) continue;
       if (!live.runId) continue;
+      if (!mine(live.owner)) continue;
       byId.set(live.threadId, {
         threadId: live.threadId,
         graphName: live.graphName,
@@ -544,14 +827,15 @@ export class RunService {
     );
   }
 
-  async getRun(threadId: string): Promise<RunDetail | null> {
-    const persisted = await loadPersistedGraph(this.config.graphStoreDir, threadId);
+  async getRun(threadId: string, caller?: Principal): Promise<RunDetail | null> {
+    await this.checkThreadAccess(threadId, this.principalFor(caller));
+    const persisted = await readPersistedGraphYaml(this.config.graphStoreDir, threadId);
     const live = this.registry.get(threadId);
     if (!persisted && !live) return null;
     const meta = persisted?.meta;
     return {
       threadId,
-      graphName: live?.graphName || meta?.graphName || persisted?.spec.metadata?.name || "graph",
+      graphName: live?.graphName || meta?.graphName || "graph",
       ...(live?.label || meta?.label ? { label: (live?.label || meta?.label) as string } : {}),
       status: live?.status ?? meta?.status ?? "completed",
       updatedAt: meta?.updatedAt ?? live?.startedAt ?? new Date().toISOString(),
@@ -562,12 +846,14 @@ export class RunService {
     };
   }
 
-  listIssues(threadId: string): RunIssue[] {
+  async listIssues(threadId: string, caller?: Principal): Promise<RunIssue[]> {
+    await this.checkThreadAccess(threadId, this.principalFor(caller));
     return this.readIssues(threadId);
   }
 
   /** In-memory events, or the on-disk journal after a process restart. */
-  getJournal(threadId: string): ServerEvent[] {
+  async getJournal(threadId: string, caller?: Principal): Promise<ServerEvent[]> {
+    await this.checkThreadAccess(threadId, this.principalFor(caller));
     const live = this.registry.get(threadId);
     if (live && live.events.length > 0) return live.events;
     return loadEventJournal(this.config.graphStoreDir, threadId);

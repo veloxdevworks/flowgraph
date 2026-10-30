@@ -58,6 +58,13 @@ import { hooksFromSpec, defaultGuardrailHooks } from "./hooks/builtin.js";
 import "./nodes/index.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
+import {
+  NODE_POLICY,
+  assertGraphToolsAllowed,
+  assertHostProbeAllowed,
+  assertNodeTypeAllowed,
+  type NodePolicy,
+} from "./node-policy.js";
 
 export type InterruptPolicy = "prompt" | "fail" | "approve" | "webhook";
 
@@ -88,6 +95,19 @@ export interface CompileOptions {
    * graph still sees only its own keys. Does not enable `ctx.memory`.
    */
   legacyStoreBackend?: MemoryBackend;
+  /**
+   * Identity for memory runtimes this compile builds without a host identity:
+   * the `legacyStoreBackend` runtime and in-process ones. A multi-user host
+   * passes the caller's org/project so graphs with the same name in different
+   * orgs never share `ctx.store` keys. Default: { org: "local", project: "local" }.
+   */
+  memoryIdentity?: MemoryIdentity;
+  /**
+   * Limits on what this graph may run (blocked node types, file subgraphs,
+   * host secrets). Checked as nodes are built, including map inners, agent
+   * skill tools and embedded subgraphs at run time. Unset: no limits.
+   */
+  nodePolicy?: NodePolicy;
   /**
    * How to get durable memory on this host, shown in the
    * MEMORY_BACKEND_UNAVAILABLE error instead of the CLI/library advice when a
@@ -740,7 +760,10 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     };
   }
 
-  const toolWiring: ToolWiring = { mcp: opts.mcp };
+  assertGraphToolsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
+  // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
+  const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
+  const toolWiring: ToolWiring = { mcp: mcpHub };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();
 
   const hooks: HookBus = createHookBus(events);
@@ -764,10 +787,11 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     workspace: graphWorkspace,
     budget,
     hooks,
-    mcp: opts.mcp,
+    mcp: mcpHub,
     store,
   };
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
+  if (opts.nodePolicy) (baseCtx as Record<symbol, unknown>)[NODE_POLICY] = opts.nodePolicy;
 
   const defaultRetry = spec.runtime?.retry;
   const defaultTimeout = spec.runtime?.timeoutDefault;
@@ -775,6 +799,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const mapJoinById = new Map<string, string>();
 
   for (const nodeSpec of spec.nodes) {
+    assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
+    assertHostProbeAllowed(opts.nodePolicy, (nodeSpec.with as { requires?: unknown[] } | undefined)?.requires, `node "${nodeSpec.id}"`);
+    if (nodeSpec.type === "map") {
+      const inner = (nodeSpec.with as { node?: { type?: unknown; with?: { requires?: unknown[] } } } | undefined)?.node;
+      if (typeof inner?.type === "string") assertNodeTypeAllowed(opts.nodePolicy, inner.type, `map node "${nodeSpec.id}" inner node`);
+      assertHostProbeAllowed(opts.nodePolicy, inner?.with?.requires, `map node "${nodeSpec.id}" inner node`);
+    }
     const factory = registry.get(nodeSpec.type);
     if (!factory) throw new Error(`Node type "${nodeSpec.type}" is not registered.`);
 
@@ -1271,7 +1302,9 @@ function resolveMemory(
       m && typeof m === "object" ? ("backend" in m ? (m as MemoryHostOptions) : { backend: m as MemoryBackend }) : undefined;
     const graph = spec.metadata.name;
     const wantsDurable = memCfg ? (memCfg.backend ?? "checkpoint") === "checkpoint" : storeAlias;
-    const ephemeral = () => createEphemeralMemoryRuntime(graph, { config: memCfg, exposeMemory, identity: host?.identity });
+    const fallbackIdentity = opts.memoryIdentity ?? LOCAL_MEMORY_IDENTITY;
+    const ephemeral = () =>
+      createEphemeralMemoryRuntime(graph, { config: memCfg, exposeMemory, identity: host?.identity ?? fallbackIdentity });
     if (memCfg?.backend === "memory") {
       runtime = ephemeral();
     } else if (host && exposeMemory) {
@@ -1280,7 +1313,7 @@ function resolveMemory(
       // plain graph keeps its process-local ctx.store as before.
       runtime = new MemoryRuntime({
         backend: host.backend,
-        identity: host.identity ?? LOCAL_MEMORY_IDENTITY,
+        identity: host.identity ?? fallbackIdentity,
         graph,
         config: memCfg,
         exposeMemory,
@@ -1297,7 +1330,7 @@ function resolveMemory(
     } else if (opts.legacyStoreBackend && !exposeMemory) {
       runtime = new MemoryRuntime({
         backend: opts.legacyStoreBackend,
-        identity: host?.identity ?? LOCAL_MEMORY_IDENTITY,
+        identity: host?.identity ?? fallbackIdentity,
         graph,
         config: memCfg,
         exposeMemory: false,

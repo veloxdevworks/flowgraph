@@ -1,4 +1,4 @@
-import type { ServerEvent, RunStatus } from "./types.js";
+import type { ServerEvent, RunStatus, ThreadOwner } from "./types.js";
 
 export type EventListener = (event: ServerEvent) => void;
 export type GlobalEventListener = (threadId: string, event: ServerEvent) => void;
@@ -19,6 +19,8 @@ export interface ActiveSession {
   /** Highest seq seen (from engine events). */
   lastSeq: number;
   dryRun?: boolean;
+  /** Principal that started the session (multi-user servers). */
+  owner?: ThreadOwner;
 }
 
 export class SessionRegistry {
@@ -67,6 +69,7 @@ export class SessionRegistry {
     label?: string;
     yaml: string;
     dryRun?: boolean;
+    owner?: ThreadOwner;
   }): ActiveSession {
     const existing = this.sessions.get(opts.threadId);
     // Placeholder from an early SSE subscribe (empty runId) can be upgraded in place.
@@ -99,6 +102,7 @@ export class SessionRegistry {
       listeners,
       lastSeq,
       ...(opts.dryRun ? { dryRun: true } : {}),
+      ...((opts.owner ?? existing?.owner) ? { owner: (opts.owner ?? existing?.owner) as ThreadOwner } : {}),
     };
     this.sessions.set(opts.threadId, session);
     return session;

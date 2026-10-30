@@ -11,6 +11,7 @@ import { MapWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { registry, defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { assertNodeTypeAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
 import { RESERVED_STATE_CHANNELS } from "../runtime/state-annotation.js";
 
@@ -62,6 +63,7 @@ export async function runMapItem(
   const itemScope = { ...baseScope, item: { [as]: task.item } };
   const innerSpec = config.node as Record<string, unknown>;
   const innerType = String(innerSpec["type"] ?? "");
+  assertNodeTypeAllowed(nodePolicyOf(ctx), innerType, `map node "${mapId}" inner node`);
   const factory = registry.get(innerType);
   if (!factory) {
     throw new Error(`map node "${mapId}": inner node type "${innerType}" is not registered.`);

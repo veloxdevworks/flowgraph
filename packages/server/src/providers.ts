@@ -10,11 +10,22 @@ import {
   mockProvider,
 } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
+import { ServerRequestError } from "./errors.js";
+
+/** Refuse providers an untrusted author may not configure (checked again when the graph runs). */
+function assertUntrustedProvider(name: string, cfg: { vendor?: unknown; baseUrl?: unknown }): void {
+  if (cfg.vendor === "ollama") {
+    throw new ServerRequestError(403, "PROVIDER_ENDPOINT_BLOCKED", `Provider "${name}": vendor ollama talks to a model server on the host, which untrusted authors may not use`);
+  }
+  if (cfg.baseUrl !== undefined) {
+    throw new ServerRequestError(403, "PROVIDER_ENDPOINT_BLOCKED", `Provider "${name}": baseUrl is set by the server operator for untrusted authors`);
+  }
+}
 
 export async function buildServerProviders(
   spec: GraphSpec,
   cwd = process.cwd(),
-  opts: { dryRun?: boolean } = {},
+  opts: { dryRun?: boolean; untrusted?: boolean } = {},
 ): Promise<ProviderAdapter[]> {
   if (opts.dryRun) {
     return [mockProvider];
@@ -25,6 +36,7 @@ export async function buildServerProviders(
   for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
     switch (cfg.kind) {
       case "langchain": {
+        if (opts.untrusted) assertUntrustedProvider(name, cfg);
         providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd }));
         built.add(name);
         break;
@@ -45,6 +57,7 @@ export async function buildServerProviders(
 
   const defaultName = spec.config?.defaults?.provider;
   if (defaultName && !built.has(defaultName) && isKnownLangChainVendor(defaultName)) {
+    if (opts.untrusted) assertUntrustedProvider(defaultName, { vendor: defaultName });
     const model = spec.config?.defaults?.model;
     providers.push(
       await createLangChainProviderFromConfig(

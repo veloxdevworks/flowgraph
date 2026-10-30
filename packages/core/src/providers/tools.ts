@@ -4,6 +4,7 @@
 
 import type { ToolSpec } from "./types.js";
 import type { NodeRunContext } from "../context.js";
+import { assertNodeTypeAllowed, nodePolicyOf } from "../node-policy.js";
 import { getTool } from "./registry.js";
 import { loadResolvedSkill, runSkill } from "../nodes/skill-runner.js";
 import type { SkillDef } from "@flowgraph/skills";
@@ -79,6 +80,7 @@ export function normalizeTools(
       specs.push({ name, kind: "skill", ref: ref.skill });
       let cached: SkillDef | undefined;
       executors.set(name, async (args, ctx) => {
+        assertNodeTypeAllowed(nodePolicyOf(ctx), "skill", `agent tool "${name}"`);
         cached ??= await loadResolvedSkill(ref.skill, ctx);
         return runSkill(cached, (args ?? {}) as Record<string, unknown>, ctx);
       });

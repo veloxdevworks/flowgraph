@@ -120,3 +120,46 @@ describe("event journal", () => {
     }
   });
 });
+
+describe("stored graph YAML", () => {
+  const yaml = MINIMAL_WITH_ENV();
+  function MINIMAL_WITH_ENV(): string {
+    return MINIMAL.replace(/name: hello/, "name: hello\n  description: \"${FG_GS_TEST_VALUE}\"");
+  }
+
+  it("stores raw YAML and expands it only when asked", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-graphs-raw-"));
+    process.env["FG_GS_TEST_VALUE"] = "expanded-value";
+    try {
+      const parsed = parseGraphYaml(yaml, { expandEnv: true });
+      expect(parsed.spec?.metadata?.description).toBe("expanded-value");
+      await persistGraph(dir, "t", yaml, parsed.spec!, { yamlFormat: "raw" });
+      expect(await fs.readFile(path.join(dir, "t.graph.yaml"), "utf-8")).not.toContain("expanded-value");
+      const plain = await loadPersistedGraph(dir, "t");
+      expect(plain?.spec.metadata?.description).toBe("${FG_GS_TEST_VALUE}");
+      expect(plain?.yaml).toBe(yaml);
+      const trusted = await loadPersistedGraph(dir, "t", { expandEnv: true });
+      expect(trusted?.spec.metadata?.description).toBe("expanded-value");
+      expect(trusted?.yaml).toBe(yaml);
+      expect(trusted?.meta?.yamlFormat).toBe("raw");
+    } finally {
+      delete process.env["FG_GS_TEST_VALUE"];
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never expands files stored by older servers", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-graphs-legacy-"));
+    process.env["FG_GS_TEST_VALUE"] = "expanded-value";
+    try {
+      const parsed = parseGraphYaml(yaml, { expandEnv: false });
+      await persistGraph(dir, "t", yaml, parsed.spec!);
+      const loaded = await loadPersistedGraph(dir, "t", { expandEnv: true });
+      expect(loaded?.meta?.yamlFormat).toBeUndefined();
+      expect(loaded?.spec.metadata?.description).toBe("${FG_GS_TEST_VALUE}");
+    } finally {
+      delete process.env["FG_GS_TEST_VALUE"];
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});

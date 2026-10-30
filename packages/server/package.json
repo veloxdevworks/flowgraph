@@ -29,6 +29,7 @@
     "@flowgraph/core": "workspace:*",
     "@flowgraph/spec": "workspace:*",
     "@flowgraph/workshop-session": "workspace:*",
+    "jose": "^6.2.14",
     "yaml": "^2.9.0"
   },
   "peerDependencies": {

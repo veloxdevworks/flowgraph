@@ -5,9 +5,9 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, createScopedMemory, defaultMemoryPolicy, memoryPositionalOpId, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
-import { describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
+import { describeGraphNameRegistryConformance, describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
 import { openSqliteBackend, createSqliteMemoryBackend, type SqliteBackend } from "./index.js";
-import { openDatabase } from "./memory.js";
+import { createSqliteGraphNameRegistry, openDatabase } from "./memory.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tmpDirs: string[] = [];
@@ -28,6 +28,24 @@ async function backend(dbPath: string): Promise<SqliteBackend> {
   open.push(b);
   return b;
 }
+
+describeGraphNameRegistryConformance("sqlite", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fg-names-"));
+  const file = path.join(dir, "names.db");
+  const dbs = [openDatabase(file)];
+  return {
+    registry: createSqliteGraphNameRegistry(dbs[0]!),
+    other: async () => {
+      const db = openDatabase(file);
+      dbs.push(db);
+      return createSqliteGraphNameRegistry(db);
+    },
+    cleanup: () => {
+      for (const db of dbs) db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    },
+  };
+});
 
 describeMemoryBackendConformance("sqlite", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fg-memc-"));
@@ -57,7 +75,7 @@ describe("sqlite memory backend", () => {
     expect(tables).toEqual(expect.arrayContaining(["fg_memory_items", "fg_memory_ops", "fg_memory_threads", "fg_schema_migrations", "fg_memory_meta"]));
     expect(tables).not.toContain("fg_threads");
     expect(tables).not.toContain("fg_meta");
-    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 3 });
+    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 4 });
     expect(b.db.pragma("busy_timeout", { simple: true })).toBe(5000);
   });
 
@@ -65,6 +83,7 @@ describe("sqlite memory backend", () => {
   function rollBackToV1(db: SqliteBackend["db"]): void {
     db.exec(`
       DROP INDEX fg_memory_subject_keys;
+      DROP TABLE fg_graph_names;
       CREATE INDEX fg_memory_subject_recent ON fg_memory_items (org, project, subject_type, updated_at DESC) WHERE subject_type <> '';
       ALTER TABLE fg_memory_threads RENAME TO fg_threads;
       ALTER TABLE fg_memory_meta RENAME TO fg_meta;
@@ -73,7 +92,7 @@ describe("sqlite memory backend", () => {
     `);
   }
 
-  it("migrations 2 and 3 upgrade an existing v1 database and keep its data", async () => {
+  it("migrations 2 to 4 upgrade an existing v1 database and keep its data", async () => {
     const p = tmpDb();
     const a = await backend(p);
     const t = { org: "acme", project: "p", graph: "g", usr: "", subjectType: "", subjectKey: "" };
@@ -84,7 +103,7 @@ describe("sqlite memory backend", () => {
     const b = await backend(p);
     const cols = (b.db.prepare(`PRAGMA table_info(fg_memory_ops)`).all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols).toContain("fingerprint");
-    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 3 });
+    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 4 });
     expect((await b.memory.get(t, "k"))?.value).toEqual({ v: 1 });
     expect((await b.memory.getThread("t-old"))?.graph).toBe("g");
     const indexes = (b.db.prepare(`SELECT name FROM sqlite_master WHERE type='index'`).all() as Array<{ name: string }>).map((r) => r.name);
