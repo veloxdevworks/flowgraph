@@ -70,3 +70,10 @@ export {
   type RecallResult,
   type RecallBlockStats,
 } from "./recall.js";
+export {
+  createInMemoryGraphNameRegistry,
+  checkGraphNameArgs,
+  type GraphNameRegistry,
+  type GraphNameRecord,
+  type GraphNameClaim,
+} from "./graph-names.js";

@@ -16,6 +16,7 @@ import {
   type MemoryLimits,
   type MemoryTuple,
   type MemoryWriteOp,
+  type GraphNameRegistry,
 } from "@flowgraph/core";
 
 export interface MemoryBackendHarness {
@@ -460,6 +461,61 @@ export function describeMemoryBackendConformance(
       expect((await b2.get(tu.graphA, "d"))?.value).toEqual({ n: 1 });
       expect((await b2.write(op({ kind: "increment", tuple: tu.graphA, key: "d", field: "n", opId: "dur-1" }))).deduped).toBe(true);
       expect((await b2.getThread("td"))?.graph).toBe("g");
+    }));
+  });
+}
+
+export interface GraphNameRegistryHarness {
+  registry: GraphNameRegistry;
+  cleanup?: () => void | Promise<void>;
+  /** A second handle on the same storage (another host); durable registries only. */
+  other?: () => Promise<GraphNameRegistry>;
+}
+
+/** Shared cases for graph-name registries: first registrant owns a name within an org. */
+export function describeGraphNameRegistryConformance(name: string, make: () => Promise<GraphNameRegistryHarness>): void {
+  const withRegistry = (fn: (r: GraphNameRegistry, h: GraphNameRegistryHarness) => Promise<void>) => async () => {
+    const h = await make();
+    try {
+      await fn(h.registry, h);
+    } finally {
+      await h.cleanup?.();
+    }
+  };
+
+  describe(`graph name registry conformance: ${name}`, () => {
+    it("the first registrant owns a name; later claims see that owner", withRegistry(async (r) => {
+      const a = await r.claim("acme", "triage", "iss|alice", 1_000);
+      expect(a).toEqual({ org: "acme", name: "triage", owner: "iss|alice", createdAt: 1_000, created: true });
+      const again = await r.claim("acme", "triage", "iss|alice", 2_000);
+      expect(again).toMatchObject({ owner: "iss|alice", created: false, createdAt: 1_000 });
+      const bob = await r.claim("acme", "triage", "iss|bob", 3_000);
+      expect(bob).toMatchObject({ owner: "iss|alice", created: false });
+      expect(await r.get("acme", "triage")).toEqual({ org: "acme", name: "triage", owner: "iss|alice", createdAt: 1_000 });
+    }));
+
+    it("names are per org and case-sensitive", withRegistry(async (r) => {
+      await r.claim("acme", "triage", "iss|alice");
+      expect((await r.claim("globex", "triage", "iss|bob")).owner).toBe("iss|bob");
+      expect((await r.claim("acme", "Triage", "iss|bob")).owner).toBe("iss|bob");
+      expect(await r.get("initech", "triage")).toBeUndefined();
+    }));
+
+    it("concurrent claims agree on one owner", withRegistry(async (r, h) => {
+      const others = h.other ? await Promise.all([h.other(), h.other()]) : [r, r];
+      const all = [r, ...others];
+      const claims = await Promise.all(
+        Array.from({ length: 12 }, (_, i) => all[i % all.length]!.claim("acme", "race", `iss|u${i}`)),
+      );
+      expect(new Set(claims.map((c) => c.owner)).size).toBe(1);
+      expect(claims.filter((c) => c.created)).toHaveLength(1);
+    }));
+
+    it("rejects empty or unstorable arguments", withRegistry(async (r) => {
+      await expect(r.claim("", "g", "o")).rejects.toMatchObject({ code: "MEMORY_GRAPH_NAME_INVALID" });
+      await expect(r.claim("acme", "", "o")).rejects.toMatchObject({ code: "MEMORY_GRAPH_NAME_INVALID" });
+      await expect(r.claim("acme", "g", "")).rejects.toMatchObject({ code: "MEMORY_GRAPH_NAME_INVALID" });
+      await expect(r.claim("acme", "g\u0000x", "o")).rejects.toMatchObject({ code: "MEMORY_NUL_CHARACTER" });
     }));
   });
 }
