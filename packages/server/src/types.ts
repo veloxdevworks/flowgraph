@@ -167,6 +167,11 @@ export interface ServerConfig {
    */
   shutdownTimeoutMs?: number;
   /**
+   * How long shutdown waits for each pool or store to close (a stuck
+   * connection must not hold the process), in ms. Default 5000.
+   */
+  closeTimeoutMs?: number;
+  /**
    * Hosts that http and webhook nodes in graphs from untrusted authors may reach
    * even though they resolve to non-public addresses (`host`, `host:port`,
    * `*.domain`). Cloud metadata and link-local addresses stay blocked.

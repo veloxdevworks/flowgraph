@@ -75,6 +75,8 @@ const SERVER_MEMORY_HINT =
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 /** How long aborted runs get to settle before pools are closed anyway. */
 const SHUTDOWN_ABORT_GRACE_MS = 2_000;
+/** Per pool or store, how long shutdown waits for it to close. */
+const SHUTDOWN_CLOSE_TIMEOUT_MS = 5_000;
 
 export class RunService {
   readonly registry: SessionRegistry;
@@ -172,7 +174,26 @@ export class RunService {
         log("warn", "shutdown.unsettled", { pending: this.inFlight.size });
       }
     }
-    for (const c of this.closers.splice(0).reverse()) await c();
+    const closeMs = this.config.closeTimeoutMs ?? SHUTDOWN_CLOSE_TIMEOUT_MS;
+    for (const c of this.closers.splice(0).reverse()) {
+      let timer: NodeJS.Timeout | undefined;
+      const outcome = await Promise.race([
+        Promise.resolve()
+          .then(c)
+          .then(
+            () => "closed" as const,
+            (err: unknown) => {
+              log("warn", "shutdown.close_failed", errorFields(err));
+              return "failed" as const;
+            },
+          ),
+        new Promise<"timeout">((r) => {
+          timer = setTimeout(() => r("timeout"), closeMs);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (outcome === "timeout") log("warn", "shutdown.close_timeout", { timeoutMs: closeMs });
+    }
   }
 
   /** True when everything in flight (including work started meanwhile) settled within `ms`. */

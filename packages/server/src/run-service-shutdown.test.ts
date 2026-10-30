@@ -102,6 +102,23 @@ describe("RunService.close", () => {
     expect(unhandled).toEqual([]);
   });
 
+  it("does not wait forever for a pool that never closes, and still closes the rest", async () => {
+    const s = await service({ closeTimeoutMs: 100 });
+    let closed = 0;
+    const closers = (s as unknown as { closers: Array<() => Promise<void>> }).closers;
+    closers.push(async () => {
+      closed++;
+    });
+    closers.push(() => new Promise<void>(() => {}));
+    closers.push(async () => {
+      throw new Error("close failed");
+    });
+    const t0 = Date.now();
+    await s.close();
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(closed).toBe(1);
+  });
+
   it("does not leave a running placeholder when the graph fails to compile", async () => {
     const s = await service();
     // Durable memory is not configured, so compiling a graph that needs it fails.
