@@ -54,22 +54,73 @@ describe("sqlite memory backend", () => {
     a.close();
     const b = await backend(p);
     const tables = (b.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`).all() as Array<{ name: string }>).map((r) => r.name);
-    expect(tables).toEqual(expect.arrayContaining(["fg_memory_items", "fg_memory_ops", "fg_threads", "fg_schema_migrations", "fg_meta"]));
-    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 2 });
+    expect(tables).toEqual(expect.arrayContaining(["fg_memory_items", "fg_memory_ops", "fg_memory_threads", "fg_schema_migrations", "fg_memory_meta"]));
+    expect(tables).not.toContain("fg_threads");
+    expect(tables).not.toContain("fg_meta");
+    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 3 });
     expect(b.db.pragma("busy_timeout", { simple: true })).toBe(5000);
   });
 
-  it("migration 2 adds the op fingerprint column to an existing v1 database", async () => {
+  /** Roll a migrated file back to the v1 shape. */
+  function rollBackToV1(db: SqliteBackend["db"]): void {
+    db.exec(`
+      DROP INDEX fg_memory_subject_keys;
+      CREATE INDEX fg_memory_subject_recent ON fg_memory_items (org, project, subject_type, updated_at DESC) WHERE subject_type <> '';
+      ALTER TABLE fg_memory_threads RENAME TO fg_threads;
+      ALTER TABLE fg_memory_meta RENAME TO fg_meta;
+      ALTER TABLE fg_memory_ops DROP COLUMN fingerprint;
+      DELETE FROM fg_schema_migrations WHERE component = 'memory' AND version > 1;
+    `);
+  }
+
+  it("migrations 2 and 3 upgrade an existing v1 database and keep its data", async () => {
     const p = tmpDb();
     const a = await backend(p);
-    // Roll the file back to the v1 shape, with an op row written before fingerprints existed.
-    a.db.exec(`ALTER TABLE fg_memory_ops DROP COLUMN fingerprint`);
-    a.db.prepare(`DELETE FROM fg_schema_migrations WHERE component='memory' AND version=2`).run();
+    const t = { org: "acme", project: "p", graph: "g", usr: "", subjectType: "", subjectKey: "" };
+    await a.memory.write({ kind: "put", tuple: t, key: "k", value: { v: 1 }, limits: MEMORY_DEFAULT_LIMITS });
+    await a.memory.bindThread({ threadId: "t-old", org: "acme", project: "p", graph: "g", usr: "", subjectType: "", subjectKey: "" });
+    rollBackToV1(a.db);
     a.close();
     const b = await backend(p);
     const cols = (b.db.prepare(`PRAGMA table_info(fg_memory_ops)`).all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols).toContain("fingerprint");
-    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 2 });
+    expect(b.db.prepare(`SELECT COUNT(*) AS n FROM fg_schema_migrations WHERE component='memory'`).get()).toEqual({ n: 3 });
+    expect((await b.memory.get(t, "k"))?.value).toEqual({ v: 1 });
+    expect((await b.memory.getThread("t-old"))?.graph).toBe("g");
+    const indexes = (b.db.prepare(`SELECT name FROM sqlite_master WHERE type='index'`).all() as Array<{ name: string }>).map((r) => r.name);
+    expect(indexes).toContain("fg_memory_subject_keys");
+    expect(indexes).not.toContain("fg_memory_subject_recent");
+  });
+
+  it("the subject cap and cross-subject search use the covering subject index", async () => {
+    const b = await backend(tmpDb());
+    const plan = (sql: string, ...params: unknown[]) =>
+      (b.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>).map((r) => r.detail).join("\n");
+    const cap = plan(
+      `SELECT subject_key AS k, MAX(updated_at) AS last FROM fg_memory_items
+       WHERE org = ? AND project = ? AND subject_type = ? AND subject_type <> ''
+         AND subject_key <> ? AND (expires_at IS NULL OR expires_at > ?)
+       GROUP BY subject_key ORDER BY last DESC, k DESC LIMIT -1 OFFSET ?`,
+      "o", "p", "t", "k", 0, 1,
+    );
+    expect(cap).toMatch(/COVERING INDEX fg_memory_subject_keys/);
+    // Untagged cross-subject search: subjects from the covering index, then
+    // rows of the chosen subjects only.
+    const db = b.db;
+    const prepare = db.prepare.bind(db);
+    let similarPlan = "";
+    db.prepare = ((sql: string) => {
+      if (sql.startsWith("WITH s AS")) similarPlan = plan(sql, "o", "p", "t", "", 0, 5, "o", "p", "t", "", 0, 2);
+      return prepare(sql);
+    }) as typeof db.prepare;
+    try {
+      await b.memory.similarSubjects({ org: "o", project: "p", subjectType: "t", limit: 5, perSubject: 2 });
+    } finally {
+      db.prepare = prepare as typeof db.prepare;
+    }
+    expect(similarPlan).toMatch(/SEARCH f USING COVERING INDEX fg_memory_subject_keys/);
+    expect(similarPlan).toMatch(/SEARCH i USING INDEX fg_memory_subject_keys \(.*subject_key=\?\)/);
+    expect(similarPlan).not.toMatch(/SCAN (f|i|fg_memory_items)\b/);
   });
 
   it("refuses a database migrated by a newer flowgraph", async () => {

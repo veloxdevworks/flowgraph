@@ -87,6 +87,18 @@ CREATE TABLE fg_meta (
     version: 2,
     sql: `ALTER TABLE fg_memory_ops ADD COLUMN fingerprint TEXT;`,
   },
+  {
+    // Covering index for the per-type subject cap and cross-subject search
+    // (group by subject without reading rows); memory-specific table names.
+    version: 3,
+    sql: `
+CREATE INDEX fg_memory_subject_keys
+  ON fg_memory_items (org, project, subject_type, subject_key, updated_at, expires_at, key) WHERE subject_type <> '';
+DROP INDEX fg_memory_subject_recent;
+ALTER TABLE fg_threads RENAME TO fg_memory_threads;
+ALTER TABLE fg_meta RENAME TO fg_memory_meta;
+`,
+  },
 ];
 
 /** Apply pending migrations in one IMMEDIATE transaction. Forward-only. */
@@ -192,18 +204,18 @@ class SqliteMemoryTable implements MemoryTable {
       touchSubject: p(`UPDATE fg_memory_items SET expires_at = ?
         WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ? AND subject_key = ?`),
       oldestSubjects: p(`SELECT subject_key AS k, MAX(updated_at) AS last FROM fg_memory_items
-        WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ? AND subject_type <> ''
+        WHERE org = ? AND project = ? AND subject_type = ? AND subject_type <> ''
           AND subject_key <> ? AND ${LIVE}
         GROUP BY subject_key ORDER BY last DESC, k DESC LIMIT -1 OFFSET ?`),
       removeSubject: p(`DELETE FROM fg_memory_items
         WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ? AND subject_key = ?`),
       opGet: p(`SELECT version, value, fingerprint FROM fg_memory_ops WHERE op_id = ?`),
       opPut: p(`INSERT OR REPLACE INTO fg_memory_ops (op_id, version, value, applied_at, fingerprint) VALUES (?, ?, ?, ?, ?)`),
-      putThread: p(`INSERT INTO fg_threads
+      putThread: p(`INSERT INTO fg_memory_threads
         (thread_id, org, project, graph, usr, subject_type, subject_key, principal_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (thread_id) DO NOTHING`),
-      getThread: p(`SELECT * FROM fg_threads WHERE thread_id = ?`),
+      getThread: p(`SELECT * FROM fg_memory_threads WHERE thread_id = ?`),
       sweepItems: p(`DELETE FROM fg_memory_items WHERE expires_at IS NOT NULL AND expires_at <= ?`),
       sweepOps: p(`DELETE FROM fg_memory_ops WHERE applied_at < ?`),
     };
@@ -242,41 +254,56 @@ class SqliteMemoryTable implements MemoryTable {
     return (this.s["list"]!.all(...tp(t), now, pfx, pfx, pfx, limit ?? -1) as RawRow[]).map(fromRaw);
   }
   similar(q: MemorySimilarQuery & { now: number }) {
-    const conds: string[] = [];
-    const params: unknown[] = [q.org, q.project, q.subjectType, q.excludeSubjectKey ?? "", q.now];
-    if (q.prefix !== undefined) {
-      conds.push("substr(key, 1, length(?)) = ?");
-      params.push(q.prefix, q.prefix);
-    }
-    for (const [k, v] of Object.entries(q.attrs ?? {})) {
-      const path = `$."${k}"`;
-      if (v === null) {
-        conds.push("json_type(attrs, ?) = 'null'");
-        params.push(path);
-      } else if (typeof v === "boolean") {
-        conds.push(`json_type(attrs, ?) = '${v ? "true" : "false"}'`);
-        params.push(path);
-      } else if (typeof v === "number") {
-        conds.push("json_type(attrs, ?) IN ('integer', 'real') AND json_extract(attrs, ?) = ?");
-        params.push(path, path, v);
-      } else {
-        conds.push("json_type(attrs, ?) = 'text' AND json_extract(attrs, ?) = ?");
-        params.push(path, path, String(v));
+    // Filter on one table alias; the same filter (and params) is used twice.
+    const filter = (a: string): { sql: string; params: unknown[] } => {
+      const conds = [
+        // Subject rows always have graph = '' and usr = '' (table CHECK), so
+        // those terms are left out and the covering subject index is used.
+        `${a}.org = ?`, `${a}.project = ?`, `${a}.subject_type = ?`,
+        `${a}.subject_type <> ''`, `${a}.subject_key <> ''`, `${a}.subject_key <> ?`,
+        `(${a}.expires_at IS NULL OR ${a}.expires_at > ?)`,
+      ];
+      const params: unknown[] = [q.org, q.project, q.subjectType, q.excludeSubjectKey ?? "", q.now];
+      if (q.prefix !== undefined) {
+        conds.push(`substr(${a}.key, 1, length(?)) = ?`);
+        params.push(q.prefix, q.prefix);
       }
-    }
-    const sql = `WITH m AS (
-        SELECT *,
-          ROW_NUMBER() OVER (PARTITION BY subject_key ORDER BY updated_at DESC, id DESC) AS rn,
-          MAX(updated_at) OVER (PARTITION BY subject_key) AS last
-        FROM fg_memory_items
-        WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ?
-          AND subject_key <> '' AND subject_key <> ? AND ${LIVE}${conds.map((c) => ` AND ${c}`).join("")}
+      for (const [k, v] of Object.entries(q.attrs ?? {})) {
+        const path = `$."${k}"`;
+        if (v === null) {
+          conds.push(`json_type(${a}.attrs, ?) = 'null'`);
+          params.push(path);
+        } else if (typeof v === "boolean") {
+          conds.push(`json_type(${a}.attrs, ?) = '${v ? "true" : "false"}'`);
+          params.push(path);
+        } else if (typeof v === "number") {
+          conds.push(`json_type(${a}.attrs, ?) IN ('integer', 'real') AND json_extract(${a}.attrs, ?) = ?`);
+          params.push(path, path, v);
+        } else {
+          conds.push(`json_type(${a}.attrs, ?) = 'text' AND json_extract(${a}.attrs, ?) = ?`);
+          params.push(path, path, String(v));
+        }
+      }
+      return { sql: conds.join(" AND "), params };
+    };
+    // Pick the subjects first (grouped over the covering subject index when
+    // there is no attrs filter), then rank rows of those subjects only.
+    // CROSS JOIN keeps s as the outer loop in sqlite.
+    const fs = filter("f");
+    const fi = filter("i");
+    const sql = `WITH s AS (
+        SELECT f.subject_key AS sk, MAX(f.updated_at) AS last FROM fg_memory_items f
+        WHERE ${fs.sql}
+        GROUP BY f.subject_key ORDER BY last DESC, sk ASC LIMIT ?
       ),
-      s AS (SELECT DISTINCT subject_key AS sk, last FROM m ORDER BY last DESC, sk ASC LIMIT ?)
-      SELECT m.* FROM m JOIN s ON m.subject_key = s.sk
-      WHERE m.rn <= ?
-      ORDER BY s.last DESC, s.sk ASC, m.rn ASC`;
-    params.push(q.limit, q.perSubject);
+      m AS (
+        SELECT i.*, s.last AS last,
+          ROW_NUMBER() OVER (PARTITION BY i.subject_key ORDER BY i.updated_at DESC, i.id DESC) AS rn
+        FROM s CROSS JOIN fg_memory_items i
+        WHERE i.subject_key = s.sk AND ${fi.sql}
+      )
+      SELECT * FROM m WHERE rn <= ? ORDER BY last DESC, subject_key ASC, rn ASC`;
+    const params = [...fs.params, q.limit, ...fi.params, q.perSubject];
     let stmt = this.similarCache.get(sql);
     if (!stmt) {
       stmt = this.db.prepare(sql);
@@ -359,13 +386,13 @@ export function createSqliteMemoryBackend(db: SqliteDatabase): SqliteMemoryBacke
 /** Sweep expired rows when the last sweep is older than `intervalMs`. */
 export async function maybeSweep(backend: SqliteMemoryBackend, intervalMs: number, now = Date.now()): Promise<number> {
   const db = backend.db;
-  const last = db.prepare(`SELECT value FROM fg_meta WHERE key = 'memory.last_sweep'`).get() as
+  const last = db.prepare(`SELECT value FROM fg_memory_meta WHERE key = 'memory.last_sweep'`).get() as
     | { value: string }
     | undefined;
   if (last && now - Number(last.value) < intervalMs) return 0;
   const n = await backend.sweep(now);
   db.prepare(
-    `INSERT INTO fg_meta (key, value) VALUES ('memory.last_sweep', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+    `INSERT INTO fg_memory_meta (key, value) VALUES ('memory.last_sweep', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
   ).run(String(now));
   return n;
 }
