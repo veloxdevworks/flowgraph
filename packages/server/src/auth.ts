@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 export type AuthResult = { ok: true } | { ok: false; status: number; message: string };
@@ -25,10 +26,17 @@ export function checkBearerAuth(
     return { ok: false, status: 401, message: "Missing Authorization header" };
   }
   const m = /^Bearer\s+(.+)$/i.exec(header);
-  if (!m?.[1] || m[1] !== opts.authToken) {
+  if (!m?.[1] || !tokensEqual(m[1], opts.authToken)) {
     return { ok: false, status: 401, message: "Invalid bearer token" };
   }
   return { ok: true };
+}
+
+/** Constant-time token comparison (hash first so lengths always match). */
+export function tokensEqual(a: string, b: string): boolean {
+  const ha = createHash("sha256").update(a, "utf8").digest();
+  const hb = createHash("sha256").update(b, "utf8").digest();
+  return timingSafeEqual(ha, hb);
 }
 
 /** AgentCore `/invocations` and `/ping` skip bearer auth (AWS SigV4 at the edge). */

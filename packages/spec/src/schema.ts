@@ -973,8 +973,8 @@ export const RuntimeSchema = z.object({
       /** Default 127.0.0.1. */
       host: z.string().optional(),
       /**
-       * Shared secret. When set, inbound POST must send
-       * `Authorization: Bearer <token>` or `X-Flowgraph-Token: <token>`.
+       * Shared secret for this graph's webhook routes. When set, inbound GET/POST
+       * must send `Authorization: Bearer <token>` or `X-Flowgraph-Token: <token>`.
        */
       token: z.string().optional(),
     })
