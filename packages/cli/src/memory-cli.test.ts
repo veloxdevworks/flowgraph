@@ -4,7 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import pg from "pg";
 import { openSqliteBackend } from "@flowgraph/checkpoint-sqlite";
+import { openPostgresBackend } from "@flowgraph/checkpoint-postgres";
+
+const PG_URL = process.env["FLOWGRAPH_TEST_POSTGRES_URL"];
 
 const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist/bin.js");
 const dirs: string[] = [];
@@ -20,10 +25,14 @@ function project(graph: string): string {
 }
 
 function cli(cwd: string, ...args: string[]) {
+  return cliEnv(cwd, {}, ...args);
+}
+
+function cliEnv(cwd: string, env: Record<string, string | undefined>, ...args: string[]) {
   const r = spawnSync(process.execPath, [bin, ...args], {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, FLOWGRAPH_ORG: "acme", FLOWGRAPH_PROJECT: "acme/web", FLOWGRAPH_USER: "dev@acme.test", NO_COLOR: "1" },
+    env: { ...process.env, FLOWGRAPH_ORG: "acme", FLOWGRAPH_PROJECT: "acme/web", FLOWGRAPH_USER: "dev@acme.test", NO_COLOR: "1", ...env },
     timeout: 60_000,
   });
   return { code: r.status, out: `${r.stdout}\n${r.stderr}` };
@@ -70,15 +79,42 @@ describe("flowgraph CLI memory", () => {
     }
   }, 120_000);
 
-  it("validate and run reject memory on a backend the CLI cannot store it in", () => {
+  it("accepts runtime.memory on a postgres checkpointer and asks for a connection string", () => {
     const d = project(counter("postgres"));
-    const v = cli(d, "validate", "g.graph.yaml");
-    expect(v.code).not.toBe(0);
-    expect(v.out).toMatch(/MEMORY_BACKEND_UNAVAILABLE/);
-    const r = cli(d, "run", "g.graph.yaml");
-    expect(r.code).toBe(2);
-    expect(r.out).toMatch(/cannot store runtime\.memory in a postgres checkpointer/);
+    const noDb = { DATABASE_URL: undefined, FLOWGRAPH_DATABASE_URL: undefined };
+    const v = cliEnv(d, noDb, "validate", "g.graph.yaml");
+    expect(v.out).not.toMatch(/MEMORY_BACKEND_UNAVAILABLE/);
+    const r = cliEnv(d, noDb, "run", "g.graph.yaml");
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/no connection string was set/);
   }, 60_000);
+
+  it.skipIf(!PG_URL)("runtime.memory on postgres persists across separate CLI processes", async () => {
+    // A throwaway database: the CLI keeps checkpoints and memory in its public schema.
+    const name = `fgt_cli_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const admin = new pg.Client({ connectionString: PG_URL });
+    await admin.connect();
+    await admin.query(`CREATE DATABASE ${name}`);
+    const url = new URL(PG_URL!);
+    url.pathname = `/${name}`;
+    try {
+      const d = project(counter("postgres"));
+      for (let i = 0; i < 3; i++) {
+        const r = cliEnv(d, { DATABASE_URL: url.toString() }, "run", "g.graph.yaml");
+        expect(r.code, r.out).toBe(0);
+      }
+      const b = await openPostgresBackend(url.toString());
+      try {
+        const t = { org: "acme", project: "acme/web", graph: "", usr: "", subjectType: "", subjectKey: "" };
+        expect((await b.memory.get(t, "deploys"))?.value).toEqual({ n: 3 });
+      } finally {
+        await b.close();
+      }
+    } finally {
+      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      await admin.end();
+    }
+  }, 120_000);
 
   it("validate flags runtime.memory without a durable checkpointer", () => {
     const d = project(counter("memory"));

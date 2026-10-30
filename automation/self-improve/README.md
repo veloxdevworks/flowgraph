@@ -50,6 +50,7 @@ pnpm --filter self-improve-automation test
 ```
 
 Uses scripted `planner` / `coder` providers and `SELF_IMPROVE_DRY_RUN=1` — no API keys.
+The one live-preflight test writes its run log to a temp file via `SELF_IMPROVE_STATE_PATH`, so tests never change `STATE.md`.
 
 ## Guardrails
 

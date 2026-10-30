@@ -8,6 +8,11 @@ import { registerFunction } from "@flowgraph/core";
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTOMATION_ROOT = __dirname;
+
+/** The run log. SELF_IMPROVE_STATE_PATH points it elsewhere (tests use a temp file). */
+function statePath(): string {
+  return process.env["SELF_IMPROVE_STATE_PATH"]?.trim() || path.join(AUTOMATION_ROOT, "STATE.md");
+}
 const REPO_ROOT = path.resolve(__dirname, "../..");
 
 function isDryRun(): boolean {
@@ -169,7 +174,7 @@ registerFunction("loadContext", async () => {
     };
   }
 
-  const stateMd = readText(path.join(AUTOMATION_ROOT, "STATE.md"), 8000);
+  const stateMd = readText(statePath(), 8000);
   const statusMd = readText(path.join(REPO_ROOT, "docs/IMPLEMENTATION_STATUS.md"), 8000);
   const guardrails = readText(path.join(AUTOMATION_ROOT, "GUARDRAILS.md"), 8000);
 
@@ -414,9 +419,8 @@ registerFunction("recordOutcome", (input) => {
     `| ${new Date().toISOString()} | ${status} | ${plan.title ?? "—"} | ${reason.slice(0, 120)} | ${pr.prUrl || "—"} |`,
   ].join("");
 
-  const statePath = path.join(AUTOMATION_ROOT, "STATE.md");
   if (!isDryRun()) {
-    fs.appendFileSync(statePath, `${line}\n`, "utf8");
+    fs.appendFileSync(statePath(), `${line}\n`, "utf8");
   }
 
   return { recorded: true, line, status, reason };

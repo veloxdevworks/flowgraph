@@ -31,10 +31,19 @@
     "@flowgraph/workshop-session": "workspace:*",
     "yaml": "^2.9.0"
   },
+  "peerDependencies": {
+    "@flowgraph/checkpoint-sqlite": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@flowgraph/checkpoint-sqlite": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^26.0.1",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "@flowgraph/checkpoint-sqlite": "workspace:*"
   }
 }

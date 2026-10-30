@@ -64,6 +64,18 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 | `FLOWGRAPH_GIT_SHA` | _(unset)_ | Optional build identity included on `/` and `/healthz`. |
 | `FLOWGRAPH_GRAPH_STORE` | `/tmp/flowgraph-graphs` | Uploaded YAML + `{threadId}.events.jsonl`. **Do not use `/tmp` on a lab host** — it is wiped on reboot. |
 
+## Memory
+
+Graphs that declare `runtime.memory` need a durable memory backend; on the default backend they fail with an error that names `FLOWGRAPH_MEMORY_BACKEND`. The server is optional: the `flowgraph` CLI keeps memory locally and never needs it or these variables. See [docs/05-state-and-data.md §8](../../docs/05-state-and-data.md#8-long-term-memory-runtimememory).
+
+| Env | Default | Purpose |
+|---|---|---|
+| `FLOWGRAPH_MEMORY_BACKEND` | `memory` | `memory` (process-local; `runtime.memory` graphs fail to compile) \| `postgres` (the `DATABASE_URL` database, same pool as checkpoints; behind PgBouncer use session mode, not transaction mode) \| `sqlite` (local file; install `@flowgraph/checkpoint-sqlite`) |
+| `FLOWGRAPH_MEMORY_SQLITE_PATH` | `<FLOWGRAPH_GRAPH_STORE>/memory.db` | sqlite memory file. Per replica: with several replicas use `postgres`, or memory splits between them |
+| `FLOWGRAPH_ORG` | _(required for `postgres` / `sqlite`)_ | The org every run on this server writes memory as. With a durable backend and no `FLOWGRAPH_ORG` the server refuses to start |
+| `FLOWGRAPH_PROJECT` / `FLOWGRAPH_USER` | `local` / _(unset)_ | Project and user of that one identity |
+| `FLOWGRAPH_MEMORY_SWEEP_MS` | `3600000` | How often expired memory and old replay records are deleted (whole milliseconds, 1000 to 2147483647; anything else stops startup). On Postgres one replica sweeps per interval |
+
 ## Lab / self-host
 
 Point stdout at a file (launchd `StandardOutPath` / `StandardErrorPath`, or a redirect):

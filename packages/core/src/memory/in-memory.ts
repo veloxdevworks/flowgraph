@@ -105,13 +105,14 @@ class InMemoryTable implements MemoryTable {
       if (r.org === org && r.project === project && r.subjectType === type && r.subjectKey === key) r.expiresAt = expiresAt;
     }
   }
-  subjectsByAge(org: string, project: string, type: string, now: number) {
+  oldestSubjects(org: string, project: string, type: string, now: number, excludeKey: string, keepNewest: number) {
     const last = new Map<string, number>();
     for (const r of this.rows.values()) {
-      if (r.org !== org || r.project !== project || r.subjectType !== type || !live(r, now)) continue;
+      if (r.org !== org || r.project !== project || r.subjectType !== type || r.subjectKey === excludeKey || !live(r, now)) continue;
       last.set(r.subjectKey, Math.max(last.get(r.subjectKey) ?? 0, r.updatedAt));
     }
-    return [...last.entries()].sort((a, b) => a[1] - b[1]).map(([k]) => k);
+    const newestFirst = [...last.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0));
+    return newestFirst.slice(keepNewest).reverse().map(([k]) => k);
   }
   removeSubject(org: string, project: string, type: string, key: string) {
     let n = 0;

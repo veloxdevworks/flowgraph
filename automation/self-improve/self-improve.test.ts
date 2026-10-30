@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import {
@@ -151,19 +152,30 @@ describe("self-improve automation", () => {
   });
 
   it("records runtime-failed when CURSOR_API_KEY is missing (live preflight)", async () => {
+    // A live run appends to the run log; keep it out of the tracked STATE.md.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "self-improve-"));
+    const tmpState = path.join(tmp, "STATE.md");
+    const trackedState = path.join(__dirname, "STATE.md");
+    const trackedBefore = fs.readFileSync(trackedState, "utf8");
     const { graph, restore } = await compileWithEnv({
       SELF_IMPROVE_DRY_RUN: undefined,
       CURSOR_API_KEY: undefined,
+      SELF_IMPROVE_STATE_PATH: tmpState,
     });
     try {
       const result = await graph.run({ threadId: "si-runtime", onInterrupt: "fail" });
       expect(result.status).toBe("completed");
       expect((result.state["outcome"] as { status: string }).status).toBe("runtime-failed");
       expect(reviewApprovals).toBe(0);
+      expect(fs.readFileSync(tmpState, "utf8")).toMatch(/\| runtime-failed \|/);
+      expect(fs.readFileSync(trackedState, "utf8")).toBe(trackedBefore);
     } finally {
       restore();
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
-  });
+    // The live preflight spawns pnpm, git and gh (gh auth status may reach the
+    // network), which can take several seconds on a loaded CI runner.
+  }, 30_000);
 
   it("opens a PR on the happy path", async () => {
     const { graph, restore } = await compileWithEnv({ SELF_IMPROVE_TEST_OPEN_PR: "1" });

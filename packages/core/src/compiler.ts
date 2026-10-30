@@ -88,6 +88,13 @@ export interface CompileOptions {
    * graph still sees only its own keys. Does not enable `ctx.memory`.
    */
   legacyStoreBackend?: MemoryBackend;
+  /**
+   * How to get durable memory on this host, shown in the
+   * MEMORY_BACKEND_UNAVAILABLE error instead of the CLI/library advice when a
+   * graph needs memory and no backend was passed (the server points at its
+   * FLOWGRAPH_MEMORY_BACKEND setting).
+   */
+  memoryUnavailableHint?: string;
   extraFactories?: NodeFactory[];
   providers?: ProviderAdapter[];
   interruptBefore?: string[];
@@ -1197,15 +1204,18 @@ export interface MemoryHostOptions {
   identity?: MemoryIdentity | undefined;
 }
 
-function memoryUnavailable(what: string, checkpoint: string | undefined): MemoryError {
+function memoryUnavailable(what: string, checkpoint: string | undefined, hostHint?: string): MemoryError {
   const tail =
     `Silent in-memory fallback is not allowed — use runtime.memory.backend: memory for an ephemeral store in tests.`;
+  if (hostHint) {
+    return new MemoryError("MEMORY_BACKEND_UNAVAILABLE", `${what} needs a durable memory backend, and this host has none configured. ${hostHint} ${tail}`);
+  }
   if (checkpoint === "sqlite" || checkpoint === "postgres") {
     // The graph already has a durable checkpointer; what's missing is a host-provided memory backend.
     const hint =
       checkpoint === "postgres"
-        ? `Postgres memory is not available yet (the flowgraph CLI stores memory only in sqlite checkpoint databases); ` +
-          `pass CompileOptions.memory with a postgres-capable backend, or use runtime.checkpoint.backend: sqlite. `
+        ? `Run it with the flowgraph CLI (memory then lives in the checkpoint database), or pass CompileOptions.memory ` +
+          `(e.g. openPostgresBackend(url).memory from @flowgraph/checkpoint-postgres). `
         : `Run it with the flowgraph CLI (memory then lives in the checkpoint database), or pass CompileOptions.memory ` +
           `(e.g. openSqliteBackend(path).memory from @flowgraph/checkpoint-sqlite). `;
     return new MemoryError(
@@ -1282,7 +1292,7 @@ function resolveMemory(
       } else {
         const ck = spec.runtime?.checkpoint;
         const ckBackend = ck && ck.enabled !== false ? (ck.backend ?? "memory") : undefined;
-        throw memoryUnavailable(memCfg ? "runtime.memory" : `runtime.store.backend "${storeBackend}"`, ckBackend);
+        throw memoryUnavailable(memCfg ? "runtime.memory" : `runtime.store.backend "${storeBackend}"`, ckBackend, opts.memoryUnavailableHint);
       }
     } else if (opts.legacyStoreBackend && !exposeMemory) {
       runtime = new MemoryRuntime({

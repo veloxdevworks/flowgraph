@@ -309,3 +309,50 @@ describe("memory validation", () => {
     expect(memoryHostDiagnostics(fnGraph("v", "mtExpose"), { memoryBackends: ["sqlite"], hostName: "x" })).toEqual([]);
   });
 });
+
+describe("startMemorySweeper", () => {
+  it("sweeps on demand with the op retention it was given, and never overlaps", async () => {
+    const { createInMemoryMemoryBackend, startMemorySweeper, MEMORY_DEFAULT_LIMITS: limits } = await import("../index.js");
+    const b = createInMemoryMemoryBackend();
+    const t = { org: "acme", project: "p", graph: "g", usr: "", subjectType: "", subjectKey: "" };
+    await b.write({ kind: "put", tuple: t, key: "gone", value: 1, ttlMs: 1, limits, now: 0 });
+    await b.write({ kind: "put", tuple: t, key: "op", value: 1, opId: "o-1", limits, now: 0 });
+    const counts: number[] = [];
+    const s = startMemorySweeper(b, { intervalMs: 60_000, opsRetentionMs: 0, onSweep: (n) => counts.push(n) });
+    const [a, c] = [s.sweepNow(), s.sweepNow()];
+    expect(a).toBe(c);
+    expect(await a).toBe(1);
+    s.stop();
+    expect(counts).toEqual([1]);
+    // The op record was swept (retention 0), so the same op id applies again.
+    expect((await b.write({ kind: "put", tuple: t, key: "op", value: 1, opId: "o-1", limits })).deduped).toBe(false);
+  });
+
+  it("refuses intervals a Node timer cannot honor, so a sweep never busy-loops", async () => {
+    const { createInMemoryMemoryBackend, startMemorySweeper, MEMORY_SWEEP_MAX_INTERVAL_MS } = await import("../index.js");
+    expect(MEMORY_SWEEP_MAX_INTERVAL_MS).toBe(2 ** 31 - 1);
+    const b = createInMemoryMemoryBackend();
+    for (const intervalMs of [2 ** 31, 1e12, Number.POSITIVE_INFINITY, Number.NaN]) {
+      expect(() => startMemorySweeper(b, { intervalMs }), String(intervalMs)).toThrow(/intervalMs must be a finite number of milliseconds up to 2147483647/);
+    }
+    // The maximum is accepted and does not fire early.
+    let calls = 0;
+    const s = startMemorySweeper(b, { intervalMs: MEMORY_SWEEP_MAX_INTERVAL_MS, sweep: async () => (calls++, 0) });
+    await new Promise((r) => setTimeout(r, 50));
+    s.stop();
+    expect(calls).toBe(0);
+  });
+
+  it("a custom sweep replaces backend.sweep", async () => {
+    const { createInMemoryMemoryBackend, startMemorySweeper } = await import("../index.js");
+    const b = createInMemoryMemoryBackend();
+    const calls: number[] = [];
+    b.sweep = async () => {
+      throw new Error("backend.sweep should not run");
+    };
+    const s = startMemorySweeper(b, { intervalMs: 60_000, sweep: async (now) => (calls.push(now), 7) });
+    expect(await s.sweepNow()).toBe(7);
+    s.stop();
+    expect(calls).toHaveLength(1);
+  });
+});

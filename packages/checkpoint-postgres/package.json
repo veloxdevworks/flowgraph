@@ -1,7 +1,7 @@
 {
   "name": "@flowgraph/checkpoint-postgres",
   "version": "0.1.0",
-  "description": "Durable Postgres checkpointer for flowgraph",
+  "description": "Durable Postgres checkpointer and scoped-memory backend for flowgraph",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,10 +20,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@langchain/langgraph-checkpoint-postgres": "^1.0.0"
+    "@langchain/langgraph-checkpoint-postgres": "^1.0.0",
+    "pg": "^8.12.0"
   },
   "peerDependencies": {
-    "@langchain/langgraph": "^1.4.7"
+    "@langchain/langgraph": "^1.4.7",
+    "@flowgraph/core": "workspace:^"
   },
   "devDependencies": {
     "@flowgraph/core": "workspace:*",
@@ -31,6 +33,8 @@
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "@flowgraph/testing": "workspace:*",
+    "@types/pg": "^8.11.0"
   }
 }

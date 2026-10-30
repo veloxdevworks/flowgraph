@@ -1,0 +1,5 @@
+---
+"@flowgraph/core": minor
+---
+
+New `startMemorySweeper(backend, { intervalMs, opsRetentionMs })` deletes expired memory and old replay records on a timer, and `MemoryBackend.sweep(now, { opsRetentionMs })` takes the replay-record retention (default 30 days). `AsyncEngineMemoryBackend` and `applyMemoryWriteAsync` run the shared write engine over promise-based tables, for network databases. The per-type subject cap now evicts every subject beyond the cap, oldest first, instead of one at a time. The missing-memory-backend compile error for a postgres checkpointer now points to `openPostgresBackend`, and hosts can replace that advice with `CompileOptions.memoryUnavailableHint`. Memory refuses NUL (U+0000) and lone UTF-16 surrogates in keys, values, attrs, scope fields, op ids, writer fields and query filters with the new `MEMORY_NUL_CHARACTER` and `MEMORY_LONE_SURROGATE` codes, the same on every backend (Postgres can store neither). `startMemorySweeper` takes an optional `sweep` function, and throws for an interval above `MEMORY_SWEEP_MAX_INTERVAL_MS` (2³¹−1 ms), which a Node timer would run every millisecond.

@@ -11,14 +11,23 @@ export {
 } from "./scope.js";
 export {
   applyMemoryWrite,
+  applyMemoryWriteAsync,
   EngineMemoryBackend,
+  AsyncEngineMemoryBackend,
+  startMemorySweeper,
+  MEMORY_SWEEP_MAX_INTERVAL_MS,
   containsSecret,
   matchesAttrs,
   normalizeSimilarQuery,
   groupSimilar,
   validateMemoryKey,
+  assertStorableText,
   MEMORY_OP_RETENTION_MS,
   type MemoryTable,
+  type AsyncMemoryTable,
+  type AsyncMemoryWriteTable,
+  type MemorySweeper,
+  type MemorySweeperOptions,
 } from "./engine.js";
 export { createInMemoryMemoryBackend, type InMemoryMemoryBackendOptions } from "./in-memory.js";
 export {

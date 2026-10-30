@@ -3,16 +3,20 @@ import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph";
 import {
   compileGraph,
   createInMemoryMemoryBackend,
+  startMemorySweeper,
   resolveAndValidateInput,
   isInputValidationError,
   readRunIssues,
   type CompiledGraph,
   type FlowgraphEvent,
   type MemoryBackend,
+  type MemoryIdentity,
+  type MemorySweeper,
   type RunIssue,
   type RunResult,
+  MEMORY_SWEEP_MAX_INTERVAL_MS,
 } from "@flowgraph/core";
-import { createPostgresCheckpointer } from "@flowgraph/checkpoint-postgres";
+import { createPostgresCheckpointer, maybeSweepPostgres, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
 import type { GraphSpec } from "@flowgraph/spec";
 import { rejectClientSecrets, applyServerCredentials } from "./credentials.js";
 import { parseGraphYaml, persistGraph, loadPersistedGraph, updateGraphMeta, listPersistedGraphs, appendEventJournal, loadEventJournal } from "./graph-source.js";
@@ -33,6 +37,21 @@ import type {
 
 import { TooManyRunsError } from "./errors.js";
 
+/** sqlite memory is optional: the package is loaded only when configured. */
+async function loadSqlite(): Promise<typeof import("@flowgraph/checkpoint-sqlite")> {
+  try {
+    return await import("@flowgraph/checkpoint-sqlite");
+  } catch (err) {
+    throw new Error(
+      `FLOWGRAPH_MEMORY_BACKEND=sqlite needs @flowgraph/checkpoint-sqlite: pnpm add @flowgraph/checkpoint-sqlite (${(err as Error).message})`,
+    );
+  }
+}
+
+const SERVER_MEMORY_HINT =
+  "Start the server with FLOWGRAPH_MEMORY_BACKEND=postgres (memory shares DATABASE_URL) or FLOWGRAPH_MEMORY_BACKEND=sqlite, " +
+  "plus FLOWGRAPH_ORG.";
+
 export class RunService {
   readonly registry: SessionRegistry;
   readonly metrics = createMetrics();
@@ -45,6 +64,10 @@ export class RunService {
    * graphs never see each other's keys; the backend caps total items.
    */
   private readonly legacyStoreBackend: MemoryBackend = createInMemoryMemoryBackend({ maxItems: 50_000 });
+  /** Durable memory for graphs that declare runtime.memory (config.memory.backend postgres | sqlite). */
+  private durableMemory: { backend: MemoryBackend; identity: MemoryIdentity } | undefined;
+  private sweeper: MemorySweeper | undefined;
+  private closers: Array<() => Promise<void> | void> = [];
 
   constructor(readonly config: ServerConfig) {
     this.registry = new SessionRegistry(config.eventBufferSize, {
@@ -56,13 +79,49 @@ export class RunService {
     applyServerCredentials({
       ...(config.awsRegion ? { awsRegion: config.awsRegion } : {}),
     });
+    const memBackend = config.memory?.backend ?? "memory";
+    const sweepMs = config.memory?.sweepIntervalMs;
+    if (sweepMs !== undefined && !(Number.isInteger(sweepMs) && sweepMs >= 1_000 && sweepMs <= MEMORY_SWEEP_MAX_INTERVAL_MS)) {
+      throw new Error(`memory.sweepIntervalMs must be a whole number of milliseconds from 1000 to ${MEMORY_SWEEP_MAX_INTERVAL_MS} (got ${sweepMs})`);
+    }
+    if (memBackend !== "memory" && !config.memory?.identity?.org?.trim()) {
+      throw new Error(
+        `FLOWGRAPH_MEMORY_BACKEND=${memBackend} needs FLOWGRAPH_ORG: durable memory on the server is owned by one org ` +
+          "(and FLOWGRAPH_PROJECT, default \"local\"). Set FLOWGRAPH_ORG, or unset FLOWGRAPH_MEMORY_BACKEND to keep " +
+          "process-local memory. Local use with the flowgraph CLI needs neither.",
+      );
+    }
   }
 
   async init(): Promise<void> {
     await this.getCheckpointer();
     log("info", "run-service ready", {
       database: this.config.databaseUrl ? "postgres" : "memory",
+      memory: this.config.memory?.backend ?? "memory",
       graphStoreDir: this.config.graphStoreDir,
+    });
+  }
+
+  /** Stop the memory sweeper and close durable memory / database pools. */
+  async close(): Promise<void> {
+    this.sweeper?.stop();
+    this.sweeper = undefined;
+    for (const c of this.closers.splice(0).reverse()) await c();
+  }
+
+  private memoryIdentity(): MemoryIdentity {
+    // The constructor refuses durable memory without an org.
+    const id = this.config.memory!.identity!;
+    return { org: id.org, project: id.project, ...(id.user ? { user: id.user } : {}) };
+  }
+
+  private useDurableMemory(backend: MemoryBackend, sweep?: (intervalMs: number, now: number) => Promise<number>): void {
+    this.durableMemory = { backend, identity: this.memoryIdentity() };
+    const intervalMs = this.config.memory?.sweepIntervalMs ?? 3_600_000;
+    this.sweeper = startMemorySweeper(backend, {
+      intervalMs,
+      ...(sweep ? { sweep: (now: number) => sweep(intervalMs, now) } : {}),
+      onError: (err) => log("warn", "memory sweep failed", errorFields(err)),
     });
   }
 
@@ -70,7 +129,30 @@ export class RunService {
     if (this.checkpointer) return this.checkpointer;
     if (!this.checkpointerPromise) {
       this.checkpointerPromise = (async () => {
+        const memBackend = this.config.memory?.backend ?? "memory";
+        if (memBackend === "postgres" && !this.config.databaseUrl) {
+          throw new Error("FLOWGRAPH_MEMORY_BACKEND=postgres needs DATABASE_URL (memory shares the checkpoint database)");
+        }
+        if (memBackend === "sqlite") {
+          const sqlite = await loadSqlite();
+          const file = this.config.memory?.sqlitePath ?? path.join(this.config.graphStoreDir, "memory.db");
+          const b = await sqlite.openSqliteBackend(file);
+          this.closers.push(() => b.close());
+          this.useDurableMemory(b.memory);
+        }
         if (this.config.databaseUrl) {
+          if (memBackend === "postgres") {
+            const pg = await openPostgresBackend({
+              connectionString: this.config.databaseUrl,
+              onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
+            });
+            this.closers.push(() => pg.close());
+            // Replicas share the database: each interval is claimed by one of
+            // them (a little early, so timer drift never skips an interval).
+            this.useDurableMemory(pg.memory, (intervalMs, now) => maybeSweepPostgres(pg.memory, intervalMs * 0.9, now));
+            this.checkpointer = pg.checkpointer;
+            return pg.checkpointer;
+          }
           const cp = await createPostgresCheckpointer(this.config.databaseUrl);
           this.checkpointer = cp;
           return cp;
@@ -137,6 +219,7 @@ export class RunService {
       graphPath,
       checkpointer,
       legacyStoreBackend: this.legacyStoreBackend,
+      ...(this.durableMemory ? { memory: this.durableMemory } : { memoryUnavailableHint: SERVER_MEMORY_HINT }),
       providers,
       sinks: [
         (event) => {
