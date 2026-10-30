@@ -544,6 +544,11 @@ export const WorktreeWithSchema = z.object({
   path: z.string().optional(),
   /** Git repo root. Defaults to runtime.workspace. */
   repo: z.string().optional(),
+  /**
+   * `action: add` only. When the branch already exists, reset it to HEAD
+   * (`git worktree add -B`). Default false: fail instead of moving the branch.
+   */
+  reset: z.boolean().optional(),
   output: OutputMappingSchema.optional(),
 });
 
@@ -934,6 +939,11 @@ export const RuntimeSchema = z.object({
     .object({
       /** Remove worktrees created this run when the graph completes (not on HITL pause). */
       cleanupOnEnd: z.boolean().optional().default(false),
+      /**
+       * Directory worktree paths must live under (absolute or workspace-relative).
+       * Defaults to runtime.workspace.
+       */
+      root: z.string().optional(),
     })
     .optional(),
   hitl: z

@@ -645,7 +645,11 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     }
 
     const compiled = factory.build(
-      { graphName: spec.metadata.name, toolWiring } as Parameters<typeof factory.build>[0],
+      {
+        graphName: spec.metadata.name,
+        toolWiring,
+        ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
+      } as Parameters<typeof factory.build>[0],
       nodeSpec as unknown as Record<string, unknown>,
       configResult.data,
     );
@@ -1467,7 +1471,11 @@ function addCheckpointedMap(
   mapJoinById.set(mapId, joinId);
 
   const innerType = String((config.node as Record<string, unknown>)["type"] ?? "");
-  const buildCtx = { graphName: spec.metadata.name, toolWiring: ctx.toolWiring };
+  const buildCtx = {
+    graphName: spec.metadata.name,
+    toolWiring: ctx.toolWiring,
+    ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
+  };
   const nodeRetry = (nodeSpec.retry ?? ctx.defaultRetry) as RetryConfigInput;
   const nodeTimeout = (nodeSpec.timeout ?? ctx.defaultTimeout) as string | undefined;
 

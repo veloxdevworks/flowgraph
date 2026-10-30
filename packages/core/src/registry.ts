@@ -31,6 +31,8 @@ export interface CompiledNode {
 
 export interface BuildContext {
   graphName: string;
+  /** `runtime.worktrees.root` (raw; resolved against the run workspace). */
+  worktreeRoot?: string;
   resolveSkill?: (uses: string) => Promise<unknown>;
   resolveSubgraph?: (uses: string) => Promise<unknown>;
   /** Wiring for node-as-tool execution, populated by the compiler. */

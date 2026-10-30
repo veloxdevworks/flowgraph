@@ -848,6 +848,40 @@ Need to log in, click through a flow, or drive a custom mobile script? Do that i
 
 ---
 
+## 9c. `worktree` — isolated git worktrees
+
+Creates, removes, or lists `git worktree`s so parallel branches (e.g. a `map` of agents) each get their own checkout.
+
+```yaml
+- id: isolate
+  type: worktree
+  with:
+    action: add                # add (default) | remove | status
+    branch: "farm/{{ state.item.id }}"
+    path: ".worktrees/{{ state.item.id }}"   # relative to runtime.workspace
+    # repo: ../other-repo      # git repo root; default runtime.workspace
+    # reset: false             # add only: allow resetting an EXISTING branch to HEAD
+    output: { to: worktree }   # { path, branch, head, action }
+```
+
+Safety rules (enforced at run time; violations fail the node with a clear error):
+
+- **Branch names** must pass `git check-ref-format --branch` unchanged; names starting with `-`, containing whitespace, or using `@{…}` are rejected.
+- **Paths** must resolve strictly inside the worktree root (`runtime.worktrees.root`, absolute or workspace-relative; default `runtime.workspace`), also after resolving symlinks. Values starting with `-` are rejected, and paths are passed to git after `--`.
+- **Existing branches are never moved silently.** `add` uses `git worktree add -b`; if the branch already exists the node fails unless `reset: true` is set (then `-B`, which resets the branch to HEAD).
+- **`remove`** uses `--force` only for a worktree this thread's own `worktree` nodes created (tracked in the reserved `__worktrees` channel). Any other worktree is removed without `--force`, so git refuses if it has uncommitted changes.
+
+`runtime.worktrees.cleanupOnEnd: true` force-removes the thread's own worktrees when the graph completes (not on a HITL pause).
+
+```yaml
+runtime:
+  worktrees:
+    root: .worktrees        # optional
+    cleanupOnEnd: true
+```
+
+---
+
 ## 9. Built-in node summary
 
 | `type` | Purpose | Capabilities | Package |
@@ -868,6 +902,7 @@ Need to log in, click through a flow, or drive a custom mobile script? Do that i
 | `map` | Fan-out over a collection | composite, parallel | core |
 | `hitl` | Human approve / question / choice gate | interruptible | core |
 | `wait` | Delay / condition / signal / inbound webhook gate | interruptible | core |
+| `worktree` | Add / remove / list isolated git worktrees | side-effecting | core |
 
 ---
 
