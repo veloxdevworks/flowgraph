@@ -27,6 +27,15 @@ describe("defaultServerConfig", () => {
     expect(cfg.connectToken).toBe("ctok");
   });
 
+  it("reads FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS", () => {
+    expect(defaultServerConfig({}).setupLockTimeoutMs).toBeUndefined();
+    expect(defaultServerConfig({ FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS: "0" }).setupLockTimeoutMs).toBe(0);
+    expect(defaultServerConfig({ FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS: "120000" }).setupLockTimeoutMs).toBe(120_000);
+    for (const bad of ["-1", "1.5", "soon"]) {
+      expect(() => defaultServerConfig({ FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS: bad })).toThrow(/FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS/);
+    }
+  });
+
   it("parses voice policy env (default: no unauthenticated minting)", () => {
     expect(defaultServerConfig({}).voice).toEqual({ allowUnauthenticated: false });
     const cfg = defaultServerConfig({

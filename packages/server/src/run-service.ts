@@ -267,6 +267,7 @@ export class RunService {
           if (memBackend === "postgres") {
             const pg = await openPostgresBackend({
               connectionString: this.config.databaseUrl,
+              ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
               onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
             });
             this.closers.push(() => pg.close());
@@ -277,7 +278,10 @@ export class RunService {
             this.checkpointer = pg.checkpointer;
             return pg.checkpointer;
           }
-          const cp = await createPostgresCheckpointer(this.config.databaseUrl);
+          const cp = await createPostgresCheckpointer({
+            connectionString: this.config.databaseUrl,
+            ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
+          });
           this.checkpointer = cp;
           return cp;
         }

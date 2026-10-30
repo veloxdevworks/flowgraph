@@ -1,4 +1,4 @@
-import type { FlowgraphEvent, RunResult, StateSnapshot } from "@flowgraph/core";
+import { MEMORY_SWEEP_MAX_INTERVAL_MS, type FlowgraphEvent, type RunResult, type StateSnapshot } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
 import {
   ASYMMETRIC_ALGORITHMS,
@@ -149,6 +149,11 @@ export interface ServerConfig {
    * `sqlite` keeps memory in a local file (needs @flowgraph/checkpoint-sqlite).
    */
   memory?: ServerMemoryConfig;
+  /**
+   * How long Postgres schema setup waits for another replica's setup lock, in ms.
+   * Env: `FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS`. Default: the checkpoint-postgres default.
+   */
+  setupLockTimeoutMs?: number;
   /** Directory for persisted uploaded graphs. */
   graphStoreDir: string;
   /** Max events retained per thread for SSE replay. */
@@ -193,9 +198,6 @@ export interface ServerMemoryConfig {
 }
 
 const MEMORY_BACKENDS: readonly ServerMemoryBackend[] = ["memory", "postgres", "sqlite"];
-
-/** Largest delay a Node timer honors; longer ones fire after 1 ms. Matches MEMORY_SWEEP_MAX_INTERVAL_MS. */
-const MAX_SWEEP_MS = 2_147_483_647;
 
 export interface VoiceConfig {
   /**
@@ -351,13 +353,20 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
   const sweepRaw = env.FLOWGRAPH_MEMORY_SWEEP_MS?.trim();
   if (sweepRaw) {
     const sweepMs = Number(sweepRaw);
-    if (!/^\d+$/.test(sweepRaw) || sweepMs < 1_000 || sweepMs > MAX_SWEEP_MS) {
+    if (!/^\d+$/.test(sweepRaw) || sweepMs < 1_000 || sweepMs > MEMORY_SWEEP_MAX_INTERVAL_MS) {
       throw new Error(
-        `FLOWGRAPH_MEMORY_SWEEP_MS must be a whole number of milliseconds from 1000 to ${MAX_SWEEP_MS} (about 24.8 days) ` +
+        `FLOWGRAPH_MEMORY_SWEEP_MS must be a whole number of milliseconds from 1000 to ${MEMORY_SWEEP_MAX_INTERVAL_MS} (about 24.8 days) ` +
           `(got "${env.FLOWGRAPH_MEMORY_SWEEP_MS}")`,
       );
     }
     config.memory.sweepIntervalMs = sweepMs;
+  }
+  const lockRaw = env.FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS?.trim();
+  if (lockRaw) {
+    if (!/^\d+$/.test(lockRaw) || !Number.isSafeInteger(Number(lockRaw))) {
+      throw new Error(`FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS must be a whole number of milliseconds (got "${env.FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS}")`);
+    }
+    config.setupLockTimeoutMs = Number(lockRaw);
   }
   const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION;
   if (region) config.awsRegion = region;

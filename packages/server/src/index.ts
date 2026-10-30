@@ -1,5 +1,5 @@
 export { RunService } from "./run-service.js";
-export { TooManyRunsError } from "./errors.js";
+export { ServerRequestError, TooManyRunsError } from "./errors.js";
 export { SessionRegistry } from "./session-registry.js";
 export {
   parseGraphYaml,
@@ -39,6 +39,14 @@ export {
   type ServerAuthConfig,
   type TrustRule,
 } from "./identity.js";
+export {
+  checkUntrustedUpload,
+  UNTRUSTED_BLOCKED_NODE_TYPES,
+  UNTRUSTED_NODE_POLICY,
+  UNTRUSTED_PROVIDER_OPTIONS,
+  type UploadViolation,
+  type UploadViolationCode,
+} from "./upload-policy.js";
 export { ConnectClient, startConnectClient } from "./connect/client.js";
 export { CONNECT_PROTOCOL_VERSION } from "./connect/protocol.js";
 export type {
