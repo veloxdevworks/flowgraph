@@ -65,10 +65,11 @@ The server reads `<issuer>/.well-known/openid-configuration` once, checks that i
 In `oidc` mode each caller is a principal `org/subject`:
 
 - **Runs.** A thread belongs to the principal that started it. Another principal gets 403 `THREAD_NOT_OWNED` on every read, control and event call for it (thread ids are global, so a 403 tells the caller the id is in use); `GET /runs` lists only your own threads. Live events for an unknown thread are a 404, so start a run before subscribing to it.
+  The owner is stored next to the checkpoints (`fg_thread_owners`): in Postgres when `DATABASE_URL` is set, so every replica sharing the database agrees, else in the sqlite memory file with `FLOWGRAPH_MEMORY_BACKEND=sqlite`, else in process memory alongside the in-memory checkpoints. Losing a replica's graph store does not hand a thread to someone else. A thread id with saved checkpoints but no recorded owner (stored before owners were recorded) is refused for everyone; use a new id. When the owner cannot be looked up (the database is down) the call is a 503 `THREAD_OWNER_UNAVAILABLE`, never a guess.
 - **Memory.** Runs write memory as `{ org, project, user: subject }` of the caller, and only the same principal can resume a thread bound to memory (`MEMORY_SCOPE_MISMATCH`).
-- **Graph names.** The first principal to upload a graph `metadata.name` in an org owns it; anyone else gets 409 `GRAPH_NAME_TAKEN`. Names are kept in the memory database (`fg_graph_names`) with `FLOWGRAPH_MEMORY_BACKEND=sqlite` or `postgres`; on the default backend they are per process and the server logs a warning.
+- **Graph names.** The first principal to upload a graph `metadata.name` in an org owns it; anyone else gets 409 `GRAPH_NAME_TAKEN`. Names are kept in Postgres (`fg_graph_names`) when `DATABASE_URL` is set, or in the sqlite memory file with `FLOWGRAPH_MEMORY_BACKEND=sqlite`; otherwise they are per process and the server logs a warning. Run replicas with `DATABASE_URL`. Names are lower-case kebab-case, so case or Unicode look-alikes of a taken name are refused when the graph is parsed.
 
-In `token` and `none` mode there is one principal, so none of these checks apply. Reusing a thread id for a different graph is a 409 `THREAD_ID_CONFLICT` in every mode.
+In `token` and `none` mode there is one principal, so none of these checks apply. Reusing a thread id for a different graph is a 409 `THREAD_ID_CONFLICT` in every mode; on multi-user servers only to the thread's owner (anyone else gets 403 `THREAD_NOT_OWNED`, without the stored id).
 
 ### Uploaded graphs from untrusted authors
 
@@ -79,8 +80,10 @@ A graph uploaded by a caller who is not a trusted author is checked when it is u
 | `UPLOAD_NODE_TYPE_BLOCKED` | `shell`, `script`, `service`, `worktree`, `skill`, `demo` and `mcp` nodes, including inside `map` and subgraphs |
 | `UPLOAD_SUBGRAPH_FILE_BLOCKED` | subgraphs loaded from a file on the server (`uses:`); inline `spec:` subgraphs are checked like the parent |
 | `UPLOAD_ENV_PLACEHOLDER_BLOCKED` / `UPLOAD_SECRET_REFERENCE_BLOCKED` | `${VAR}` placeholders and `{{ secrets.* }}` templates, which would read the server's environment |
-| `UPLOAD_HOST_PATH_BLOCKED` | node `workspace`, `runtime.workspace`, `runtime.worktrees.root` and workshop `with.diff` paths |
+| `UPLOAD_HOST_PATH_BLOCKED` | node `workspace`, `runtime.workspace`, `runtime.worktrees.root`, and workshop `with.diff` that runs `git diff` on the server (a `before` / `after` diff is allowed) |
 | `UPLOAD_AGENT_SKILL_TOOL_BLOCKED` | agents given the `skill` tool |
+| `UPLOAD_AGENT_TOOL_BLOCKED` | agent tools that run on the host: `start_service`, `stop_service`, `restart_service`, the file tools (`Read`, `Write`, `Edit`, `Glob`, `Bash`, `fs_*`) and any other registered function tool. `ask_human`, `list_services` and `service_status` stay allowed, plus `FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS` |
+| `UPLOAD_FUNCTION_BLOCKED` | `function` / `code` nodes, which call functions registered in the server process, unless listed in `FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS` |
 | `UPLOAD_PROVIDER_OVERRIDE_BLOCKED` | provider `apiKeyEnv`, `cwd`, and `options` other than sampling settings (`temperature`, `maxTokens`, `topP`, `stop`, `seed`, `timeout`, `reasoningEffort`, …) |
 | `UPLOAD_PROVIDER_ENDPOINT_BLOCKED` | custom provider endpoints (`baseUrl`), and the `ollama` vendor or `config.defaults.provider: ollama`, whose default endpoint is a model server on the host (`localhost:11434`) |
 | `UPLOAD_HTTP_TARGET_BLOCKED` | literal `http` / `webhook` URLs that are not `http(s)`, or whose host is `localhost` or a non-public IP (loopback, private, link-local, CGNAT, cloud metadata, and their IPv6 and IPv4-mapped forms) |
@@ -88,12 +91,14 @@ A graph uploaded by a caller who is not a trusted author is checked when it is u
 | `UPLOAD_LOCAL_TOOLS_BLOCKED` | `localTools`, which run file tools on the server |
 | `UPLOAD_HOST_PROBE_BLOCKED` | `with.requires`, which checks which programs are installed on the server |
 
-At run time the engine enforces the same limits again (`NODE_TYPE_BLOCKED`, `SUBGRAPH_FILE_BLOCKED`, `SECRET_REFERENCE_BLOCKED`, `MCP_BLOCKED`, `LOCAL_TOOLS_BLOCKED`, `HOST_PROBE_BLOCKED`; the MCP hub is never handed to an untrusted graph), and building providers refuses `ollama` and `baseUrl` with 403 `PROVIDER_ENDPOINT_BLOCKED`. Trusted authors are `oidc` callers with a trusted role or team, every `token` caller, and `none` mode only with `FLOWGRAPH_INSECURE_DEV=1`.
+At run time the engine enforces the same limits again (`NODE_TYPE_BLOCKED`, `SUBGRAPH_FILE_BLOCKED`, `SECRET_REFERENCE_BLOCKED`, `MCP_BLOCKED`, `LOCAL_TOOLS_BLOCKED`, `HOST_PROBE_BLOCKED`, `TOOL_BLOCKED`, `FUNCTION_BLOCKED`, `HOST_EXEC_BLOCKED`; the service tools refuse to start, stop or restart anything for a graph whose policy blocks `service` nodes; the MCP hub is never handed to an untrusted graph), and building providers refuses `ollama` and `baseUrl` with 403 `PROVIDER_ENDPOINT_BLOCKED`. Trusted authors are `oidc` callers with a trusted role or team, every `token` caller, and `none` mode only with `FLOWGRAPH_INSECURE_DEV=1`.
 
-**Outbound requests.** `http` and `webhook` nodes in untrusted graphs may reach only public addresses. Templated URLs are checked when the request is made: the host is resolved and every address it resolves to is checked before connecting (so DNS rebinding to an inner address is refused), and redirects are followed by hand with the same check on every hop; a redirect to a blocked address is never followed. Refusals name the address and the reason (`OUTBOUND_ADDRESS_BLOCKED`; `OUTBOUND_URL_BLOCKED` for non-http schemes). To let untrusted graphs call specific inner services, list them:
+**Outbound requests.** `http` and `webhook` nodes in untrusted graphs may reach only public addresses. Templated URLs are checked when the request is made: the host is resolved and every address it resolves to is checked before connecting (so DNS rebinding to an inner address is refused), and redirects are followed by hand with the same check on every hop; a redirect to a blocked address is never followed. Refusals name the address and the reason (`OUTBOUND_ADDRESS_BLOCKED`; `OUTBOUND_URL_BLOCKED` for non-http schemes). Each request, redirects and body included, has 30 s (`OUTBOUND_TIMEOUT`) and reads at most 10 MiB of response (`OUTBOUND_RESPONSE_TOO_LARGE`). To let untrusted graphs call specific inner services, list them:
 
 | Env | Default | Purpose |
 |---|---|---|
+| `FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS` | _(unset)_ | Comma-separated agent tool names untrusted graphs may use beyond `ask_human`, `list_services` and `service_status`. Listing a service tool does not let it start anything; `service` stays a blocked node type |
+| `FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS` | _(unset: none)_ | Comma-separated registered function names untrusted `function` and `code` nodes may call (agent function tools are listed in `FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS`). Only list functions that are safe for any caller |
 | `FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS` | _(unset: public addresses only)_ | Comma-separated `host`, `host:port`, `*.domain` or `[v6]:port` entries that untrusted `http` / `webhook` nodes may reach even though they resolve to private, loopback or CGNAT addresses. Public hosts stay reachable either way. Cloud metadata (`169.254.169.254`, `fd00:ec2::254`, …) and link-local addresses are never allowed |
 
 **Stored graphs.** The graph store (`{threadId}.graph.yaml`), the live session and `GET /runs/:id` keep the YAML as it was uploaded. `${VAR}` placeholders in a trusted author's graph are filled from the server environment each time it runs and are never written back; an untrusted author cannot upload them, and a stored placeholder is refused if its author has since lost trust. Files stored by servers before 0.2 hold YAML that was expanded at upload; they are read as they are and never expanded again.
@@ -108,7 +113,8 @@ Errors are JSON `{ "error", "code" }`; 401s also send `WWW-Authenticate: Bearer`
 | 401 | `AUTH_INVALID_TOKEN` | Bad signature, algorithm, `aud`, `iss`, `nbf`, `iat`, unknown `kid`, or no `sub` |
 | 401 | `AUTH_TOKEN_EXPIRED` | `exp` passed (beyond the skew) |
 | 403 | `AUTH_NO_ORG` | No org claim and no `FLOWGRAPH_ORG` |
-| 503 | `AUTH_PROVIDER_UNAVAILABLE` | Discovery or JWKS could not be read, or discovery named a different issuer |
+| 503 | `AUTH_PROVIDER_UNAVAILABLE` | Discovery or JWKS could not be read, discovery named a different issuer, or its `jwks_uri` is neither https nor on the issuer's origin. A failed discovery is retried after 5 s |
+| 503 | `THREAD_OWNER_UNAVAILABLE` | The thread's owner could not be looked up (database unavailable) |
 | 403 | `THREAD_NOT_OWNED` | Another principal's thread |
 | 404 | `THREAD_NOT_FOUND` | Unknown thread |
 | 409 | `THREAD_ID_CONFLICT` / `GRAPH_NAME_TAKEN` | Thread id used for a different graph / graph name owned by someone else |
