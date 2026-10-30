@@ -812,6 +812,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
         graphName: spec.metadata.name,
         toolWiring,
         ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
+        ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
       } as Parameters<typeof factory.build>[0],
       nodeSpec as unknown as Record<string, unknown>,
       configResult.data,
@@ -1761,6 +1762,7 @@ function addCheckpointedMap(
     graphName: spec.metadata.name,
     toolWiring: ctx.toolWiring,
     ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
+    ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
   };
   const nodeRetry = (nodeSpec.retry ?? ctx.defaultRetry) as RetryConfigInput;
   const nodeTimeout = (nodeSpec.timeout ?? ctx.defaultTimeout) as string | undefined;

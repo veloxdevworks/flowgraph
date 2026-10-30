@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import type { ContextConfigInput } from "./context/types.js";
 import type { NodeRunContext } from "./context.js";
 
 export interface NodeContract {
@@ -35,6 +36,8 @@ export interface BuildContext {
   worktreeRoot?: string;
   resolveSkill?: (uses: string) => Promise<unknown>;
   resolveSubgraph?: (uses: string) => Promise<unknown>;
+  /** `runtime.context`: graph-wide context budget defaults for agent nodes. */
+  contextDefaults?: ContextConfigInput;
   /** Wiring for node-as-tool execution, populated by the compiler. */
   toolWiring?: {
     invokeNode?: (

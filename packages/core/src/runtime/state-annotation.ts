@@ -70,7 +70,7 @@ export function channelReducerAndDefault(
 
   if (ch.type === "messages" || ch.reducer === "messages") {
     return {
-      reducer: messagesStateReducer as (current: unknown, incoming: unknown) => unknown,
+      reducer: tolerantMessagesReducer,
       default: () => (ch.default as unknown[] | undefined) ?? [],
     };
   }
@@ -94,6 +94,42 @@ export function channelReducerAndDefault(
     reducer: (_cur: unknown, inc: unknown) => inc,
     default: () => ch.default ?? null,
   };
+}
+
+type Reducer = (current: unknown, incoming: unknown) => unknown;
+const REMOVE_ALL_MESSAGES = "__remove_all__";
+const baseMessagesReducer = messagesStateReducer as Reducer;
+
+function isRemoval(m: unknown): m is { id?: unknown } {
+  if (!m || typeof m !== "object") return false;
+  const t = (m as { _getType?: () => string; getType?: () => string; type?: unknown });
+  return (t._getType?.() ?? t.getType?.() ?? t.type) === "remove";
+}
+
+/**
+ * messagesStateReducer, except that removing an id that is not (or no
+ * longer) in the channel is a no-op instead of an error. Two writers can
+ * compact the same history in one step (parallel branches, a subgraph and
+ * its parent), and the second removal must not fail the run.
+ */
+function tolerantMessagesReducer(current: unknown, incoming: unknown): unknown {
+  const inc = Array.isArray(incoming) ? incoming : [incoming];
+  if (!inc.some(isRemoval)) return baseMessagesReducer(current, incoming);
+  const known = new Set<unknown>();
+  for (const m of (Array.isArray(current) ? current : current == null ? [] : [current]) as Array<{ id?: unknown }>) {
+    if (m && typeof m === "object" && m.id !== undefined) known.add(m.id);
+  }
+  const kept: unknown[] = [];
+  for (const m of inc) {
+    if (isRemoval(m)) {
+      if (m.id !== REMOVE_ALL_MESSAGES && !known.has(m.id)) continue;
+      known.delete(m.id);
+    } else if (m && typeof m === "object" && (m as { id?: unknown }).id !== undefined) {
+      known.add((m as { id?: unknown }).id);
+    }
+    kept.push(m);
+  }
+  return baseMessagesReducer(current, kept);
 }
 
 export function buildStateAnnotation(spec: GraphSpec): ReturnType<typeof Annotation.Root> {

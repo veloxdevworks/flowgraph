@@ -27,7 +27,11 @@ import { REPLAY_CHANNEL, ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
 import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
 import type { AgentMemoryConfig } from "../memory/recall.js";
+import { MEMORY_RECALL_DEFAULT_TOKENS } from "../memory/types.js";
 import { appendRecallSection, recallForAgent, rememberTool } from "./agent-memory.js";
+import { resolveContextPolicy, recallBudget } from "../context/policy.js";
+import type { ContextConfigInput } from "../context/types.js";
+import { startAgentContext, type AgentContextSession } from "./agent-context.js";
 
 const configSchema = AgentWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -81,8 +85,18 @@ export const agentNode = defineNode<Config>({
           }
         }
 
+        const contextPolicy = resolveContextPolicy(
+          buildCtx.contextDefaults,
+          config.context as ContextConfigInput | undefined,
+          { outputMaxTokens: config.maxTokens },
+        );
+
         // Recall memory (never written to state). Templates see it as {{ memory.<id> }}.
-        const memoryConfig = config.memory as AgentMemoryConfig | undefined;
+        // Under a context budget, recall gets at most half of it.
+        let memoryConfig = config.memory as AgentMemoryConfig | undefined;
+        if (contextPolicy && memoryConfig?.recall?.length) {
+          memoryConfig = { ...memoryConfig, maxTokens: recallBudget(contextPolicy, memoryConfig.maxTokens ?? MEMORY_RECALL_DEFAULT_TOKENS) };
+        }
         const recall = await recallForAgent(ctx, memoryConfig, scope, [config.prompt, config.system, agentBody]);
         const tplScope = recall ? { ...scope, memory: recall.vars } : scope;
 
@@ -165,6 +179,28 @@ export const agentNode = defineNode<Config>({
         ctx.emit("agent.step", { provider: providerName, model: nodeModel, tools: specs.map((t) => t.name) });
 
         try {
+          let contextSession: AgentContextSession | undefined;
+          if (contextPolicy) {
+            contextSession = startAgentContext({
+              policy: contextPolicy,
+              ctx,
+              state,
+              nodeLabel: String(nodeSpec["id"] ?? ctx.nodeId),
+              agentProvider: providerName,
+              agentModel: req.model,
+              cacheKey,
+              system,
+              prompt,
+              tools: specs,
+              onUsage: (usage) => {
+                ctx.emit("agent.usage", { ...usage, purpose: "context.summary" });
+                enforceBudget(ctx, usage);
+              },
+            });
+            await contextSession.prepare(req, provider);
+            providerCtx.context = contextSession.manager;
+          }
+
           const result = await provider.run(req, providerCtx);
 
           if (result.stopReason === "maxSteps") {
@@ -190,12 +226,14 @@ export const agentNode = defineNode<Config>({
 
           memoryReplayCache.clear(cacheKey);
 
+          const historyUpdate = contextSession?.historyUpdate(result);
           return {
             update: {
               ...applyOutput(config.output, result.output, {
                 nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
                 scope,
               }),
+              ...(historyUpdate ?? {}),
               [REPLAY_CHANNEL]: { [cacheKey]: null },
             },
           };

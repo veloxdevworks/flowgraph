@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { messagesStateReducer } from "@langchain/langgraph";
+import { AIMessage, HumanMessage, RemoveMessage } from "@langchain/core/messages";
 import { buildStateAnnotation, channelReducerAndDefault } from "./state-annotation.js";
 import { registry } from "../registry.js";
 import type { GraphSpec } from "@flowgraph/spec";
@@ -46,18 +47,26 @@ describe("channelReducerAndDefault", () => {
     expect(reducer({ a: { x: 1 } }, { a: { x: 2 } })).toEqual({ a: { x: 2 } });
   });
 
-  it("messages type uses LangGraph messagesStateReducer", () => {
+  it("messages type behaves like LangGraph messagesStateReducer", () => {
     const { reducer, default: defaultFn } = channelReducerAndDefault("messages", { type: "messages" });
-    expect(reducer).toBe(messagesStateReducer);
     expect(defaultFn()).toEqual([]);
+    const cur = [new HumanMessage({ content: "a", id: "1" }), new AIMessage({ content: "b", id: "2" })];
+    const inc = [new AIMessage({ content: "b2", id: "2" }), new HumanMessage({ content: "c", id: "3" })];
+    expect(reducer(cur, inc)).toEqual(messagesStateReducer(cur, inc));
+    const removed = reducer(cur, [new RemoveMessage({ id: "1" })]) as Array<{ id: string }>;
+    expect(removed.map((m) => m.id)).toEqual(["2"]);
   });
 
-  it("messages reducer literal uses LangGraph messagesStateReducer", () => {
+  it("messages reducer ignores removals of ids that are not in the channel", () => {
     const { reducer } = channelReducerAndDefault("chat", {
       type: "array",
       reducer: "messages",
     });
-    expect(reducer).toBe(messagesStateReducer);
+    const cur = [new HumanMessage({ content: "a", id: "1" }), new AIMessage({ content: "b", id: "2" })];
+    expect(() => messagesStateReducer(cur, [new RemoveMessage({ id: "gone" })])).toThrow();
+    const out = reducer(cur, [new RemoveMessage({ id: "gone" }), new RemoveMessage({ id: "2" }), new RemoveMessage({ id: "2" })]) as Array<{ id: string }>;
+    expect(out.map((m) => m.id)).toEqual(["1"]);
+    expect(reducer(cur, [new RemoveMessage({ id: "__remove_all__" })])).toEqual([]);
   });
 
   it("custom reducer merges via registered function", () => {

@@ -81,6 +81,7 @@ export class ContextWindow {
   private readonly initialSummary: string | undefined;
   private summaryCalls = 0;
   private lastStats: ContextStats | undefined;
+  private lastLoopUnits: ContextMessage[][] = [];
 
   constructor(init: ContextWindowInit) {
     this.policy = init.policy;
@@ -106,6 +107,12 @@ export class ContextWindow {
   /** History units left out by the latest fit. */
   droppedHistory(): ContextMessage[] {
     return this.history.slice(0, Math.min(this.droppedUnits, this.history.length)).flat();
+  }
+
+  /** Tool-loop messages left out by the latest fit (by identity). */
+  droppedLoop(): Set<ContextMessage> {
+    const n = Math.max(0, this.droppedUnits - this.history.length);
+    return new Set(this.lastLoopUnits.slice(0, n).flat());
   }
 
   /** History units still sent by the latest fit. */
@@ -167,6 +174,7 @@ export class ContextWindow {
   async fit(loop: ContextMessage[] = []): Promise<FittedContext> {
     const p = this.policy;
     const { units: loopUnits } = toUnits(loop);
+    this.lastLoopUnits = loopUnits;
     const all = [...this.history, ...loopUnits];
     const pinnedTail = loopUnits.length > 0 ? 1 : 0;
     const maxDrop = all.length - pinnedTail;
