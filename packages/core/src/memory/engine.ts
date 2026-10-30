@@ -76,8 +76,11 @@ export function validateMemoryKey(key: unknown, maxChars: number): string {
   if (key.length > maxChars) {
     throw new MemoryError("MEMORY_KEY_INVALID", `memory key is longer than ${maxChars} characters`);
   }
-  if (/[\p{Cc}\u2028\u2029]/u.test(key)) {
-    throw new MemoryError("MEMORY_KEY_INVALID", `memory key ${JSON.stringify(key)} contains control or line-separator characters`);
+  if (/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(key)) {
+    throw new MemoryError(
+      "MEMORY_KEY_INVALID",
+      `memory key ${JSON.stringify(key)} contains control, format (zero-width/bidi) or line-separator characters`,
+    );
   }
   return key;
 }
@@ -168,11 +171,24 @@ function nextValue(op: MemoryWriteOp, current: unknown, exists: boolean): unknow
   }
 }
 
-/** Stable identity of a write for op-id dedupe: tuple, key, kind and arguments. */
+/** JSON with object keys sorted recursively, so key order never changes a hash. */
+function canonicalJson(v: unknown): string {
+  const norm = (x: unknown): unknown => {
+    if (Array.isArray(x)) return x.map(norm);
+    if (x && typeof x === "object" && !(x instanceof Date)) {
+      const o = x as Record<string, unknown>;
+      return Object.fromEntries(Object.keys(o).sort().map((k) => [k, norm(o[k])]));
+    }
+    return x;
+  };
+  return JSON.stringify(norm(v));
+}
+
+/** Stable identity of a write for op-id dedupe: tuple, key, kind and arguments (canonical JSON). */
 export function writeFingerprint(op: Pick<MemoryWriteOp, "kind" | "tuple" | "key" | "value" | "attrs" | "field" | "by" | "max" | "ifVersion" | "ttlMs">): string {
   let args: string;
   try {
-    args = JSON.stringify([op.value ?? null, op.attrs ?? null, op.field ?? null, op.by ?? null, op.max ?? null, op.ifVersion ?? null, op.ttlMs ?? null]);
+    args = canonicalJson([op.value ?? null, op.attrs ?? null, op.field ?? null, op.by ?? null, op.max ?? null, op.ifVersion ?? null, op.ttlMs ?? null]);
   } catch {
     args = String(Math.random()); // unserializable: never treat as a replay
   }
@@ -194,12 +210,23 @@ export function applyMemoryWrite(table: MemoryTable, op: MemoryWriteOp): MemoryW
   validateMemoryKey(op.key, limits.keyChars);
 
   const fingerprint = op.opId ? (op.fingerprint ?? writeFingerprint(op)) : null;
+  // Op row this write is recorded under. Only the same write (same tuple, key,
+  // kind and arguments) is a replay. A retry that made a different write at this
+  // position is applied, never dropped, and recorded under opId~fingerprint so
+  // the first write's record is kept and alternating retries (A, B, A, B) each
+  // apply once.
+  let opKey = op.opId;
   if (op.opId) {
     const prior = table.opGet(op.opId);
-    // Only the same write (same tuple, key, kind and arguments) is a replay. A
-    // retry that made a different write at this position is applied, never dropped.
     if (prior && prior.fingerprint === fingerprint) {
       return { version: prior.version, value: prior.value, deduped: true, evicted: 0 };
+    }
+    if (prior) {
+      opKey = `${op.opId}~${fingerprint}`;
+      const alt = table.opGet(opKey);
+      if (alt && alt.fingerprint === fingerprint) {
+        return { version: alt.version, value: alt.value, deduped: true, evicted: 0 };
+      }
     }
   }
 
@@ -224,7 +251,7 @@ export function applyMemoryWrite(table: MemoryTable, op: MemoryWriteOp): MemoryW
   if (op.kind === "delete") {
     if (existing) table.remove(existing.id);
     const result = { version: 0, value: null };
-    if (op.opId) table.opPut(op.opId, result, now, fingerprint);
+    if (opKey) table.opPut(opKey, result, now, fingerprint);
     return { ...result, deduped: false, evicted: 0 };
   }
 
@@ -333,7 +360,7 @@ export function applyMemoryWrite(table: MemoryTable, op: MemoryWriteOp): MemoryW
   }
 
   const result = { version, value };
-  if (op.opId) table.opPut(op.opId, result, now, fingerprint);
+  if (opKey) table.opPut(opKey, result, now, fingerprint);
   return { ...result, deduped: false, evicted };
 }
 

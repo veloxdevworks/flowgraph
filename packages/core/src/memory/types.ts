@@ -250,7 +250,6 @@ export interface MemoryBackend {
    * subject (most recently active subject first). Never reads user or graph scope.
    */
   similarSubjects(q: MemorySimilarQuery): Promise<MemorySimilarGroup[]>;
-  /** Insert or replace the thread's binding. */
   /**
    * Bind a thread if it has no binding yet. Never overwrites an existing
    * binding; callers re-read with {@link getThread} to detect a conflict.

@@ -114,7 +114,8 @@ function truncateBytes(s: string, max: number): string {
  * to ASCII): single angle quotes, CJK and mathematical angle brackets,
  * ornamental and modifier angles, Canadian syllabics look-alikes.
  */
-const ANGLE_CHARS = /[<>\u2039\u203A\u2329\u232A\u3008\u3009\u27E8\u27E9\u276C-\u2771\u29FC\u29FD\u02C2\u02C3\u1433\u1438\uFE64\uFE65\uFF1C\uFF1E]/g;
+const ANGLE_CHARS =
+  /[<>\u00AB\u00BB\u2039\u203A\u226A\u226B\u2329\u232A\u3008-\u300B\u27E8\u27E9\u27EA\u27EB\u276C-\u2771\u29FC\u29FD\u02C2\u02C3\u1433\u1438\uFE64\uFE65\uFF1C\uFF1E\u{1F668}]/gu;
 const CONTROL_CHARS = /[\p{Cc}\u2028\u2029]/gu;
 
 /**

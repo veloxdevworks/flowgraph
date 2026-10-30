@@ -334,6 +334,14 @@ export function describeMemoryBackendConformance(
       expect((await b.get(tu.graphA, "x"))?.value).toBe(5);
     }));
 
+    it("alternating retries under one op id apply each write once", withBackend(async (b) => {
+      for (const key of ["c", "d", "c", "d", "c"]) {
+        await b.write(op({ kind: "increment", tuple: tu.graphA, key, field: "n", opId: "alt-1" }));
+      }
+      expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "d"))?.value).toEqual({ n: 1 });
+    }));
+
     it("list honours a limit", withBackend(async (b) => {
       for (let i = 0; i < 5; i++) await b.write(op({ kind: "put", tuple: tu.graphA, key: `l/${i}`, value: i }));
       expect(await b.list(tu.graphA, { prefix: "l/", limit: 3 })).toHaveLength(3);
