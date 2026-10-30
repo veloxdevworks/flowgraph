@@ -14,6 +14,10 @@ function info(partial: Partial<InterruptInfo> & { id: string }): InterruptInfo {
     ...(partial.kind !== undefined ? { kind: partial.kind } : {}),
     ...(partial.choices !== undefined ? { choices: partial.choices } : {}),
     ...(partial.payload !== undefined ? { payload: partial.payload } : {}),
+    ...(partial.validationError !== undefined
+      ? { validationError: partial.validationError, attempt: partial.attempt ?? 1, maxAttempts: partial.maxAttempts ?? 3 }
+      : {}),
+    ...(partial.exhausted ? { exhausted: true } : {}),
   };
 }
 
@@ -65,6 +69,26 @@ describe("formatInterruptPrompt", () => {
     expect(review).toContain("1 file changed");
     expect(review).toContain("approve, request-changes");
   });
+
+  it("formats workshop prompts with agenda and schema", () => {
+    const prompt = formatInterruptPrompt(
+      info({
+        id: "1",
+        reason: "Workshop the feature",
+        kind: "workshop",
+        payload: {
+          data: {
+            agenda: [{ id: "scope", title: "Scope" }, { id: "risks", title: "Risks" }],
+            schema: { type: "object", required: ["title"] },
+          },
+        },
+      }),
+    );
+    expect(prompt).toContain("Agenda:");
+    expect(prompt).toContain("1. Scope");
+    expect(prompt).toContain("JSON Schema");
+    expect(prompt).toContain("Paste JSON");
+  });
 });
 
 describe("parseInterruptAnswer", () => {
@@ -88,6 +112,18 @@ describe("parseInterruptAnswer", () => {
     });
     expect(parseInterruptAnswer(info({ id: "1", kind: "review" }), "no")).toEqual({
       decision: "request-changes",
+    });
+  });
+
+  it("parses workshop JSON output", () => {
+    expect(
+      parseInterruptAnswer(
+        info({ id: "1", kind: "workshop" }),
+        '{"output":{"title":"SSO"},"endedReason":"completed"}',
+      ),
+    ).toEqual({ output: { title: "SSO" }, endedReason: "completed" });
+    expect(parseInterruptAnswer(info({ id: "1", kind: "workshop" }), '{"title":"SSO"}')).toEqual({
+      title: "SSO",
     });
   });
 });
@@ -133,5 +169,22 @@ describe("serializePendingInterrupts", () => {
       kind: "question",
       reason: "Which project?",
     });
+  });
+});
+
+describe("re-prompt after a rejected answer", () => {
+  it("prefixes the prompt with the validation error and attempt budget", () => {
+    const prompt = formatInterruptPrompt(
+      info({ id: "1", reason: "Fill in", kind: "form", validationError: "title: required", attempt: 1, maxAttempts: 3 }),
+    );
+    expect(prompt.split("\n")[0]).toBe("Previous answer rejected (attempt 1 of 3): title: required");
+    expect(prompt).toContain("Paste JSON form values");
+  });
+
+  it("includes validation fields in the pending interrupt list", () => {
+    const out = serializePendingInterrupts("t", [
+      info({ id: "i", kind: "form", validationError: "bad", attempt: 3, maxAttempts: 3, exhausted: true }),
+    ]);
+    expect(out.interrupts[0]).toMatchObject({ validationError: "bad", attempt: 3, maxAttempts: 3, exhausted: true });
   });
 });

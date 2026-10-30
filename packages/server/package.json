@@ -28,6 +28,7 @@
     "@flowgraph/checkpoint-postgres": "workspace:*",
     "@flowgraph/core": "workspace:*",
     "@flowgraph/spec": "workspace:*",
+    "@flowgraph/workshop-session": "workspace:*",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

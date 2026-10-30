@@ -56,6 +56,13 @@ function interruptData(it: InterruptInfo): Record<string, unknown> | undefined {
 
 /** Prompt text shown before collecting an interrupt answer. */
 export function formatInterruptPrompt(it: InterruptInfo): string {
+  const body = formatInterruptBody(it);
+  if (!it.validationError) return body;
+  const budget = it.maxAttempts ? ` (attempt ${it.attempt ?? "?"} of ${it.maxAttempts})` : "";
+  return `Previous answer rejected${budget}: ${it.validationError}\n${body}`;
+}
+
+function formatInterruptBody(it: InterruptInfo): string {
   const kind = it.kind ?? "approval";
   const reason = it.reason ?? it.id;
   const data = interruptData(it);
@@ -84,6 +91,21 @@ export function formatInterruptPrompt(it: InterruptInfo): string {
       ? (data["decision"] as string[]).join(", ")
       : "approve, request-changes";
     return `${reason}${stat}${artifacts}\nDecision (${decisions}) or JSON { "decision", "feedback" }: `;
+  }
+
+  if (kind === "workshop") {
+    const agenda = Array.isArray(data?.["agenda"])
+      ? (data["agenda"] as Array<{ title?: string } | string>)
+          .map((item, i) => {
+            const title = typeof item === "string" ? item : String(item?.title ?? `item ${i + 1}`);
+            return `  ${i + 1}. ${title}`;
+          })
+          .join("\n")
+      : "";
+    const schema = data?.["schema"];
+    const hint = schema ? `\nJSON Schema: ${JSON.stringify(schema)}` : "";
+    const agendaBlock = agenda ? `\nAgenda:\n${agenda}` : "";
+    return `${reason}${agendaBlock}${hint}\nPaste JSON { "output", "transcript?", "coverage?", "endedReason?" } or the output object: `;
   }
 
   const tool = typeof data?.["tool"] === "string" ? data["tool"] : undefined;
@@ -158,6 +180,17 @@ export function parseInterruptAnswer(it: InterruptInfo, raw: string): unknown {
       /* fall through */
     }
     return { decision: trimmed };
+  }
+
+  if (kind === "workshop") {
+    if (trimmed === "") return { output: {} };
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      /* fall through */
+    }
+    return { output: { notes: trimmed } };
   }
 
   // approval / custom / default
@@ -237,6 +270,14 @@ export function serializePendingInterrupts(
       kind: it.kind ?? "approval",
       reason: it.reason,
       choices: it.choices,
+      ...(it.validationError
+        ? {
+            validationError: it.validationError,
+            attempt: it.attempt,
+            maxAttempts: it.maxAttempts,
+            ...(it.exhausted ? { exhausted: true } : {}),
+          }
+        : {}),
       payload: it.payload,
     })),
   };

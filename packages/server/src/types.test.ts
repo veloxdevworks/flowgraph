@@ -26,4 +26,13 @@ describe("defaultServerConfig", () => {
     expect(cfg.connectUrl).toBe("wss://platform.example/connect");
     expect(cfg.connectToken).toBe("ctok");
   });
+
+  it("parses voice policy env (default: no unauthenticated minting)", () => {
+    expect(defaultServerConfig({}).voice).toEqual({ allowUnauthenticated: false });
+    const cfg = defaultServerConfig({
+      FLOWGRAPH_VOICE_ALLOW_UNAUTHENTICATED: "1",
+      FLOWGRAPH_VOICE_ALLOWED_MODELS: " gpt-realtime , grok-voice-latest,, ",
+    });
+    expect(cfg.voice).toEqual({ allowUnauthenticated: true, allowedModels: ["gpt-realtime", "grok-voice-latest"] });
+  });
 });

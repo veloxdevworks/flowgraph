@@ -13,6 +13,7 @@ import type { InterruptKind, NodeRunContext } from "../context.js";
 import { applyOutput } from "./output.js";
 import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
+import { interruptUntilValid } from "../runtime/resume-validation.js";
 
 const configSchema = HitlWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -102,18 +103,18 @@ export const hitlNode = defineNode<Config>({
           }
         }
 
-        const resume = ctx.interrupt<unknown>({
-          reason: message,
-          kind: MODE_TO_KIND[config.mode],
-          data,
-        });
-
-        const result = mapHitlResume(config, resume, {
-          choices,
-          decisions: (data["decision"] as string[] | undefined) ?? choices,
-          schema: (data["schema"] as Record<string, unknown> | undefined) ?? config.schema,
-          nodeId: String(nodeSpec["id"]),
-        });
+        const result = interruptUntilValid(
+          ctx,
+          { reason: message, kind: MODE_TO_KIND[config.mode], data },
+          (resume) =>
+            mapHitlResume(config, resume, {
+              choices,
+              decisions: (data["decision"] as string[] | undefined) ?? choices,
+              schema: (data["schema"] as Record<string, unknown> | undefined) ?? config.schema,
+              nodeId: String(nodeSpec["id"]),
+            }),
+          { maxAttempts: config.maxResumeAttempts },
+        );
 
         ctx.emit("node.output", { hitl: { mode: config.mode, result } });
 

@@ -8,6 +8,7 @@ import type { ServerConfig } from "../types.js";
 import { handleAgentCore } from "./agentcore.js";
 import { handleRest } from "./rest.js";
 import { sendJson } from "./util.js";
+import { logVoicePolicy } from "../voice.js";
 import { startConnectClient, type ConnectClient } from "../connect/client.js";
 
 function attachAccessLog(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): void {
@@ -93,6 +94,7 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
               "GET /runs/:threadId/state",
               "GET /runs/:threadId/history",
               "GET /runs/:threadId/issues",
+              "POST /voice/client-secrets",
             ],
             agentcore: ["GET /ping", "POST /invocations"],
           },
@@ -139,6 +141,7 @@ export async function listen(
         "FLOWGRAPH_GRAPH_STORE is under /tmp and will be lost on reboot. Set it to a durable path (e.g. ~/flowgraph-graphs).",
     });
   }
+  logVoicePolicy(config);
   if (!config.authToken && !config.authDisabled) {
     log("warn", "auth.required", {
       message:

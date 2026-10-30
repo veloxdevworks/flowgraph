@@ -36,6 +36,24 @@ curl -N -H "Authorization: Bearer dev" \
 
 REST requires `FLOWGRAPH_AUTH_TOKEN` unless you explicitly opt out with `FLOWGRAPH_AUTH_DISABLED=1` (local/dev only). AgentCore `/ping` and `/invocations` skip bearer auth (SigV4 at the edge).
 
+## Voice tokens (`POST /voice/client-secrets`)
+
+Mints a short-lived realtime voice token for a workshop client using the server's `XAI_API_KEY` (or `GROK_API_KEY`) / `OPENAI_API_KEY`. Body: `{ "provider"?: "xai" | "openai", "model"?: string }`.
+
+| Env | Default | Purpose |
+|---|---|---|
+| `FLOWGRAPH_VOICE_ALLOW_UNAUTHENTICATED` | off | Mint even when REST auth is off (`FLOWGRAPH_AUTH_DISABLED=1` or no token). **Anyone who can reach the port can then spend your vendor key.** Logs a loud warning at startup and on every mint. Local/dev only. |
+| `FLOWGRAPH_VOICE_ALLOWED_MODELS` | `grok-voice-latest,gpt-4o-realtime-preview` | Comma-separated models callers may request (config: `voice.allowedModels`). |
+
+Errors are generic to callers; upstream vendor detail is only logged server-side (`voice.mint-failed`).
+
+| Status | `code` | When |
+|---|---|---|
+| 403 | `VOICE_AUTH_REQUIRED` | REST auth is off and the opt-in is not set |
+| 400 | `VOICE_MODEL_NOT_ALLOWED` / `VOICE_PROVIDER_NOT_ALLOWED` | Model not in the allowlist / unknown provider |
+| 503 | `VOICE_NOT_CONFIGURED` | No vendor key on the server |
+| 502 | `VOICE_MINT_FAILED` | Vendor rejected or failed the mint |
+
 ## Limits
 
 | Env | Default | Purpose |

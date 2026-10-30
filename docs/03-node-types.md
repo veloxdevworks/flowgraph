@@ -593,7 +593,20 @@ Deterministic pause points for human input. Unlike `wait` (duration/signal/condi
     output: { to: strategy }
 ```
 
-Each mode sets an interrupt **kind** (`approval`, `question`, `choice`) so the CLI and external GUIs know how to prompt and parse the resume value.
+Each mode sets an interrupt **kind** (`approval`, `question`, `choice`, `form`, `review`) so the CLI and external GUIs know how to prompt and parse the resume value.
+
+**Invalid answers re-prompt.** If a resume value fails validation (unknown choice, unknown review decision, or a `form`/`review` answer that fails `with.schema`), the node re-issues its interrupt with `validationError`, `attempt` and `maxAttempts` attached instead of failing. After `with.maxResumeAttempts` rejected answers (default `3`) the run reports `status: "error"` (`ResumeAttemptsExhaustedError`) but the interrupt stays pending, so the thread can still be inspected and resumed with a valid answer. See [07 — Invalid answers](./07-runtime-and-execution.md#invalid-answers-re-prompt-dont-brick).
+
+```yaml
+- id: intake
+  type: hitl
+  with:
+    mode: form
+    message: "Describe the request"
+    schema: { type: object, required: [title], properties: { title: { type: string } } }
+    maxResumeAttempts: 5            # default 3
+    output: { to: intake }
+```
 
 ### `ask_human` tool (agent nodes)
 
@@ -636,6 +649,55 @@ Agents can discover **and** start/stop background services in the current run/th
 | `restart_service` | same as `start_service` | `ServiceInfo` after stop+start |
 
 **Governance:** spawning arbitrary commands via `start_service` is the same trust boundary as the `shell` / `service` nodes. Gate it with `permission: ask` or a `runtime.hooks` entry on `agent:beforeToolCall` (e.g. `where: { tool: start_service }`, `do: interrupt`) — see [08 — Providers](./08-providers.md).
+
+---
+
+## 8a. `workshop` — facilitated agenda session
+
+A specialized HITL node for a **bounded conversation** that produces a structured deliverable. Unlike `hitl` (one question, one resume), `workshop` raises a single interrupt whose payload is a **session contract**: agenda, output schema, primed context, facilitator prompt, and optional voice hints. The client (CLI, desktop, or a phone web app) facilitates the conversation and resumes once with:
+
+```ts
+{ output, transcript, coverage, endedReason }
+```
+
+`output` is validated against `with.schema` before the node completes. An invalid output re-issues the workshop interrupt with `validationError` / `attempt` / `maxAttempts` so the client can show the error and try again; after `with.maxResumeAttempts` rejections (default `3`) the run fails with `ResumeAttemptsExhaustedError` while the interrupt stays pending and resumable (see [07](./07-runtime-and-execution.md#invalid-answers-re-prompt-dont-brick)). Voice, text chat, and a plain JSON form are all valid facilitators of the same contract — that is what keeps CI honest.
+
+```yaml
+- id: feature-workshop
+  type: workshop
+  with:
+    message: "Workshop {{ state.packet.title }}"
+    agenda:
+      - scope
+      - risks
+      - { id: gtm, title: "Go-to-market", description: "Who ships this and when?" }
+    schema:
+      type: object
+      properties:
+        title: { type: string }
+        acceptance: { type: array, items: { type: string } }
+      required: [title]
+    context: "{{ state.packet }}"
+    facilitator: "Cover every agenda item. Do not invent requirements."
+    voice:
+      provider: xai
+      model: grok-voice-latest
+      voice: eve
+    fallback: form                 # form | text | json
+    limits: { maxMinutes: 30 }
+    maxResumeAttempts: 3           # invalid outputs re-prompt this many times (default 3)
+    output: { to: brief }
+```
+
+The interrupt payload (`payload.data`) is typed as `WorkshopContract` in `@flowgraph/spec` (re-exported by `@flowgraph/workshop-session`): `mode`, `agenda`, `fallback`, optional `schema` / `context` / `facilitator` / `voice` / `limits`, `artifactRefs` (rendered `with.artifacts`), and `diff` / `diffStat`. A git diff failure is reported on `diff.error` (no `diffStat`); patches over 256 KiB are cut and marked `diff.truncated: true`.
+
+`limits` are enforced by the client, not the engine (the node is a single interrupt): `WorkshopSession` closes the session and fires `onTimeLimit` after `limits.maxMinutes` (default 30). `maxTurns` is advisory. The facilitator tools are `update_draft`, `cover_agenda_item`, `add_risk`, and `finish`; `read_artifact` is only advertised when the client opts in with `READ_ARTIFACT_TOOL` and serves it in `onToolCall`.
+
+The node is **interrupt-and-map only** — no side effects. Research belongs in a prior `prepare` agent node; writing plans/tickets belongs in a later `post` node. Headless: `--on-interrupt fail` then `flowgraph resume` with the output JSON, or paste the output object at the CLI prompt.
+
+`voice` is a hint for the client. When a client asks `@flowgraph/server` for a voice token (`POST /voice/client-secrets`), the server only mints for models in its allowlist (`FLOWGRAPH_VOICE_ALLOWED_MODELS`, default each provider's default model) and refuses while REST auth is off unless `FLOWGRAPH_VOICE_ALLOW_UNAUTHENTICATED=1` is set. See the [server README](../packages/server/README.md#voice-tokens-post-voiceclient-secrets).
+
+Prefer cheap `hitl` `approve` / `review` when a single decision is enough. Use `workshop` when the human and facilitator need to think together against an agenda.
 
 ---
 
@@ -902,6 +964,7 @@ runtime:
 | `map` | Fan-out over a collection | composite, parallel | core |
 | `hitl` | Human approve / question / choice gate | interruptible | core |
 | `wait` | Delay / condition / signal / inbound webhook gate | interruptible | core |
+| `workshop` | Facilitated agenda session (human answers per item) | interruptible | core |
 | `worktree` | Add / remove / list isolated git worktrees | side-effecting | core |
 
 ---

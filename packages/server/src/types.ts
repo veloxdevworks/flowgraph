@@ -141,6 +141,23 @@ export interface ServerConfig {
   connectUrl?: string;
   /** Token sent in the connect `hello` handshake. */
   connectToken?: string;
+  /** `POST /voice/client-secrets` policy. */
+  voice?: VoiceConfig;
+}
+
+export interface VoiceConfig {
+  /**
+   * Mint voice tokens even when REST auth is off (`authDisabled` or no token).
+   * Anyone who can reach the port can then spend the server's vendor key.
+   * Default false. Env: `FLOWGRAPH_VOICE_ALLOW_UNAUTHENTICATED=1`.
+   */
+  allowUnauthenticated?: boolean;
+  /**
+   * Realtime models callers may request. Default: each provider's default
+   * model only (see `DEFAULT_VOICE_MODELS`). Env: comma-separated
+   * `FLOWGRAPH_VOICE_ALLOWED_MODELS`.
+   */
+  allowedModels?: string[];
 }
 
 function envFlag(env: NodeJS.ProcessEnv, key: string): boolean {
@@ -171,5 +188,13 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
   if (region) config.awsRegion = region;
   if (env.FLOWGRAPH_CONNECT_URL?.trim()) config.connectUrl = env.FLOWGRAPH_CONNECT_URL.trim();
   if (env.FLOWGRAPH_CONNECT_TOKEN?.trim()) config.connectToken = env.FLOWGRAPH_CONNECT_TOKEN.trim();
+  const allowedModels = (env.FLOWGRAPH_VOICE_ALLOWED_MODELS ?? "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+  config.voice = {
+    allowUnauthenticated: envFlag(env, "FLOWGRAPH_VOICE_ALLOW_UNAUTHENTICATED"),
+    ...(allowedModels.length ? { allowedModels } : {}),
+  };
   return config;
 }

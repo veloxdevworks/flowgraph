@@ -12,7 +12,14 @@ import type { IssueInput, RunIssue } from "./runtime/run-issues.js";
 export type { SecretProvider };
 
 /** How a HITL interrupt should be presented and answered. */
-export type InterruptKind = "approval" | "question" | "choice" | "form" | "review" | "custom";
+export type InterruptKind =
+  | "approval"
+  | "question"
+  | "choice"
+  | "form"
+  | "review"
+  | "workshop"
+  | "custom";
 
 export interface RunMeta {
   runId: string;

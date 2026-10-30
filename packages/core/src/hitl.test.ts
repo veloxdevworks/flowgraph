@@ -112,8 +112,11 @@ describe("hitl node", () => {
       resume: { choice: "nope" },
       onInterrupt: "fail",
     });
-    expect(r2.status).toBe("error");
-    expect(r2.error?.message).toContain("Invalid choice");
+    expect(r2.status).toBe("interrupted");
+    expect(r2.interrupts?.[0]?.validationError).toContain("Invalid choice");
+    const r3 = await compiled.resume({ threadId: "hitl-bad", resume: "a", onInterrupt: "fail" });
+    expect(r3.status).toBe("completed");
+    expect((r3.state["gateResult"] as { choice: string }).choice).toBe("a");
   });
 });
 

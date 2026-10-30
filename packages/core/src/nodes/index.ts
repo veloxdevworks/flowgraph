@@ -17,6 +17,7 @@ import { subgraphNode } from "./subgraph.js";
 import { mapNode } from "./map.js";
 import { mcpNode } from "./mcp.js";
 import { hitlNode } from "./hitl.js";
+import { workshopNode } from "./workshop.js";
 import { worktreeNode } from "./worktree.js";
 import { webhookNode } from "./webhook.js";
 import "../providers/ask-human.js";
@@ -40,6 +41,7 @@ const BUILT_INS = [
   mapNode,
   mcpNode,
   hitlNode,
+  workshopNode,
   worktreeNode,
   webhookNode,
 ];
@@ -68,6 +70,7 @@ export {
   mapNode,
   mcpNode,
   hitlNode,
+  workshopNode,
   worktreeNode,
   webhookNode,
 };

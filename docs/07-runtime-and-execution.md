@@ -88,10 +88,11 @@ HITL is built on LangGraph's `interrupt()` + `Command({ resume })` + checkpointe
 
 1. **Dynamic interrupt** — a node (or hook) calls `ctx.interrupt({ reason, kind?, data? })`. Execution suspends; state is checkpointed; the payload surfaces to the caller under the interrupt result.
 2. **Static breakpoints** — `interruptBefore` / `interruptAfter` a node, set at compile or per-run (great for debugging / approval gates).
-3. **`hitl` nodes** — first-class approve / question / choice gates in the graph topology.
-4. **`ask_human` tool** — intelligent agents ask clarifying questions mid-loop (opt-in via `tools: [{ function: ask_human }]`).
-5. **Service tools** — agents discover and manage background services in the current thread (`list_services`, `service_status`, `start_service`, `stop_service`, `restart_service`). Services started via tools share the same registry/cleanup as the `service` node.
-6. **`wait` nodes** — durable pauses for time, signals, conditions, or inbound webhooks (`webhook: true`).
+3. **`hitl` nodes** — first-class approve / question / choice / form / review gates in the graph topology.
+4. **`workshop` nodes** — one-shot facilitated session contract (agenda + output schema); the client owns the conversation (voice, text, or form) and resumes with `{ output, transcript, coverage, endedReason }`.
+5. **`ask_human` tool** — intelligent agents ask clarifying questions mid-loop (opt-in via `tools: [{ function: ask_human }]`).
+6. **Service tools** — agents discover and manage background services in the current thread (`list_services`, `service_status`, `start_service`, `stop_service`, `restart_service`). Services started via tools share the same registry/cleanup as the `service` node.
+7. **`wait` nodes** — durable pauses for time, signals, conditions, or inbound webhooks (`webhook: true`).
 
 ### Interrupt kinds
 
@@ -102,6 +103,9 @@ Each interrupt carries a **kind** so operators know how to answer:
 | `approval` | `hitl` approve mode, tool gates, `permission: ask` | `{ approved: true \| false }` |
 | `question` | `hitl` question mode, `ask_human` | `{ answer: "..." }` |
 | `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }` |
+| `form` | `hitl` form mode | schema-validated object |
+| `review` | `hitl` review mode | `{ decision, feedback? }` |
+| `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` |
 | `custom` | advanced / hook payloads | arbitrary JSON |
 
 ```yaml
@@ -138,6 +142,18 @@ const result = await compiled.resume({
 A scalar / object resume (anything whose keys are not interrupt ids) is broadcast the same way a single-interrupt resume is. Answering only a subset of the map leaves the remaining gates pending — they re-surface on the next `interrupt.raised`.
 
 Static breakpoints (`runtime.hitl.breakpoints.before` / `after`) pause with a synthetic `breakpoint:…` interrupt and no `interrupt()` call. `compiled.resume()` continues past those with LangGraph's null input; the resume payload is ignored.
+
+### Invalid answers: re-prompt, don't brick
+
+LangGraph persists every value a task's `interrupt()` calls consumed and replays them in order when the node re-runs. A node that **throws** after a bad answer would therefore replay that bad answer on every later resume and the thread would be stuck.
+
+`hitl` (choice / form / review) and `workshop` nodes instead validate inside a re-prompt loop (`interruptUntilValid` in `@flowgraph/core`):
+
+1. A resume value that fails validation (JSON Schema, unknown review decision, unknown choice) re-issues the **same** interrupt (same interrupt id, so map-keyed resumes keep working) with extra fields in `payload.data` and on `InterruptInfo`: `validationError`, `attempt` (rejected answers so far), `maxAttempts`. The run returns `status: "interrupted"` as usual; the CLI prints `Previous answer rejected (attempt n of N): …` before prompting again.
+2. After `with.maxResumeAttempts` rejected answers (default **3**) the interrupt is raised once more with `exhausted: true`. The engine reports the run as `status: "error"` with a `ResumeAttemptsExhaustedError` (`code: "RESUME_ATTEMPTS_EXHAUSTED"`), emits `node.error` + `run.error`, and returns the pending `interrupts`.
+3. The thread is **not** corrupted: `getState(threadId)` still lists the node in `next` and the exhausted interrupt (with its last `validationError`) in `interrupts`. A later valid `resume` — from the same process or after a restart against a durable checkpointer — completes the node. Each further invalid answer fails the run again the same way.
+
+Sibling interrupts are independent: in a `map` fan-out, a bad answer for one item re-prompts only that item; valid answers for other items in the same id-keyed resume are kept.
 
 A `thread_id` + durable checkpointer is what makes "interrupt for approval and resume days later" work ([Vision success criteria](./00-vision.md#7-success-criteria)).
 

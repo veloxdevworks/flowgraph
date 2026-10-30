@@ -5,6 +5,7 @@
 
 import { START, END, StateGraph, MemorySaver, InMemoryStore, Command, Send, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
+import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
 import type { GraphSpec } from "@flowgraph/spec";
 import { MapWithSchema } from "@flowgraph/spec";
@@ -90,6 +91,31 @@ export interface InterruptInfo {
   choices?: string[];
   /** ISO timestamp when a wait node's timeout elapses. */
   deadlineAt?: string;
+  /** Set when this is a re-prompt after a rejected answer (hitl / workshop). */
+  validationError?: string;
+  /** Rejected answers so far (with `validationError`). */
+  attempt?: number;
+  maxAttempts?: number;
+  /** Re-prompt budget spent; the run reported an error but the interrupt is still resumable. */
+  exhausted?: boolean;
+}
+
+/** Run error when a hitl/workshop node rejected `maxResumeAttempts` answers. */
+export class ResumeAttemptsExhaustedError extends Error {
+  readonly code = "RESUME_ATTEMPTS_EXHAUSTED";
+  constructor(message: string) {
+    super(message);
+    this.name = "ResumeAttemptsExhaustedError";
+  }
+}
+
+function describeExhausted(it: InterruptInfo): string {
+  const nodeId = (it.payload as { data?: { __nodeId?: string } } | undefined)?.data?.__nodeId ?? it.id;
+  return (
+    `node "${nodeId}" rejected ${it.attempt ?? "?"} of ${it.maxAttempts ?? "?"} allowed resume answers ` +
+    `(last error: ${it.validationError ?? "unknown"}). The interrupt is still pending; ` +
+    `resume the thread again with a valid answer.`
+  );
 }
 
 export interface RunOptions {
@@ -384,6 +410,34 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           return finish({ status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs });
         }
 
+        const exhausted = interrupts.filter((i) => i.exhausted);
+        if (exhausted.length > 0) {
+          // Re-prompt budget spent: fail this run, but leave the interrupt
+          // pending in the checkpoint so the thread stays inspectable and a
+          // later valid resume can still complete the node.
+          const clean = stripReserved(result);
+          const message = exhausted.map(describeExhausted).join("; ");
+          const error = new ResumeAttemptsExhaustedError(message);
+          for (const it of exhausted) {
+            const nodeId = (it.payload as { data?: { __nodeId?: string } } | undefined)?.data?.__nodeId;
+            events.emit(
+              "node.error",
+              { nodeId, error: message, resumeAttemptsExhausted: true, interruptId: it.id },
+              nodeId ? { nodeId } : {},
+            );
+          }
+          events.emit("run.error", { message, error: message, durationMs: Date.now() - startMs });
+          return finish({
+            status: "error",
+            state: clean,
+            runId,
+            threadId,
+            interrupts,
+            error,
+            durationMs: Date.now() - startMs,
+          });
+        }
+
         await attachWebhookUrls(interrupts, {
           threadId,
           graphSpec,
@@ -483,13 +537,20 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   };
 
   const toSnapshot = (
-    snap: { values: Record<string, unknown>; next: readonly string[]; config?: { configurable?: { checkpoint_id?: string } }; createdAt?: string; tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }> },
+    snap: { values: Record<string, unknown>; next: readonly string[]; config?: { configurable?: { checkpoint_id?: string } }; createdAt?: string; tasks?: ReadonlyArray<{ name?: string; interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }> },
     threadId?: string,
   ): StateSnapshot => {
     const interrupts: InterruptInfo[] = [];
+    const next = [...snap.next];
     for (const task of snap.tasks ?? []) {
       for (const it of task.interrupts ?? []) {
         interrupts.push(toInterruptInfo(it));
+      }
+      // LangGraph drops a task from `next` once it has pending writes (e.g. the
+      // persisted resume values of a re-prompted hitl node), even though it is
+      // still waiting on an interrupt. Report it as pending.
+      if ((task.interrupts?.length ?? 0) > 0 && task.name && !next.includes(task.name)) {
+        next.push(task.name);
       }
     }
     if (threadId) enrichInterruptsWithWebhookUrls(interrupts, threadId);
@@ -505,7 +566,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     }
     return {
       values: stripReserved(snap.values),
-      next: [...snap.next],
+      next,
       checkpointId: snap.config?.configurable?.checkpoint_id,
       createdAt: snap.createdAt,
       interrupts,
@@ -1168,6 +1229,13 @@ function toInterruptInfo(it: { id?: string; value?: unknown }): InterruptInfo {
     if (Array.isArray(choices) && choices.length > 0) info.choices = choices;
     const deadline = value.data?.deadlineAt ?? value.deadlineAt;
     if (typeof deadline === "string") info.deadlineAt = deadline;
+    const v = resumeValidationInfo(value);
+    if (v) {
+      info.validationError = v.validationError;
+      info.attempt = v.attempt;
+      info.maxAttempts = v.maxAttempts;
+      if (v.exhausted) info.exhausted = true;
+    }
   }
   return info;
 }

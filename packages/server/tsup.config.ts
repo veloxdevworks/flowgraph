@@ -10,6 +10,7 @@ export default defineConfig([
     external: [
       "@flowgraph/core",
       "@flowgraph/spec",
+      "@flowgraph/workshop-session",
       "@flowgraph/checkpoint-postgres",
       "@langchain/aws",
       "@langchain/anthropic",
@@ -27,6 +28,7 @@ export default defineConfig([
     external: [
       "@flowgraph/core",
       "@flowgraph/spec",
+      "@flowgraph/workshop-session",
       "@flowgraph/checkpoint-postgres",
       "@langchain/aws",
       "@langchain/anthropic",
