@@ -188,6 +188,51 @@ describe("untrusted outbound targets and provider endpoints", () => {
   });
 });
 
+describe("untrusted MCP, local tools and host probes", () => {
+  const hitl = `  - { id: a, type: hitl, with: { mode: approve, message: "ok?" } }`;
+
+  it("refuses mcpServers, mcp nodes, agent mcp tools and localTools, including in inline subgraphs", () => {
+    expect(codesOf(graph(hitl, `mcpServers:\n  fs: { transport: stdio, command: npx, args: [server-fs] }\n`))).toEqual(["UPLOAD_MCP_BLOCKED mcpServers"]);
+    expect(codesOf(graph(hitl, `mcpServers:\n  remote: { transport: http, url: "https://mcp.example.com/" }\n`))).toEqual(["UPLOAD_MCP_BLOCKED mcpServers"]);
+    expect(codesOf(graph(`  - { id: a, type: mcp, with: { server: fs, tool: read } }`))).toContain("UPLOAD_NODE_TYPE_BLOCKED nodes.a");
+    expect(codesOf(graph(`  - { id: a, type: agent, with: { prompt: hi, tools: [{ mcp: fs }] } }`))).toEqual(["UPLOAD_MCP_BLOCKED nodes.a.with.tools[0]"]);
+    expect(codesOf(graph(hitl, `localTools:\n  fs: { operations: [read] }\n`))).toContain("UPLOAD_LOCAL_TOOLS_BLOCKED localTools");
+    const inline = graph(`  - id: a
+    type: subgraph
+    spec:
+      apiVersion: flowgraph/v1
+      kind: Graph
+      metadata: { name: child }
+      mcpServers:
+        fs: { transport: stdio, command: npx }
+      localTools: { fs: {} }
+      nodes:
+        - { id: h, type: hitl, with: { mode: approve, message: "ok?" } }
+      edges:
+        - { from: START, to: h }
+        - { from: h, to: END }`);
+    expect(codesOf(inline)).toEqual(expect.arrayContaining(["UPLOAD_MCP_BLOCKED nodes.a.spec.mcpServers", "UPLOAD_LOCAL_TOOLS_BLOCKED nodes.a.spec.localTools"]));
+  });
+
+  it("refuses requires host-program checks, including on map inners", () => {
+    expect(codesOf(graph(`  - { id: a, type: hitl, with: { mode: approve, message: "ok?", requires: [git] } }`))).toEqual([
+      "UPLOAD_HOST_PROBE_BLOCKED nodes.a.with.requires",
+    ]);
+    const mapped = graph(`  - id: a
+    type: map
+    with:
+      over: "{{ state.items }}"
+      node: { id: inner, type: hitl, with: { mode: approve, message: "ok?", requires: [docker] } }`);
+    expect(codesOf(mapped)).toContain("UPLOAD_HOST_PROBE_BLOCKED nodes.a.map.inner.with.requires");
+  });
+
+  it("compiles untrusted graphs with MCP, local tools and host probes off", () => {
+    expect(UNTRUSTED_NODE_POLICY).toMatchObject({ blockMcp: true, blockLocalTools: true, blockHostProbes: true });
+    expect(UNTRUSTED_NODE_POLICY.blockedTypes).toContain("mcp");
+    expect(untrustedNodePolicy(["h"])).toMatchObject({ blockMcp: true, blockLocalTools: true, blockHostProbes: true });
+  });
+});
+
 const OIDC: ServerAuthConfig = {
   mode: "oidc",
   explicit: true,
@@ -333,5 +378,15 @@ edges:
     await allowed.startRun({ threadId: "s2", yaml: yaml("u-ssrf-ok"), input: { url: `http://127.0.0.1:${port}/admin` } }, ursula);
     expect(await settle(allowed, "s2", ["completed", "error"])).toBe("completed");
     expect(hits).toBe(1);
+  });
+
+  it("refuses an untrusted upload with mcpServers before anything connects", async () => {
+    const s = await svc();
+    const yaml = SHELL.replace("NAME", "u-mcp")
+      .replace(/  - \{ id: a, type: shell.*\n/, "")
+      .replace("  - { from: gate, to: a }\n  - { from: a, to: END }", "  - { from: gate, to: END }")
+      .concat(`mcpServers:\n  fs: { transport: stdio, command: "touch /tmp/fg-mcp-should-not-run" }\n`);
+    await expect(s.startRun({ threadId: "m1", yaml }, principal("ursula", false))).rejects.toMatchObject({ status: 403, code: "UPLOAD_MCP_BLOCKED" });
+    expect(await s.getRun("m1", principal("ursula", false))).toBeNull();
   });
 });

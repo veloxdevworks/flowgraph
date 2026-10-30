@@ -1,8 +1,9 @@
 /**
  * What an untrusted author may upload to a multi-user server. Graphs from
  * untrusted principals may not run host commands, read host files or paths,
- * read the server's environment, reach non-public addresses, or point
- * providers at other endpoints or keys. The server checks every upload here and compiles untrusted graphs
+ * read the server's environment, reach non-public addresses, use MCP
+ * servers or local tools, probe for host programs, or point providers at
+ * other endpoints or keys. The server checks every upload here and compiles untrusted graphs
  * with a matching core NodePolicy, so a stored graph that skipped this check
  * still cannot run a blocked node.
  */
@@ -13,7 +14,7 @@ import type { GraphSpec } from "@flowgraph/spec";
 import { ServerRequestError } from "./errors.js";
 
 /** Node types an untrusted upload may not contain (host commands, processes, files). */
-export const UNTRUSTED_BLOCKED_NODE_TYPES: readonly string[] = ["shell", "script", "service", "worktree", "skill", "demo"];
+export const UNTRUSTED_BLOCKED_NODE_TYPES: readonly string[] = ["shell", "script", "service", "worktree", "skill", "demo", "mcp"];
 
 /** LangChain model options an untrusted upload may set; anything else could redirect the request or the key. */
 export const UNTRUSTED_PROVIDER_OPTIONS: readonly string[] = [
@@ -44,6 +45,9 @@ export type UploadViolationCode =
   | "UPLOAD_PROVIDER_OVERRIDE_BLOCKED"
   | "UPLOAD_PROVIDER_ENDPOINT_BLOCKED"
   | "UPLOAD_HTTP_TARGET_BLOCKED"
+  | "UPLOAD_MCP_BLOCKED"
+  | "UPLOAD_LOCAL_TOOLS_BLOCKED"
+  | "UPLOAD_HOST_PROBE_BLOCKED"
   | "UPLOAD_HOST_PATH_BLOCKED";
 
 export interface UploadViolation {
@@ -61,6 +65,9 @@ export const UNTRUSTED_NODE_POLICY: NodePolicy = {
   blockSubgraphFiles: true,
   blockSecrets: true,
   outboundHttp: { publicOnly: true },
+  blockMcp: true,
+  blockLocalTools: true,
+  blockHostProbes: true,
   reason: REASON,
 };
 
@@ -125,7 +132,13 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
         if (t && typeof t === "object" && "skill" in t) {
           add("UPLOAD_AGENT_SKILL_TOOL_BLOCKED", `${path}.with.tools[${i}]`, "skill tools run handlers on the server");
         }
+        if (t && typeof t === "object" && "mcp" in t) {
+          add("UPLOAD_MCP_BLOCKED", `${path}.with.tools[${i}]`, "MCP tools connect to servers or start processes on the host");
+        }
       });
+    }
+    if (w.requires !== undefined) {
+      add("UPLOAD_HOST_PROBE_BLOCKED", `${path}.with.requires`, "requires checks which programs are installed on the server");
     }
     if ((type === "http" || type === "webhook") && typeof w.url === "string") {
       const why = literalUrlProblem(w.url, opts.allowHosts);
@@ -143,6 +156,12 @@ function checkGraphLevel(
   where: string,
   add: (code: UploadViolationCode, path: string, message: string) => void,
 ): void {
+  if (graph.mcpServers && Object.keys(graph.mcpServers).length > 0) {
+    add("UPLOAD_MCP_BLOCKED", `${where}mcpServers`, "mcpServers connect to servers or start processes on the host");
+  }
+  if (graph.localTools !== undefined) {
+    add("UPLOAD_LOCAL_TOOLS_BLOCKED", `${where}localTools`, "localTools run tool code on the server");
+  }
   const defaultProvider = graph.config?.defaults?.provider;
   if (typeof defaultProvider === "string" && LOCAL_ENDPOINT_VENDORS.includes(defaultProvider) && !graph.providers?.[defaultProvider]) {
     add("UPLOAD_PROVIDER_ENDPOINT_BLOCKED", `${where}config.defaults.provider`, `vendor "${defaultProvider}" talks to a model server on the host`);
