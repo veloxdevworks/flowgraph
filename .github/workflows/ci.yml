@@ -19,6 +19,26 @@ jobs:
         # pnpm@11 (packageManager) requires Node >= 22.13
         node-version: [22.x]
 
+    # Postgres for the checkpointer and memory integration tests
+    # (they are skipped when FLOWGRAPH_TEST_POSTGRES_URL is unset).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: flowgraph_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      FLOWGRAPH_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/flowgraph_test
+
     steps:
       - uses: actions/checkout@v4
 
