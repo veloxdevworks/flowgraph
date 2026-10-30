@@ -42,7 +42,7 @@ The server identifies callers in one of three modes. None of this applies to the
 | `token` | `FLOWGRAPH_AUTH_TOKEN` | Single-user mode: anyone with the shared token is the same principal. With durable runs or memory (`DATABASE_URL` or a durable `FLOWGRAPH_MEMORY_BACKEND`) the server only starts when you also set `FLOWGRAPH_AUTH_MODE=token`. |
 | `none` | `FLOWGRAPH_AUTH_DISABLED=1` | No auth, local/dev only. With durable runs or memory the server refuses to start unless `FLOWGRAPH_INSECURE_DEV=1`. |
 
-`FLOWGRAPH_OIDC_ISSUER` cannot be combined with `FLOWGRAPH_AUTH_TOKEN` or `FLOWGRAPH_AUTH_DISABLED`; `FLOWGRAPH_AUTH_MODE` (`oidc` \| `token` \| `none`) must match the variables that are set. AgentCore `/ping` is always open; `/invocations` skips bearer auth in `token` and `none` mode (SigV4 at the edge) but needs a JWT in `oidc` mode. Over the connect channel, `oidc` mode needs the user's JWT in each command's `params.accessToken`.
+`FLOWGRAPH_OIDC_ISSUER` cannot be combined with `FLOWGRAPH_AUTH_TOKEN` or `FLOWGRAPH_AUTH_DISABLED`; `FLOWGRAPH_AUTH_MODE` (`oidc` \| `token` \| `none`) must match the variables that are set. AgentCore `/ping` is always open. `/invocations` skips bearer auth in `token` and `none` mode (AgentCore checks SigV4 at the edge), but in `oidc` mode it needs `Authorization: Bearer <jwt>` exactly like REST: no token, a malformed or forged one is a 401, and a valid one acts as that caller, so another caller's thread is a 403 `THREAD_NOT_OWNED`. Over the connect channel, `oidc` mode needs the user's JWT in each command's `params.accessToken` ([trust model](#control-plane-connect-adr-0014)).
 
 ### OIDC
 
@@ -76,14 +76,27 @@ A graph uploaded by a caller who is not a trusted author is checked when it is u
 
 | `code` | Refused |
 |---|---|
-| `UPLOAD_NODE_TYPE_BLOCKED` | `shell`, `script`, `service`, `worktree`, `skill` and `demo` nodes, including inside `map` and subgraphs |
+| `UPLOAD_NODE_TYPE_BLOCKED` | `shell`, `script`, `service`, `worktree`, `skill`, `demo` and `mcp` nodes, including inside `map` and subgraphs |
 | `UPLOAD_SUBGRAPH_FILE_BLOCKED` | subgraphs loaded from a file on the server (`uses:`); inline `spec:` subgraphs are checked like the parent |
 | `UPLOAD_ENV_PLACEHOLDER_BLOCKED` / `UPLOAD_SECRET_REFERENCE_BLOCKED` | `${VAR}` placeholders and `{{ secrets.* }}` templates, which would read the server's environment |
 | `UPLOAD_HOST_PATH_BLOCKED` | node `workspace`, `runtime.workspace`, `runtime.worktrees.root` and workshop `with.diff` paths |
 | `UPLOAD_AGENT_SKILL_TOOL_BLOCKED` | agents given the `skill` tool |
-| `UPLOAD_PROVIDER_OVERRIDE_BLOCKED` | provider `baseUrl`, `apiKeyEnv`, `cwd`, and `options` other than sampling settings (`temperature`, `maxTokens`, `topP`, `stop`, `seed`, `timeout`, `reasoningEffort`, …) |
+| `UPLOAD_PROVIDER_OVERRIDE_BLOCKED` | provider `apiKeyEnv`, `cwd`, and `options` other than sampling settings (`temperature`, `maxTokens`, `topP`, `stop`, `seed`, `timeout`, `reasoningEffort`, …) |
+| `UPLOAD_PROVIDER_ENDPOINT_BLOCKED` | custom provider endpoints (`baseUrl`), and the `ollama` vendor or `config.defaults.provider: ollama`, whose default endpoint is a model server on the host (`localhost:11434`) |
+| `UPLOAD_HTTP_TARGET_BLOCKED` | literal `http` / `webhook` URLs that are not `http(s)`, or whose host is `localhost` or a non-public IP (loopback, private, link-local, CGNAT, cloud metadata, and their IPv6 and IPv4-mapped forms) |
+| `UPLOAD_MCP_BLOCKED` | `mcpServers` (stdio servers start host processes; http servers reach any address) and agents given `{ mcp: … }` tools |
+| `UPLOAD_LOCAL_TOOLS_BLOCKED` | `localTools`, which run file tools on the server |
+| `UPLOAD_HOST_PROBE_BLOCKED` | `with.requires`, which checks which programs are installed on the server |
 
-At run time the same node types, file subgraphs and secret lookups are also refused by the engine (`NODE_TYPE_BLOCKED`, `SUBGRAPH_FILE_BLOCKED`, `SECRET_REFERENCE_BLOCKED`). Trusted authors are `oidc` callers with a trusted role or team, every `token` caller, and `none` mode only with `FLOWGRAPH_INSECURE_DEV=1`.
+At run time the engine enforces the same limits again (`NODE_TYPE_BLOCKED`, `SUBGRAPH_FILE_BLOCKED`, `SECRET_REFERENCE_BLOCKED`, `MCP_BLOCKED`, `LOCAL_TOOLS_BLOCKED`, `HOST_PROBE_BLOCKED`; the MCP hub is never handed to an untrusted graph), and building providers refuses `ollama` and `baseUrl` with 403 `PROVIDER_ENDPOINT_BLOCKED`. Trusted authors are `oidc` callers with a trusted role or team, every `token` caller, and `none` mode only with `FLOWGRAPH_INSECURE_DEV=1`.
+
+**Outbound requests.** `http` and `webhook` nodes in untrusted graphs may reach only public addresses. Templated URLs are checked when the request is made: the host is resolved and every address it resolves to is checked before connecting (so DNS rebinding to an inner address is refused), and redirects are followed by hand with the same check on every hop; a redirect to a blocked address is never followed. Refusals name the address and the reason (`OUTBOUND_ADDRESS_BLOCKED`; `OUTBOUND_URL_BLOCKED` for non-http schemes). To let untrusted graphs call specific inner services, list them:
+
+| Env | Default | Purpose |
+|---|---|---|
+| `FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS` | _(unset: public addresses only)_ | Comma-separated `host`, `host:port`, `*.domain` or `[v6]:port` entries that untrusted `http` / `webhook` nodes may reach even though they resolve to private, loopback or CGNAT addresses. Public hosts stay reachable either way. Cloud metadata (`169.254.169.254`, `fd00:ec2::254`, …) and link-local addresses are never allowed |
+
+**Stored graphs.** The graph store (`{threadId}.graph.yaml`), the live session and `GET /runs/:id` keep the YAML as it was uploaded. `${VAR}` placeholders in a trusted author's graph are filled from the server environment each time it runs and are never written back; an untrusted author cannot upload them, and a stored placeholder is refused if its author has since lost trust. Files stored by servers before 0.2 hold YAML that was expanded at upload; they are read as they are and never expanded again.
 
 ### Auth errors
 
@@ -99,6 +112,15 @@ Errors are JSON `{ "error", "code" }`; 401s also send `WWW-Authenticate: Bearer`
 | 403 | `THREAD_NOT_OWNED` | Another principal's thread |
 | 404 | `THREAD_NOT_FOUND` | Unknown thread |
 | 409 | `THREAD_ID_CONFLICT` / `GRAPH_NAME_TAKEN` | Thread id used for a different graph / graph name owned by someone else |
+
+### Upgrading from 0.1
+
+Two behavior changes can stop an existing deployment until you act:
+
+1. **Durable servers need an explicit auth mode.** With `DATABASE_URL` or `FLOWGRAPH_MEMORY_BACKEND=postgres|sqlite`, a server configured only with `FLOWGRAPH_AUTH_TOKEN` now refuses to start. Add `FLOWGRAPH_AUTH_MODE=token` to keep the single shared token (every caller is one principal), or move to `oidc`. `FLOWGRAPH_AUTH_DISABLED=1` on a durable server refuses to start unless `FLOWGRAPH_INSECURE_DEV=1`.
+2. **`FLOWGRAPH_AUTH_DISABLED=1` callers are untrusted authors** unless `FLOWGRAPH_INSECURE_DEV=1` is also set, on any server. Their graphs get every limit in [the untrusted-author section](#uploaded-graphs-from-untrusted-authors): no `shell`, `script`, `service`, `worktree`, `skill`, `demo` or `mcp` nodes, no `mcpServers`, `localTools` or `requires`, no `${VAR}` or `secrets.*`, no `ollama` or `baseUrl` providers, and `http` / `webhook` nodes reach public addresses only. Set `FLOWGRAPH_INSECURE_DEV=1` on a local dev server to keep running such graphs, or use `token` mode.
+
+Also: reusing a thread id for a different graph is a 409 `THREAD_ID_CONFLICT`, and stored graph YAML is now kept as uploaded (see *Stored graphs* above). The `flowgraph` CLI runs graphs locally and is unaffected by all of this.
 
 ## Voice tokens (`POST /voice/client-secrets`)
 
@@ -126,6 +148,7 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 | `FLOWGRAPH_MAX_CONCURRENT_RUNS` | `16` | In-flight `running`/`started` threads per process (`0` = unlimited) |
 | `FLOWGRAPH_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. `GET /ping` access logs are `debug`. |
 | `FLOWGRAPH_GIT_SHA` | _(unset)_ | Optional build identity included on `/` and `/healthz`. |
+| `FLOWGRAPH_SHUTDOWN_TIMEOUT_MS` | `10000` | On SIGTERM / SIGINT the server stops accepting connections and new runs (503 `SERVER_CLOSING`), waits this long for runs in flight, aborts what is still running and gives it 2 s to settle, then closes database pools and exits. `RunService.close()` does the same for embedders |
 | `FLOWGRAPH_GRAPH_STORE` | `/tmp/flowgraph-graphs` | Uploaded YAML + `{threadId}.events.jsonl`. **Do not use `/tmp` on a lab host** — it is wiped on reboot. |
 
 ## Memory
@@ -181,6 +204,13 @@ node packages/server/dist/bin.js
 ```
 
 Handshake: client sends `{ type: "hello", protocolVersion: 1, token, capabilities }`; platform replies `{ type: "hello.ack", protocolVersion: 1, sessionId }`. Commands (`run.start|resume|cancel|pause|continue|state|history|list`) map onto `RunService`; engine events are batched as `{ type: "event.batch", threadId, events }`.
+
+**Trust model.** The server dials out to one platform relay that the operator chose by setting `FLOWGRAPH_CONNECT_URL`, and authenticates itself to it with `FLOWGRAPH_CONNECT_TOKEN`. That relay is trusted as part of the deployment, like the load balancer in front of REST:
+
+- **Events.** Every event of every thread on this server is forwarded upstream, whoever started the run. The relay must apply its own per-user access control before showing events to anyone. Do not point `FLOWGRAPH_CONNECT_URL` at a relay you would not give read access to all runs.
+- **Commands in `oidc` mode.** The relay is not a principal itself. Each command must carry the end user's own JWT as `params.accessToken`; the server verifies it exactly like a REST bearer token and runs the command as that user, with the same thread ownership, memory scope and trusted-author checks. A command without a valid token is refused with the same `AUTH_*` code. The relay can therefore act only for users whose tokens it holds.
+- **Commands in `token` and `none` mode.** There is one principal, and the relay acts as it with full access. Use `oidc` for any multi-user deployment that uses connect.
+- Use `wss://`; the connect token and forwarded access tokens travel on that socket.
 
 ## TLS
 
