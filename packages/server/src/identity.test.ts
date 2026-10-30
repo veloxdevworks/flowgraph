@@ -357,6 +357,22 @@ describe("HTTP with OIDC", () => {
       expect(mine.status).toBe(200);
       const inv = await fetch(`${base}/invocations`, { method: "POST", body: JSON.stringify({ action: "list" }) });
       expect(inv.status).toBe(401);
+      // /invocations takes the same JWT as REST: none, a bad one, or a forged one is refused.
+      const invoke = (body: unknown, authorization?: string) =>
+        fetch(`${base}/invocations`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
+          body: JSON.stringify(body),
+        });
+      expect((await invoke({ action: "start", threadId: "inv-anon", yaml: yaml.replace("http-owned", "inv-anon") })).status).toBe(401);
+      expect((await invoke({ action: "state", threadId: "http-t1" }, "Bearer not-a-jwt")).status).toBe(401);
+      expect((await invoke({ action: "state", threadId: "http-t1" }, `Bearer ${token.slice(0, -4)}AAAA`)).status).toBe(401);
+      expect(service.registry.get("inv-anon")).toBeUndefined();
+      // With a valid JWT it acts as that caller, so threads stay with their owner.
+      const bobState = await invoke({ action: "state", threadId: "http-t1" }, `Bearer ${bobToken}`);
+      expect(bobState.status).toBe(403);
+      expect(await bobState.json()).toMatchObject({ code: "THREAD_NOT_OWNED" });
+      expect((await invoke({ action: "state", threadId: "http-t1" }, `Bearer ${token}`)).status).toBe(200);
       expect((await fetch(`${base}/ping`)).status).toBe(200);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
