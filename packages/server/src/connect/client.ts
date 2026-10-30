@@ -61,6 +61,12 @@ export class ConnectClient {
 
   start(): void {
     this.stopped = false;
+    if (this.opts.token && /^ws:\/\//i.test(this.opts.url)) {
+      log("warn", "connect.insecure-url", {
+        url: this.opts.url,
+        detail: "FLOWGRAPH_CONNECT_TOKEN is sent over plaintext ws://; use wss://",
+      });
+    }
     this.unsubGlobal = this.opts.service.registry.onGlobal((threadId, event) => {
       this.enqueue(threadId, event);
     });
@@ -187,6 +193,12 @@ export class ConnectClient {
       return;
     }
     if (isCommand(parsed)) {
+      // Only act on commands after the platform acknowledged our hello on this socket.
+      if (!this.ready) {
+        log("warn", "connect.command.before-ack", { method: parsed.method });
+        this.send({ type: "command.result", id: parsed.id, ok: false, error: "Not ready: hello not acknowledged" });
+        return;
+      }
       void this.dispatch(parsed);
     }
   }

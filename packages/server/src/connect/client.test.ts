@@ -87,6 +87,29 @@ describe("ConnectClient", () => {
     client.stop();
   });
 
+  it("refuses commands that arrive before hello.ack", async () => {
+    let socket: FakeSocket | undefined;
+    const listRuns = vi.fn(async () => []);
+    const service = { registry: new SessionRegistry(), listRuns } as unknown as RunService;
+    const client = new ConnectClient({
+      url: "wss://platform.test/connect",
+      service,
+      webSocket: class {
+        constructor() {
+          socket = new FakeSocket();
+          return socket;
+        }
+      } as unknown as new (url: string) => WebSocketLike,
+    });
+    client.start();
+    socket!.emit("open");
+    socket!.emit("message", JSON.stringify({ type: "command", id: "early", method: "run.list", params: {} }));
+    const res = socket!.sent.map((s) => JSON.parse(s) as { type: string; id?: string; ok?: boolean; error?: string });
+    expect(res.find((m) => m.type === "command.result")).toMatchObject({ id: "early", ok: false, error: expect.stringMatching(/Not ready/) });
+    expect(listRuns).not.toHaveBeenCalled();
+    client.stop();
+  });
+
   it("rejects unknown methods", async () => {
     let socket: FakeSocket | undefined;
     const service = {
