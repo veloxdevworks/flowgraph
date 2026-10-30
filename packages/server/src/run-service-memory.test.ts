@@ -172,6 +172,10 @@ describe("defaultServerConfig memory", () => {
     // FLOWGRAPH_PROJECT alone sets no identity; the org is what durable memory needs.
     expect(defaultServerConfig({ FLOWGRAPH_MEMORY_BACKEND: "postgres", FLOWGRAPH_PROJECT: "acme/web" }).memory).toEqual({ backend: "postgres" });
     expect(defaultServerConfig({ FLOWGRAPH_ORG: "acme" }).memory).toEqual({ backend: "memory", identity: { org: "acme", project: "local" } });
+    for (const bad of ["abc", "-5", "0", "999", "1.5", "1e9", "60s"]) {
+      expect(() => defaultServerConfig({ FLOWGRAPH_MEMORY_SWEEP_MS: bad }), bad).toThrow(/FLOWGRAPH_MEMORY_SWEEP_MS must be a whole number/);
+    }
+    expect(defaultServerConfig({ FLOWGRAPH_MEMORY_SWEEP_MS: " " }).memory).toEqual({ backend: "memory" });
     expect(() => defaultServerConfig({ FLOWGRAPH_MEMORY_BACKEND: "redis" })).toThrow(/FLOWGRAPH_MEMORY_BACKEND must be one of/);
   });
 });

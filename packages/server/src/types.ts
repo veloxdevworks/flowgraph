@@ -223,8 +223,14 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
       ...(env.FLOWGRAPH_USER?.trim() ? { user: env.FLOWGRAPH_USER.trim() } : {}),
     };
   }
-  const sweepMs = envInt(env, "FLOWGRAPH_MEMORY_SWEEP_MS", 0);
-  if (sweepMs > 0) config.memory.sweepIntervalMs = sweepMs;
+  const sweepRaw = env.FLOWGRAPH_MEMORY_SWEEP_MS?.trim();
+  if (sweepRaw) {
+    const sweepMs = Number(sweepRaw);
+    if (!/^\d+$/.test(sweepRaw) || !Number.isSafeInteger(sweepMs) || sweepMs < 1_000) {
+      throw new Error(`FLOWGRAPH_MEMORY_SWEEP_MS must be a whole number of milliseconds, at least 1000 (got "${env.FLOWGRAPH_MEMORY_SWEEP_MS}")`);
+    }
+    config.memory.sweepIntervalMs = sweepMs;
+  }
   const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION;
   if (region) config.awsRegion = region;
   if (env.FLOWGRAPH_CONNECT_URL?.trim()) config.connectUrl = env.FLOWGRAPH_CONNECT_URL.trim();
