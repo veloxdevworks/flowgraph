@@ -81,6 +81,13 @@ export interface CompileOptions {
    * parent's MemoryRuntime.
    */
   memory?: MemoryHostOptions | MemoryBackend | MemoryRuntime | "ephemeral";
+  /**
+   * Backend for the graph-scoped `ctx.store` of graphs that do not declare
+   * runtime.memory. Long-lived hosts (the server) pass one shared backend so
+   * `ctx.store` survives recompiles between a run and its resume while each
+   * graph still sees only its own keys. Does not enable `ctx.memory`.
+   */
+  legacyStoreBackend?: MemoryBackend;
   extraFactories?: NodeFactory[];
   providers?: ProviderAdapter[];
   interruptBefore?: string[];
@@ -1277,6 +1284,14 @@ function resolveMemory(
         const ckBackend = ck && ck.enabled !== false ? (ck.backend ?? "memory") : undefined;
         throw memoryUnavailable(memCfg ? "runtime.memory" : `runtime.store.backend "${storeBackend}"`, ckBackend);
       }
+    } else if (opts.legacyStoreBackend && !exposeMemory) {
+      runtime = new MemoryRuntime({
+        backend: opts.legacyStoreBackend,
+        identity: host?.identity ?? LOCAL_MEMORY_IDENTITY,
+        graph,
+        config: memCfg,
+        exposeMemory: false,
+      });
     } else {
       runtime = ephemeral();
     }

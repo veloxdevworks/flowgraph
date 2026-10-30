@@ -1,12 +1,14 @@
 import * as path from "node:path";
-import { MemorySaver, InMemoryStore, type BaseCheckpointSaver, type BaseStore } from "@langchain/langgraph";
+import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph";
 import {
   compileGraph,
+  createInMemoryMemoryBackend,
   resolveAndValidateInput,
   isInputValidationError,
   readRunIssues,
   type CompiledGraph,
   type FlowgraphEvent,
+  type MemoryBackend,
   type RunIssue,
   type RunResult,
 } from "@flowgraph/core";
@@ -37,10 +39,12 @@ export class RunService {
   private checkpointer: BaseCheckpointSaver | null = null;
   private checkpointerPromise: Promise<BaseCheckpointSaver> | null = null;
   /**
-   * One store for the whole service. compile() runs on every start/resume/getState, so a
-   * per-compile InMemoryStore would drop ctx.store data between a run and its own resume.
+   * One in-process memory backend for the whole service. compile() runs on every
+   * start/resume/getState, so a per-compile store would drop ctx.store data between a
+   * run and its own resume. Each compile gets a graph-scoped ctx.store view on it, so
+   * graphs never see each other's keys; the backend caps total items.
    */
-  private readonly store: BaseStore = new InMemoryStore();
+  private readonly legacyStoreBackend: MemoryBackend = createInMemoryMemoryBackend({ maxItems: 50_000 });
 
   constructor(readonly config: ServerConfig) {
     this.registry = new SessionRegistry(config.eventBufferSize, {
@@ -132,7 +136,7 @@ export class RunService {
       cwd,
       graphPath,
       checkpointer,
-      store: this.store,
+      legacyStoreBackend: this.legacyStoreBackend,
       providers,
       sinks: [
         (event) => {
