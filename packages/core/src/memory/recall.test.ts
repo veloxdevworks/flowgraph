@@ -377,7 +377,7 @@ describe("agent memory validation", () => {
       runtime: { checkpoint: { backend: "postgres" }, memory: {} },
     } as unknown as GraphSpec;
     await expect(compileGraph(spec, { checkpointer: "memory" })).rejects.toThrow(
-      /runtime\.memory needs a memory backend for its postgres checkpointer, and this host provided none\. Postgres memory is not available yet/,
+      /runtime\.memory needs a memory backend for its postgres checkpointer, and this host provided none\. .*openPostgresBackend\(url\)\.memory from @flowgraph\/checkpoint-postgres/,
     );
   });
 });

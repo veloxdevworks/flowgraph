@@ -206,7 +206,7 @@ function agentMemoryDiagnostics(spec: GraphSpec, node: Record<string, unknown>, 
 
 /**
  * Host-specific checks: which durable checkpoint backends this host can put
- * memory in. The CLI supports sqlite; postgres memory is not available yet.
+ * memory in (the CLI supports sqlite and postgres).
  */
 export function memoryHostDiagnostics(
   spec: GraphSpec,

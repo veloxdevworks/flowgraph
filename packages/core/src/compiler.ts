@@ -1204,8 +1204,8 @@ function memoryUnavailable(what: string, checkpoint: string | undefined): Memory
     // The graph already has a durable checkpointer; what's missing is a host-provided memory backend.
     const hint =
       checkpoint === "postgres"
-        ? `Postgres memory is not available yet (the flowgraph CLI stores memory only in sqlite checkpoint databases); ` +
-          `pass CompileOptions.memory with a postgres-capable backend, or use runtime.checkpoint.backend: sqlite. `
+        ? `Run it with the flowgraph CLI (memory then lives in the checkpoint database), or pass CompileOptions.memory ` +
+          `(e.g. openPostgresBackend(url).memory from @flowgraph/checkpoint-postgres). `
         : `Run it with the flowgraph CLI (memory then lives in the checkpoint database), or pass CompileOptions.memory ` +
           `(e.g. openSqliteBackend(path).memory from @flowgraph/checkpoint-sqlite). `;
     return new MemoryError(

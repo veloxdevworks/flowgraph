@@ -15,7 +15,15 @@ async function main(): Promise<void> {
 
   const shutdown = () => {
     log("info", "shutting down");
-    server.close(() => process.exit(0));
+    server.close(() => {
+      service.close().then(
+        () => process.exit(0),
+        (err: unknown) => {
+          log("error", "shutdown.failed", errorFields(err));
+          process.exit(1);
+        },
+      );
+    });
     setTimeout(() => process.exit(1), 10_000).unref();
   };
   process.on("SIGINT", shutdown);

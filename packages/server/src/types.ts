@@ -119,6 +119,13 @@ export interface ServerConfig {
   authDisabled?: boolean;
   /** Postgres URL. When unset, use in-memory checkpointer (local smoke only). */
   databaseUrl?: string;
+  /**
+   * Where `runtime.memory` (and the durable `ctx.store` alias) lives. Default
+   * `memory`: process-local, and graphs that declare durable memory fail to
+   * compile. `postgres` shares the checkpointer's pool (needs `databaseUrl`);
+   * `sqlite` keeps memory in a local file (needs @flowgraph/checkpoint-sqlite).
+   */
+  memory?: ServerMemoryConfig;
   /** Directory for persisted uploaded graphs. */
   graphStoreDir: string;
   /** Max events retained per thread for SSE replay. */
@@ -144,6 +151,25 @@ export interface ServerConfig {
   /** `POST /voice/client-secrets` policy. */
   voice?: VoiceConfig;
 }
+
+export type ServerMemoryBackend = "memory" | "postgres" | "sqlite";
+
+export interface ServerMemoryConfig {
+  /** Env: `FLOWGRAPH_MEMORY_BACKEND`. Default `memory`. */
+  backend: ServerMemoryBackend;
+  /** sqlite file. Env: `FLOWGRAPH_MEMORY_SQLITE_PATH`. Default `<graphStoreDir>/memory.db`. */
+  sqlitePath?: string;
+  /**
+   * Who owns memory written by this server: every run shares one identity.
+   * Env: `FLOWGRAPH_ORG`, `FLOWGRAPH_PROJECT`, `FLOWGRAPH_USER`. Default org
+   * and project `local`.
+   */
+  identity?: { org: string; project: string; user?: string };
+  /** How often to delete expired memory and old op records. Env: `FLOWGRAPH_MEMORY_SWEEP_MS`. Default 1h. */
+  sweepIntervalMs?: number;
+}
+
+const MEMORY_BACKENDS: readonly ServerMemoryBackend[] = ["memory", "postgres", "sqlite"];
 
 export interface VoiceConfig {
   /**
@@ -184,6 +210,21 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
   };
   if (env.FLOWGRAPH_AUTH_TOKEN) config.authToken = env.FLOWGRAPH_AUTH_TOKEN;
   if (env.DATABASE_URL) config.databaseUrl = env.DATABASE_URL;
+  const memBackend = (env.FLOWGRAPH_MEMORY_BACKEND?.trim().toLowerCase() || "memory") as ServerMemoryBackend;
+  if (!MEMORY_BACKENDS.includes(memBackend)) {
+    throw new Error(`FLOWGRAPH_MEMORY_BACKEND must be one of ${MEMORY_BACKENDS.join(" | ")} (got "${env.FLOWGRAPH_MEMORY_BACKEND}")`);
+  }
+  config.memory = { backend: memBackend };
+  if (env.FLOWGRAPH_MEMORY_SQLITE_PATH?.trim()) config.memory.sqlitePath = env.FLOWGRAPH_MEMORY_SQLITE_PATH.trim();
+  if (env.FLOWGRAPH_ORG?.trim() || env.FLOWGRAPH_PROJECT?.trim()) {
+    config.memory.identity = {
+      org: env.FLOWGRAPH_ORG?.trim() || "local",
+      project: env.FLOWGRAPH_PROJECT?.trim() || "local",
+      ...(env.FLOWGRAPH_USER?.trim() ? { user: env.FLOWGRAPH_USER.trim() } : {}),
+    };
+  }
+  const sweepMs = envInt(env, "FLOWGRAPH_MEMORY_SWEEP_MS", 0);
+  if (sweepMs > 0) config.memory.sweepIntervalMs = sweepMs;
   const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION;
   if (region) config.awsRegion = region;
   if (env.FLOWGRAPH_CONNECT_URL?.trim()) config.connectUrl = env.FLOWGRAPH_CONNECT_URL.trim();

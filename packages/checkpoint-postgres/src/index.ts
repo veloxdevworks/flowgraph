@@ -66,6 +66,8 @@ export interface PostgresBackendOptions {
   setup?: boolean;
   /** Sweep expired memory on open when the last sweep is older than this. Default 1h. */
   sweepIntervalMs?: number;
+  /** Extra pg.Pool settings when this call creates the pool (e.g. max, allowExitOnIdle). */
+  poolConfig?: Omit<pg.PoolConfig, "connectionString">;
 }
 
 export interface PostgresBackend {
@@ -96,7 +98,7 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
   const schema = opts.schema ?? "public";
   quoteSchema(schema);
   const owned = !opts.pool;
-  const pool = opts.pool ?? new pg.Pool({ connectionString: opts.connectionString });
+  const pool = opts.pool ?? new pg.Pool({ ...opts.poolConfig, connectionString: opts.connectionString });
   try {
     const saver = new PostgresSaver(pool, undefined, { schema });
     if (opts.setup !== false) await saver.setup();
