@@ -326,18 +326,63 @@ describe("RunService upload policy", () => {
     });
   });
 
-  it("never expands env placeholders for untrusted authors, and stored graphs are not re-expanded", async () => {
-    const s = await svc();
+  it("never expands env placeholders for untrusted authors, and never stores expanded values", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-raw-"));
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const open = async (): Promise<RunService> => {
+      const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 200, auth: OIDC });
+      await s.init();
+      return s;
+    };
     process.env["FG_UPLOAD_TEST_SECRET"] = "s3cr3t";
+    const yaml = (name: string) => `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: ${name} }
+state:
+  channels:
+    approval: { type: object }
+    second: { type: object }
+nodes:
+  - { id: gate, type: hitl, with: { mode: approve, message: "ok?", output: { to: approval } } }
+  - { id: reveal, type: hitl, with: { mode: approve, message: "key=\${FG_UPLOAD_TEST_SECRET}", output: { to: second } } }
+edges:
+  - { from: START, to: gate }
+  - { from: gate, to: reveal }
+  - { from: reveal, to: END }
+runtime:
+  checkpoint: { enabled: true, backend: memory }
+`;
     try {
-      const yaml = SHELL.replace("NAME", "u-env").replace(/  - \{ id: a, type: shell.*\n/, "").replace("  - { from: gate, to: a }\n  - { from: a, to: END }", "  - { from: gate, to: END }").replace('message: "ok?"', 'message: "${FG_UPLOAD_TEST_SECRET}"');
-      await expect(s.startRun({ threadId: "u2", yaml }, principal("ursula", false))).rejects.toMatchObject({ code: "UPLOAD_ENV_PLACEHOLDER_BLOCKED" });
-      // A trusted author's upload is expanded once, at upload.
+      const first = await open();
+      await expect(first.startRun({ threadId: "u2", yaml: yaml("u-env") }, principal("ursula", false))).rejects.toMatchObject({
+        code: "UPLOAD_ENV_PLACEHOLDER_BLOCKED",
+      });
       const tina = principal("tina", true);
-      await s.startRun({ threadId: "t3", yaml: yaml.replace("u-env", "t-env") }, tina);
-      const detail = await s.getRun("t3", tina);
-      expect(detail?.yaml).toContain("s3cr3t");
-      expect(detail?.yaml).not.toContain("${FG_UPLOAD_TEST_SECRET}");
+      await first.startRun({ threadId: "t3", yaml: yaml("t-env") }, tina);
+      expect(await settle(first, "t3", ["interrupted", "error"])).toBe("interrupted");
+      // The graph store, the session and getRun keep the YAML as uploaded.
+      const stored = await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8");
+      expect(stored).toContain("${FG_UPLOAD_TEST_SECRET}");
+      expect(stored).not.toContain("s3cr3t");
+      expect(JSON.parse(await fs.readFile(path.join(dir, "t3.graph.yaml.meta.json"), "utf-8"))).toMatchObject({ yamlFormat: "raw" });
+      expect(first.registry.get("t3")?.yaml).not.toContain("s3cr3t");
+      const detail = await first.getRun("t3", tina);
+      expect(detail?.yaml).toContain("${FG_UPLOAD_TEST_SECRET}");
+      expect(detail?.yaml).not.toContain("s3cr3t");
+      cleanup.push(() => first.close());
+      const second = first;
+
+      // A trusted resume fills the placeholder at run time only.
+      await second.resumeRun({ threadId: "t3", resume: { approved: true } }, tina);
+      expect(await settle(second, "t3", ["interrupted", "completed", "error"])).toBe("interrupted");
+      expect(JSON.stringify(second.registry.get("t3")?.events)).toContain("key=s3cr3t");
+      expect(await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8")).not.toContain("s3cr3t");
+      expect((await second.getRun("t3", tina))?.yaml).not.toContain("s3cr3t");
+      // An author who lost trust cannot run the stored placeholder.
+      await expect(second.resumeRun({ threadId: "t3", resume: { approved: true } }, principal("tina", false))).rejects.toMatchObject({
+        code: "UPLOAD_ENV_PLACEHOLDER_BLOCKED",
+      });
     } finally {
       delete process.env["FG_UPLOAD_TEST_SECRET"];
     }

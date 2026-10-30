@@ -119,6 +119,13 @@ export interface GraphMeta {
   graphName?: string;
   status?: RunStatus;
   owner?: ThreadOwner;
+  /**
+   * `raw`: the stored file is the YAML as uploaded, with any `${VAR}`
+   * placeholders left in; they are filled only when a trusted author runs it.
+   * Absent on files stored by older servers, which held expanded YAML and are
+   * never expanded again.
+   */
+  yamlFormat?: "raw";
 }
 
 export interface ServerConfig {

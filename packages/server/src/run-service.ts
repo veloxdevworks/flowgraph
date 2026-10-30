@@ -25,6 +25,7 @@ import {
   parseGraphYaml,
   persistGraph,
   loadPersistedGraph,
+  readPersistedGraphYaml,
   readGraphMeta,
   updateGraphMeta,
   listPersistedGraphs,
@@ -318,16 +319,22 @@ export class RunService {
         log("warn", "stripped client imports from uploaded graph", { threadId });
       }
       await this.claimGraphName(parsed.spec, principal);
-      await persistGraph(this.config.graphStoreDir, threadId, parsed.yaml, parsed.spec, { ...extras, owner: this.ownerOf(principal) });
+      // Store and hand back the YAML as uploaded: expanded values never reach
+      // the graph store, the session or getRun, and are filled again per run.
+      await persistGraph(this.config.graphStoreDir, threadId, yaml, parsed.spec, {
+        ...extras,
+        owner: this.ownerOf(principal),
+        yamlFormat: "raw",
+      });
       return {
         spec: parsed.spec,
-        yaml: parsed.yaml,
+        yaml,
         cwd: this.config.graphStoreDir,
         importsStripped: parsed.importsStripped,
       };
     }
 
-    const persisted = await loadPersistedGraph(this.config.graphStoreDir, threadId);
+    const persisted = await loadPersistedGraph(this.config.graphStoreDir, threadId, { expandEnv: principal.trusted });
     if (!persisted) {
       throw new Error(
         `No persisted graph for thread "${threadId}". Provide yaml on start/resume.`,
@@ -708,13 +715,13 @@ export class RunService {
 
   async getRun(threadId: string, caller?: Principal): Promise<RunDetail | null> {
     await this.checkThreadAccess(threadId, this.principalFor(caller));
-    const persisted = await loadPersistedGraph(this.config.graphStoreDir, threadId);
+    const persisted = await readPersistedGraphYaml(this.config.graphStoreDir, threadId);
     const live = this.registry.get(threadId);
     if (!persisted && !live) return null;
     const meta = persisted?.meta;
     return {
       threadId,
-      graphName: live?.graphName || meta?.graphName || persisted?.spec.metadata?.name || "graph",
+      graphName: live?.graphName || meta?.graphName || "graph",
       ...(live?.label || meta?.label ? { label: (live?.label || meta?.label) as string } : {}),
       status: live?.status ?? meta?.status ?? "completed",
       updatedAt: meta?.updatedAt ?? live?.startedAt ?? new Date().toISOString(),

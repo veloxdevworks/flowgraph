@@ -151,7 +151,7 @@ export async function persistGraph(
   threadId: string,
   yaml: string,
   spec: GraphSpec,
-  extras: { label?: string; status?: RunStatus; owner?: ThreadOwner } = {},
+  extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" } = {},
 ): Promise<PersistedGraph> {
   await ensureGraphStoreDir(dir);
   const filePath = graphPathFor(dir, threadId);
@@ -168,6 +168,8 @@ export async function persistGraph(
     status: extras.status ?? existing?.status ?? "started",
     // The first owner sticks: callers check ownership before persisting.
     ...((existing?.owner ?? extras.owner) ? { owner: (existing?.owner ?? extras.owner) as ThreadOwner } : {}),
+    // Describes the file just written, so it never carries over.
+    ...(extras.yamlFormat ? { yamlFormat: extras.yamlFormat } : {}),
   };
   await writeGraphMeta(dir, threadId, meta);
   return {
@@ -210,6 +212,7 @@ export async function readGraphMeta(dir: string, threadId: string): Promise<Grap
       ...(typeof parsed.graphName === "string" ? { graphName: parsed.graphName } : {}),
       ...(typeof parsed.status === "string" ? { status: parsed.status as RunStatus } : {}),
       ...(isThreadOwner(parsed.owner) ? { owner: { id: parsed.owner.id, org: parsed.owner.org } } : {}),
+      ...(parsed.yamlFormat === "raw" ? { yamlFormat: "raw" as const } : {}),
     };
   } catch {
     return null;
@@ -232,19 +235,36 @@ export async function updateGraphMeta(
   return next;
 }
 
+/**
+ * Load a stored graph. `yaml` is the stored text (raw for current files, so
+ * no environment value is ever returned). `${VAR}` placeholders are filled
+ * into `spec` only when `expandEnv` is set (trusted authors) and the file was
+ * stored raw; files from older servers already hold expanded YAML, and
+ * expanding them again would read the environment for text that only looks
+ * like a placeholder.
+ */
 export async function loadPersistedGraph(
   dir: string,
   threadId: string,
+  opts: { expandEnv?: boolean } = {},
 ): Promise<{ yaml: string; spec: GraphSpec; meta: GraphMeta | null } | null> {
-  const filePath = graphPathFor(dir, threadId);
   try {
-    const yaml = await fs.readFile(filePath, "utf-8");
-    // Stored YAML was expanded when it was uploaded; expanding again would read
-    // the server environment for text that only looks like a placeholder.
-    const parsed = parseGraphYaml(yaml, { expandEnv: false });
+    const stored = await readPersistedGraphYaml(dir, threadId);
+    if (!stored) return null;
+    const raw = stored.meta?.yamlFormat === "raw";
+    const parsed = parseGraphYaml(stored.yaml, { expandEnv: raw && opts.expandEnv === true });
     if (!parsed.spec) return null;
-    const meta = await readGraphMeta(dir, threadId);
-    return { yaml: parsed.yaml, spec: parsed.spec, meta };
+    return { yaml: raw ? stored.yaml : parsed.yaml, spec: parsed.spec, meta: stored.meta };
+  } catch {
+    return null;
+  }
+}
+
+/** The stored graph text and meta, without parsing or expanding it. */
+export async function readPersistedGraphYaml(dir: string, threadId: string): Promise<{ yaml: string; meta: GraphMeta | null } | null> {
+  try {
+    const yaml = await fs.readFile(graphPathFor(dir, threadId), "utf-8");
+    return { yaml, meta: await readGraphMeta(dir, threadId) };
   } catch {
     return null;
   }

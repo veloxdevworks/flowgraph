@@ -5,6 +5,7 @@ export {
   parseGraphYaml,
   persistGraph,
   loadPersistedGraph,
+  readPersistedGraphYaml,
   listPersistedGraphs,
   updateGraphMeta,
   appendEventJournal,
