@@ -8,8 +8,8 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
-import { describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
-import { openPostgresBackend, createPostgresMemoryBackend, migratePostgresMemorySchema, POSTGRES_MEMORY_MIGRATIONS, type PostgresBackend } from "./index.js";
+import { describeGraphNameRegistryConformance, describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
+import { openPostgresBackend, createPostgresGraphNameRegistry, createPostgresMemoryBackend, migratePostgresMemorySchema, POSTGRES_MEMORY_MIGRATIONS, type PostgresBackend } from "./index.js";
 
 const DB = process.env["FLOWGRAPH_TEST_POSTGRES_URL"];
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -35,6 +35,35 @@ const tu = (o: Partial<{ org: string; project: string; graph: string; usr: strin
 describe.skipIf(!DB)("postgres memory backend (integration)", () => {
   beforeAll(() => {
     admin = new pg.Pool({ connectionString: DB, max: 2 });
+  });
+
+  describeGraphNameRegistryConformance("postgres", async () => {
+    const schema = freshSchema();
+    const pools = [new pg.Pool({ connectionString: DB, max: 4 })];
+    return {
+      registry: await createPostgresGraphNameRegistry(pools[0]!, { schema }),
+      other: async () => {
+        const p = new pg.Pool({ connectionString: DB, max: 4 });
+        pools.push(p);
+        return createPostgresGraphNameRegistry(p, { schema });
+      },
+      cleanup: async () => {
+        for (const p of pools) await p.end();
+      },
+    };
+  });
+
+  it("openPostgresBackend exposes the graph-name registry in its schema", async () => {
+    const schema = freshSchema();
+    const a = await openPostgresBackend({ connectionString: DB!, schema });
+    const b = await openPostgresBackend({ connectionString: DB!, schema });
+    try {
+      expect((await a.graphNames.claim("acme", "triage", "iss|alice")).created).toBe(true);
+      expect(await b.graphNames.claim("acme", "triage", "iss|bob")).toMatchObject({ owner: "iss|alice", created: false });
+    } finally {
+      await a.close();
+      await b.close();
+    }
   });
 
   describeMemoryBackendConformance("postgres", async () => {
@@ -69,7 +98,7 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
         expect.arrayContaining(["fg_memory_items", "fg_memory_ops", "fg_memory_threads", "fg_memory_meta", "fg_schema_migrations", "checkpoints"]),
       );
       const n = await b.pool.query(`SELECT COUNT(*)::int AS n FROM "${schema}".fg_schema_migrations WHERE component = 'memory'`);
-      expect(n.rows[0]).toEqual({ n: 3 });
+      expect(n.rows[0]).toEqual({ n: 4 });
       expect(b.memory.durable).toBe(true);
       expect(b.memory.kind).toBe("postgres");
     } finally {
@@ -82,8 +111,8 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
     const pools = Array.from({ length: 6 }, () => new pg.Pool({ connectionString: DB, max: 1 }));
     try {
       const applied = await Promise.all(pools.map((p) => migratePostgresMemorySchema(p, schema)));
-      expect(applied.reduce((a, b) => a + b, 0)).toBe(3);
-      expect(applied.filter((n) => n === 3)).toHaveLength(1);
+      expect(applied.reduce((a, b) => a + b, 0)).toBe(4);
+      expect(applied.filter((n) => n === 4)).toHaveLength(1);
     } finally {
       await Promise.all(pools.map((p) => p.end()));
     }
@@ -252,7 +281,7 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
       `CREATE INDEX fg_memory_subject_recent ON "${old}".fg_memory_items (org, project, subject_type, updated_at DESC) WHERE subject_type <> ''`,
     );
     await admin!.query(`INSERT INTO "${old}".fg_schema_migrations VALUES ('memory', 1, 0)`);
-    expect(await migratePostgresMemorySchema(admin!, old)).toBe(2);
+    expect(await migratePostgresMemorySchema(admin!, old)).toBe(3);
     expect(await indexes(old)).toContain("fg_memory_subject_keys");
     expect(await indexes(old)).not.toContain("fg_memory_subject_recent");
   });

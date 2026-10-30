@@ -9,6 +9,9 @@ import {
   AsyncEngineMemoryBackend,
   scopeOfTuple,
   type AsyncMemoryWriteTable,
+  checkGraphNameArgs,
+  type GraphNameRecord,
+  type GraphNameRegistry,
   type MemoryRow,
   type MemorySimilarQuery,
   type MemoryThreadBinding,
@@ -104,6 +107,20 @@ CREATE INDEX fg_memory_subject_keys
   ON {s}.fg_memory_items (org, project, subject_type, subject_key, updated_at) INCLUDE (expires_at, key)
   WHERE subject_type <> '';
 DROP INDEX IF EXISTS {s}.fg_memory_subject_recent;
+`,
+  },
+  {
+    // Graph-name ownership for multi-user servers: the first registrant of a
+    // name within an org owns it.
+    version: 4,
+    sql: `
+CREATE TABLE {s}.fg_graph_names (
+  org        TEXT   COLLATE "C" NOT NULL,
+  name       TEXT   COLLATE "C" NOT NULL,
+  owner      TEXT   COLLATE "C" NOT NULL,
+  created_at BIGINT NOT NULL,
+  PRIMARY KEY (org, name)
+);
 `,
   },
 ];
@@ -511,4 +528,37 @@ export async function maybeSweepPostgres(backend: PostgresMemoryBackend, interva
     return true;
   });
   return claimed ? backend.sweep(now) : 0;
+}
+
+/**
+ * Graph-name registry in the memory schema (table fg_graph_names, memory
+ * schema 4). A claim is one INSERT ... ON CONFLICT DO NOTHING followed by a
+ * read of the winning row, so concurrent hosts agree on the owner.
+ */
+export async function createPostgresGraphNameRegistry(pool: Pool, opts: PostgresMemoryOptions = {}): Promise<GraphNameRegistry> {
+  const schema = opts.schema ?? "public";
+  const s = quoteSchema(schema);
+  if (opts.migrate !== false) await migratePostgresMemorySchema(pool, schema);
+  type Raw = { org: string; name: string; owner: string; created_at: string | number };
+  const rec = (r: Raw): GraphNameRecord => ({ org: r.org, name: r.name, owner: r.owner, createdAt: Number(r.created_at) });
+  const select = `SELECT org, name, owner, created_at FROM ${s}.fg_graph_names WHERE org = $1 AND name = $2`;
+  return {
+    async claim(org, name, owner, now = Date.now()) {
+      checkGraphNameArgs(org, name, owner);
+      const ins = await pool.query<Raw>(
+        `INSERT INTO ${s}.fg_graph_names (org, name, owner, created_at) VALUES ($1, $2, $3, $4)
+          ON CONFLICT (org, name) DO NOTHING RETURNING org, name, owner, created_at`,
+        [org, name, owner, now],
+      );
+      if (ins.rows[0]) return { ...rec(ins.rows[0]), created: true };
+      // The conflicting row is committed (ON CONFLICT waited for it), so a plain read sees it.
+      const r = await pool.query<Raw>(select, [org, name]);
+      return { ...rec(r.rows[0]!), created: false };
+    },
+    async get(org, name) {
+      checkGraphNameArgs(org, name);
+      const r = await pool.query<Raw>(select, [org, name]);
+      return r.rows[0] ? rec(r.rows[0]) : undefined;
+    },
+  };
 }
