@@ -289,7 +289,11 @@ export class FlowgraphMemorySaver extends MemorySaver {
       }
       if (!Array.isArray(parsed) || parsed[0] !== threadId || parsed[1] !== ns) continue;
       const id = String(parsed[2]);
-      if (!bucket[id] || (parents.has(id) && !pins.has(id))) delete this.writes[key];
+      // Writes can be stored before their checkpoint row is visible: LangGraph
+      // assigns the next checkpoint id and flushes writes before the chained
+      // put lands. Those writes belong to the upcoming leaf. Only drop writes
+      // for a checkpoint that is already stored and has a successor.
+      if (bucket[id] && parents.has(id) && !pins.has(id)) delete this.writes[key];
     }
   }
 

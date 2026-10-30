@@ -282,6 +282,36 @@ describe("sqlite checkpoint retention", () => {
     expect(Number(db.pragma("freelist_count", { simple: true }))).toBe(0);
   });
 
+  it("keeps pending writes that arrive before the checkpoint row", async () => {
+    const dbPath = tmpDb();
+    const saver = createSqliteCheckpointer({ path: dbPath });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const put = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+      getTuple(config: unknown): Promise<{ pendingWrites?: [string, string, unknown][] } | undefined>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    await put.putWrites(
+      { configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "future" } },
+      [["__interrupt__", { reason: "wait" }]],
+      "task",
+    );
+    await put.put(
+      { configurable: { thread_id: "w", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: 1 } },
+      { source: "loop", step: 1, parents: {} },
+    );
+    await put.put(
+      { configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "future", channel_values: { n: 2 }, channel_versions: { n: 2 } },
+      { source: "loop", step: 2, parents: {} },
+    );
+    const tuple = await put.getTuple({ configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "future" } });
+    expect(tuple?.pendingWrites?.some((write) => write[1] === "__interrupt__")).toBe(true);
+    db.close();
+  });
+
   it("refuses a checkpoint schema newer than this build", () => {
     const dbPath = tmpDb();
     const first = createSqliteCheckpointer({ path: dbPath, retention: false });

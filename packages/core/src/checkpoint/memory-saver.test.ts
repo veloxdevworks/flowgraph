@@ -55,6 +55,23 @@ describe("FlowgraphMemorySaver retention", () => {
     expect(saver.byteSize()).toBeLessThan(doubled.byteSize());
   });
 
+  it("keeps writes stored before their checkpoint and drops them once a successor exists", async () => {
+    const saver = new FlowgraphMemorySaver(resolveCheckpointRetention({ maxCheckpoints: 20, finishedTtl: null }));
+    await saver.putWrites(config("early", "leaf"), [["__interrupt__", { reason: "wait" }]], "task");
+    await saver.put(config("early"), checkpoint("other", { n: 1 }, { n: 1 }), meta(1));
+    await saver.put(config("early"), checkpoint("leaf", { n: 2 }, { n: 2 }), meta(2));
+    const leaf = await saver.getTuple(config("early", "leaf"));
+    expect(leaf?.pendingWrites?.some((write) => write[1] === "__interrupt__")).toBe(true);
+
+    await saver.put(config("done"), checkpoint("p", { n: 1 }, { n: 1 }), meta(1));
+    await saver.putWrites(config("done", "p"), [["n", "payload"]], "task");
+    await saver.put(config("done", "p"), checkpoint("c", { n: 2 }, { n: 2 }), meta(2));
+    const parent = await saver.getTuple(config("done", "p"));
+    expect(parent?.pendingWrites ?? []).toEqual([]);
+    const child = await saver.getTuple(config("done", "c"));
+    expect(child?.checkpoint.channel_values["n"]).toBe(2);
+  });
+
   it("keeps the newest checkpoints and an older interrupt point", async () => {
     const saver = new FlowgraphMemorySaver(
       resolveCheckpointRetention({ maxCheckpoints: 1, maxInterruptPoints: 2, finishedTtl: null, maxFinishedThreads: null }),

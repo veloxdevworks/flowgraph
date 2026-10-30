@@ -420,18 +420,19 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
   }
 
   /**
-   * Pending writes are only required on a branch tip (nothing has superseded
-   * them) and on interrupt/resume pins. Drop the rest.
+   * Pending writes are required on a branch tip and on interrupt/resume pins.
+   * Drop them only once a successor row is stored. Writes for a checkpoint id
+   * that is not inserted yet belong to a put that is still queued.
    */
   private compactWrites(threadId: string, ns: string): number {
     const result = this.sqlite
       .prepare(
         `DELETE FROM writes
          WHERE thread_id = ? AND checkpoint_ns = ?
-           AND checkpoint_id NOT IN (
+           AND checkpoint_id IN (
              SELECT c.checkpoint_id FROM checkpoints c
              WHERE c.thread_id = ? AND c.checkpoint_ns = ?
-               AND NOT EXISTS (
+               AND EXISTS (
                  SELECT 1 FROM checkpoints child
                  WHERE child.thread_id = c.thread_id
                    AND child.checkpoint_ns = c.checkpoint_ns

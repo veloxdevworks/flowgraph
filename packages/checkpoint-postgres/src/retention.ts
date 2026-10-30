@@ -256,7 +256,10 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     }
   }
 
-  /** Drop pending writes superseded by a child checkpoint. Leaves and pins keep theirs. */
+  /**
+   * Drop pending writes only after a child checkpoint row exists.
+   * Writes stored under an id that is not inserted yet belong to a queued put.
+   */
   private async compactWrites(threadId: string, ns: string): Promise<number> {
     const result = await this.db().query(
       `DELETE FROM ${this.q}.checkpoint_writes w
