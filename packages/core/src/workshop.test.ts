@@ -75,6 +75,37 @@ describe("mapWorkshopResume", () => {
     expect(result.endedReason).toBe("completed");
   });
 
+  it("rejects non-object resumes instead of mapping them to {}", () => {
+    expect(() => mapWorkshopResume("SSO please", { nodeId: "w" })).toThrow(/must be an object.*got string/);
+    expect(() => mapWorkshopResume(null, { nodeId: "w" })).toThrow(/got null/);
+    expect(() => mapWorkshopResume([{ title: "x" }], { nodeId: "w" })).toThrow(/got array/);
+    expect(() => mapWorkshopResume({ output: "SSO" }, { nodeId: "w" })).toThrow(/"output" must be an object/);
+  });
+
+  it("rejects output fields mixed with meta keys instead of dropping them", () => {
+    expect(() => mapWorkshopResume({ title: "SSO", transcript: [] }, { nodeId: "w" })).toThrow(
+      /mixes output fields with "transcript"/,
+    );
+    expect(() => mapWorkshopResume({ output: { title: "SSO" }, title: "dup" }, { nodeId: "w" })).toThrow(
+      /unexpected top-level key\(s\) "title"/,
+    );
+  });
+
+  it("validates meta field types", () => {
+    expect(() => mapWorkshopResume({ output: { title: "a" }, transcript: "hi" }, { schema, nodeId: "w" })).toThrow(
+      /"transcript" must be an array/,
+    );
+    expect(() => mapWorkshopResume({ output: { title: "a" }, coverage: [] }, { schema, nodeId: "w" })).toThrow(
+      /"coverage" must be an object/,
+    );
+  });
+
+  it("allows meta-only resumes (e.g. an ended session) when the schema permits", () => {
+    const r = mapWorkshopResume({ transcript: [], endedReason: "timeout" }, { nodeId: "w" });
+    expect(r.output).toEqual({});
+    expect(r.endedReason).toBe("timeout");
+  });
+
   it("rejects missing required fields", () => {
     expect(() => mapWorkshopResume({ output: {} }, { schema, nodeId: "w" })).toThrow(
       /missing required field/,

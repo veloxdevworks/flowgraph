@@ -179,15 +179,50 @@ export function mapWorkshopResume(
   resume: unknown,
   opts: { schema?: Record<string, unknown> | undefined; nodeId: string },
 ): WorkshopResume {
-  const rec = isRecord(resume) ? resume : {};
-  const hasMeta = RESUME_META.some((k) => k in rec);
-  const output = isRecord(rec["output"])
-    ? rec["output"]
-    : hasMeta
-      ? {}
-      : rec;
+  const where = `workshop node "${opts.nodeId}" resume`;
+  if (!isRecord(resume)) {
+    throw new Error(
+      `${where} must be an object: { output, transcript?, coverage?, endedReason? } or a bare output object (got ${describeType(resume)}).`,
+    );
+  }
+  const rec = resume;
+  const keys = Object.keys(rec);
+  const metaKeys = keys.filter((k) => (RESUME_META as readonly string[]).includes(k));
+  let output: Record<string, unknown>;
+  if ("output" in rec) {
+    if (!isRecord(rec["output"])) {
+      throw new Error(`${where}: "output" must be an object (got ${describeType(rec["output"])}).`);
+    }
+    const extra = keys.filter((k) => !(RESUME_META as readonly string[]).includes(k));
+    if (extra.length > 0) {
+      throw new Error(
+        `${where}: unexpected top-level key(s) ${extra.map((k) => `"${k}"`).join(", ")} next to "output". ` +
+          `Put output fields inside "output".`,
+      );
+    }
+    output = rec["output"];
+  } else if (metaKeys.length > 0 && metaKeys.length < keys.length) {
+    // e.g. { title, transcript }: ambiguous, and silently dropping `title` loses data.
+    throw new Error(
+      `${where} mixes output fields with ${metaKeys.map((k) => `"${k}"`).join(", ")}. ` +
+        `Send { output: { ... }, ${metaKeys.join(", ")} } or a bare output object.`,
+    );
+  } else if (metaKeys.length > 0) {
+    output = {};
+  } else {
+    output = rec;
+  }
   validateJsonSchema(output, opts.schema, `workshop node "${opts.nodeId}" output`);
 
+  if ("transcript" in rec && !Array.isArray(rec["transcript"])) {
+    throw new Error(`${where}: "transcript" must be an array.`);
+  }
+  if ("coverage" in rec && !isRecord(rec["coverage"])) {
+    throw new Error(`${where}: "coverage" must be an object.`);
+  }
+  if ("endedReason" in rec && typeof rec["endedReason"] !== "string") {
+    throw new Error(`${where}: "endedReason" must be a string.`);
+  }
   const transcript = Array.isArray(rec["transcript"]) ? rec["transcript"] : [];
   const coverage = isRecord(rec["coverage"]) ? rec["coverage"] : {};
   const endedReason =
@@ -196,4 +231,10 @@ export function mapWorkshopResume(
       : "completed";
 
   return { output, transcript, coverage, endedReason };
+}
+
+function describeType(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
 }
