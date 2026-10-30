@@ -172,6 +172,36 @@ describe("OIDC authenticator", () => {
     }
   });
 
+  it("refuses a discovery document that sends keys to plain http elsewhere", async () => {
+    iss.discoveryJwksUri = "http://keys.attacker.example/jwks.json";
+    try {
+      const auth = new OidcAuthenticator(oidcConfig());
+      expect(failure(await auth.authenticate(bearer(await iss.sign(rsa, { org_id: "a" }))))).toEqual({
+        status: 503,
+        code: "AUTH_PROVIDER_UNAVAILABLE",
+      });
+    } finally {
+      delete iss.discoveryJwksUri;
+    }
+  });
+
+  it("remembers a failed discovery briefly instead of refetching on every request", async () => {
+    iss.discoveryIssuer = "https://other.example";
+    try {
+      const auth = new OidcAuthenticator(oidcConfig({ discoveryRetryMs: 150 }));
+      const token = bearer(await iss.sign(rsa, { org_id: "a" }));
+      const before = iss.discoveryFetches;
+      for (let i = 0; i < 5; i++) expect(failure(await auth.authenticate(token)).status).toBe(503);
+      expect(iss.discoveryFetches).toBe(before + 1);
+      delete iss.discoveryIssuer;
+      await new Promise((r) => setTimeout(r, 200));
+      expect((await auth.authenticate(token)).ok).toBe(true);
+      expect(iss.discoveryFetches).toBe(before + 2);
+    } finally {
+      delete iss.discoveryIssuer;
+    }
+  });
+
   it("reports a missing or malformed Authorization header", async () => {
     const auth = new OidcAuthenticator(oidcConfig());
     expect(failure(await auth.authenticate(undefined))).toEqual({ status: 401, code: "AUTH_REQUIRED" });

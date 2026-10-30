@@ -26,6 +26,8 @@ export interface TestIssuer {
   published: TestKey[];
   /** Overrides the `issuer` field of the discovery document. */
   discoveryIssuer?: string;
+  /** Override the `jwks_uri` the discovery document names. */
+  discoveryJwksUri?: string;
   newKey(alg?: "RS256" | "ES256"): Promise<TestKey>;
   /** Sign a token; `claims` override the defaults (iss, aud, sub, iat, exp in 5 minutes). */
   sign(key: TestKey, claims?: JWTPayload, opts?: { audience?: string | string[]; kid?: string | null }): Promise<string>;
@@ -40,7 +42,7 @@ export async function startTestIssuer(): Promise<TestIssuer> {
     if (req.url === "/.well-known/openid-configuration") {
       state.discoveryFetches++;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ issuer: state.discoveryIssuer ?? state.issuer, jwks_uri: state.jwksUri }));
+      res.end(JSON.stringify({ issuer: state.discoveryIssuer ?? state.issuer, jwks_uri: state.discoveryJwksUri ?? state.jwksUri }));
       return;
     }
     if (req.url === "/jwks") {
