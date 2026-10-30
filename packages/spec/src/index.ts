@@ -103,3 +103,13 @@ export type {
 } from "./schema.js";
 
 export { generateJsonSchema } from "./json-schema.js";
+
+export type {
+  WorkshopAgendaItem,
+  WorkshopVoiceHints,
+  WorkshopLimits,
+  WorkshopDiff,
+  WorkshopContract,
+  WorkshopTranscriptTurn,
+  WorkshopResume,
+} from "./workshop-contract.js";

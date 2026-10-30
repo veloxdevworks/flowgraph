@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 import { compileGraph } from "./compiler.js";
-import type { GraphSpec } from "@flowgraph/spec";
-import { mapWorkshopResume, normalizeAgenda } from "./nodes/workshop.js";
+import type { GraphSpec, WorkshopContract } from "@flowgraph/spec";
+import { WORKSHOP_MAX_PATCH_BYTES, mapWorkshopResume, normalizeAgenda } from "./nodes/workshop.js";
 
 function workshopGraph(extra: Record<string, unknown> = {}): GraphSpec {
   return {
@@ -133,6 +137,35 @@ describe("workshop node", () => {
     expect(data?.["context"]).toBe("auth");
     expect(data?.["fallback"]).toBe("form");
     expect((data?.["schema"] as { required?: string[] })?.required).toContain("title");
+  });
+
+  it("emits artifactRefs and reports diff failures on diff.error, not diffStat", async () => {
+    const compiled = await compileGraph(
+      workshopGraph({ artifacts: ["docs/{{ state.topic }}.md"], diff: { cwd: os.tmpdir(), base: "--output=/tmp/x" } }),
+      {},
+    );
+    const r1 = await compiled.run({ threadId: "ws-contract", input: { topic: "auth" }, onInterrupt: "fail" });
+    const data = (r1.interrupts?.[0]?.payload as { data?: WorkshopContract })?.data;
+    expect(data?.artifactRefs).toEqual(["docs/auth.md"]);
+    expect(data?.diffStat).toBeUndefined();
+    expect(data?.diff).toMatchObject({ error: expect.stringMatching(/must not start with "-"/) });
+  });
+
+  it("caps very large git patches in the checkpointed payload", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fg-ws-diff-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    git("init", "-q");
+    fs.writeFileSync(path.join(dir, "big.txt"), "a\n");
+    git("add", "big.txt");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+    fs.writeFileSync(path.join(dir, "big.txt"), "x".repeat(100) + "\n".repeat(1) + "y\n".repeat(WORKSHOP_MAX_PATCH_BYTES));
+    const compiled = await compileGraph(workshopGraph({ diff: { cwd: dir } }), {});
+    const r1 = await compiled.run({ threadId: "ws-bigdiff", onInterrupt: "fail" });
+    const data = (r1.interrupts?.[0]?.payload as { data?: WorkshopContract })?.data;
+    const diff = data?.diff as { patch: string; truncated?: boolean };
+    expect(diff.truncated).toBe(true);
+    expect(Buffer.byteLength(diff.patch, "utf8")).toBeLessThanOrEqual(WORKSHOP_MAX_PATCH_BYTES);
+    expect(typeof data?.diffStat).toBe("string");
   });
 
   it("resumes with a validated output and writes state", async () => {

@@ -1,47 +1,16 @@
-export type WorkshopAgendaItem = {
-  id: string;
-  title: string;
-  description?: string;
-};
+export type {
+  WorkshopAgendaItem,
+  WorkshopVoiceHints,
+  WorkshopLimits,
+  WorkshopDiff,
+  WorkshopContract,
+  WorkshopTranscriptTurn,
+  WorkshopResume,
+} from "@flowgraph/spec";
 
-export type WorkshopVoiceHints = {
-  provider?: string;
-  model?: string;
-  voice?: string;
-};
-
-export type WorkshopLimits = {
-  maxMinutes?: number;
-  maxTurns?: number;
-};
-
-/** Interrupt payload the engine sends to a client. */
-export type WorkshopContract = {
-  agenda: WorkshopAgendaItem[];
-  schema?: Record<string, unknown>;
-  context?: unknown;
-  facilitator?: string;
-  voice?: WorkshopVoiceHints;
-  artifacts?: string[];
-  diffStat?: string;
-  limits?: WorkshopLimits;
-  fallback?: "form" | "text" | "json" | string;
-};
-
-export type WorkshopTranscriptTurn = {
-  role: "user" | "assistant" | "system" | "tool";
-  text: string;
-  at?: string;
-};
-
-export type WorkshopResume = {
-  output: Record<string, unknown>;
-  transcript: WorkshopTranscriptTurn[];
-  coverage: Record<string, boolean | string>;
-  endedReason: string;
-};
-
+/** Rough realtime voice price, for client-side cost estimates only. */
 export const WORKSHOP_VOICE_USD_PER_MINUTE = 0.05;
+/** Session wall-clock cap when the contract has no `limits.maxMinutes`. */
 export const WORKSHOP_SESSION_MAX_MS = 30 * 60 * 1000;
 
 export type VoiceProviderId = "xai" | "openai";

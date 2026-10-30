@@ -12,6 +12,7 @@ import { WorkshopWithSchema } from "@flowgraph/spec";
 import { renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import type { WorkshopAgendaItem, WorkshopContract, WorkshopResume } from "@flowgraph/spec";
 import { applyOutput } from "./output.js";
 import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
@@ -20,18 +21,10 @@ import { interruptUntilValid } from "../runtime/resume-validation.js";
 const configSchema = WorkshopWithSchema;
 type Config = z.infer<typeof configSchema>;
 
-export type WorkshopAgendaItem = {
-  id: string;
-  title: string;
-  description?: string | undefined;
-};
+export type { WorkshopAgendaItem, WorkshopContract, WorkshopResume } from "@flowgraph/spec";
 
-export type WorkshopResume = {
-  output: Record<string, unknown>;
-  transcript: unknown[];
-  coverage: Record<string, unknown>;
-  endedReason: string;
-};
+/** Max git patch bytes embedded in the (checkpointed) interrupt payload. */
+export const WORKSHOP_MAX_PATCH_BYTES = 256 * 1024;
 
 export const workshopNode = defineNode<Config>({
   type: "workshop",
@@ -72,19 +65,19 @@ export const workshopNode = defineNode<Config>({
           : undefined;
         const fallback = config.fallback ?? "form";
 
-        const data: Record<string, unknown> = {
+        const data: WorkshopContract = {
           mode: "workshop",
           agenda,
           fallback,
         };
-        if (schema) data["schema"] = schema;
-        if (context !== undefined) data["context"] = context;
-        if (facilitator) data["facilitator"] = facilitator;
-        if (voice) data["voice"] = voice;
-        if (limits) data["limits"] = limits;
+        if (schema) data.schema = schema;
+        if (context !== undefined) data.context = context;
+        if (facilitator) data.facilitator = facilitator;
+        if (voice) data.voice = voice as WorkshopContract["voice"];
+        if (limits) data.limits = limits as WorkshopContract["limits"];
 
         if (config.artifacts) {
-          data["artifactRefs"] = (renderDeep(config.artifacts, scope) as unknown[]).map(String);
+          data.artifactRefs = (renderDeep(config.artifacts, scope) as unknown[]).map(String);
         }
 
         if (config.diff) {
@@ -93,7 +86,7 @@ export const workshopNode = defineNode<Config>({
 
         const result = interruptUntilValid(
           ctx,
-          { reason: message, kind: "workshop", data },
+          { reason: message, kind: "workshop", data: data as Record<string, unknown> },
           (resume) => mapWorkshopResume(resume, { schema, nodeId: String(nodeSpec["id"]) }),
           { maxAttempts: config.maxResumeAttempts },
         );
@@ -138,7 +131,7 @@ function slugAgenda(title: string, index: number): string {
 }
 
 async function attachDiff(
-  data: Record<string, unknown>,
+  data: WorkshopContract,
   config: Config,
   scope: Record<string, unknown>,
   ctx: NodeRunContext,
@@ -147,8 +140,8 @@ async function attachDiff(
   if (diff.before != null || diff.after != null) {
     const before = diff.before ? String(renderDeep(diff.before, scope)) : "";
     const after = diff.after ? String(renderDeep(diff.after, scope)) : "";
-    data["diff"] = { before, after };
-    data["diffStat"] = `${before.split("\n").length} → ${after.split("\n").length} lines`;
+    data.diff = { before, after };
+    data.diffStat = `${before.split("\n").length} → ${after.split("\n").length} lines`;
     return;
   }
   const cwdRaw = diff.cwd ? String(renderDeep(diff.cwd, scope)) : ctx.workspace;
@@ -161,11 +154,15 @@ async function attachDiff(
       ...(base ? { base } : {}),
       ...(paths ? { paths } : {}),
     });
-    data["diff"] = { cwd: collected.cwd, base: collected.base, patch: collected.patch };
-    data["diffStat"] = collected.stat;
+    const truncated = Buffer.byteLength(collected.patch, "utf8") > WORKSHOP_MAX_PATCH_BYTES;
+    const patch = truncated
+      ? Buffer.from(collected.patch, "utf8").subarray(0, WORKSHOP_MAX_PATCH_BYTES).toString("utf8")
+      : collected.patch;
+    data.diff = { cwd: collected.cwd, base: collected.base, patch, ...(truncated ? { truncated: true } : {}) };
+    data.diffStat = collected.stat;
   } catch (err) {
-    data["diffStat"] = err instanceof Error ? err.message : String(err);
-    data["diff"] = { cwd, error: data["diffStat"] };
+    // Keep diffStat a stat; report the failure on diff.error.
+    data.diff = { cwd, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -230,7 +227,13 @@ export function mapWorkshopResume(
       ? rec["endedReason"]
       : "completed";
 
-  return { output, transcript, coverage, endedReason };
+  // transcript/coverage entries are passed through as sent (shape not validated).
+  return {
+    output,
+    transcript: transcript as WorkshopResume["transcript"],
+    coverage: coverage as WorkshopResume["coverage"],
+    endedReason,
+  };
 }
 
 function describeType(v: unknown): string {
