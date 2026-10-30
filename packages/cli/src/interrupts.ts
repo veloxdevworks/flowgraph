@@ -86,6 +86,21 @@ export function formatInterruptPrompt(it: InterruptInfo): string {
     return `${reason}${stat}${artifacts}\nDecision (${decisions}) or JSON { "decision", "feedback" }: `;
   }
 
+  if (kind === "workshop") {
+    const agenda = Array.isArray(data?.["agenda"])
+      ? (data["agenda"] as Array<{ title?: string } | string>)
+          .map((item, i) => {
+            const title = typeof item === "string" ? item : String(item?.title ?? `item ${i + 1}`);
+            return `  ${i + 1}. ${title}`;
+          })
+          .join("\n")
+      : "";
+    const schema = data?.["schema"];
+    const hint = schema ? `\nJSON Schema: ${JSON.stringify(schema)}` : "";
+    const agendaBlock = agenda ? `\nAgenda:\n${agenda}` : "";
+    return `${reason}${agendaBlock}${hint}\nPaste JSON { "output", "transcript?", "coverage?", "endedReason?" } or the output object: `;
+  }
+
   const tool = typeof data?.["tool"] === "string" ? data["tool"] : undefined;
   if (tool) {
     const args = data?.["args"] !== undefined ? ` ${JSON.stringify(data["args"])}` : "";
@@ -158,6 +173,17 @@ export function parseInterruptAnswer(it: InterruptInfo, raw: string): unknown {
       /* fall through */
     }
     return { decision: trimmed };
+  }
+
+  if (kind === "workshop") {
+    if (trimmed === "") return { output: {} };
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      /* fall through */
+    }
+    return { output: { notes: trimmed } };
   }
 
   // approval / custom / default

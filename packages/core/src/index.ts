@@ -230,6 +230,7 @@ export {
   mapNode,
   mcpNode,
   hitlNode,
+  workshopNode,
   webhookNode,
   demoNode,
   worktreeNode,

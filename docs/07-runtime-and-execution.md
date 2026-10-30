@@ -88,10 +88,11 @@ HITL is built on LangGraph's `interrupt()` + `Command({ resume })` + checkpointe
 
 1. **Dynamic interrupt** — a node (or hook) calls `ctx.interrupt({ reason, kind?, data? })`. Execution suspends; state is checkpointed; the payload surfaces to the caller under the interrupt result.
 2. **Static breakpoints** — `interruptBefore` / `interruptAfter` a node, set at compile or per-run (great for debugging / approval gates).
-3. **`hitl` nodes** — first-class approve / question / choice gates in the graph topology.
-4. **`ask_human` tool** — intelligent agents ask clarifying questions mid-loop (opt-in via `tools: [{ function: ask_human }]`).
-5. **Service tools** — agents discover and manage background services in the current thread (`list_services`, `service_status`, `start_service`, `stop_service`, `restart_service`). Services started via tools share the same registry/cleanup as the `service` node.
-6. **`wait` nodes** — durable pauses for time, signals, conditions, or inbound webhooks (`webhook: true`).
+3. **`hitl` nodes** — first-class approve / question / choice / form / review gates in the graph topology.
+4. **`workshop` nodes** — one-shot facilitated session contract (agenda + output schema); the client owns the conversation (voice, text, or form) and resumes with `{ output, transcript, coverage, endedReason }`.
+5. **`ask_human` tool** — intelligent agents ask clarifying questions mid-loop (opt-in via `tools: [{ function: ask_human }]`).
+6. **Service tools** — agents discover and manage background services in the current thread (`list_services`, `service_status`, `start_service`, `stop_service`, `restart_service`). Services started via tools share the same registry/cleanup as the `service` node.
+7. **`wait` nodes** — durable pauses for time, signals, conditions, or inbound webhooks (`webhook: true`).
 
 ### Interrupt kinds
 
@@ -102,6 +103,9 @@ Each interrupt carries a **kind** so operators know how to answer:
 | `approval` | `hitl` approve mode, tool gates, `permission: ask` | `{ approved: true \| false }` |
 | `question` | `hitl` question mode, `ask_human` | `{ answer: "..." }` |
 | `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }` |
+| `form` | `hitl` form mode | schema-validated object |
+| `review` | `hitl` review mode | `{ decision, feedback? }` |
+| `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` |
 | `custom` | advanced / hook payloads | arbitrary JSON |
 
 ```yaml

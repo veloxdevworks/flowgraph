@@ -93,6 +93,7 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
               "GET /runs/:threadId/state",
               "GET /runs/:threadId/history",
               "GET /runs/:threadId/issues",
+              "POST /voice/client-secrets",
             ],
             agentcore: ["GET /ping", "POST /invocations"],
           },

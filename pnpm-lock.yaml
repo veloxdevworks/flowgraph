@@ -539,6 +539,9 @@ importers:
       '@flowgraph/spec':
         specifier: workspace:*
         version: link:../spec
+      '@flowgraph/workshop-session':
+        specifier: workspace:*
+        version: link:../workshop-session
       '@langchain/langgraph':
         specifier: ^1.4.7
         version: 1.4.7(@langchain/core@1.2.1(@opentelemetry/api@1.9.1)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.1))(openai@6.45.0(@aws-sdk/credential-provider-node@3.972.69)(@smithy/signature-v4@5.6.5)(zod@4.4.3)))(zod@4.4.3)
@@ -637,6 +640,18 @@ importers:
       '@types/node':
         specifier: ^26.0.0
         version: 26.1.0
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(postcss@8.5.16)(typescript@5.8.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.8.0
+        version: 5.8.3
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
+
+  packages/workshop-session:
+    devDependencies:
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(postcss@8.5.16)(typescript@5.8.3)(yaml@2.9.0)

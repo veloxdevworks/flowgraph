@@ -175,3 +175,57 @@ describe("GET /runs/:threadId/issues", () => {
     });
   });
 });
+
+describe("POST /voice/client-secrets", () => {
+  it("returns 400 when the server has no vendor key", async () => {
+    const prev = process.env.XAI_API_KEY;
+    delete process.env.XAI_API_KEY;
+    delete process.env.GROK_API_KEY;
+    const service = { config: { maxBodyBytes: 2_000_000 } } as unknown as RunService;
+    const req = {
+      method: "POST",
+      [Symbol.asyncIterator]: async function* () {
+        yield Buffer.from("{}");
+      },
+    } as unknown as IncomingMessage;
+    const res = mockRes();
+    const handled = await handleRest(
+      req,
+      res,
+      service,
+      new URL("http://localhost/voice/client-secrets"),
+    );
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(400);
+    if (prev) process.env.XAI_API_KEY = prev;
+  });
+
+  it("mints an ephemeral token from XAI_API_KEY", async () => {
+    process.env.XAI_API_KEY = "sk-server";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ value: "ephemeral" }), { status: 200 })),
+    );
+    const service = { config: { maxBodyBytes: 2_000_000 } } as unknown as RunService;
+    const req = {
+      method: "POST",
+      [Symbol.asyncIterator]: async function* () {
+        yield Buffer.from(JSON.stringify({ provider: "xai" }));
+      },
+    } as unknown as IncomingMessage;
+    const res = mockRes();
+    const handled = await handleRest(
+      req,
+      res,
+      service,
+      new URL("http://localhost/voice/client-secrets"),
+    );
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(
+      expect.objectContaining({ token: "ephemeral", provider: "xai" }),
+    );
+    vi.unstubAllGlobals();
+    delete process.env.XAI_API_KEY;
+  });
+});

@@ -5,6 +5,7 @@ import { TooManyRunsError } from "../errors.js";
 import type { RunService } from "../run-service.js";
 import { attachSse } from "./sse.js";
 import { matchPath, PayloadTooLargeError, readJsonBody, sendJson } from "./util.js";
+import { mintVoiceClientSecret } from "../voice.js";
 
 export async function handleRest(
   req: IncomingMessage,
@@ -26,6 +27,16 @@ export async function handleRest(
       authRequired: !service.config.authDisabled && Boolean(service.config.authToken),
       identity: processIdentity(service.config),
     });
+    return true;
+  }
+
+  if (method === "POST" && pathname === "/voice/client-secrets") {
+    try {
+      const body = (await readJsonBody(req, maxBodyBytes)) as { provider?: string; model?: string };
+      sendJson(res, 200, await mintVoiceClientSecret(body ?? {}));
+    } catch (err) {
+      sendError(res, err);
+    }
     return true;
   }
 

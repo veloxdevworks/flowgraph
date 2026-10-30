@@ -639,6 +639,48 @@ Agents can discover **and** start/stop background services in the current run/th
 
 ---
 
+## 8a. `workshop` — facilitated agenda session
+
+A specialized HITL node for a **bounded conversation** that produces a structured deliverable. Unlike `hitl` (one question, one resume), `workshop` raises a single interrupt whose payload is a **session contract**: agenda, output schema, primed context, facilitator prompt, and optional voice hints. The client (CLI, desktop, or a phone web app) facilitates the conversation and resumes once with:
+
+```ts
+{ output, transcript, coverage, endedReason }
+```
+
+`output` is validated against `with.schema` before the node completes. Voice, text chat, and a plain JSON form are all valid facilitators of the same contract — that is what keeps CI honest.
+
+```yaml
+- id: feature-workshop
+  type: workshop
+  with:
+    message: "Workshop {{ state.packet.title }}"
+    agenda:
+      - scope
+      - risks
+      - { id: gtm, title: "Go-to-market", description: "Who ships this and when?" }
+    schema:
+      type: object
+      properties:
+        title: { type: string }
+        acceptance: { type: array, items: { type: string } }
+      required: [title]
+    context: "{{ state.packet }}"
+    facilitator: "Cover every agenda item. Do not invent requirements."
+    voice:
+      provider: xai
+      model: grok-voice-latest
+      voice: eve
+    fallback: form                 # form | text | json
+    limits: { maxMinutes: 30 }
+    output: { to: brief }
+```
+
+The node is **interrupt-and-map only** — no side effects. Research belongs in a prior `prepare` agent node; writing plans/tickets belongs in a later `post` node. Headless: `--on-interrupt fail` then `flowgraph resume` with the output JSON, or paste the output object at the CLI prompt.
+
+Prefer cheap `hitl` `approve` / `review` when a single decision is enough. Use `workshop` when the human and facilitator need to think together against an agenda.
+
+---
+
 ## 9. `wait` / `delay` — time & external gates
 
 ```yaml
@@ -902,6 +944,7 @@ runtime:
 | `map` | Fan-out over a collection | composite, parallel | core |
 | `hitl` | Human approve / question / choice gate | interruptible | core |
 | `wait` | Delay / condition / signal / inbound webhook gate | interruptible | core |
+| `workshop` | Facilitated agenda session (human answers per item) | interruptible | core |
 | `worktree` | Add / remove / list isolated git worktrees | side-effecting | core |
 
 ---

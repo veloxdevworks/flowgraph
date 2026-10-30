@@ -583,6 +583,56 @@ export const HitlWithSchema = BaseWithSchema.extend({
   decision: z.array(z.string()).optional(),
 });
 
+// workshop node — facilitated agenda session (one-shot HITL; client owns the conversation)
+export const WorkshopAgendaItemSchema = z.union([
+  z.string(),
+  z.object({
+    id: z.string().optional(),
+    title: z.string(),
+    description: z.string().optional(),
+  }),
+]);
+
+export const WorkshopVoiceSchema = z.object({
+  /** Voice provider key: xai | openai */
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  voice: z.string().optional(),
+});
+
+export const WorkshopLimitsSchema = z.object({
+  maxMinutes: z.number().positive().optional(),
+  maxTurns: z.number().int().positive().optional(),
+});
+
+export const WorkshopWithSchema = BaseWithSchema.extend({
+  /** Interrupt reason / opening recap shown to the human. */
+  message: z.string().optional(),
+  /** Agenda items the facilitator must cover. Strings or { id, title, description }. */
+  agenda: z.array(WorkshopAgendaItemSchema).optional(),
+  /** JSON Schema for the structured output the session must produce. */
+  schema: z.record(z.unknown()).optional(),
+  /** Primed research / packet from a prior prepare node (string or object). */
+  context: z.union([z.string(), z.record(z.unknown())]).optional(),
+  /** System prompt for the facilitator (voice or text). */
+  facilitator: z.string().optional(),
+  voice: WorkshopVoiceSchema.optional(),
+  /** Optional git diff at interrupt time (same shape as hitl review). */
+  diff: z
+    .object({
+      cwd: z.string().optional(),
+      base: z.string().optional(),
+      paths: z.array(z.string()).optional(),
+      before: z.string().optional(),
+      after: z.string().optional(),
+    })
+    .optional(),
+  artifacts: z.array(z.string()).optional(),
+  limits: WorkshopLimitsSchema.optional(),
+  /** Headless / no-mic fallback: form | text | json. Default form. */
+  fallback: z.union([z.literal("form"), z.literal("text"), z.literal("json")]).optional().default("form"),
+});
+
 // wait node — duration / until / signal / webhook (inbound HTTP resume)
 export const WaitWithSchema = BaseWithSchema.extend({
   duration: DurationSchema.optional(),
