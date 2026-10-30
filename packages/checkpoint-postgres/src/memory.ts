@@ -123,7 +123,7 @@ export async function migratePostgresMemorySchema(pool: Pool, schema = "public")
   const s = quoteSchema(schema);
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
     await client.query(`SELECT ${LOCK("$1")}`, [`flowgraph:memory:migrate:${schema}`]);
     await client.query(`CREATE SCHEMA IF NOT EXISTS ${s}`);
     await client.query(`CREATE TABLE IF NOT EXISTS ${s}.fg_schema_migrations (
@@ -448,7 +448,10 @@ async function inTransaction<T>(pool: Pool, fn: (c: PoolClient) => Promise<T>): 
   for (let attempt = 1; ; attempt++) {
     const client = await pool.connect();
     try {
-      await client.query("BEGIN");
+      // Pinned: the write program takes its locks first and then reads, which
+      // is only correct when each statement sees the latest commit. Under a
+      // database default of repeatable read the snapshot predates the lock.
+      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
       const out = await fn(client);
       await client.query("COMMIT");
       return out;

@@ -120,6 +120,26 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
     }
   }, 120_000);
 
+  it("writes stay correct when the session default isolation is repeatable read", async () => {
+    const schema = freshSchema();
+    const pool = new pg.Pool({ connectionString: DB, max: 8, options: "-c default_transaction_isolation=repeatable\\ read" });
+    try {
+      expect((await pool.query("SHOW default_transaction_isolation")).rows[0]).toEqual({ default_transaction_isolation: "repeatable read" });
+      const memory = await createPostgresMemoryBackend(pool, { schema });
+      const t = tu({ project: "p", graph: "g" });
+      const results = await Promise.allSettled(
+        Array.from({ length: 60 }, (_, i) =>
+          memory.write({ kind: "increment", tuple: i % 2 ? t : tu({ project: "p" }), key: "hits", field: "n", limits: MEMORY_DEFAULT_LIMITS }),
+        ),
+      );
+      expect(results.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+      expect((await memory.get(t, "hits"))?.value).toEqual({ n: 30 });
+      expect((await memory.get(tu({ project: "p" }), "hits"))?.value).toEqual({ n: 30 });
+    } finally {
+      await pool.end();
+    }
+  });
+
   it("does not end a pool it was given", async () => {
     const pool = new pg.Pool({ connectionString: DB, max: 2 });
     const b = await openPostgresBackend({ pool, schema: freshSchema() });
