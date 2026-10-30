@@ -214,10 +214,26 @@ describe("RunService with OIDC principals", () => {
     const unsub = s.registry.subscribe("bound", (ev) => {
       if (ev.type === "run.error") errors.push(JSON.stringify(ev.data));
     });
-    // A same-org principal under a fresh name gets past the server checks.
+    // The thread owner is stored with the checkpoints, so the server still refuses.
     const yaml = COUNTER.replace("name: id-counter", "name: id-counter-2");
-    await expect(s.startRun({ threadId: "bound", yaml }, bob)).resolves.toMatchObject({ status: "started" });
-    expect(await settle(s, "bound", ["completed", "error"])).toBe("error");
+    await expect(s.startRun({ threadId: "bound", yaml }, bob)).rejects.toEqual(refused("THREAD_NOT_OWNED", 403));
+    // Lose the owner row too: the thread's saved checkpoints still refuse it.
+    const { openSqliteBackend } = await import("@flowgraph/checkpoint-sqlite");
+    const raw = await openSqliteBackend(path.join(dir, "memory.db"));
+    raw.db.prepare("DELETE FROM fg_thread_owners").run();
+    raw.close();
+    await expect(s.startRun({ threadId: "bound", yaml }, bob)).rejects.toMatchObject({ code: "THREAD_NOT_OWNED", message: expect.stringMatching(/saved state/) });
+    // And after a restart (in-memory checkpoints gone), a same-org principal
+    // under a fresh name gets past the server checks; memory's own thread
+    // binding refuses.
+    await s.close();
+    const s2 = await service(dir, { memory });
+    const unsub2 = s2.registry.subscribe("bound", (ev) => {
+      if (ev.type === "run.error") errors.push(JSON.stringify(ev.data));
+    });
+    await expect(s2.startRun({ threadId: "bound", yaml }, bob)).resolves.toMatchObject({ status: "started" });
+    expect(await settle(s2, "bound", ["completed", "error"])).toBe("error");
+    unsub2();
     unsub();
     expect(errors.join("\n")).toMatch(/MEMORY_SCOPE_MISMATCH|bound to a different/);
   });

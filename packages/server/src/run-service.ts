@@ -8,9 +8,11 @@ import {
   isInputValidationError,
   readRunIssues,
   createInMemoryGraphNameRegistry,
+  createInMemoryThreadOwnerRegistry,
   type CompiledGraph,
   type FlowgraphEvent,
   type GraphNameRegistry,
+  type ThreadOwnerRegistry,
   type MemoryBackend,
   type MemoryIdentity,
   type MemorySweeper,
@@ -18,7 +20,7 @@ import {
   type RunResult,
   MEMORY_SWEEP_MAX_INTERVAL_MS,
 } from "@flowgraph/core";
-import { createPostgresCheckpointer, maybeSweepPostgres, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
+import { maybeSweepPostgres, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
 import type { GraphSpec } from "@flowgraph/spec";
 import { rejectClientSecrets, applyServerCredentials } from "./credentials.js";
 import {
@@ -90,6 +92,12 @@ export class RunService {
   private durableMemory: { backend: MemoryBackend } | undefined;
   /** Graph-name ownership: next to durable memory when configured, else process-local. */
   private graphNames: GraphNameRegistry | undefined;
+  /**
+   * Thread ownership, stored with the checkpoints: Postgres when DATABASE_URL
+   * is set, else the sqlite memory file, else process memory (where the
+   * in-memory checkpoints live too).
+   */
+  private threadOwners: ThreadOwnerRegistry | undefined;
   private singleUser: Principal | undefined;
   private sweeper: MemorySweeper | undefined;
   private closers: Array<() => Promise<void> | void> = [];
@@ -238,8 +246,12 @@ export class RunService {
   }
 
   /**
-   * Refuse a thread another principal created. Only multi-user servers check; a
-   * thread stored before owners were recorded is refused there too.
+   * Refuse a thread another principal created. Only multi-user servers check.
+   * The owner comes from the thread-owner registry stored with the
+   * checkpoints, so every replica sharing them agrees, and a lost or wiped
+   * graph store does not hand a thread to a new caller. A thread with stored
+   * state but no recorded owner is refused, as is any call when the owner
+   * cannot be looked up.
    */
   private async checkThreadAccess(
     threadId: string,
@@ -247,21 +259,31 @@ export class RunService {
     opts: { mustExist?: boolean } = {},
   ): Promise<GraphMeta | null> {
     const meta = await readGraphMeta(this.config.graphStoreDir, threadId);
-    if (meta && meta.threadId !== threadId) {
-      // Thread ids map to file names with unsafe characters replaced ("a/b" and "a_b").
-      throw new ServerRequestError(
-        409,
-        "THREAD_ID_CONFLICT",
-        `Thread id "${threadId}" collides with stored thread "${meta.threadId}"; use another id`,
-      );
+    const collides = Boolean(meta && meta.threadId !== threadId);
+    if (!this.multiUser) {
+      if (collides) throw this.threadIdConflict(threadId, meta!);
+      return meta;
     }
-    if (!this.multiUser) return meta;
+    const notOwned = () => new ServerRequestError(403, "THREAD_NOT_OWNED", `Thread "${threadId}" belongs to another user`);
+    const registry = await this.threadOwnerRegistry();
+    const record = await this.ownerLookup(threadId, () => registry.get(threadId));
+    if (record) {
+      if (record.owner !== principal.id) throw notOwned();
+    }
+    if (collides) {
+      // Thread ids map to file names with unsafe characters replaced ("a/b"
+      // and "a_b"). Name the other thread only to its owner.
+      if (meta!.owner?.id !== principal.id) throw notOwned();
+      throw this.threadIdConflict(threadId, meta!);
+    }
+    if (record) return meta;
     const live = this.registry.get(threadId);
-    const owner = meta?.owner ?? live?.owner;
-    if (owner) {
-      if (owner.id !== principal.id) {
-        throw new ServerRequestError(403, "THREAD_NOT_OWNED", `Thread "${threadId}" belongs to another user`);
-      }
+    const legacy = meta?.owner ?? live?.owner;
+    if (legacy) {
+      if (legacy.id !== principal.id) throw notOwned();
+      // Owner known only from this replica's graph store: record it with the checkpoints.
+      const claim = await this.ownerLookup(threadId, () => registry.claim(threadId, legacy.id, legacy.org ?? ""));
+      if (claim.owner !== principal.id) throw notOwned();
       return meta;
     }
     if (meta || (live && live.runId)) {
@@ -271,8 +293,66 @@ export class RunService {
         `Thread "${threadId}" has no recorded owner (it was stored before this server identified callers); use a new thread id`,
       );
     }
+    // No owner anywhere: refuse ids that already have saved state (stored
+    // before owners were recorded, or by a host without this registry).
+    const checkpointer = await this.ownerLookup(threadId, () => this.getCheckpointer());
+    const saved = await this.ownerLookup(threadId, () => checkpointer.getTuple({ configurable: { thread_id: threadId } }));
+    if (saved) {
+      throw new ServerRequestError(
+        403,
+        "THREAD_NOT_OWNED",
+        `Thread "${threadId}" has saved state but no recorded owner; use a new thread id`,
+      );
+    }
     if (opts.mustExist) throw new ServerRequestError(404, "THREAD_NOT_FOUND", `No run "${threadId}"`);
     return null;
+  }
+
+  private threadIdConflict(threadId: string, meta: GraphMeta): ServerRequestError {
+    return new ServerRequestError(
+      409,
+      "THREAD_ID_CONFLICT",
+      `Thread id "${threadId}" collides with stored thread "${meta.threadId}"; use another id`,
+    );
+  }
+
+  /**
+   * Update a thread's meta file in the background. The file can be gone (a
+   * wiped graph store, or a test removing its directory); that must not
+   * become an unhandled rejection.
+   */
+  private patchMeta(threadId: string, patch: Parameters<typeof updateGraphMeta>[2]): void {
+    updateGraphMeta(this.config.graphStoreDir, threadId, patch).catch((err: unknown) => {
+      log("warn", "graph meta update failed", { threadId, ...errorFields(err) });
+    });
+  }
+
+  /** Run an owner lookup; any failure refuses the call rather than guessing. */
+  private async ownerLookup<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof ServerRequestError) throw err;
+      log("error", "thread owner lookup failed", { threadId, ...errorFields(err) });
+      throw new ServerRequestError(503, "THREAD_OWNER_UNAVAILABLE", `Cannot check who owns thread "${threadId}" right now; try again`);
+    }
+  }
+
+  /** The thread-owner registry, opening the checkpoint store first so a durable one is used when configured. */
+  private async threadOwnerRegistry(): Promise<ThreadOwnerRegistry> {
+    if (!this.threadOwners) await this.ownerLookup("*", () => this.getCheckpointer());
+    this.threadOwners ??= createInMemoryThreadOwnerRegistry();
+    return this.threadOwners;
+  }
+
+  /** Record the caller as the owner of a new thread; refuse when another caller won the claim. */
+  private async claimThread(threadId: string, principal: Principal): Promise<void> {
+    if (!this.multiUser) return;
+    const registry = await this.threadOwnerRegistry();
+    const claim = await this.ownerLookup(threadId, () => registry.claim(threadId, principal.id, principal.org ?? ""));
+    if (claim.owner !== principal.id) {
+      throw new ServerRequestError(403, "THREAD_NOT_OWNED", `Thread "${threadId}" belongs to another user`);
+    }
   }
 
   /** Check a caller may watch a thread's events (multi-user servers refuse unknown threads). */
@@ -332,28 +412,27 @@ export class RunService {
           this.closers.push(() => b.close());
           this.useDurableMemory(b.memory);
           this.graphNames = b.graphNames;
+          this.threadOwners = b.threadOwners;
         }
         if (this.config.databaseUrl) {
+          // One pool for checkpoints, thread owners and graph names (and
+          // memory when FLOWGRAPH_MEMORY_BACKEND=postgres), so every replica
+          // sharing the checkpoints shares who owns them.
+          const pg = await openPostgresBackend({
+            connectionString: this.config.databaseUrl,
+            ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
+            onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
+          });
+          this.closers.push(() => pg.close());
           if (memBackend === "postgres") {
-            const pg = await openPostgresBackend({
-              connectionString: this.config.databaseUrl,
-              ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
-              onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
-            });
-            this.closers.push(() => pg.close());
             // Replicas share the database: each interval is claimed by one of
             // them (a little early, so timer drift never skips an interval).
             this.useDurableMemory(pg.memory, (intervalMs, now) => maybeSweepPostgres(pg.memory, intervalMs * 0.9, now));
-            this.graphNames = pg.graphNames;
-            this.checkpointer = pg.checkpointer;
-            return pg.checkpointer;
           }
-          const cp = await createPostgresCheckpointer({
-            connectionString: this.config.databaseUrl,
-            ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
-          });
-          this.checkpointer = cp;
-          return cp;
+          this.graphNames = pg.graphNames;
+          this.threadOwners = pg.threadOwners;
+          this.checkpointer = pg.checkpointer;
+          return pg.checkpointer;
         }
         // One MemorySaver shared by every compile. Letting compileGraph create its own
         // per call gave each start/resume/getState an empty saver, so HITL resume
@@ -461,6 +540,7 @@ export class RunService {
     if (!req.yaml?.trim()) throw new Error("yaml is required");
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(req.threadId, principal);
+    await this.claimThread(req.threadId, principal);
 
     const max = this.config.maxConcurrentRuns ?? 16;
     if (max > 0 && this.registry.activeCount() >= max) {
@@ -492,7 +572,7 @@ export class RunService {
     } catch (err) {
       // Don't leave a "running" placeholder behind for a run that never started.
       if (this.registry.get(req.threadId) === placeholder) this.registry.remove(req.threadId);
-      void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "error" });
+      this.patchMeta(req.threadId, { status: "error" });
       throw err;
     }
 
@@ -534,7 +614,7 @@ export class RunService {
         log("error", "run.error", { threadId: req.threadId, ...errorFields(err) });
         this.registry.setStatus(req.threadId, "error");
         this.metrics.recordResult("error");
-        void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "error" });
+        this.patchMeta(req.threadId, { status: "error" });
         const message = err instanceof Error ? err.message : String(err);
         this.registry.pushEvent(req.threadId, {
           id: `err-${Date.now()}`,
@@ -572,7 +652,7 @@ export class RunService {
     this.registry.setStatus(threadId, status);
     this.metrics.recordResult(result.status);
     log("info", "run.end", { threadId, status: result.status, runId: result.runId });
-    void updateGraphMeta(this.config.graphStoreDir, threadId, { status });
+    this.patchMeta(threadId, { status });
   }
 
   resumeRun(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
@@ -625,7 +705,7 @@ export class RunService {
     session.runId = compiled.runId;
     session.dryRun = dryRun;
     this.registry.setStatus(req.threadId, "running");
-    void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "running" });
+    this.patchMeta(req.threadId, { status: "running" });
 
     // Fire-and-forget like start/continue — resumed execution can be long-running.
     void this.track((async () => {
@@ -642,7 +722,7 @@ export class RunService {
         log("error", "resume.error", { threadId: req.threadId, ...errorFields(err) });
         this.registry.setStatus(req.threadId, "error");
         this.metrics.recordResult("error");
-        void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "error" });
+        this.patchMeta(req.threadId, { status: "error" });
         const message = err instanceof Error ? err.message : String(err);
         this.registry.pushEvent(req.threadId, {
           id: `err-${Date.now()}`,
@@ -672,7 +752,7 @@ export class RunService {
     session.abort.abort();
     this.registry.setStatus(threadId, "cancelled");
     this.metrics.recordResult("cancelled");
-    void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "cancelled" });
+    this.patchMeta(threadId, { status: "cancelled" });
     return { threadId, runId: session.runId, status: "cancelled" };
   }
 
@@ -681,7 +761,7 @@ export class RunService {
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
     session.pause.abort();
-    void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "paused" });
+    this.patchMeta(threadId, { status: "paused" });
     return { threadId, runId: session.runId, status: "started" };
   }
 
@@ -730,7 +810,7 @@ export class RunService {
     session.runId = compiled.runId;
     session.dryRun = dryRun;
     this.registry.setStatus(threadId, "running");
-    void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "running" });
+    this.patchMeta(threadId, { status: "running" });
 
     // Fire-and-forget like start (continue can be long-running)
     void this.track((async () => {
@@ -746,7 +826,7 @@ export class RunService {
         log("error", "continue.error", { threadId, ...errorFields(err) });
         this.registry.setStatus(threadId, "error");
         this.metrics.recordResult("error");
-        void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "error" });
+        this.patchMeta(threadId, { status: "error" });
       }
     })());
 
