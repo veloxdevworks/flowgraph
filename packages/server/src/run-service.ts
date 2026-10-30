@@ -387,14 +387,18 @@ export class RunService {
       if (this.multiUser) {
         log("warn", "graph-names.process-local", {
           message:
-            "Graph-name ownership is kept in memory and resets on restart; set FLOWGRAPH_MEMORY_BACKEND=postgres or sqlite to store it durably.",
+            "Graph-name ownership is kept in memory and resets on restart, and replicas do not share it; set DATABASE_URL (or FLOWGRAPH_MEMORY_BACKEND=sqlite for one replica) to store it durably.",
         });
       }
     }
     return this.graphNames;
   }
 
-  /** On multi-user servers a graph name belongs to the first principal in its org that uploads it. */
+  /**
+   * On multi-user servers a graph name belongs to the first principal in its
+   * org that uploads it. The spec only admits lower-case ASCII kebab-case
+   * names, so case or Unicode look-alikes of a name cannot be registered.
+   */
   private async claimGraphName(spec: GraphSpec, principal: Principal): Promise<void> {
     if (!this.multiUser) return;
     const name = spec.metadata?.name ?? "graph";

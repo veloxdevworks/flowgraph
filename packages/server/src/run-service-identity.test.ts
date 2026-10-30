@@ -201,6 +201,16 @@ describe("RunService with OIDC principals", () => {
     expect(scopes.at(-1)).toEqual({ value: { n: 1 }, scope: { org: "globex", project: "web", graph: "id-counter", user: "carol" } });
   });
 
+  it("admits no case or Unicode look-alike of another user's graph name", async () => {
+    const s = await service(await tmp());
+    await s.startRun({ threadId: "nm1", yaml: gate("team-flow") }, alice);
+    // Upper case, full-width "t" and Cyrillic "е" are not kebab-case names.
+    for (const lookalike of ["Team-Flow", "\uff54eam-flow", "t\u0435am-flow"]) {
+      await expect(s.startRun({ threadId: `nm-${randomUUID()}`, yaml: gate(`"${lookalike}"`) }, bob)).rejects.toThrow(/name must be kebab-case/);
+    }
+    await expect(s.startRun({ threadId: `nm-${randomUUID()}`, yaml: gate("team-flow") }, bob)).rejects.toEqual(refused("GRAPH_NAME_TAKEN", 409));
+  });
+
   it("memory refuses another principal on a bound thread even if the server record is gone", async () => {
     const dir = await tmp();
     const memory: ServerMemoryConfig = { backend: "sqlite" };
