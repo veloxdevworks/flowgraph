@@ -312,6 +312,65 @@ export const AgentMemorySchema = z
   })
   .strict();
 
+/**
+ * Context management for agent nodes: a token budget for everything sent to the
+ * model (system prompt, recalled memory, conversation history, the prompt, tool
+ * schemas and the tool loop), and how to shrink history when it does not fit.
+ * Shared by `runtime.context` (graph defaults) and an agent's `with.context`.
+ */
+export const ContextStrategySchema = z.enum(["none", "last", "trim", "summarize"], {
+  errorMap: (issue, ctx) =>
+    issue.code === "invalid_enum_value"
+      ? { message: `must be one of none | last | trim | summarize (got "${String(issue.received)}")` }
+      : { message: ctx.defaultError },
+});
+
+export const ContextSummarizeSchema = z
+  .object({
+    /** Registered provider used to summarize older turns. Omit for the deterministic extractive summary. */
+    provider: z.string().min(1).optional(),
+    /** Model for the summarizer (a cheap one is fine). */
+    model: z.string().min(1).optional(),
+    /** Token cap for the running summary (default 500). */
+    maxTokens: z.number().int().positive().optional(),
+    /** Extra instructions for the summarizer. */
+    instructions: z.string().optional(),
+  })
+  .strict();
+
+const contextPolicyFields = {
+  /** Token budget for one model call (default 16000 when a context block is present). */
+  maxTokens: z.number().int().positive().optional(),
+  /** Tokens held back for the reply (default: with.maxTokens, else 0). */
+  reserveTokens: z.number().int().nonnegative().optional(),
+  /** How history is shrunk when over budget (default trim). */
+  strategy: ContextStrategySchema.optional(),
+  /** strategy last: keep at most this many history and tool-loop messages (default 20). */
+  lastN: z.number().int().positive().optional(),
+  /** Cap on each tool result; longer results are cut with a marker. */
+  toolResultMaxTokens: z.number().int().positive().optional(),
+  /** strategy summarize: how older turns are folded into a running summary. */
+  summarize: ContextSummarizeSchema.optional(),
+  /** Registered token estimator (default "bytes": UTF-8 bytes / 4). */
+  estimator: z.string().min(1).optional(),
+  /** When the pinned part alone (system, memory, prompt, latest tool turn) is over budget: error (default) or warn. */
+  onOverflow: z.enum(["error", "warn"]).optional(),
+};
+
+export const RuntimeContextSchema = z.object(contextPolicyFields).strict();
+
+export const AgentContextSchema = z
+  .object({
+    ...contextPolicyFields,
+    /** A `type: messages` channel holding this agent's conversation across steps, loops and runs. */
+    history: z.string().min(1).optional(),
+    /** What is appended to history per run: the prompt and final reply (turns, default) or every tool turn too (all). */
+    record: z.enum(["turns", "all"]).optional(),
+    /** Remove messages that no longer fit (and store the running summary) in the history channel. Default true. */
+    compact: z.boolean().optional(),
+  })
+  .strict();
+
 // agent node (formerly "intelligent")
 export const AgentWithSchema = BaseWithSchema.extend({
   /** Reference to a reusable agent definition (AGENT.md), resolved at run time. */
@@ -340,6 +399,8 @@ export const AgentWithSchema = BaseWithSchema.extend({
   hub: z.enum(["deepagents"]).optional(),
   /** Long-term memory: recall into the prompt within a token budget, and the `remember` tool. */
   memory: AgentMemorySchema.optional(),
+  /** Context budget and history management (see AgentContextSchema). */
+  context: AgentContextSchema.optional(),
   // provider-namespaced escape hatches (any shape)
   claude: z.record(z.unknown()).optional(),
   cursor: z.record(z.unknown()).optional(),
@@ -1205,6 +1266,8 @@ export const RuntimeSchema = z.object({
       onExceed: z.union([z.literal("interrupt"), z.literal("fail"), z.literal("warn")]).optional(),
     })
     .optional(),
+  /** Graph-wide defaults for every agent node's `with.context`. */
+  context: RuntimeContextSchema.optional(),
   secrets: z
     .object({
       provider: z.union([z.literal("env"), z.literal("dotenv"), z.string()]).optional(),
