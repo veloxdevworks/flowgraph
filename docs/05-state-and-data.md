@@ -227,12 +227,12 @@ Because state lives entirely in channels, it is exactly what the checkpointer pe
 
 ## 8. Long-term memory (`runtime.memory`)
 
-Checkpointed state lives for one thread. **Memory** persists across threads and runs: learned fixes, counters, preferences, notes about an incident. It lives in the same database as the checkpointer (a `.flowgraph/checkpoints.db` sqlite file for the CLI), in `fg_memory_*` tables.
+Checkpointed state lives for one thread. **Memory** persists across threads and runs: learned fixes, counters, preferences, notes about an incident. It lives in the same database as the checkpointer (a `.flowgraph/checkpoints.db` sqlite file, or the Postgres database), in `fg_memory_*` tables.
 
 ```yaml
 runtime:
   checkpoint:
-    backend: sqlite             # memory needs a durable checkpointer
+    backend: sqlite             # or postgres; memory needs a durable checkpointer
   memory:
     backend: checkpoint         # default; `memory` = process-local, tests only (warns)
     subject:                    # optional: a per-incident / per-ticket scope
@@ -383,13 +383,33 @@ This gives the agent a `remember({ scope, key, value, attrs? })` tool. `scope` i
 
 | Host | sqlite | postgres | memory |
 |---|---|---|---|
-| CLI (`flowgraph run/resume`) | durable, same `.db` file as checkpoints | `MEMORY_BACKEND_UNAVAILABLE` (not yet supported) | ephemeral |
-| `compileGraph` | pass `memory: { backend, identity }` from `openSqliteBackend(path)` in `@flowgraph/checkpoint-sqlite` | — | `memory: "ephemeral"` |
+| CLI (`flowgraph run/resume`) | durable, same `.db` file as checkpoints | durable, same database as checkpoints (`runtime.checkpoint.path` or `DATABASE_URL`), one connection pool | ephemeral |
+| `compileGraph` | pass `memory: { backend, identity }` from `openSqliteBackend(path)` in `@flowgraph/checkpoint-sqlite` | pass `memory: { backend, identity }` from `openPostgresBackend(url)` in `@flowgraph/checkpoint-postgres` | `memory: "ephemeral"` |
 | `@flowgraph/testing` | — | — | fresh ephemeral backend per compile |
-| server | not yet: `runtime.memory` graphs fail to compile | | `ctx.store` only: one in-process backend shared by the service (capped at 50,000 items, oldest inserted evicted first across all graphs), with a view per graph keyed by `metadata.name` — two uploaded graphs with the same name share one `ctx.store` |
+| server | `FLOWGRAPH_MEMORY_BACKEND=sqlite`: a local file (`FLOWGRAPH_MEMORY_SQLITE_PATH`, default `<graph store>/memory.db`); needs `@flowgraph/checkpoint-sqlite` installed | `FLOWGRAPH_MEMORY_BACKEND=postgres`: the `DATABASE_URL` database, sharing the checkpointer's pool | default (`FLOWGRAPH_MEMORY_BACKEND=memory`): `runtime.memory` graphs fail to compile; `ctx.store` is one in-process backend shared by the service (capped at 50,000 items, oldest inserted evicted first across all graphs), with a view per graph keyed by `metadata.name` — two uploaded graphs with the same name share one `ctx.store` |
+
+The server's runtime `checkpoint.backend` comes from its own config, not the uploaded graph. With durable memory, every run on one server shares a single identity: `FLOWGRAPH_ORG`, `FLOWGRAPH_PROJECT` and `FLOWGRAPH_USER` (org and project default to `local`, with a warning). Plain graphs (no `runtime.memory`) keep the in-process `ctx.store`.
 
 `compileGraph` never falls back to in-memory silently: `runtime.memory` without a durable host backend is a compile error, and `flowgraph validate` reports the same problem (`MEMORY_BACKEND_UNAVAILABLE`) before you run.
 
 Validation codes: `MEMORY_BACKEND_UNAVAILABLE`, `MEMORY_BACKEND_EPHEMERAL` (warning), `MEMORY_STORE_AND_MEMORY`, `MEMORY_LIMIT_EXCEEDS_CAP`, `MEMORY_NOT_CONFIGURED`, `MEMORY_SUBJECT_UNDECLARED`, `MEMORY_SUBJECT_TYPE_MISMATCH`, `MEMORY_RECALL_ID_DUPLICATE`, `MEMORY_SCOPE_IMPLICIT` (warning; the write still goes to `user` scope), `MEMORY_AGENT_WRITES_WIDE` (warning). Runtime error codes are prefixed in the message (`MEMORY_VERSION_CONFLICT: …`). Examples: [self-healing](../examples/self-healing/) and [react-factory](../examples/react-factory/).
 
-**Upgrading.** Memory schema migrations run automatically when the sqlite file is opened, are forward-only, and a file migrated by a newer flowgraph is refused by an older one. Copy the `.db` file (with the run stopped) before upgrading flowgraph so you can roll back. Replay records written before the op-fingerprint migration (memory schema 2) never match, so a run interrupted before the upgrade and resumed after it re-applies the writes of the interrupted node (an `increment` counts twice); finish or abandon in-flight runs before upgrading.
+### Storage
+
+Both durable backends use the same tables and the same write engine, and pass the same conformance suite (`describeMemoryBackendConformance` in `@flowgraph/testing`):
+
+| Table | Holds |
+|---|---|
+| `fg_memory_items` | one row per item: scope tuple, key, JSON value, attrs, version, timestamps, expiry |
+| `fg_memory_ops` | replay records: op id, result, write fingerprint |
+| `fg_memory_threads` | thread → scope bindings (insert-only) |
+| `fg_memory_meta` | last sweep time |
+| `fg_schema_migrations` | applied migrations per component |
+
+Each write is one transaction. On sqlite it is an immediate transaction on the file (other processes wait up to `busy_timeout`, 5 s). On Postgres it first takes a transaction-scoped advisory lock on the write's scope — for subject scope, on every subject of that type in the project, since a new subject may evict others — and then on its op id, and reads the row `FOR UPDATE`; increments, appends, compare-and-set, the subject cap and op-id dedupe are atomic across connections and hosts, and a deadlock or serialization failure is retried. Postgres tables go in the checkpointer's schema (`openPostgresBackend({ connectionString, schema })`, default `public`). Values are stored as `json` (key order preserved) and attrs as `jsonb`, whose containment match is type-exact like sqlite's (`2` never matches `"2"`); text sorts bytewise (`COLLATE "C"`) on both.
+
+The per-type subject cap and `similarSubjects` without tags read the covering index `fg_memory_subject_keys (org, project, subject_type, subject_key, updated_at …)`: the cap lists distinct live subjects of the type, and cross-subject search picks the newest subjects from the index before reading only their rows. Both are proportional to the number of subjects of that type, not to the total item count.
+
+**Sweeping.** Expired items stay invisible to reads and are deleted by a sweep, which also drops replay records older than 30 days (`MEMORY_OP_RETENTION_MS`). `openSqliteBackend` and `openPostgresBackend` sweep on open when the last sweep was more than an hour ago (one host claims each interval on Postgres). Long-running hosts call `startMemorySweeper(backend, { intervalMs, opsRetentionMs })` from `@flowgraph/core` (the server does this hourly; `FLOWGRAPH_MEMORY_SWEEP_MS`); it never overlaps runs and does not keep the process alive. Postgres sweeps delete in batches and skip rows a writer holds. A replay record must outlive the longest a thread can stay paused and still be resumed; raise `opsRetentionMs` if threads wait longer than 30 days.
+
+**Upgrading.** Memory schema migrations run automatically when the sqlite file or Postgres database is opened, and are forward-only; a database migrated by a newer flowgraph is refused by an older one. On Postgres they run in one transaction under an advisory lock, so hosts starting together apply each migration once. Copy the `.db` file (with the run stopped), or back up the Postgres schema, before upgrading flowgraph so you can roll back. Memory schema 3 adds the covering subject index and, on sqlite, renames `fg_threads` and `fg_meta` to `fg_memory_threads` and `fg_memory_meta`; anything that read those tables directly must use the new names. Replay records written before the op-fingerprint migration (memory schema 2) never match, so a run interrupted before the upgrade and resumed after it re-applies the writes of the interrupted node (an `increment` counts twice); finish or abandon in-flight runs before upgrading.

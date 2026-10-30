@@ -64,6 +64,17 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 | `FLOWGRAPH_GIT_SHA` | _(unset)_ | Optional build identity included on `/` and `/healthz`. |
 | `FLOWGRAPH_GRAPH_STORE` | `/tmp/flowgraph-graphs` | Uploaded YAML + `{threadId}.events.jsonl`. **Do not use `/tmp` on a lab host** — it is wiped on reboot. |
 
+## Memory
+
+Graphs that declare `runtime.memory` need a durable memory backend. See [docs/05-state-and-data.md §8](../../docs/05-state-and-data.md#8-long-term-memory-runtimememory).
+
+| Env | Default | Purpose |
+|---|---|---|
+| `FLOWGRAPH_MEMORY_BACKEND` | `memory` | `memory` (process-local; `runtime.memory` graphs fail to compile) \| `postgres` (the `DATABASE_URL` database, same pool as checkpoints) \| `sqlite` (local file; install `@flowgraph/checkpoint-sqlite`) |
+| `FLOWGRAPH_MEMORY_SQLITE_PATH` | `<FLOWGRAPH_GRAPH_STORE>/memory.db` | sqlite memory file |
+| `FLOWGRAPH_ORG` / `FLOWGRAPH_PROJECT` / `FLOWGRAPH_USER` | `local` / `local` / _(unset)_ | The one identity every run on this server writes memory as |
+| `FLOWGRAPH_MEMORY_SWEEP_MS` | `3600000` | How often expired memory and old replay records are deleted |
+
 ## Lab / self-host
 
 Point stdout at a file (launchd `StandardOutPath` / `StandardErrorPath`, or a redirect):
