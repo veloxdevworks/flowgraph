@@ -2,10 +2,10 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildSkillsCommand } from "./skills-command.js";
-import { checkpointerOption, promptResolver, serializePendingInterrupts } from "./interrupts.js";
+import { checkpointerOption, CLI_MEMORY_BACKENDS, promptResolver, serializePendingInterrupts } from "./interrupts.js";
 import { mcpHubForRun, closeMcpHub, loginMcpServer, mcpOAuthStatus, logoutMcpServer } from "./mcp.js";
 import { buildProviders } from "./providers.js";
 import { registerLocalTools } from "./local-tools.js";
@@ -154,6 +154,7 @@ program
     if (spec) {
       const imported = await loadGraphImports(spec, { cwd });
       allDiags.push(...validateSpec(spec));
+      allDiags.push(...memoryHostDiagnostics(spec, { memoryBackends: CLI_MEMORY_BACKENDS, hostName: "flowgraph CLI" }));
 
       if (opts.preflight) {
         const pf = await preflightGraphSkills(spec, {
@@ -235,7 +236,10 @@ program
 
     const imported = await loadGraphImports(spec, { cwd: graphDir });
 
-    const lintDiags = validateSpec(spec);
+    const lintDiags = [
+      ...validateSpec(spec),
+      ...memoryHostDiagnostics(spec, { memoryBackends: CLI_MEMORY_BACKENDS, hostName: "flowgraph CLI" }),
+    ];
     const fatalDiags = [...loadDiags, ...lintDiags].filter(isError);
     if (fatalDiags.length > 0) {
       printError("Graph has errors:");
@@ -308,7 +312,7 @@ program
       graphPath,
       sinks,
       providers,
-      ...(await checkpointerOption(spec)),
+      ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
       ...mcpOpt,
     });
 
@@ -456,7 +460,7 @@ program
       graphPath,
       sinks,
       providers,
-      ...(await checkpointerOption(spec)),
+      ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
       ...mcpOpt,
     });
 

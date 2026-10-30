@@ -26,10 +26,11 @@
     "@flowgraph/skills": "workspace:*",
     "@flowgraph/spec": "workspace:*",
     "commander": "^15.0.0",
-    "picocolors": "^1.1.1"
+    "picocolors": "^1.1.1",
+    "yaml": "^2.9.0"
   },
   "peerDependencies": {
-      "@flowgraph/checkpoint-sqlite": "workspace:*",
+    "@flowgraph/checkpoint-sqlite": "workspace:*",
     "@flowgraph/checkpoint-postgres": "workspace:*",
     "@flowgraph/tools-fs": "workspace:*"
   },
