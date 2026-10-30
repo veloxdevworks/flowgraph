@@ -3,6 +3,35 @@ import pg from "pg";
 /** Default bound on waiting for another host's schema setup. */
 export const DEFAULT_SETUP_LOCK_TIMEOUT_MS = 60_000;
 
+/**
+ * SQLSTATEs a concurrent `CREATE ... IF NOT EXISTS` or migration-row insert
+ * raises when two setups overlap: unique_violation, duplicate_object,
+ * duplicate_table, duplicate_schema.
+ */
+const SETUP_RACE_CODES = new Set(["23505", "42710", "42P07", "42P06"]);
+
+export function isSetupRaceError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" && SETUP_RACE_CODES.has(code);
+}
+
+/**
+ * Run an idempotent setup step, re-running it when it loses a race with an
+ * overlapping setup (which can happen when a lock holder's connection dies
+ * mid-setup and a waiter takes the lock). The re-run sees the objects the other
+ * setup created and skips them. Any other error is thrown as is.
+ */
+export async function retrySetupRace<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= attempts || !isSetupRaceError(err)) throw err;
+      await sleep(100 * attempt);
+    }
+  }
+}
+
 export interface SetupLockOptions {
   /** Give up waiting for the lock after this long. Default 60s. */
   timeoutMs?: number | undefined;
@@ -31,8 +60,11 @@ export async function withSetupLock<T>(
   }
   const key = setupLockKey(schema);
   const client = new pg.Client(config);
-  // An error on this idle client (e.g. the server terminated it) must not crash
-  // the process. Errors on the lock queries themselves still reject those queries.
+  // The server may terminate this client while it is idle; without a listener
+  // that is an unhandled 'error' event. If it happens while we hold the lock,
+  // the lock is released and another host may set up concurrently; setup steps
+  // tolerate that overlap (retrySetupRace). Errors on the lock queries
+  // themselves still reject those queries.
   client.on("error", () => undefined);
   await client.connect();
   try {

@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
 import { describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
 import { openPostgresBackend, createPostgresMemoryBackend, migratePostgresMemorySchema, POSTGRES_MEMORY_MIGRATIONS, type PostgresBackend } from "./index.js";
@@ -119,6 +120,41 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
       await adminClient.end();
     }
   }, 120_000);
+
+  it("a waiter that takes the lock while a dead holder's setup is still running still opens", async () => {
+    const lockSql = "SELECT pg_advisory_lock(hashtextextended($1, 0))";
+    for (let round = 0; round < 4; round++) {
+      const schema = freshSchema();
+      // Play the lock holder: take the setup lock, then start setup without it.
+      const holder = new pg.Client({ connectionString: DB });
+      holder.on("error", () => undefined);
+      await holder.connect();
+      await holder.query(lockSql, [`flowgraph:setup:${schema}`]);
+      const waiters = Promise.allSettled(
+        Array.from({ length: 4 }, () => openPostgresBackend({ connectionString: DB!, schema, poolConfig: { max: 1 } })),
+      );
+      await new Promise((r) => setTimeout(r, 100));
+      // Kill the holder's lock connection, as if its host died mid-setup ...
+      const { rows } = await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      await admin!.query("SELECT pg_terminate_backend($1)", [rows[0]!.pid]);
+      // ... and once a waiter has taken the lock, run the dead holder's setup
+      // (unlocked, as its pool connections outlive the lock) alongside it.
+      for (let i = 0; i < 400; i++) {
+        const held = await admin!.query("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted AND objid = (hashtextextended($1, 0) & 4294967295)::oid", [`flowgraph:setup:${schema}`]);
+        if (held.rowCount) break;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      const holderPool = new pg.Pool({ connectionString: DB, max: 4 });
+      // The holder's own setups race each other without the lock; their failures are expected.
+      const holderSetups = Promise.allSettled(Array.from({ length: 4 }, () => new PostgresSaver(holderPool, undefined, { schema }).setup()));
+      const opened = await waiters;
+      await holderSetups;
+      await holderPool.end();
+      await holder.end().catch(() => undefined);
+      for (const r of opened) if (r.status === "fulfilled") await r.value.close();
+      expect(opened.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+    }
+  }, 60_000);
 
   it("gives up waiting for the setup lock after setupLockTimeoutMs with a clear error", async () => {
     const schema = freshSchema();

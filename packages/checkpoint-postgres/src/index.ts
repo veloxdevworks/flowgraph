@@ -16,7 +16,7 @@
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
 import pg from "pg";
-import { DEFAULT_SETUP_LOCK_TIMEOUT_MS, withSetupLock } from "./setup-lock.js";
+import { DEFAULT_SETUP_LOCK_TIMEOUT_MS, retrySetupRace, withSetupLock } from "./setup-lock.js";
 import {
   createPostgresMemoryBackend,
   maybeSweepPostgres,
@@ -54,7 +54,7 @@ export async function createPostgresCheckpointer(
   const saver = PostgresSaver.fromConnString(connectionString);
   if (doSetup) {
     const timeoutMs = typeof connStringOrOptions === "string" ? undefined : connStringOrOptions.setupLockTimeoutMs;
-    await withSetupLock({ connectionString }, "public", () => saver.setup(), { timeoutMs });
+    await withSetupLock({ connectionString }, "public", () => retrySetupRace(() => saver.setup()), { timeoutMs });
   }
   return saver as unknown as BaseCheckpointSaver;
 }
@@ -141,7 +141,7 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
           clientConfigOf(pool),
           schema,
           async () => {
-            await saver.setup();
+            await retrySetupRace(() => saver.setup());
             return createPostgresMemoryBackend(pool, { schema });
           },
           { timeoutMs: opts.setupLockTimeoutMs },
