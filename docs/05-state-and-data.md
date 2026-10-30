@@ -72,6 +72,19 @@ Channels with `type: messages` (or `reducer: messages`) use LangGraph's `message
 
 > Reducers are essential for **parallel branches** ([02 §Fan-out](./02-graph-spec.md#fan-out-parallel-edges)) and `map` nodes: when multiple branches write the same channel in one superstep, the reducer merges their writes. Without an accumulating reducer, the last write wins and data is lost — the compiler **warns** when immediate fan-out branch nodes (the direct `to` targets of a parallel edge) write the same channel with `lastWrite` or no reducer. The warning does not trace multi-hop paths before a join.
 
+### Subgraph merge-back
+
+A `subgraph` node writes child results into the parent through the same reducers:
+
+| `stateMap.out` | What is written |
+|---|---|
+| set | Each **key** is a parent channel. Each **value** is a child channel or `{{ }}` expression (`approval: gateResult` writes the child's `gateResult` into the parent's `approval`). |
+| omitted | Channels that share a name. Child-only channels are not kept on the parent. The reserved `outputs` bag is not copied. |
+
+The child is seeded with the matching parent values (or `stateMap.in`). The update is only the **new** portion, then the **parent's** reducer combines it: an `append` channel receives the suffix the child added, and a `merge` / `mergeDeep` channel receives the keys the child changed. Unchanged seeded channels are left alone, so a parallel branch is not overwritten with a stale copy.
+
+Parallel subgraphs in one superstep merge in node-id order (map items merge in input order). `flowgraph validate` reports `UNDECLARED_OUTPUT_CHANNEL` when an `out` key is not a parent channel, and `SUBGRAPH_OUTPUT_UNKNOWN` when an `out` value names a child channel that does not exist.
+
 ## 3. Reading & writing state
 
 - **Read** anywhere via expressions: `{{ state.summary }}`, `{{ state.issue.body }}`, `{{ state.outputs.summarize }}`.

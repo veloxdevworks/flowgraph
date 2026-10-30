@@ -1,0 +1,33 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: child-log
+  description: Appends one item to log and sets note. childOnly must not leak to the parent.
+
+state:
+  channels:
+    title: { type: string }
+    log: { type: array }
+    note: { type: string }
+    childOnly: { type: string }
+
+nodes:
+  - id: stamp
+    type: function
+    with:
+      fn: subgraphMergeStamp
+      input:
+        log: "{{ state.log }}"
+        item: child
+      output:
+        map:
+          log: "{{ result.log }}"
+          note: "{{ result.note }}"
+          childOnly: "{{ result.childOnly }}"
+
+edges:
+  - { from: START, to: stamp }
+  - { from: stamp, to: END }
+
+runtime:
+  checkpoint: { enabled: false }

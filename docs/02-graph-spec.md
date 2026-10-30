@@ -284,7 +284,7 @@ nodes:
 
 - `input:` builds an `input` object available to the node's `with` expressions (and to skills as their declared inputs).
 - `to` / `map` are optional overrides for shared/typed/reducer-backed channels (e.g. parallel fan-in into one `append` channel) or field projection.
-- **Exception — `subgraph`:** when `output` is omitted, the child graph's state is **merged** into the parent (transparent passthrough). Use `output: none` to suppress that, or `to`/`map`/`stateMap.out` for explicit projection.
+- **Exception — `subgraph`:** when `output` and `stateMap.out` are both omitted, channels that **share a name** merge back and the parent's reducer combines only the child's new values. Use `output: none` to write nothing, `output.to` / `output.map` for a normal node projection, or `stateMap.out` (`parentChannel: childChannel`) for an explicit mapping. See [05 — Subgraph merge-back](./05-state-and-data.md#subgraph-merge-back).
 - Prefer not to declare your own `outputs` channel unless you intend to override its `mergeDeep` semantics.
 
 ## 9. `runtime` (graph-level defaults)

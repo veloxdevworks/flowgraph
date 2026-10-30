@@ -758,6 +758,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       skills: skillAliases,
       agents: agentAliases,
       subgraphs: subgraphAliases,
+      // Parent channel reducers for subgraph merge-back. Set after
+      // ensureDeclaredOutputChannels so auto-declared targets are included.
+      channels: spec.state?.channels ?? {},
     },
     secrets: createEnvSecretProvider(),
     events,

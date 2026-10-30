@@ -526,11 +526,13 @@ Composes a child graph as a single node. Enables modular libraries of graphs and
   uses: tests                    # imported via imports[].subgraph
   input: { repo: "{{ state.repo }}", sha: "{{ state.sha }}" }
   with:
-    output: { map: { testResults: "{{ result.summary }}" } }
-    # state mapping between parent/child channels:
+    # state mapping between parent/child channels (destination ← source):
     stateMap:
-      in:  { repo: repo, sha: sha }
-      out: { summary: testResults }
+      in:                        # child channel ← parent channel
+        repo: repo
+        sha: sha
+      out:                       # parent channel ← child channel
+        summary: testResults
 ```
 
 Provide **exactly one** of:
@@ -538,9 +540,17 @@ Provide **exactly one** of:
 - `uses:` — path or `imports[].subgraph` alias (resolved from the graph's working directory at run time)
 - `spec:` — an inline child `GraphSpec` (produced by `bundleGraphForRemote` for remote portability; the engine compiles it via `compileGraphForEmbedding` without reading the filesystem)
 
-The child graph runs with its own channels; `stateMap` projects parent state in and child state out. Child events are nested under the parent's span. The parent must use checkpointing (`runtime.checkpoint`) for nested HITL inside the child to pause and resume correctly — the child inherits the parent's LangGraph checkpointer.
+The child graph runs with its own channels. `stateMap.in` seeds the child (omit it and channels that share a name are copied in). `stateMap.out` writes back: **keys are parent channels, values are child channels** or `{{ }}` expressions. Omit `stateMap.out` and channels that share a name merge. Either way the **parent's reducer** combines the write — an `append` channel receives only the items the child added, and a `merge` channel receives only the keys the child changed. Child-only channels and the child's `outputs` bag stay in the child unless `stateMap.out` names them.
+
+`output: none` writes nothing. `output.to` / `output.map` (with no `stateMap.out`) is the ordinary node projection of the whole child state.
+
+Inside `map`, the subgraph's update is the per-item value (`collect` merges those in input order). A single changed channel, or a single `stateMap.out` entry, becomes that item; several changed channels become one object.
+
+Child events are nested under the parent's span. The parent must use checkpointing (`runtime.checkpoint`) for nested HITL inside the child to pause and resume correctly — the child inherits the parent's LangGraph checkpointer. The merge into the parent happens when the child finishes, so a resume sees the seeded parent value plus everything the child produced, once.
 
 On resume, the parent `subgraph` node re-executes from the top (recomputing `stateMap.in`). Side effects reached before a nested interrupt should use `ctx.once()` so they do not re-fire on replay (same pattern as top-level HITL nodes).
+
+`flowgraph validate` errors when an `out` key is not a parent channel (`UNDECLARED_OUTPUT_CHANNEL`) or an `out` value names a child channel that does not exist (`SUBGRAPH_OUTPUT_UNKNOWN`).
 
 ---
 

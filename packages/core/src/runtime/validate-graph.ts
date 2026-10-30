@@ -2,8 +2,9 @@
  * Offline graph lint helpers used by validateSpec.
  */
 
-import type { GraphSpec, Diagnostic } from "@flowgraph/spec";
+import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
+import { childChannelRefsInMapping, stateMapOutEntries } from "../nodes/subgraph-merge.js";
 import { isOutputNone, OUTPUTS_CHANNEL } from "./apply-output.js";
 import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
 import { RESERVED_STATE_CHANNELS } from "./state-annotation.js";
@@ -193,16 +194,12 @@ export function collectNodeWriteChannels(node: GraphSpec["nodes"][number]): stri
   }
 
   if (node.type === "subgraph") {
-    const stateMap = withBlock["stateMap"];
-    if (stateMap != null && typeof stateMap === "object" && !Array.isArray(stateMap)) {
-      const out = (stateMap as { out?: unknown }).out;
-      if (out != null && typeof out === "object" && !Array.isArray(out)) {
-        for (const channel of Object.values(out as Record<string, unknown>)) {
-          if (typeof channel === "string" && channel.trim()) names.add(channel.trim());
-        }
-        // stateMap.out replaces the default merge/slug path
-        return [...names];
-      }
+    const out = stateMapOutEntries(withBlock);
+    if (out) {
+      // Keys are parent channels. Values are child channels or expressions.
+      for (const channel of Object.keys(out)) names.add(channel);
+      // stateMap.out replaces the default merge/slug path
+      return [...names];
     }
     if (isOutputNone(output)) return [...names];
     // Explicit to/map: outputs slug + projections. Omitted output: child-state merge
@@ -287,12 +284,8 @@ export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[
       ) {
         path = `nodes.${node.id}.with.collect`;
       } else if (node.type === "subgraph") {
-        const stateMap = withBlock["stateMap"];
-        const out =
-          stateMap != null && typeof stateMap === "object"
-            ? (stateMap as { out?: Record<string, unknown> }).out
-            : undefined;
-        if (out && Object.values(out).includes(channel)) {
+        const out = stateMapOutEntries(withBlock);
+        if (out && Object.prototype.hasOwnProperty.call(out, channel)) {
           path = `nodes.${node.id}.with.stateMap.out`;
         }
       }
@@ -422,6 +415,96 @@ export function subgraphRefDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
+export interface SubgraphOutputSite {
+  /** Node id, or the enclosing map id when the subgraph is anonymous. */
+  id: string;
+  /** Diagnostic path for `stateMap.out`. */
+  path: string;
+  uses?: string | undefined;
+  inline?: GraphSpec | undefined;
+  /** Parent channel → child channel or expression. Absent when `stateMap.out` is omitted. */
+  out?: Record<string, string> | undefined;
+}
+
+/** Every subgraph node, including map inners and nested inline specs. */
+export function subgraphOutputSites(spec: GraphSpec): SubgraphOutputSite[] {
+  const sites: SubgraphOutputSite[] = [];
+  const walk = (graph: GraphSpec, prefix: string) => {
+    for (const node of graph.nodes ?? []) {
+      if (node.type === "subgraph") {
+        sites.push(siteFor(node, `${prefix}nodes.${node.id}.with.stateMap.out`));
+        if (node.spec) walk(node.spec, `${prefix}nodes.${node.id}.spec.`);
+      }
+      if (node.type === "map") {
+        const inner = (node.with as { node?: NodeSpec } | undefined)?.node;
+        if (inner && inner.type === "subgraph") {
+          const label = inner.id || node.id;
+          sites.push({
+            ...siteFor(inner, `${prefix}nodes.${node.id}.with.node.with.stateMap.out`),
+            id: label,
+          });
+          if (inner.spec) walk(inner.spec, `${prefix}nodes.${node.id}.with.node.spec.`);
+        }
+      }
+    }
+  };
+  walk(spec, "");
+  return sites;
+}
+
+function siteFor(node: NodeSpec, path: string): SubgraphOutputSite {
+  const uses = typeof node.uses === "string" && node.uses.trim() ? node.uses.trim() : undefined;
+  return {
+    id: node.id,
+    path,
+    ...(uses ? { uses } : {}),
+    ...(node.spec ? { inline: node.spec } : {}),
+    ...(stateMapOutEntries(node.with) ? { out: stateMapOutEntries(node.with) } : {}),
+  };
+}
+
+/** Channels a child graph can produce: declared channels plus node write targets. */
+export function knownChildChannels(child: GraphSpec): Set<string> {
+  const names = new Set(Object.keys(child.state?.channels ?? {}));
+  for (const node of child.nodes ?? []) {
+    for (const channel of collectNodeWriteChannels(node)) names.add(channel);
+  }
+  return names;
+}
+
+export function unknownSubgraphOutputDiagnostics(site: SubgraphOutputSite, child: GraphSpec): Diagnostic[] {
+  if (!site.out) return [];
+  const known = knownChildChannels(child);
+  const diagnostics: Diagnostic[] = [];
+  for (const [parentChannel, expr] of Object.entries(site.out)) {
+    for (const ref of childChannelRefsInMapping(expr)) {
+      if (known.has(ref)) continue;
+      diagnostics.push({
+        severity: "error",
+        code: "SUBGRAPH_OUTPUT_UNKNOWN",
+        message:
+          `Node "${site.id}" stateMap.out writes parent channel "${parentChannel}" from "${expr.trim()}", ` +
+          `but "${ref}" is not a channel of the child graph.`,
+        path: site.path,
+      });
+    }
+  }
+  return diagnostics;
+}
+
+/**
+ * Flag `stateMap.out` values that name a child channel the inline child does
+ * not have. File subgraphs are checked by `loadGraph`, which can read the child.
+ */
+export function subgraphOutputMappingDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const site of subgraphOutputSites(spec)) {
+    if (!site.out || !site.inline) continue;
+    diagnostics.push(...unknownSubgraphOutputDiagnostics(site, site.inline));
+  }
+  return diagnostics;
+}
+
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   return [
     ...reachabilityDiagnostics(spec),
@@ -431,6 +514,7 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...fanInLastWriteDiagnostics(spec),
     ...unconditionalFanOutDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
+    ...subgraphOutputMappingDiagnostics(spec),
     ...memoryLintDiagnostics(spec),
   ];
 }
