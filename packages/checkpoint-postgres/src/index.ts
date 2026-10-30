@@ -16,6 +16,7 @@
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
 import pg from "pg";
+import { DEFAULT_SETUP_LOCK_TIMEOUT_MS, withSetupLock } from "./setup-lock.js";
 import {
   createPostgresMemoryBackend,
   maybeSweepPostgres,
@@ -28,6 +29,8 @@ export interface PostgresCheckpointerOptions {
   connectionString: string;
   /** Run setup() to create the checkpoint tables. Default: true. */
   setup?: boolean;
+  /** How long to wait for another host's setup to finish before failing. Default 60s. */
+  setupLockTimeoutMs?: number;
 }
 
 /**
@@ -50,39 +53,10 @@ export async function createPostgresCheckpointer(
 
   const saver = PostgresSaver.fromConnString(connectionString);
   if (doSetup) {
-    await withSetupLock({ connectionString }, "public", () => saver.setup());
+    const timeoutMs = typeof connStringOrOptions === "string" ? undefined : connStringOrOptions.setupLockTimeoutMs;
+    await withSetupLock({ connectionString }, "public", () => saver.setup(), { timeoutMs });
   }
   return saver as unknown as BaseCheckpointSaver;
-}
-
-/**
- * Run schema setup (the upstream checkpointer's CREATE SCHEMA / CREATE TABLE
- * IF NOT EXISTS, which race on a fresh database) under a session-level
- * advisory lock per schema, so concurrent cold starts serialize.
- *
- * The lock lives on a dedicated client, not one from the shared pool: the
- * setup itself takes pool connections, and holding the lock on one of them
- * would deadlock a pool of size 1.
- */
-async function withSetupLock<T>(config: pg.ClientConfig, schema: string, fn: () => Promise<T>): Promise<T> {
-  const client = new pg.Client(config);
-  // An error on this idle client (e.g. the server terminated it) must not crash the process.
-  client.on("error", () => undefined);
-  await client.connect();
-  try {
-    await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [setupLockKey(schema)]);
-    try {
-      return await fn();
-    } finally {
-      await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [setupLockKey(schema)]).catch(() => undefined);
-    }
-  } finally {
-    await client.end().catch(() => undefined);
-  }
-}
-
-function setupLockKey(schema: string): string {
-  return `flowgraph:setup:${schema}`;
 }
 
 /** Connection settings for a dedicated client that reaches the same database as `pool`. */
@@ -101,6 +75,11 @@ export interface PostgresBackendOptions {
   schema?: string;
   /** Run checkpointer setup() and memory migrations. Default true. */
   setup?: boolean;
+  /**
+   * How long to wait for another host's schema setup (the per-schema advisory
+   * lock) before failing with a timeout error. Default 60s.
+   */
+  setupLockTimeoutMs?: number;
   /** Sweep expired memory on open when the last sweep is older than this. Default 1h. */
   sweepIntervalMs?: number;
   /** Extra pg.Pool settings when this call creates the pool (e.g. max, allowExitOnIdle). */
@@ -158,10 +137,15 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
     const saver = new PostgresSaver(pool, undefined, { schema });
     const setup = opts.setup !== false;
     const memory = setup
-      ? await withSetupLock(clientConfigOf(pool), schema, async () => {
-          await saver.setup();
-          return createPostgresMemoryBackend(pool, { schema });
-        })
+      ? await withSetupLock(
+          clientConfigOf(pool),
+          schema,
+          async () => {
+            await saver.setup();
+            return createPostgresMemoryBackend(pool, { schema });
+          },
+          { timeoutMs: opts.setupLockTimeoutMs },
+        )
       : await createPostgresMemoryBackend(pool, { schema, migrate: false });
     await maybeSweepPostgres(memory, opts.sweepIntervalMs ?? 3_600_000);
     let closed = false;
@@ -181,7 +165,7 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
   }
 }
 
-export { PostgresSaver };
+export { PostgresSaver, DEFAULT_SETUP_LOCK_TIMEOUT_MS };
 export {
   createPostgresMemoryBackend,
   maybeSweepPostgres,

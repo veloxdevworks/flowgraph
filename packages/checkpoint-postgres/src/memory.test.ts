@@ -120,6 +120,31 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
     }
   }, 120_000);
 
+  it("gives up waiting for the setup lock after setupLockTimeoutMs with a clear error", async () => {
+    const schema = freshSchema();
+    const holder = new pg.Client({ connectionString: DB });
+    await holder.connect();
+    try {
+      await holder.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [`flowgraph:setup:${schema}`]);
+      const t0 = Date.now();
+      const err = await openPostgresBackend({ connectionString: DB!, schema, setupLockTimeoutMs: 400 }).then(
+        (b) => (void b.close(), undefined),
+        (e: unknown) => e as Error & { code?: string },
+      );
+      const waited = Date.now() - t0;
+      expect(err?.code).toBe("FLOWGRAPH_SETUP_LOCK_TIMEOUT");
+      expect(err?.message).toMatch(new RegExp(`timed out after 400ms waiting for the schema setup lock on "${schema}"`));
+      expect(waited).toBeGreaterThanOrEqual(380);
+      expect(waited).toBeLessThan(5_000);
+      // Once the holder lets go, opening works.
+      await holder.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [`flowgraph:setup:${schema}`]);
+      const b = await openPostgresBackend({ connectionString: DB!, schema, setupLockTimeoutMs: 400 });
+      await b.close();
+    } finally {
+      await holder.end();
+    }
+  }, 30_000);
+
   it("writes stay correct when the session default isolation is repeatable read", async () => {
     const schema = freshSchema();
     const pool = new pg.Pool({ connectionString: DB, max: 8, options: "-c default_transaction_isolation=repeatable\\ read" });
