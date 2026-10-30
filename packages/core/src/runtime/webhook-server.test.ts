@@ -75,6 +75,33 @@ describe("webhook HTTP ingress", () => {
     expect(snap?.values["approval"]).toEqual({ approved: true });
   });
 
+  it("enforces each graph's webhook token on its own routes only", async () => {
+    const secured = await compileGraph(webhookWaitGraph({}, { webhookServer: { port: 0, token: "s3cret" } }), {});
+    const open = await compileGraph(webhookWaitGraph(), {});
+    const r1 = await secured.run({ threadId: "tok-secured", onInterrupt: "fail" });
+    const r2 = await open.run({ threadId: "tok-open", onInterrupt: "fail" });
+    const url1 = (r1.interrupts?.[0]?.payload as { data?: { webhookUrl?: string } })?.data?.webhookUrl;
+    const url2 = (r2.interrupts?.[0]?.payload as { data?: { webhookUrl?: string } })?.data?.webhookUrl;
+
+    expect((await fetch(url1!)).status).toBe(401);
+    expect((await postJson(url1!, { approved: true })).status).toBe(401);
+    const wrong = await fetch(url1!, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer nope" },
+      body: "{}",
+    });
+    expect(wrong.status).toBe(401);
+    const ok = await fetch(url1!, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer s3cret" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(ok.status).toBe(200);
+
+    // A tokenless graph is unaffected by another graph's token.
+    expect((await postJson(url2!, { approved: false })).status).toBe(200);
+  });
+
   it("returns 422 when schema validation fails on POST", async () => {
     const compiled = await compileGraph(
       webhookWaitGraph({

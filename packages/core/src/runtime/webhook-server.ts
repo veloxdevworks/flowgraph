@@ -2,12 +2,13 @@
  * Embedded HTTP ingress for `wait` nodes with `webhook: true`.
  *
  * Process-scoped: one listener per host:port. Routes are one-shot and live
- * in memory — call `rehydrateWebhookRoute` after a process restart when the
- * checkpoint still shows `mode: webhook`. Optional shared-secret auth via
- * `runtime.webhookServer.token`.
+ * in memory, so a process restart loses pending registrations. Optional
+ * shared-secret auth via `runtime.webhookServer.token`, enforced per route
+ * (each graph's token guards only its own routes).
  */
 
 import * as http from "node:http";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 export const DEFAULT_WEBHOOK_HOST = "127.0.0.1";
@@ -34,6 +35,8 @@ export interface WebhookRoute {
   resume: WebhookResumeFn;
   /** Generated listening URL (set by the engine when registering). */
   url?: string;
+  /** Shared secret required on GET/POST for this route (from the graph's `webhookServer.token`). */
+  token?: string;
 }
 
 interface PendingRoute extends WebhookRoute {
@@ -51,8 +54,6 @@ interface ServerEntry {
 
 const servers = new Map<string, ServerEntry>();
 const routes = new Map<string, PendingRoute>();
-/** Shared secret for inbound POST (process-scoped; last ensureWebhookServer wins). */
-let requiredToken: string | undefined;
 
 function serverKey(host: string, port: number): string {
   return `${host}:${port}`;
@@ -121,6 +122,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  if (route.token && !webhookAuthorized(req, route.token)) {
+    sendJson(res, 401, { error: "unauthorized", message: "Missing or invalid webhook token" });
+    return;
+  }
+
   if (req.method === "GET") {
     sendJson(res, 200, {
       waiting: true,
@@ -132,11 +138,6 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   if (req.method !== "POST") {
     sendJson(res, 405, { error: "method_not_allowed", message: "Use GET or POST" });
-    return;
-  }
-
-  if (requiredToken && !webhookAuthorized(req)) {
-    sendJson(res, 401, { error: "unauthorized", message: "Missing or invalid webhook token" });
     return;
   }
 
@@ -180,12 +181,20 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
 }
 
-function webhookAuthorized(req: http.IncomingMessage): boolean {
-  if (!requiredToken) return true;
+function sameSecret(a: string, b: string): boolean {
+  const ha = createHash("sha256").update(a, "utf8").digest();
+  const hb = createHash("sha256").update(b, "utf8").digest();
+  return timingSafeEqual(ha, hb);
+}
+
+function webhookAuthorized(req: http.IncomingMessage, token: string): boolean {
   const auth = req.headers["authorization"];
-  if (typeof auth === "string" && auth === `Bearer ${requiredToken}`) return true;
+  if (typeof auth === "string") {
+    const m = /^Bearer\s+(.+)$/i.exec(auth);
+    if (m?.[1] && sameSecret(m[1], token)) return true;
+  }
   const header = req.headers["x-flowgraph-token"];
-  if (typeof header === "string" && header === requiredToken) return true;
+  if (typeof header === "string" && sameSecret(header, token)) return true;
   return false;
 }
 
@@ -213,7 +222,6 @@ function listenOnce(
 export async function ensureWebhookServer(
   config: WebhookServerConfig = {},
 ): Promise<WebhookServerInfo> {
-  if (config.token) requiredToken = config.token;
   const host = config.host ?? DEFAULT_WEBHOOK_HOST;
   const preferredPort = config.port ?? DEFAULT_WEBHOOK_PORT;
   const preferredKey = serverKey(host, preferredPort);
@@ -297,7 +305,6 @@ export async function closeWebhookServers(): Promise<void> {
       }),
   );
   servers.clear();
-  requiredToken = undefined;
   await Promise.all(closing);
 }
 

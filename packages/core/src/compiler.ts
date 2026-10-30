@@ -1248,6 +1248,7 @@ async function attachWebhookUrls(
       threadId: opts.threadId,
       nodeId,
       url,
+      ...(serverCfg?.token ? { token: serverCfg.token } : {}),
       resume: async (body) => {
         if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
         const result = await opts.executeInvoke(
