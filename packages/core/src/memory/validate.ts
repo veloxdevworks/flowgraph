@@ -3,7 +3,7 @@
  */
 import type { GraphSpec, Diagnostic } from "@flowgraph/spec";
 import { walkNodes } from "../discover-skills.js";
-import { MEMORY_HARD_CAPS } from "./types.js";
+import { MEMORY_HARD_CAPS, MEMORY_RECALL_MAX_TOKENS } from "./types.js";
 
 const WRITE_OPS = new Set(["put", "patch", "increment", "append", "delete"]);
 
@@ -77,6 +77,10 @@ export function memoryLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   }
 
   walkNodes(spec, (node, path) => {
+    if ((node as { type?: unknown }).type === "agent") {
+      out.push(...agentMemoryDiagnostics(spec, node as Record<string, unknown>, path));
+      return;
+    }
     if ((node as { type?: unknown }).type !== "memory") return;
     const id = String((node as { id?: unknown }).id ?? "?");
     const w = ((node as { with?: Record<string, unknown> }).with ?? {}) as Record<string, unknown>;
@@ -111,6 +115,80 @@ export function memoryLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     }
   });
 
+  return out;
+}
+
+/** Diagnostics for an agent node's `with.memory` (recall, similarSubjects, remember). */
+function agentMemoryDiagnostics(spec: GraphSpec, node: Record<string, unknown>, path: string): Diagnostic[] {
+  const w = (node["with"] ?? {}) as Record<string, unknown>;
+  const am = w["memory"] as Record<string, unknown> | undefined;
+  if (!am || typeof am !== "object") return [];
+  const out: Diagnostic[] = [];
+  const id = String(node["id"] ?? "?");
+  const base = `${path}.with.memory`;
+  const mem = spec.runtime?.memory;
+  const declaredType = mem?.subject?.type;
+  if (!mem) {
+    out.push({
+      severity: "error",
+      code: "MEMORY_NOT_CONFIGURED",
+      message: `agent node "${id}" uses with.memory but the graph has no runtime.memory block`,
+      path: base,
+    });
+  }
+  const maxTokens = am["maxTokens"];
+  if (typeof maxTokens === "number" && maxTokens > MEMORY_RECALL_MAX_TOKENS) {
+    out.push({
+      severity: "error",
+      code: "MEMORY_LIMIT_EXCEEDS_CAP",
+      message: `agent node "${id}" with.memory.maxTokens is ${maxTokens}; the hard cap is ${MEMORY_RECALL_MAX_TOKENS}`,
+      path: `${base}.maxTokens`,
+    });
+  }
+  const subjectUndeclared = (what: string, p: string) => {
+    if (mem && !mem.subject) {
+      out.push({
+        severity: "error",
+        code: "MEMORY_SUBJECT_UNDECLARED",
+        message: `agent node "${id}" ${what} but runtime.memory.subject is not declared`,
+        path: p,
+      });
+    }
+  };
+  const recall = Array.isArray(am["recall"]) ? (am["recall"] as Array<Record<string, unknown>>) : [];
+  const seen = new Set<string>();
+  recall.forEach((b, i) => {
+    const bid = String(b["id"] ?? "");
+    const p = `${base}.recall[${i}]`;
+    if (seen.has(bid)) {
+      out.push({
+        severity: "error",
+        code: "MEMORY_RECALL_ID_DUPLICATE",
+        message: `agent node "${id}": recall id "${bid}" is defined twice`,
+        path: `${p}.id`,
+      });
+    }
+    seen.add(bid);
+    const scopes = Array.isArray(b["scopes"]) ? (b["scopes"] as unknown[]) : [];
+    if (scopes.includes("subject")) subjectUndeclared(`recalls scope subject (block "${bid}")`, `${p}.scopes`);
+    const sim = b["similarSubjects"] as Record<string, unknown> | undefined;
+    if (sim && typeof sim === "object") {
+      if (!declaredType) {
+        subjectUndeclared(`uses similarSubjects (block "${bid}")`, `${p}.similarSubjects`);
+      } else if (typeof sim["type"] === "string" && sim["type"] !== declaredType) {
+        out.push({
+          severity: "error",
+          code: "MEMORY_SUBJECT_TYPE_MISMATCH",
+          message: `agent node "${id}": similarSubjects.type "${sim["type"]}" but this graph binds "${declaredType}"`,
+          path: `${p}.similarSubjects.type`,
+        });
+      }
+    }
+  });
+  const writes = am["agentWrites"] as Record<string, unknown> | undefined;
+  if (writes && Array.isArray(writes["scopes"]) && (writes["scopes"] as unknown[]).includes("subject")) {
+    subjectUndeclared("lets the remember tool write scope subject", `${base}.agentWrites.scopes`);
+  }
   return out;
 }
 

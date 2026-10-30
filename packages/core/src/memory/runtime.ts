@@ -68,6 +68,7 @@ export function memoryPolicyFromConfig(cfg: RuntimeMemoryConfig | undefined): Me
     if (bytes !== undefined) p.limits.bytesPerScope = bytes;
   }
   if (cfg?.subject?.ttl) p.subjectTtlMs = parseDuration(cfg.subject.ttl);
+  if (cfg?.subject?.type) p.subjectType = cfg.subject.type;
   return p;
 }
 

@@ -11,10 +11,14 @@ import {
   MemoryError,
   MEMORY_APPEND_DEFAULT_MAX,
   MEMORY_APPEND_MAX_CAP,
+  MEMORY_SIMILAR_MAX_PER_SUBJECT,
+  MEMORY_SIMILAR_MAX_SUBJECTS,
   MEMORY_SUBJECT_DEFAULT_TTL_MS,
   type MemoryBackend,
   type MemoryListOptions,
   type MemoryRow,
+  type MemorySimilarGroup,
+  type MemorySimilarQuery,
   type MemoryThreadBinding,
   type MemoryTuple,
   type MemoryWriteOp,
@@ -36,6 +40,12 @@ export interface MemoryTable {
   oldest(t: MemoryTuple, limit: number, excludeKey: string, now: number): MemoryRow[];
   /** Live rows in this tuple, most recently updated first, filtered by key prefix. */
   list(t: MemoryTuple, prefix: string | undefined, now: number): MemoryRow[];
+  /**
+   * Live rows of other subjects matching {@link MemorySimilarQuery}: at most
+   * `limit` subjects (most recent matching item first, ties by subject key) and
+   * `perSubject` rows each (newest first). Rows are returned grouped in that order.
+   */
+  similar(q: MemorySimilarQuery & { now: number }): MemoryRow[];
   /** Set expires_at on every row of a subject (sliding TTL). */
   touchSubject(org: string, project: string, type: string, key: string, expiresAt: number): void;
   /** Distinct live subject keys of a type in a project, least recently written first. */
@@ -311,6 +321,47 @@ export function matchesAttrs(row: MemoryRow, attrs: Record<string, unknown> | un
 }
 
 /**
+ * Validate and clamp a similar-subjects query. Returns null when it can match
+ * nothing (non-scalar attr value, no subject type).
+ */
+export function normalizeSimilarQuery(q: MemorySimilarQuery): (MemorySimilarQuery & { now: number }) | null {
+  if (!q.org || !q.project || !q.subjectType) return null;
+  const attrs: Record<string, string | number | boolean | null> = {};
+  for (const [k, v] of Object.entries(q.attrs ?? {})) {
+    if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(k)) {
+      throw new MemoryError("MEMORY_ATTRS_INVALID", `attr filter key "${k}" must match [A-Za-z0-9_.:-]{1,64}`);
+    }
+    if (v === null || typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v))) {
+      attrs[k] = v;
+    } else {
+      return null;
+    }
+  }
+  return {
+    org: q.org,
+    project: q.project,
+    subjectType: q.subjectType,
+    excludeSubjectKey: q.excludeSubjectKey ?? "",
+    attrs,
+    prefix: q.prefix || undefined,
+    limit: Math.max(1, Math.min(Math.floor(q.limit), MEMORY_SIMILAR_MAX_SUBJECTS)),
+    perSubject: Math.max(1, Math.min(Math.floor(q.perSubject), MEMORY_SIMILAR_MAX_PER_SUBJECT)),
+    now: q.now ?? Date.now(),
+  };
+}
+
+/** Group rows (already ordered subject-by-subject) into similar-subject groups. */
+export function groupSimilar(rows: MemoryRow[]): MemorySimilarGroup[] {
+  const out: MemorySimilarGroup[] = [];
+  for (const r of rows) {
+    const last = out[out.length - 1];
+    if (last && last.subjectKey === r.subjectKey) last.items.push(r);
+    else out.push({ subjectKey: r.subjectKey, items: [r] });
+  }
+  return out;
+}
+
+/**
  * A {@link MemoryBackend} over a synchronous {@link MemoryTable} plus a
  * transaction runner.
  */
@@ -333,6 +384,13 @@ export class EngineMemoryBackend implements MemoryBackend {
     const now = opts.now ?? Date.now();
     const rows = this.table.list(tuple, opts.prefix, now).filter((r) => matchesAttrs(r, opts.attrs));
     return opts.limit !== undefined ? rows.slice(0, Math.max(0, opts.limit)) : rows;
+  }
+
+  async similarSubjects(q: MemorySimilarQuery): Promise<MemorySimilarGroup[]> {
+    const query = normalizeSimilarQuery(q);
+    if (!query) return [];
+    const rows = this.table.similar(query).filter((r) => matchesAttrs(r, query.attrs));
+    return groupSimilar(rows);
   }
 
   async write(op: MemoryWriteOp): Promise<MemoryWriteResult> {

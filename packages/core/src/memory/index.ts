@@ -14,6 +14,8 @@ export {
   EngineMemoryBackend,
   containsSecret,
   matchesAttrs,
+  normalizeSimilarQuery,
+  groupSimilar,
   validateMemoryKey,
   MEMORY_OP_RETENTION_MS,
   type MemoryTable,
@@ -31,6 +33,8 @@ export {
   type MemoryWriteOptions,
   type MemoryWriteOutcome,
   type MemoryScopeInfo,
+  type MemorySimilarOptions,
+  type MemorySimilarSubject,
 } from "./handle.js";
 export { LegacyScopedStore } from "./legacy-store.js";
 export {
@@ -43,3 +47,17 @@ export {
   type MemoryRuntimeInit,
 } from "./runtime.js";
 export { memoryLintDiagnostics, memoryHostDiagnostics } from "./validate.js";
+export {
+  recallMemory,
+  fitRecall,
+  compareRecallItems,
+  referencedRecallIds,
+  estimateTokens,
+  RecallBlockError,
+  RECALL_APPENDIX_HEADER,
+  type AgentMemoryConfig,
+  type RecallBlockConfig,
+  type RecallItem,
+  type RecallResult,
+  type RecallBlockStats,
+} from "./recall.js";

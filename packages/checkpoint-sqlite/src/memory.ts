@@ -8,6 +8,7 @@ import type { Database as DB, Statement } from "better-sqlite3";
 import {
   EngineMemoryBackend,
   type MemoryRow,
+  type MemorySimilarQuery,
   type MemoryTable,
   type MemoryThreadBinding,
   type MemoryTuple,
@@ -165,8 +166,9 @@ const tp = (t: MemoryTuple) => [t.org, t.project, t.graph, t.usr, t.subjectType,
 
 class SqliteMemoryTable implements MemoryTable {
   private readonly s: Record<string, Statement>;
+  private readonly similarCache = new Map<string, Statement>();
 
-  constructor(db: DB) {
+  constructor(private readonly db: DB) {
     const p = (sql: string) => db.prepare(sql);
     this.s = {
       find: p(`SELECT * FROM fg_memory_items WHERE ${T} AND key = ?`),
@@ -234,6 +236,50 @@ class SqliteMemoryTable implements MemoryTable {
   list(t: MemoryTuple, prefix: string | undefined, now: number) {
     const pfx = prefix ?? null;
     return (this.s["list"]!.all(...tp(t), now, pfx, pfx, pfx) as RawRow[]).map(fromRaw);
+  }
+  similar(q: MemorySimilarQuery & { now: number }) {
+    const conds: string[] = [];
+    const params: unknown[] = [q.org, q.project, q.subjectType, q.excludeSubjectKey ?? "", q.now];
+    if (q.prefix !== undefined) {
+      conds.push("substr(key, 1, length(?)) = ?");
+      params.push(q.prefix, q.prefix);
+    }
+    for (const [k, v] of Object.entries(q.attrs ?? {})) {
+      const path = `$."${k}"`;
+      if (v === null) {
+        conds.push("json_type(attrs, ?) = 'null'");
+        params.push(path);
+      } else if (typeof v === "boolean") {
+        conds.push(`json_type(attrs, ?) = '${v ? "true" : "false"}'`);
+        params.push(path);
+      } else if (typeof v === "number") {
+        conds.push("json_type(attrs, ?) IN ('integer', 'real') AND json_extract(attrs, ?) = ?");
+        params.push(path, path, v);
+      } else {
+        conds.push("json_type(attrs, ?) = 'text' AND json_extract(attrs, ?) = ?");
+        params.push(path, path, String(v));
+      }
+    }
+    const sql = `WITH m AS (
+        SELECT *,
+          ROW_NUMBER() OVER (PARTITION BY subject_key ORDER BY updated_at DESC, id DESC) AS rn,
+          MAX(updated_at) OVER (PARTITION BY subject_key) AS last
+        FROM fg_memory_items
+        WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ?
+          AND subject_key <> '' AND subject_key <> ? AND ${LIVE}${conds.map((c) => ` AND ${c}`).join("")}
+      ),
+      s AS (SELECT DISTINCT subject_key AS sk, last FROM m ORDER BY last DESC, sk ASC LIMIT ?)
+      SELECT m.* FROM m JOIN s ON m.subject_key = s.sk
+      WHERE m.rn <= ?
+      ORDER BY s.last DESC, s.sk ASC, m.rn ASC`;
+    params.push(q.limit, q.perSubject);
+    let stmt = this.similarCache.get(sql);
+    if (!stmt) {
+      stmt = this.db.prepare(sql);
+      if (this.similarCache.size > 64) this.similarCache.clear();
+      this.similarCache.set(sql, stmt);
+    }
+    return (stmt.all(...params) as RawRow[]).map(fromRaw);
   }
   touchSubject(org: string, project: string, type: string, key: string, expiresAt: number) {
     this.s["touchSubject"]!.run(expiresAt, org, project, type, key);

@@ -26,6 +26,8 @@ import {
 import { REPLAY_CHANNEL, ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
 import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
+import type { AgentMemoryConfig } from "../memory/recall.js";
+import { appendRecallSection, recallForAgent, rememberTool } from "./agent-memory.js";
 
 const configSchema = AgentWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -70,26 +72,37 @@ export const agentNode = defineNode<Config>({
           (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {};
         const scope = { state, input: nodeInput, config: ctx.config, run: ctx.meta };
 
-        const prompt = stringifyRendered(renderDeep(config.prompt, scope));
-
-        let system: string | undefined;
+        let agentBody: string | undefined;
         if (config.agent) {
-          let agentDef;
           try {
-            agentDef = await loadResolvedAgent(config.agent, ctx);
+            agentBody = (await loadResolvedAgent(config.agent, ctx)).body;
           } catch (err) {
             throw new Error(`agent node "${String(nodeSpec["id"])}": ${String(err)}`);
           }
-          const agentSystem = stringifyRendered(renderDeep(agentDef.body, scope));
-          const extra = config.system ? stringifyRendered(renderDeep(config.system, scope)) : undefined;
+        }
+
+        // Recall memory (never written to state). Templates see it as {{ memory.<id> }}.
+        const memoryConfig = config.memory as AgentMemoryConfig | undefined;
+        const recall = await recallForAgent(ctx, memoryConfig, scope, [config.prompt, config.system, agentBody]);
+        const tplScope = recall ? { ...scope, memory: recall.vars } : scope;
+
+        const prompt = stringifyRendered(renderDeep(config.prompt, tplScope));
+
+        let system: string | undefined;
+        if (agentBody !== undefined) {
+          const agentSystem = stringifyRendered(renderDeep(agentBody, tplScope));
+          const extra = config.system ? stringifyRendered(renderDeep(config.system, tplScope)) : undefined;
           system = extra ? `${agentSystem}\n\n${extra}` : agentSystem;
         } else if (config.system) {
-          system = stringifyRendered(renderDeep(config.system, scope));
+          system = stringifyRendered(renderDeep(config.system, tplScope));
         }
         system = prependKnownIssues(system, state);
+        system = appendRecallSection(system, recall);
 
         const { normalized, mcpRefs } = normalizeTools(config.tools as ToolRef[] | undefined, wiring);
         let { specs, executors } = mergeTools(normalized, reportIssueTool());
+        const remember = rememberTool(ctx, memoryConfig, scope);
+        if (remember) ({ specs, executors } = mergeTools({ specs, executors }, remember));
         if (mcpRefs.length > 0) {
           const expanded = await expandMcpTools(mcpRefs, requireMcpHub(ctx));
           ({ specs, executors } = mergeTools({ specs, executors }, expanded));

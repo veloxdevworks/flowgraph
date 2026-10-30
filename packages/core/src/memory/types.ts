@@ -68,7 +68,10 @@ export type MemoryErrorCode =
   | "MEMORY_BACKEND_UNAVAILABLE"
   | "MEMORY_BACKEND_UNKNOWN"
   | "MEMORY_STORE_AND_MEMORY"
-  | "MEMORY_NOT_CONFIGURED";
+  | "MEMORY_NOT_CONFIGURED"
+  | "MEMORY_SUBJECT_TYPE_MISMATCH"
+  | "MEMORY_SUBJECT_UNDECLARED"
+  | "MEMORY_WRITE_LIMIT";
 
 export class MemoryError extends Error {
   readonly code: MemoryErrorCode;
@@ -173,6 +176,40 @@ export interface MemoryListOptions {
   now?: number | undefined;
 }
 
+/** Cross-subject search: other subjects of one type in one project. */
+export interface MemorySimilarQuery {
+  org: string;
+  project: string;
+  subjectType: string;
+  /** The run's own subject key, excluded from results ("" = exclude nothing). */
+  excludeSubjectKey?: string | undefined;
+  /** Exact attr equality (match + where). */
+  attrs?: Record<string, unknown> | undefined;
+  /** Key prefix filter. */
+  prefix?: string | undefined;
+  /** Max subjects (newest activity first). */
+  limit: number;
+  /** Max items per subject (newest first). */
+  perSubject: number;
+  now?: number | undefined;
+}
+
+export interface MemorySimilarGroup {
+  subjectKey: string;
+  /** Newest matching item first. */
+  items: MemoryRow[];
+}
+
+export const MEMORY_SIMILAR_MAX_SUBJECTS = 50;
+export const MEMORY_SIMILAR_MAX_PER_SUBJECT = 10;
+
+/** Agent recall budget (tokens are estimated as UTF-8 bytes / 4). */
+export const MEMORY_RECALL_DEFAULT_TOKENS = 1_000;
+export const MEMORY_RECALL_MAX_TOKENS = 4_000;
+export const MEMORY_RECALL_DEFAULT_ITEMS = 20;
+export const MEMORY_RECALL_ITEM_TOKENS = 400;
+export const MEMORY_AGENT_WRITES_DEFAULT = 5;
+
 /** Binding of a thread to its scope tuple, persisted in fg_threads. */
 export interface MemoryThreadBinding {
   threadId: string;
@@ -197,6 +234,11 @@ export interface MemoryBackend {
   get(tuple: MemoryTuple, key: string, now?: number): Promise<MemoryRow | null>;
   list(tuple: MemoryTuple, opts?: MemoryListOptions): Promise<MemoryRow[]>;
   write(op: MemoryWriteOp): Promise<MemoryWriteResult>;
+  /**
+   * Items of other subjects of the same type in the same org/project, grouped by
+   * subject (most recently active subject first). Never reads user or graph scope.
+   */
+  similarSubjects(q: MemorySimilarQuery): Promise<MemorySimilarGroup[]>;
   /** Insert or replace the thread's binding. */
   bindThread(binding: MemoryThreadBinding): Promise<void>;
   getThread(threadId: string): Promise<MemoryThreadBinding | null>;

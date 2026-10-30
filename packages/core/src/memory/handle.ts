@@ -39,6 +39,28 @@ export interface MemorySearchOptions extends MemoryReadOptions {
   attrs?: Record<string, unknown> | undefined;
   /** Default 20, max 200. */
   limit?: number | undefined;
+  /** Collapse the same key across scopes, narrowest wins (default true). */
+  dedupe?: boolean | undefined;
+}
+
+export interface MemorySimilarOptions {
+  /** Subject type; defaults to the graph's declared subject type and must equal it. */
+  type?: string | undefined;
+  /** Exact attr equality. */
+  match?: Record<string, unknown> | undefined;
+  /** Extra exact attr filters (merged with match). */
+  where?: Record<string, unknown> | undefined;
+  prefix?: string | undefined;
+  /** Max subjects (default 5, max 50). */
+  limit?: number | undefined;
+  /** Items per subject (default 2, max 10). */
+  perSubject?: number | undefined;
+}
+
+export interface MemorySimilarSubject {
+  subject: { type: string; key: string };
+  /** Newest first; scope is "subject". */
+  items: MemoryRecord[];
 }
 
 export interface MemoryWriteOutcome {
@@ -61,6 +83,12 @@ export interface ScopedMemory {
   readonly durable: boolean;
   get(key: string, opts?: MemoryReadOptions): Promise<MemoryRecord | null>;
   search(opts?: MemorySearchOptions): Promise<MemoryRecord[]>;
+  /**
+   * Other subjects of this graph's subject type in the same org/project whose
+   * items match `match`/`where` attrs, most recently active first. The run's own
+   * subject is excluded; user and graph scopes are never read.
+   */
+  similarSubjects(opts?: MemorySimilarOptions): Promise<MemorySimilarSubject[]>;
   put(scope: MemoryScopeName, key: string, value: unknown, opts?: MemoryWriteOptions): Promise<MemoryWriteOutcome>;
   /** Shallow-merge `value` into the stored object (atomic). */
   patch(scope: MemoryScopeName, key: string, value: Record<string, unknown>, opts?: MemoryWriteOptions): Promise<MemoryWriteOutcome>;
@@ -88,6 +116,8 @@ export interface MemoryPolicy {
   /** Limits for subject scope. */
   subjectLimits: MemoryLimits;
   subjectTtlMs: number;
+  /** Declared `runtime.memory.subject.type` (similarSubjects is limited to it). */
+  subjectType?: string | undefined;
 }
 
 export function defaultMemoryPolicy(): MemoryPolicy {
@@ -199,17 +229,60 @@ export function createScopedMemory(
     },
     async search(opts = {}) {
       const limit = Math.max(0, Math.min(opts.limit ?? 20, 200));
+      const dedupe = opts.dedupe !== false;
+      const seen = new Set<string>();
       const out: MemoryRecord[] = [];
-      for (const s of readScopes(opts.scopes)) {
+      // Narrowest scope first, so with dedupe the narrowest copy of a key wins.
+      const scopes = readScopes(opts.scopes).sort(
+        (a, b) => MEMORY_READ_PRECEDENCE.indexOf(a) - MEMORY_READ_PRECEDENCE.indexOf(b),
+      );
+      for (const s of scopes) {
         if (out.length >= limit) break;
         const rows = await backend.list(tupleForScope(binding, s), {
           prefix: opts.prefix,
           attrs: opts.attrs,
-          limit: limit - out.length,
+          limit: dedupe ? limit : limit - out.length,
         });
-        for (const r of rows) out.push(rowToRecord(r, s));
+        for (const r of rows) {
+          if (out.length >= limit) break;
+          if (dedupe) {
+            if (seen.has(r.key)) continue;
+            seen.add(r.key);
+          }
+          out.push(rowToRecord(r, s));
+        }
       }
       return out;
+    },
+    async similarSubjects(opts = {}) {
+      const declared = policy.subjectType ?? binding.subject?.type;
+      if (!declared) {
+        throw new MemoryError(
+          "MEMORY_SUBJECT_UNDECLARED",
+          "similarSubjects needs runtime.memory.subject (the subject type to search)",
+        );
+      }
+      const type = opts.type ?? declared;
+      if (type !== declared) {
+        throw new MemoryError(
+          "MEMORY_SUBJECT_TYPE_MISMATCH",
+          `similarSubjects type "${type}" but this graph binds "${declared}"`,
+        );
+      }
+      const groups = await backend.similarSubjects({
+        org: binding.org,
+        project: binding.project,
+        subjectType: type,
+        excludeSubjectKey: binding.subject?.key ?? "",
+        attrs: { ...(opts.match ?? {}), ...(opts.where ?? {}) },
+        prefix: opts.prefix,
+        limit: opts.limit ?? 5,
+        perSubject: opts.perSubject ?? 2,
+      });
+      return groups.map((g) => ({
+        subject: { type, key: g.subjectKey },
+        items: g.items.map((r) => rowToRecord(r, "subject")),
+      }));
     },
     put(scope, key, value, opts) {
       return write("put", scope, key, { value }, opts);

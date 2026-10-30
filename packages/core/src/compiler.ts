@@ -1190,12 +1190,26 @@ export interface MemoryHostOptions {
   identity?: MemoryIdentity | undefined;
 }
 
-function memoryUnavailable(what: string): MemoryError {
+function memoryUnavailable(what: string, checkpoint: string | undefined): MemoryError {
+  const tail =
+    `Silent in-memory fallback is not allowed — use runtime.memory.backend: memory for an ephemeral store in tests.`;
+  if (checkpoint === "sqlite" || checkpoint === "postgres") {
+    // The graph already has a durable checkpointer; what's missing is a host-provided memory backend.
+    const hint =
+      checkpoint === "postgres"
+        ? `Postgres memory is not available yet (the flowgraph CLI stores memory only in sqlite checkpoint databases); ` +
+          `pass CompileOptions.memory with a postgres-capable backend, or use runtime.checkpoint.backend: sqlite. `
+        : `Run it with the flowgraph CLI (memory then lives in the checkpoint database), or pass CompileOptions.memory ` +
+          `(e.g. openSqliteBackend(path).memory from @flowgraph/checkpoint-sqlite). `;
+    return new MemoryError(
+      "MEMORY_BACKEND_UNAVAILABLE",
+      `${what} needs a memory backend for its ${checkpoint} checkpointer, and this host provided none. ${hint}${tail}`,
+    );
+  }
   return new MemoryError(
     "MEMORY_BACKEND_UNAVAILABLE",
     `${what} needs a durable checkpointer; set runtime.checkpoint.backend: sqlite ` +
-      `(the CLI then stores memory in the checkpoint database), or pass CompileOptions.memory. ` +
-      `Silent in-memory fallback is not allowed — use runtime.memory.backend: memory for an ephemeral store in tests.`,
+      `(the CLI then stores memory in the checkpoint database), or pass CompileOptions.memory. ${tail}`,
   );
 }
 
@@ -1259,7 +1273,9 @@ function resolveMemory(
         // Programmatic host injected a raw BaseStore for runtime.store: sqlite|postgres.
         runtime = undefined;
       } else {
-        throw memoryUnavailable(memCfg ? "runtime.memory" : `runtime.store.backend "${storeBackend}"`);
+        const ck = spec.runtime?.checkpoint;
+        const ckBackend = ck && ck.enabled !== false ? (ck.backend ?? "memory") : undefined;
+        throw memoryUnavailable(memCfg ? "runtime.memory" : `runtime.store.backend "${storeBackend}"`, ckBackend);
       }
     } else {
       runtime = ephemeral();

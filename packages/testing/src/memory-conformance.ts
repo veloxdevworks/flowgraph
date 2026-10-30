@@ -242,6 +242,73 @@ export function describeMemoryBackendConformance(
       expect((await b.list(tu.graphA, { prefix: "fi_", now: 5 })).map((r) => r.key)).toEqual([]);
     }));
 
+    const subj = (key: string, o: Partial<MemoryTuple> = {}) =>
+      T({ project: "github.com/acme/web", subjectType: "incident", subjectKey: key, ...o });
+    const similar = (b: MemoryBackend, q: Partial<Parameters<MemoryBackend["similarSubjects"]>[0]> = {}) =>
+      b.similarSubjects({
+        org: "acme",
+        project: "github.com/acme/web",
+        subjectType: "incident",
+        limit: 5,
+        perSubject: 2,
+        now: 100,
+        ...q,
+      });
+    const keys = (gs: Array<{ subjectKey: string; items: Array<{ key: string }> }>) =>
+      gs.map((g) => `${g.subjectKey}:${g.items.map((i) => i.key).join(",")}`);
+
+    it("similarSubjects: other subjects of one type, newest first, grouped per subject", withBackend(async (b) => {
+      let t = 1;
+      for (const k of ["INC-1", "INC-2", "INC-3", "INC-ME"]) {
+        for (let i = 0; i < 3; i++) {
+          await b.write(op({ kind: "put", tuple: subj(k), key: `attempt/${i}`, value: { k, i }, attrs: { service: "db", outcome: "resolved" }, now: t++ }));
+        }
+      }
+      // INC-1 gets the most recent activity.
+      await b.write(op({ kind: "put", tuple: subj("INC-1"), key: "attempt/9", value: 9, attrs: { service: "db", outcome: "resolved" }, now: 50 }));
+      expect(keys(await similar(b, { excludeSubjectKey: "INC-ME" }))).toEqual([
+        "INC-1:attempt/9,attempt/2",
+        "INC-3:attempt/2,attempt/1",
+        "INC-2:attempt/2,attempt/1",
+      ]);
+      expect(keys(await similar(b, { excludeSubjectKey: "INC-ME", limit: 1, perSubject: 1 }))).toEqual(["INC-1:attempt/9"]);
+      // limits are clamped, not trusted
+      const wide = await similar(b, { limit: 10_000, perSubject: 10_000 });
+      expect(wide.length).toBe(4);
+      expect(Math.max(...wide.map((g) => g.items.length))).toBeLessThanOrEqual(10);
+    }));
+
+    it("similarSubjects: exact attr match by type, prefix filter, and scope isolation", withBackend(async (b) => {
+      await b.write(op({ kind: "put", tuple: subj("A"), key: "attempt/1", value: 1, attrs: { service: "db", outcome: "resolved", n: 2, hot: true }, now: 1 }));
+      await b.write(op({ kind: "put", tuple: subj("B"), key: "attempt/1", value: 2, attrs: { service: "db", outcome: "failed", n: "2", hot: false }, now: 2 }));
+      await b.write(op({ kind: "put", tuple: subj("C"), key: "note/1", value: 3, attrs: { service: "db", outcome: "resolved" }, now: 3 }));
+      // Same attrs outside the project / type / subject scope must never show up.
+      await b.write(op({ kind: "put", tuple: subj("X", { project: "github.com/acme/other" }), key: "attempt/1", value: 4, attrs: { service: "db", outcome: "resolved" }, now: 4 }));
+      await b.write(op({ kind: "put", tuple: subj("Y", { subjectType: "build" }), key: "attempt/1", value: 5, attrs: { service: "db", outcome: "resolved" }, now: 5 }));
+      await b.write(op({ kind: "put", tuple: tu.userA1, key: "attempt/1", value: 6, attrs: { service: "db", outcome: "resolved" }, now: 6 }));
+      await b.write(op({ kind: "put", tuple: tu.graphA, key: "attempt/1", value: 7, attrs: { service: "db", outcome: "resolved" }, now: 7 }));
+      await b.write(op({ kind: "put", tuple: tu.project, key: "attempt/1", value: 8, attrs: { service: "db", outcome: "resolved" }, now: 8 }));
+
+      expect(keys(await similar(b, { attrs: { service: "db" } }))).toEqual(["C:note/1", "B:attempt/1", "A:attempt/1"]);
+      expect(keys(await similar(b, { attrs: { service: "db", outcome: "resolved" } }))).toEqual(["C:note/1", "A:attempt/1"]);
+      expect(keys(await similar(b, { attrs: { outcome: "resolved" }, prefix: "attempt/" }))).toEqual(["A:attempt/1"]);
+      // types are exact: number 2 is not string "2", true is not 1
+      expect(keys(await similar(b, { attrs: { n: 2 } }))).toEqual(["A:attempt/1"]);
+      expect(keys(await similar(b, { attrs: { n: "2" } }))).toEqual(["B:attempt/1"]);
+      expect(keys(await similar(b, { attrs: { hot: true } }))).toEqual(["A:attempt/1"]);
+      expect(keys(await similar(b, { attrs: { hot: 1 } }))).toEqual([]);
+      expect(keys(await similar(b, { attrs: { missing: "x" } }))).toEqual([]);
+      // a non-scalar filter matches nothing; prefix metacharacters are literal
+      expect(await similar(b, { attrs: { service: { $ne: "x" } } })).toEqual([]);
+      expect(await similar(b, { prefix: "attempt_" })).toEqual([]);
+    }));
+
+    it("similarSubjects: hides expired subjects", withBackend(async (b) => {
+      await b.write(op({ kind: "put", tuple: subj("OLD"), key: "a", value: 1, subjectTtlMs: 10, now: 1 }));
+      await b.write(op({ kind: "put", tuple: subj("NEW"), key: "a", value: 1, subjectTtlMs: 1_000, now: 50 }));
+      expect(keys(await similar(b, { now: 100 }))).toEqual(["NEW:a"]);
+    }));
+
     it("stores and replaces thread bindings", withBackend(async (b) => {
       expect(await b.getThread("t1")).toBeNull();
       const base = { threadId: "t1", org: "acme", project: "p", graph: "g", usr: "u", subjectType: "", subjectKey: "" };

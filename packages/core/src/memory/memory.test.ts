@@ -131,7 +131,7 @@ describe("ctx.memory exposure", () => {
 
   it("runtime.memory without a host backend fails loudly instead of going in-memory", async () => {
     await expect(compileGraph(fnGraph("g", "mtExpose"), { checkpointer: "memory" })).rejects.toThrow(
-      /MEMORY_BACKEND_UNAVAILABLE: runtime\.memory needs a durable checkpointer/,
+      /MEMORY_BACKEND_UNAVAILABLE: runtime\.memory needs a memory backend for its sqlite checkpointer, and this host provided none\. Run it with the flowgraph CLI.*Silent in-memory fallback is not allowed/s,
     );
   });
 

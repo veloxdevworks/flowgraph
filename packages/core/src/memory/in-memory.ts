@@ -2,9 +2,9 @@
  * Ephemeral in-process memory backend. For tests and for the legacy
  * `ctx.store` adapter when no durable backend is configured.
  */
-import { EngineMemoryBackend, type MemoryTable } from "./engine.js";
+import { EngineMemoryBackend, matchesAttrs, type MemoryTable } from "./engine.js";
 import { tupleKey } from "./scope.js";
-import type { MemoryRow, MemoryThreadBinding, MemoryTuple } from "./types.js";
+import type { MemoryRow, MemorySimilarQuery, MemoryThreadBinding, MemoryTuple } from "./types.js";
 
 const clone = <T>(v: T): T => (v === undefined ? v : (JSON.parse(JSON.stringify(v)) as T));
 const live = (r: MemoryRow, now: number) => r.expiresAt === null || r.expiresAt > now;
@@ -64,6 +64,23 @@ class InMemoryTable implements MemoryTable {
       .filter((r) => live(r, now) && (prefix === undefined || r.key.startsWith(prefix)))
       .sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id)
       .map(clone);
+  }
+  similar(q: MemorySimilarQuery & { now: number }) {
+    const byKey = new Map<string, MemoryRow[]>();
+    for (const r of this.rows.values()) {
+      if (r.org !== q.org || r.project !== q.project || r.subjectType !== q.subjectType) continue;
+      if (r.graph !== "" || r.usr !== "" || r.subjectKey === "" || r.subjectKey === q.excludeSubjectKey) continue;
+      if (!live(r, q.now) || (q.prefix !== undefined && !r.key.startsWith(q.prefix)) || !matchesAttrs(r, q.attrs)) continue;
+      const list = byKey.get(r.subjectKey) ?? [];
+      list.push(r);
+      byKey.set(r.subjectKey, list);
+    }
+    const groups = [...byKey.entries()].map(([key, rows]) => ({
+      key,
+      rows: rows.sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id),
+    }));
+    groups.sort((a, b) => b.rows[0]!.updatedAt - a.rows[0]!.updatedAt || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return groups.slice(0, q.limit).flatMap((g) => g.rows.slice(0, q.perSubject).map(clone));
   }
   touchSubject(org: string, project: string, type: string, key: string, expiresAt: number) {
     for (const r of this.rows.values()) {
