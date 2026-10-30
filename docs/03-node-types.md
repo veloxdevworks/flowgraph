@@ -593,7 +593,20 @@ Deterministic pause points for human input. Unlike `wait` (duration/signal/condi
     output: { to: strategy }
 ```
 
-Each mode sets an interrupt **kind** (`approval`, `question`, `choice`) so the CLI and external GUIs know how to prompt and parse the resume value.
+Each mode sets an interrupt **kind** (`approval`, `question`, `choice`, `form`, `review`) so the CLI and external GUIs know how to prompt and parse the resume value.
+
+**Invalid answers re-prompt.** If a resume value fails validation (unknown choice, unknown review decision, or a `form`/`review` answer that fails `with.schema`), the node re-issues its interrupt with `validationError`, `attempt` and `maxAttempts` attached instead of failing. After `with.maxResumeAttempts` rejected answers (default `3`) the run reports `status: "error"` (`ResumeAttemptsExhaustedError`) but the interrupt stays pending, so the thread can still be inspected and resumed with a valid answer. See [07 — Invalid answers](./07-runtime-and-execution.md#invalid-answers-re-prompt-dont-brick).
+
+```yaml
+- id: intake
+  type: hitl
+  with:
+    mode: form
+    message: "Describe the request"
+    schema: { type: object, required: [title], properties: { title: { type: string } } }
+    maxResumeAttempts: 5            # default 3
+    output: { to: intake }
+```
 
 ### `ask_human` tool (agent nodes)
 
@@ -647,7 +660,7 @@ A specialized HITL node for a **bounded conversation** that produces a structure
 { output, transcript, coverage, endedReason }
 ```
 
-`output` is validated against `with.schema` before the node completes. Voice, text chat, and a plain JSON form are all valid facilitators of the same contract — that is what keeps CI honest.
+`output` is validated against `with.schema` before the node completes. An invalid output re-issues the workshop interrupt with `validationError` / `attempt` / `maxAttempts` so the client can show the error and try again; after `with.maxResumeAttempts` rejections (default `3`) the run fails with `ResumeAttemptsExhaustedError` while the interrupt stays pending and resumable (see [07](./07-runtime-and-execution.md#invalid-answers-re-prompt-dont-brick)). Voice, text chat, and a plain JSON form are all valid facilitators of the same contract — that is what keeps CI honest.
 
 ```yaml
 - id: feature-workshop
@@ -672,6 +685,7 @@ A specialized HITL node for a **bounded conversation** that produces a structure
       voice: eve
     fallback: form                 # form | text | json
     limits: { maxMinutes: 30 }
+    maxResumeAttempts: 3           # invalid outputs re-prompt this many times (default 3)
     output: { to: brief }
 ```
 

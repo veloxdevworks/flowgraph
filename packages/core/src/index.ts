@@ -20,7 +20,13 @@ export {
   isInputValidationError,
   InputValidationError,
 } from "./inputs.js";
-export { compileGraph } from "./compiler.js";
+export { compileGraph, ResumeAttemptsExhaustedError } from "./compiler.js";
+export {
+  DEFAULT_MAX_RESUME_ATTEMPTS,
+  interruptUntilValid,
+  resumeValidationInfo,
+} from "./runtime/resume-validation.js";
+export type { ResumeValidationInfo } from "./runtime/resume-validation.js";
 export type { GraphSpec, NodeSpec, EdgeSpec, InputField, InputFieldType } from "@flowgraph/spec";
 export type {
   CompileOptions,

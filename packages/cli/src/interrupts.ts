@@ -56,6 +56,13 @@ function interruptData(it: InterruptInfo): Record<string, unknown> | undefined {
 
 /** Prompt text shown before collecting an interrupt answer. */
 export function formatInterruptPrompt(it: InterruptInfo): string {
+  const body = formatInterruptBody(it);
+  if (!it.validationError) return body;
+  const budget = it.maxAttempts ? ` (attempt ${it.attempt ?? "?"} of ${it.maxAttempts})` : "";
+  return `Previous answer rejected${budget}: ${it.validationError}\n${body}`;
+}
+
+function formatInterruptBody(it: InterruptInfo): string {
   const kind = it.kind ?? "approval";
   const reason = it.reason ?? it.id;
   const data = interruptData(it);
@@ -263,6 +270,14 @@ export function serializePendingInterrupts(
       kind: it.kind ?? "approval",
       reason: it.reason,
       choices: it.choices,
+      ...(it.validationError
+        ? {
+            validationError: it.validationError,
+            attempt: it.attempt,
+            maxAttempts: it.maxAttempts,
+            ...(it.exhausted ? { exhausted: true } : {}),
+          }
+        : {}),
       payload: it.payload,
     })),
   };

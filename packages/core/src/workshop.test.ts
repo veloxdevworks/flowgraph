@@ -138,7 +138,7 @@ describe("workshop node", () => {
     expect((r2.state["brief"] as { output: { title: string } }).output.title).toBe("Billing credits");
   });
 
-  it("errors when resume output fails the schema", async () => {
+  it("re-prompts with the validation error when resume output fails the schema", async () => {
     const compiled = await compileGraph(workshopGraph(), {});
     await compiled.run({ threadId: "ws-4", onInterrupt: "fail" });
     const r2 = await compiled.resume({
@@ -146,7 +146,10 @@ describe("workshop node", () => {
       resume: { output: { title: 12 } },
       onInterrupt: "fail",
     });
-    expect(r2.status).toBe("error");
-    expect(r2.error?.message).toContain("expected type string");
+    expect(r2.status).toBe("interrupted");
+    expect(r2.interrupts?.[0]?.kind).toBe("workshop");
+    expect(r2.interrupts?.[0]?.validationError).toContain("expected type string");
+    expect(r2.interrupts?.[0]).toMatchObject({ attempt: 1, maxAttempts: 3 });
+    expect(r2.interrupts?.[0]?.exhausted).toBeUndefined();
   });
 });

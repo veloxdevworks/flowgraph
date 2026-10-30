@@ -14,6 +14,10 @@ function info(partial: Partial<InterruptInfo> & { id: string }): InterruptInfo {
     ...(partial.kind !== undefined ? { kind: partial.kind } : {}),
     ...(partial.choices !== undefined ? { choices: partial.choices } : {}),
     ...(partial.payload !== undefined ? { payload: partial.payload } : {}),
+    ...(partial.validationError !== undefined
+      ? { validationError: partial.validationError, attempt: partial.attempt ?? 1, maxAttempts: partial.maxAttempts ?? 3 }
+      : {}),
+    ...(partial.exhausted ? { exhausted: true } : {}),
   };
 }
 
@@ -165,5 +169,22 @@ describe("serializePendingInterrupts", () => {
       kind: "question",
       reason: "Which project?",
     });
+  });
+});
+
+describe("re-prompt after a rejected answer", () => {
+  it("prefixes the prompt with the validation error and attempt budget", () => {
+    const prompt = formatInterruptPrompt(
+      info({ id: "1", reason: "Fill in", kind: "form", validationError: "title: required", attempt: 1, maxAttempts: 3 }),
+    );
+    expect(prompt.split("\n")[0]).toBe("Previous answer rejected (attempt 1 of 3): title: required");
+    expect(prompt).toContain("Paste JSON form values");
+  });
+
+  it("includes validation fields in the pending interrupt list", () => {
+    const out = serializePendingInterrupts("t", [
+      info({ id: "i", kind: "form", validationError: "bad", attempt: 3, maxAttempts: 3, exhausted: true }),
+    ]);
+    expect(out.interrupts[0]).toMatchObject({ validationError: "bad", attempt: 3, maxAttempts: 3, exhausted: true });
   });
 });

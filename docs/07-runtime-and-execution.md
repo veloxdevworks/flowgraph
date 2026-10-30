@@ -143,6 +143,18 @@ A scalar / object resume (anything whose keys are not interrupt ids) is broadcas
 
 Static breakpoints (`runtime.hitl.breakpoints.before` / `after`) pause with a synthetic `breakpoint:…` interrupt and no `interrupt()` call. `compiled.resume()` continues past those with LangGraph's null input; the resume payload is ignored.
 
+### Invalid answers: re-prompt, don't brick
+
+LangGraph persists every value a task's `interrupt()` calls consumed and replays them in order when the node re-runs. A node that **throws** after a bad answer would therefore replay that bad answer on every later resume and the thread would be stuck.
+
+`hitl` (choice / form / review) and `workshop` nodes instead validate inside a re-prompt loop (`interruptUntilValid` in `@flowgraph/core`):
+
+1. A resume value that fails validation (JSON Schema, unknown review decision, unknown choice) re-issues the **same** interrupt (same interrupt id, so map-keyed resumes keep working) with extra fields in `payload.data` and on `InterruptInfo`: `validationError`, `attempt` (rejected answers so far), `maxAttempts`. The run returns `status: "interrupted"` as usual; the CLI prints `Previous answer rejected (attempt n of N): …` before prompting again.
+2. After `with.maxResumeAttempts` rejected answers (default **3**) the interrupt is raised once more with `exhausted: true`. The engine reports the run as `status: "error"` with a `ResumeAttemptsExhaustedError` (`code: "RESUME_ATTEMPTS_EXHAUSTED"`), emits `node.error` + `run.error`, and returns the pending `interrupts`.
+3. The thread is **not** corrupted: `getState(threadId)` still lists the node in `next` and the exhausted interrupt (with its last `validationError`) in `interrupts`. A later valid `resume` — from the same process or after a restart against a durable checkpointer — completes the node. Each further invalid answer fails the run again the same way.
+
+Sibling interrupts are independent: in a `map` fan-out, a bad answer for one item re-prompts only that item; valid answers for other items in the same id-keyed resume are kept.
+
 A `thread_id` + durable checkpointer is what makes "interrupt for approval and resume days later" work ([Vision success criteria](./00-vision.md#7-success-criteria)).
 
 ### Interrupt policy per environment

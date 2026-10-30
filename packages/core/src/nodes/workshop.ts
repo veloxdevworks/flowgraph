@@ -15,6 +15,7 @@ import type { NodeRunContext } from "../context.js";
 import { applyOutput } from "./output.js";
 import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
+import { interruptUntilValid } from "../runtime/resume-validation.js";
 
 const configSchema = WorkshopWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -90,16 +91,12 @@ export const workshopNode = defineNode<Config>({
           await attachDiff(data, config, scope, ctx);
         }
 
-        const resume = ctx.interrupt<unknown>({
-          reason: message,
-          kind: "workshop",
-          data,
-        });
-
-        const result = mapWorkshopResume(resume, {
-          schema,
-          nodeId: String(nodeSpec["id"]),
-        });
+        const result = interruptUntilValid(
+          ctx,
+          { reason: message, kind: "workshop", data },
+          (resume) => mapWorkshopResume(resume, { schema, nodeId: String(nodeSpec["id"]) }),
+          { maxAttempts: config.maxResumeAttempts },
+        );
 
         ctx.emit("node.output", { workshop: result });
 

@@ -580,7 +580,12 @@ export const HitlWithSchema = BaseWithSchema.extend({
   /** `mode: review` — artifact paths or demo-manifest refs shown to the human. */
   artifacts: z.array(z.string()).optional(),
   /** `mode: review` — extra decision labels beyond approve / request-changes. */
-  decision: z.array(z.string()).optional(),
+  decision: z.array(z.string()).optional(),  /**
+   * Re-prompt budget for answers that fail validation (schema / decision / choice).
+   * The interrupt is re-issued with `validationError` until this many answers were
+   * rejected; then the run fails but the interrupt stays pending. Default 3.
+   */
+  maxResumeAttempts: z.number().int().positive().optional(),
 });
 
 // workshop node — facilitated agenda session (one-shot HITL; client owns the conversation)
@@ -608,6 +613,12 @@ export const WorkshopLimitsSchema = z.object({
 export const WorkshopWithSchema = BaseWithSchema.extend({
   /** Interrupt reason / opening recap shown to the human. */
   message: z.string().optional(),
+  /**
+   * Re-prompt budget for answers that fail validation (schema / decision / choice).
+   * The interrupt is re-issued with `validationError` until this many answers were
+   * rejected; then the run fails but the interrupt stays pending. Default 3.
+   */
+  maxResumeAttempts: z.number().int().positive().optional(),
   /** Agenda items the facilitator must cover. Strings or { id, title, description }. */
   agenda: z.array(WorkshopAgendaItemSchema).optional(),
   /** JSON Schema for the structured output the session must produce. */
