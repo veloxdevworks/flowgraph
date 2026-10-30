@@ -16,6 +16,7 @@ import { z } from "zod";
 import { SubgraphWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
+import type { BaseStore } from "@langchain/langgraph";
 import type { NodeRunContext } from "../context.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
@@ -159,6 +160,7 @@ async function loadChild(
   const { compiledLg } = await compileGraphForEmbedding(spec, {
     cwd: ctx.workspace,
     sinks: [forwardSink],
+    store: childStore(spec, ctx),
   });
 
   return {
@@ -170,6 +172,18 @@ async function loadChild(
       return result;
     },
   };
+}
+
+/**
+ * The child shares the parent's long-term store (one store per run tree), so memory
+ * written by a subgraph is visible to the parent and vice versa. A child that opts out
+ * (`runtime.store.enabled: false` or `backend: none`) gets no store; otherwise the child's
+ * own `runtime.store.backend` is ignored — the host decides the backend, not the child.
+ */
+function childStore(spec: GraphSpec, ctx: NodeRunContext): BaseStore | "none" {
+  const childRuntime = spec.runtime?.store;
+  if (childRuntime?.enabled === false || childRuntime?.backend === "none") return "none";
+  return ctx.store ?? "none";
 }
 
 function stripSubgraphState(state: Record<string, unknown>): Record<string, unknown> {
