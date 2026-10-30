@@ -66,13 +66,14 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 
 ## Memory
 
-Graphs that declare `runtime.memory` need a durable memory backend. See [docs/05-state-and-data.md §8](../../docs/05-state-and-data.md#8-long-term-memory-runtimememory).
+Graphs that declare `runtime.memory` need a durable memory backend; on the default backend they fail with an error that names `FLOWGRAPH_MEMORY_BACKEND`. The server is optional: the `flowgraph` CLI keeps memory locally and never needs it or these variables. See [docs/05-state-and-data.md §8](../../docs/05-state-and-data.md#8-long-term-memory-runtimememory).
 
 | Env | Default | Purpose |
 |---|---|---|
 | `FLOWGRAPH_MEMORY_BACKEND` | `memory` | `memory` (process-local; `runtime.memory` graphs fail to compile) \| `postgres` (the `DATABASE_URL` database, same pool as checkpoints) \| `sqlite` (local file; install `@flowgraph/checkpoint-sqlite`) |
 | `FLOWGRAPH_MEMORY_SQLITE_PATH` | `<FLOWGRAPH_GRAPH_STORE>/memory.db` | sqlite memory file |
-| `FLOWGRAPH_ORG` / `FLOWGRAPH_PROJECT` / `FLOWGRAPH_USER` | `local` / `local` / _(unset)_ | The one identity every run on this server writes memory as |
+| `FLOWGRAPH_ORG` | _(required for `postgres` / `sqlite`)_ | The org every run on this server writes memory as. With a durable backend and no `FLOWGRAPH_ORG` the server refuses to start |
+| `FLOWGRAPH_PROJECT` / `FLOWGRAPH_USER` | `local` / _(unset)_ | Project and user of that one identity |
 | `FLOWGRAPH_MEMORY_SWEEP_MS` | `3600000` | How often expired memory and old replay records are deleted |
 
 ## Lab / self-host
