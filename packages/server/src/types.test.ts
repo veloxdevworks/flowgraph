@@ -37,6 +37,12 @@ describe("defaultServerConfig", () => {
     expect(() => defaultServerConfig({ FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS: "http://x/" })).toThrow(/FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS/);
   });
 
+  it("reads FLOWGRAPH_SHUTDOWN_TIMEOUT_MS", () => {
+    expect(defaultServerConfig({}).shutdownTimeoutMs).toBeUndefined();
+    expect(defaultServerConfig({ FLOWGRAPH_SHUTDOWN_TIMEOUT_MS: "2500" }).shutdownTimeoutMs).toBe(2500);
+    expect(() => defaultServerConfig({ FLOWGRAPH_SHUTDOWN_TIMEOUT_MS: "soon" })).toThrow(/FLOWGRAPH_SHUTDOWN_TIMEOUT_MS/);
+  });
+
   it("reads FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS", () => {
     expect(defaultServerConfig({}).setupLockTimeoutMs).toBeUndefined();
     expect(defaultServerConfig({ FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS: "0" }).setupLockTimeoutMs).toBe(0);

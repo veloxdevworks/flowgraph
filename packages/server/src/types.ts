@@ -162,6 +162,11 @@ export interface ServerConfig {
    */
   setupLockTimeoutMs?: number;
   /**
+   * How long shutdown waits for runs in flight before aborting them and
+   * closing pools. Env: `FLOWGRAPH_SHUTDOWN_TIMEOUT_MS`. Default 10000.
+   */
+  shutdownTimeoutMs?: number;
+  /**
    * Hosts that http and webhook nodes in graphs from untrusted authors may reach
    * even though they resolve to non-public addresses (`host`, `host:port`,
    * `*.domain`). Cloud metadata and link-local addresses stay blocked.
@@ -381,6 +386,13 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
       throw new Error(`FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS must be a whole number of milliseconds (got "${env.FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS}")`);
     }
     config.setupLockTimeoutMs = Number(lockRaw);
+  }
+  const shutdownRaw = env.FLOWGRAPH_SHUTDOWN_TIMEOUT_MS?.trim();
+  if (shutdownRaw) {
+    if (!/^\d+$/.test(shutdownRaw) || !Number.isSafeInteger(Number(shutdownRaw))) {
+      throw new Error(`FLOWGRAPH_SHUTDOWN_TIMEOUT_MS must be a whole number of milliseconds (got "${env.FLOWGRAPH_SHUTDOWN_TIMEOUT_MS}")`);
+    }
+    config.shutdownTimeoutMs = Number(shutdownRaw);
   }
   const allowHosts = (env.FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS ?? "")
     .split(",")

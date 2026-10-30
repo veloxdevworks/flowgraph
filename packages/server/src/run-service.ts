@@ -69,6 +69,11 @@ const SERVER_MEMORY_HINT =
   "Start the server with FLOWGRAPH_MEMORY_BACKEND=postgres (memory shares DATABASE_URL) or FLOWGRAPH_MEMORY_BACKEND=sqlite, " +
   "plus FLOWGRAPH_ORG.";
 
+/** How long close() waits for runs in flight before aborting them. */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+/** How long aborted runs get to settle before pools are closed anyway. */
+const SHUTDOWN_ABORT_GRACE_MS = 2_000;
+
 export class RunService {
   readonly registry: SessionRegistry;
   readonly metrics = createMetrics();
@@ -89,6 +94,11 @@ export class RunService {
   private sweeper: MemorySweeper | undefined;
   private closers: Array<() => Promise<void> | void> = [];
   private auth: Authenticator | undefined;
+  /** Set by close(): new runs and graph reads are refused from then on. */
+  private closing = false;
+  private closed: Promise<void> | undefined;
+  /** Requests being set up and runs executing, which close() waits for. */
+  private readonly inFlight = new Set<Promise<unknown>>();
 
   /** Resolves callers to principals (OIDC, the legacy token, or none), built from config.auth. */
   get authenticator(): Authenticator {
@@ -130,11 +140,62 @@ export class RunService {
     });
   }
 
-  /** Stop the memory sweeper and close durable memory / database pools. */
-  async close(): Promise<void> {
+  /**
+   * Shut down: refuse new runs (503 SERVER_CLOSING), wait up to
+   * `shutdownTimeoutMs` for requests and runs in flight, abort what is still
+   * running and give it a moment to settle, then stop the memory sweeper and
+   * close durable memory and database pools. Safe to call more than once.
+   */
+  close(): Promise<void> {
+    this.closed ??= this.shutdown();
+    return this.closed;
+  }
+
+  private async shutdown(): Promise<void> {
+    this.closing = true;
     this.sweeper?.stop();
     this.sweeper = undefined;
+    const timeoutMs = this.config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    if (!(await this.drain(timeoutMs))) {
+      const running = this.registry.list().filter((s) => s.status === "running" || s.status === "started");
+      log("warn", "shutdown.abort", { runs: running.length, timeoutMs });
+      for (const s of running) s.abort.abort(new Error("server is shutting down"));
+      if (!(await this.drain(SHUTDOWN_ABORT_GRACE_MS))) {
+        log("warn", "shutdown.unsettled", { pending: this.inFlight.size });
+      }
+    }
     for (const c of this.closers.splice(0).reverse()) await c();
+  }
+
+  /** True when everything in flight (including work started meanwhile) settled within `ms`. */
+  private async drain(ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (this.inFlight.size > 0) {
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = await Promise.race([
+        Promise.allSettled([...this.inFlight]).then(() => false),
+        new Promise<boolean>((r) => {
+          timer = setTimeout(() => r(true), left);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (timedOut) return false;
+    }
+    return true;
+  }
+
+  private assertOpen(): void {
+    if (this.closing) throw new ServerRequestError(503, "SERVER_CLOSING", "The server is shutting down; retry against another instance");
+  }
+
+  /** Keep `work` in flight until it settles; close() waits for it. */
+  private track<T>(work: Promise<T>): Promise<T> {
+    this.inFlight.add(work);
+    const done = () => this.inFlight.delete(work);
+    work.then(done, done);
+    return work;
   }
 
   private get uploadOptions(): { allowHosts?: readonly string[] } {
@@ -381,7 +442,16 @@ export class RunService {
     });
   }
 
-  async startRun(req: StartRunRequest, caller?: Principal): Promise<StartRunResult> {
+  startRun(req: StartRunRequest, caller?: Principal): Promise<StartRunResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.startRunNow(req, caller));
+  }
+
+  private async startRunNow(req: StartRunRequest, caller?: Principal): Promise<StartRunResult> {
     rejectClientSecrets(req.env);
     if (!req.threadId?.trim()) throw new Error("threadId is required");
     if (!req.yaml?.trim()) throw new Error("yaml is required");
@@ -410,9 +480,17 @@ export class RunService {
       owner: this.ownerOf(principal),
     });
 
-    const compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
-      this.registry.pushEvent(req.threadId, ev);
-    }, principal, Boolean(req.dryRun));
+    let compiled: CompiledGraph;
+    try {
+      compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
+        this.registry.pushEvent(req.threadId, ev);
+      }, principal, Boolean(req.dryRun));
+    } catch (err) {
+      // Don't leave a "running" placeholder behind for a run that never started.
+      if (this.registry.get(req.threadId) === placeholder) this.registry.remove(req.threadId);
+      void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "error" });
+      throw err;
+    }
 
     let resolvedInput: Record<string, unknown>;
     try {
@@ -438,7 +516,7 @@ export class RunService {
       graph: graphName,
     });
 
-    void (async () => {
+    void this.track((async () => {
       try {
         const result = await compiled.run({
           input: resolvedInput,
@@ -466,7 +544,7 @@ export class RunService {
           seq: -1,
         });
       }
-    })();
+    })());
 
     return {
       threadId: req.threadId,
@@ -493,7 +571,16 @@ export class RunService {
     void updateGraphMeta(this.config.graphStoreDir, threadId, { status });
   }
 
-  async resumeRun(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
+  resumeRun(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.resumeRunNow(req, caller));
+  }
+
+  private async resumeRunNow(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
     if (!req.threadId?.trim()) throw new Error("threadId is required");
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(req.threadId, principal, { mustExist: true });
@@ -537,7 +624,7 @@ export class RunService {
     void updateGraphMeta(this.config.graphStoreDir, req.threadId, { status: "running" });
 
     // Fire-and-forget like start/continue — resumed execution can be long-running.
-    void (async () => {
+    void this.track((async () => {
       try {
         const result = await compiled.resume({
           threadId: req.threadId,
@@ -565,7 +652,7 @@ export class RunService {
           seq: -1,
         });
       }
-    })();
+    })());
 
     return {
       threadId: req.threadId,
@@ -594,7 +681,16 @@ export class RunService {
     return { threadId, runId: session.runId, status: "started" };
   }
 
-  async continueRun(threadId: string, yaml?: string, caller?: Principal): Promise<ControlResult> {
+  continueRun(threadId: string, yaml?: string, caller?: Principal): Promise<ControlResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.continueRunNow(threadId, yaml, caller));
+  }
+
+  private async continueRunNow(threadId: string, yaml?: string, caller?: Principal): Promise<ControlResult> {
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(threadId, principal, { mustExist: true });
     const existing = this.registry.get(threadId);
@@ -633,7 +729,7 @@ export class RunService {
     void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "running" });
 
     // Fire-and-forget like start (continue can be long-running)
-    void (async () => {
+    void this.track((async () => {
       try {
         const result = await compiled.continueRun({
           threadId,
@@ -648,12 +744,21 @@ export class RunService {
         this.metrics.recordResult("error");
         void updateGraphMeta(this.config.graphStoreDir, threadId, { status: "error" });
       }
-    })();
+    })());
 
     return { threadId, runId: compiled.runId, status: "started" };
   }
 
-  async getState(threadId: string, yaml?: string, caller?: Principal): Promise<GetStateResult> {
+  getState(threadId: string, yaml?: string, caller?: Principal): Promise<GetStateResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.getStateNow(threadId, yaml, caller));
+  }
+
+  private async getStateNow(threadId: string, yaml?: string, caller?: Principal): Promise<GetStateResult> {
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(threadId, principal, { mustExist: true });
     const existing = this.registry.get(threadId);
@@ -663,7 +768,16 @@ export class RunService {
     return { state };
   }
 
-  async getHistory(threadId: string, yaml?: string, caller?: Principal): Promise<{ history: unknown[] }> {
+  getHistory(threadId: string, yaml?: string, caller?: Principal): Promise<{ history: unknown[] }> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.getHistoryNow(threadId, yaml, caller));
+  }
+
+  private async getHistoryNow(threadId: string, yaml?: string, caller?: Principal): Promise<{ history: unknown[] }> {
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(threadId, principal, { mustExist: true });
     const existing = this.registry.get(threadId);
