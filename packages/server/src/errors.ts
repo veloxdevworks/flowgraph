@@ -4,3 +4,16 @@ export class TooManyRunsError extends Error {
     this.name = "TooManyRunsError";
   }
 }
+
+/** A request the server refuses with a specific HTTP status and machine-readable code. */
+export class ServerRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly diagnostics?: unknown[],
+  ) {
+    super(message);
+    this.name = "ServerRequestError";
+  }
+}

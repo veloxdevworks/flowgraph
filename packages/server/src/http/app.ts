@@ -1,6 +1,6 @@
 import * as http from "node:http";
 import { isAgentCorePath } from "../auth.js";
-import { checkStartupAuth, OidcAuthenticator, type AuthOutcome } from "../identity.js";
+import { checkStartupAuth, OidcAuthenticator, type AuthOutcome, type Principal } from "../identity.js";
 import { credentialStatus } from "../credentials.js";
 import { isEphemeralGraphStore, processIdentity } from "../diagnostics.js";
 import { errorFields, log } from "../metrics.js";
@@ -62,16 +62,18 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
       if (isAgentCorePath(url.pathname)) {
         // Outside OIDC mode AgentCore authenticates at the edge (SigV4); with
         // OIDC, /invocations carries the caller's bearer JWT like REST does.
+        let principal: Principal | undefined;
         if (url.pathname === "/invocations" && authenticator.mode === "oidc") {
           const auth = await authenticator.authenticate(req.headers.authorization);
           if (!auth.ok) return writeAuthFailure(res, auth);
+          principal = auth.principal;
         }
-        const handled = await handleAgentCore(req, res, service, url.pathname);
+        const handled = await handleAgentCore(req, res, service, url.pathname, principal);
         if (handled) return;
       } else {
         const auth = await authenticator.authenticate(req.headers.authorization);
         if (!auth.ok) return writeAuthFailure(res, auth);
-        const handled = await handleRest(req, res, service, url);
+        const handled = await handleRest(req, res, service, url, auth.principal);
         if (handled) return;
       }
 

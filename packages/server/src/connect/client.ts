@@ -9,6 +9,8 @@
 import type { ServerEvent } from "../types.js";
 import type { RunService } from "../run-service.js";
 import { errorFields, log } from "../metrics.js";
+import { ServerRequestError } from "../errors.js";
+import type { Principal } from "../identity.js";
 import {
   CONNECT_PROTOCOL_VERSION,
   isCommand,
@@ -207,6 +209,7 @@ export class ConnectClient {
     const p = cmd.params ?? {};
     const threadId = String(p.threadId ?? "");
     try {
+      const principal = await this.principalOf(p);
       let result: unknown;
       switch (cmd.method) {
         case "run.start":
@@ -218,41 +221,44 @@ export class ConnectClient {
               : {}),
             ...(typeof p.label === "string" ? { label: p.label } : {}),
             ...(p.dryRun ? { dryRun: true } : {}),
-          });
+          }, principal);
           break;
         case "run.resume":
           result = await this.opts.service.resumeRun({
             threadId,
             resume: p.resume,
             ...(typeof p.yaml === "string" ? { yaml: p.yaml } : {}),
-          });
+          }, principal);
           break;
         case "run.cancel":
-          result = await this.opts.service.cancelRun(threadId);
+          result = await this.opts.service.cancelRun(threadId, principal);
           break;
         case "run.pause":
-          result = await this.opts.service.pauseRun(threadId);
+          result = await this.opts.service.pauseRun(threadId, principal);
           break;
         case "run.continue":
           result = await this.opts.service.continueRun(
             threadId,
             typeof p.yaml === "string" ? p.yaml : undefined,
+            principal,
           );
           break;
         case "run.state":
           result = await this.opts.service.getState(
             threadId,
             typeof p.yaml === "string" ? p.yaml : undefined,
+            principal,
           );
           break;
         case "run.history":
           result = await this.opts.service.getHistory(
             threadId,
             typeof p.yaml === "string" ? p.yaml : undefined,
+            principal,
           );
           break;
         case "run.list":
-          result = { runs: await this.opts.service.listRuns() };
+          result = { runs: await this.opts.service.listRuns(principal) };
           break;
         default:
           throw new Error(`Unknown connect method "${cmd.method}"`);
@@ -264,8 +270,22 @@ export class ConnectClient {
         id: cmd.id,
         ok: false,
         error: err instanceof Error ? err.message : String(err),
+        ...(err instanceof ServerRequestError ? { code: err.code } : {}),
       });
     }
+  }
+
+  /**
+   * The user a command acts for. With OIDC the platform forwards the user's
+   * access token as `params.accessToken`; other modes have one principal.
+   */
+  private async principalOf(params: Record<string, unknown>): Promise<Principal | undefined> {
+    const authenticator = this.opts.service.authenticator;
+    if (authenticator.mode !== "oidc") return undefined;
+    const token = typeof params.accessToken === "string" ? params.accessToken : "";
+    const auth = await authenticator.authenticate(token ? `Bearer ${token}` : undefined);
+    if (!auth.ok) throw new ServerRequestError(auth.status, auth.code, auth.message);
+    return auth.principal;
   }
 
   private enqueue(threadId: string, event: ServerEvent): void {

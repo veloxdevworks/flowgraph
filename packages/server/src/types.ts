@@ -105,6 +105,12 @@ export interface PersistedGraph {
   status?: RunStatus;
 }
 
+/** The principal that created a thread; only it may run, read or control the thread on a multi-user server. */
+export interface ThreadOwner {
+  id: string;
+  org: string;
+}
+
 export interface GraphMeta {
   threadId: string;
   storedAt: string;
@@ -112,6 +118,7 @@ export interface GraphMeta {
   label?: string;
   graphName?: string;
   status?: RunStatus;
+  owner?: ThreadOwner;
 }
 
 export interface ServerConfig {

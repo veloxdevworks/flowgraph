@@ -323,6 +323,38 @@ describe("HTTP with OIDC", () => {
       expect(ok.status).toBe(200);
       const noOrg = await fetch(`${base}/runs`, { headers: { authorization: `Bearer ${await iss.sign(rsa)}` } });
       expect(noOrg.status).toBe(403);
+      // Threads belong to whoever started them.
+      const yaml = [
+        "apiVersion: flowgraph/v1",
+        "kind: Graph",
+        "metadata: { name: http-owned }",
+        "state: { channels: { approval: { type: object } } }",
+        "nodes:",
+        "  - { id: gate, type: hitl, with: { mode: approve, message: ok, output: { to: approval } } }",
+        "edges: [{ from: START, to: gate }, { from: gate, to: END }]",
+        "runtime: { checkpoint: { enabled: true, backend: memory }, hitl: { onInterrupt: fail } }",
+      ].join("\n");
+      const started = await fetch(`${base}/runs`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ threadId: "http-t1", yaml }),
+      });
+      expect(started.status).toBe(202);
+      const bobToken = await iss.sign(rsa, { sub: "bob", org_id: "acme" });
+      const peek = await fetch(`${base}/runs/http-t1`, { headers: { authorization: `Bearer ${bobToken}` } });
+      expect(peek.status).toBe(403);
+      expect(await peek.json()).toMatchObject({ code: "THREAD_NOT_OWNED" });
+      const events = await fetch(`${base}/runs/http-t1/events`, { headers: { authorization: `Bearer ${bobToken}` } });
+      expect(events.status).toBe(403);
+      const taken = await fetch(`${base}/runs`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bobToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ threadId: "http-t2", yaml }),
+      });
+      expect(taken.status).toBe(409);
+      expect(await taken.json()).toMatchObject({ code: "GRAPH_NAME_TAKEN" });
+      const mine = await fetch(`${base}/runs/http-t1`, { headers: { authorization: `Bearer ${token}` } });
+      expect(mine.status).toBe(200);
       const inv = await fetch(`${base}/invocations`, { method: "POST", body: JSON.stringify({ action: "list" }) });
       expect(inv.status).toBe(401);
       expect((await fetch(`${base}/ping`)).status).toBe(200);

@@ -2,7 +2,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { ClientSecretsRejectedError, credentialStatus } from "../credentials.js";
 import { processIdentity } from "../diagnostics.js";
 import { authModeOf } from "../identity.js";
-import { TooManyRunsError } from "../errors.js";
+import { ServerRequestError, TooManyRunsError } from "../errors.js";
+import type { Principal } from "../identity.js";
 import type { RunService } from "../run-service.js";
 import { attachSse } from "./sse.js";
 import { matchPath, PayloadTooLargeError, readJsonBody, sendJson } from "./util.js";
@@ -13,6 +14,7 @@ export async function handleRest(
   res: ServerResponse,
   service: RunService,
   url: URL,
+  principal?: Principal,
 ): Promise<boolean> {
   const { pathname } = url;
   const method = req.method ?? "GET";
@@ -44,7 +46,7 @@ export async function handleRest(
 
   if (method === "GET" && pathname === "/runs") {
     try {
-      sendJson(res, 200, { runs: await service.listRuns() });
+      sendJson(res, 200, { runs: await service.listRuns(principal) });
     } catch (err) {
       sendError(res, err);
     }
@@ -69,7 +71,7 @@ export async function handleRest(
         ...(body.label ? { label: body.label } : {}),
         ...(body.env ? { env: body.env } : {}),
         ...(body.dryRun ? { dryRun: true } : {}),
-      });
+      }, principal);
       if (body.stream) {
         // Start already fired; attach SSE on the same response via redirect pattern —
         // clients should open GET /runs/:id/events separately. Return start result.
@@ -88,6 +90,12 @@ export async function handleRest(
         (req.headers["last-event-id"] as string | undefined) ??
         url.searchParams.get("afterSeq") ??
         undefined;
+      try {
+        await service.authorizeEvents(m.threadId, principal);
+      } catch (err) {
+        sendError(res, err);
+        return true;
+      }
       attachSse(res, service.registry, m.threadId, lastEventId, req);
       return true;
     }
@@ -105,7 +113,7 @@ export async function handleRest(
           threadId: m.threadId,
           resume: body.resume,
           ...(body.yaml ? { yaml: body.yaml } : {}),
-        });
+        }, principal);
         sendJson(res, 202, result);
       } catch (err) {
         sendError(res, err);
@@ -118,7 +126,7 @@ export async function handleRest(
     const m = matchPath<"threadId">(pathname, "/runs/:threadId/cancel");
     if (m && method === "POST") {
       try {
-        sendJson(res, 200, await service.cancelRun(m.threadId));
+        sendJson(res, 200, await service.cancelRun(m.threadId, principal));
       } catch (err) {
         sendError(res, err);
       }
@@ -130,7 +138,7 @@ export async function handleRest(
     const m = matchPath<"threadId">(pathname, "/runs/:threadId/pause");
     if (m && method === "POST") {
       try {
-        sendJson(res, 200, await service.pauseRun(m.threadId));
+        sendJson(res, 200, await service.pauseRun(m.threadId, principal));
       } catch (err) {
         sendError(res, err);
       }
@@ -146,7 +154,7 @@ export async function handleRest(
         sendJson(
           res,
           202,
-          await service.continueRun(m.threadId, body.yaml),
+          await service.continueRun(m.threadId, body.yaml, principal),
         );
       } catch (err) {
         sendError(res, err);
@@ -159,7 +167,7 @@ export async function handleRest(
     const m = matchPath<"threadId">(pathname, "/runs/:threadId/journal");
     if (m && method === "GET") {
       try {
-        sendJson(res, 200, { events: service.getJournal(m.threadId) });
+        sendJson(res, 200, { events: await service.getJournal(m.threadId, principal) });
       } catch (err) {
         sendError(res, err);
       }
@@ -171,7 +179,7 @@ export async function handleRest(
     const m = matchPath<"threadId">(pathname, "/runs/:threadId/issues");
     if (m && method === "GET") {
       try {
-        sendJson(res, 200, { issues: service.listIssues(m.threadId) });
+        sendJson(res, 200, { issues: await service.listIssues(m.threadId, principal) });
       } catch (err) {
         sendError(res, err);
       }
@@ -184,7 +192,7 @@ export async function handleRest(
     if (m && method === "GET") {
       try {
         const yaml = url.searchParams.get("yaml") ?? undefined;
-        sendJson(res, 200, await service.getState(m.threadId, yaml));
+        sendJson(res, 200, await service.getState(m.threadId, yaml, principal));
       } catch (err) {
         sendError(res, err);
       }
@@ -197,7 +205,7 @@ export async function handleRest(
     if (m && method === "GET") {
       try {
         const yaml = url.searchParams.get("yaml") ?? undefined;
-        sendJson(res, 200, await service.getHistory(m.threadId, yaml));
+        sendJson(res, 200, await service.getHistory(m.threadId, yaml, principal));
       } catch (err) {
         sendError(res, err);
       }
@@ -209,7 +217,7 @@ export async function handleRest(
     const m = matchPath<"threadId">(pathname, "/runs/:threadId");
     if (m && method === "GET") {
       try {
-        const detail = await service.getRun(m.threadId);
+        const detail = await service.getRun(m.threadId, principal);
         if (!detail) {
           sendJson(res, 404, { error: `No run "${m.threadId}"` });
         } else {
@@ -225,7 +233,11 @@ export async function handleRest(
   return false;
 }
 
-function sendError(res: ServerResponse, err: unknown): void {
+export function sendError(res: ServerResponse, err: unknown): void {
+  if (err instanceof ServerRequestError) {
+    sendJson(res, err.status, { error: err.message, code: err.code, ...(err.diagnostics ? { diagnostics: err.diagnostics } : {}) });
+    return;
+  }
   if (err instanceof VoiceRequestError) {
     sendJson(res, err.status, { error: err.message, code: err.code });
     return;

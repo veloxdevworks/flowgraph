@@ -15,7 +15,7 @@ import {
 } from "@flowgraph/core";
 import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import { errorFields, log } from "./metrics.js";
-import type { GraphMeta, PersistedGraph, RunStatus, ServerEvent } from "./types.js";
+import type { GraphMeta, PersistedGraph, RunStatus, ServerEvent, ThreadOwner } from "./types.js";
 
 export interface ParseGraphYamlResult {
   spec: GraphSpec | null;
@@ -150,7 +150,7 @@ export async function persistGraph(
   threadId: string,
   yaml: string,
   spec: GraphSpec,
-  extras: { label?: string; status?: RunStatus } = {},
+  extras: { label?: string; status?: RunStatus; owner?: ThreadOwner } = {},
 ): Promise<PersistedGraph> {
   await ensureGraphStoreDir(dir);
   const filePath = graphPathFor(dir, threadId);
@@ -165,6 +165,8 @@ export async function persistGraph(
     graphName: spec.metadata?.name ?? "graph",
     ...((extras.label ?? existing?.label) ? { label: (extras.label ?? existing?.label) as string } : {}),
     status: extras.status ?? existing?.status ?? "started",
+    // The first owner sticks: callers check ownership before persisting.
+    ...((existing?.owner ?? extras.owner) ? { owner: (existing?.owner ?? extras.owner) as ThreadOwner } : {}),
   };
   await writeGraphMeta(dir, threadId, meta);
   return {
@@ -187,6 +189,10 @@ async function writeGraphMeta(dir: string, threadId: string, meta: GraphMeta): P
   await fs.writeFile(metaPathFor(dir, threadId), JSON.stringify(meta), "utf-8");
 }
 
+function isThreadOwner(v: unknown): v is ThreadOwner {
+  return Boolean(v && typeof v === "object" && typeof (v as ThreadOwner).id === "string" && typeof (v as ThreadOwner).org === "string");
+}
+
 export async function readGraphMeta(dir: string, threadId: string): Promise<GraphMeta | null> {
   try {
     const raw = await fs.readFile(metaPathFor(dir, threadId), "utf-8");
@@ -202,6 +208,7 @@ export async function readGraphMeta(dir: string, threadId: string): Promise<Grap
       ...(typeof parsed.label === "string" ? { label: parsed.label } : {}),
       ...(typeof parsed.graphName === "string" ? { graphName: parsed.graphName } : {}),
       ...(typeof parsed.status === "string" ? { status: parsed.status as RunStatus } : {}),
+      ...(isThreadOwner(parsed.owner) ? { owner: { id: parsed.owner.id, org: parsed.owner.org } } : {}),
     };
   } catch {
     return null;
