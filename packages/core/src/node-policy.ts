@@ -8,6 +8,7 @@
  */
 
 import type { NodeRunContext } from "./context.js";
+import type { OutboundHttpPolicy } from "./outbound-http.js";
 
 /** Key of the policy on the run context (copied into every node context). */
 export const NODE_POLICY = Symbol.for("flowgraph.nodePolicy");
@@ -19,11 +20,21 @@ export interface NodePolicy {
   blockSubgraphFiles?: boolean | undefined;
   /** Make `{{ secret.X }}` in http / webhook templates fail instead of reading the host environment. */
   blockSecrets?: boolean | undefined;
+  /**
+   * Limits on where http and webhook nodes may connect (public addresses only,
+   * checked after DNS and on every redirect). Unset: plain fetch.
+   */
+  outboundHttp?: OutboundHttpPolicy | undefined;
   /** Who set the policy, for error messages (e.g. "uploaded graphs from untrusted authors"). */
   reason?: string | undefined;
 }
 
-export type NodePolicyErrorCode = "NODE_TYPE_BLOCKED" | "SUBGRAPH_FILE_BLOCKED" | "SECRET_REFERENCE_BLOCKED";
+export type NodePolicyErrorCode =
+  | "NODE_TYPE_BLOCKED"
+  | "SUBGRAPH_FILE_BLOCKED"
+  | "SECRET_REFERENCE_BLOCKED"
+  | "OUTBOUND_ADDRESS_BLOCKED"
+  | "OUTBOUND_URL_BLOCKED";
 
 export class NodePolicyError extends Error {
   constructor(

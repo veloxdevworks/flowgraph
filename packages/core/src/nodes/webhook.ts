@@ -11,6 +11,7 @@ import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
+import { guardedFetch } from "../outbound-http.js";
 import { applyOutput } from "./output.js";
 
 const configSchema = WebhookWithSchema;
@@ -80,7 +81,14 @@ async function runEmit(
 
     ctx.logger.debug("webhook emit", { method, url });
 
-    const response = await fetch(url, requestInit);
+    const outbound = nodePolicyOf(ctx)?.outboundHttp;
+    const response = outbound
+      ? await guardedFetch(
+          url,
+          { method, headers: requestInit.headers as Record<string, string>, body, signal: ctx.signal ?? null },
+          outbound,
+        )
+      : await fetch(url, requestInit);
 
     if (!response.ok) {
       throw new Error(

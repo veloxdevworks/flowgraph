@@ -67,6 +67,7 @@ export const httpNode = defineNode<Config>({
           ...(renderedBody !== undefined ? { body: renderedBody } : {}),
           ...(config.expect?.status ? { expectStatus: config.expect.status } : {}),
           signal: ctx.signal ?? null,
+          outbound: nodePolicyOf(ctx)?.outboundHttp,
         });
 
         ctx.emit("node.output", {

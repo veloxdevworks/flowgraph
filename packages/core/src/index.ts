@@ -31,6 +31,15 @@ export {
   type NodePolicy,
   type NodePolicyErrorCode,
 } from "./node-policy.js";
+export {
+  classifyAddress,
+  guardedFetch,
+  hostIsAllowListed,
+  type AddressVerdict,
+  type GuardedFetchInit,
+  type OutboundHttpPolicy,
+  type OutboundResolver,
+} from "./outbound-http.js";
 export type { MemoryHostOptions } from "./compiler.js";
 export * from "./memory/index.js";
 export { memoryNode } from "./nodes/memory.js";
