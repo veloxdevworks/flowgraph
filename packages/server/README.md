@@ -71,10 +71,10 @@ Graphs that declare `runtime.memory` need a durable memory backend; on the defau
 | Env | Default | Purpose |
 |---|---|---|
 | `FLOWGRAPH_MEMORY_BACKEND` | `memory` | `memory` (process-local; `runtime.memory` graphs fail to compile) \| `postgres` (the `DATABASE_URL` database, same pool as checkpoints) \| `sqlite` (local file; install `@flowgraph/checkpoint-sqlite`) |
-| `FLOWGRAPH_MEMORY_SQLITE_PATH` | `<FLOWGRAPH_GRAPH_STORE>/memory.db` | sqlite memory file |
+| `FLOWGRAPH_MEMORY_SQLITE_PATH` | `<FLOWGRAPH_GRAPH_STORE>/memory.db` | sqlite memory file. Per replica: with several replicas use `postgres`, or memory splits between them |
 | `FLOWGRAPH_ORG` | _(required for `postgres` / `sqlite`)_ | The org every run on this server writes memory as. With a durable backend and no `FLOWGRAPH_ORG` the server refuses to start |
 | `FLOWGRAPH_PROJECT` / `FLOWGRAPH_USER` | `local` / _(unset)_ | Project and user of that one identity |
-| `FLOWGRAPH_MEMORY_SWEEP_MS` | `3600000` | How often expired memory and old replay records are deleted |
+| `FLOWGRAPH_MEMORY_SWEEP_MS` | `3600000` | How often expired memory and old replay records are deleted (whole milliseconds, at least 1000; anything else stops startup). On Postgres one replica sweeps per interval |
 
 ## Lab / self-host
 
