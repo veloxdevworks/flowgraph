@@ -225,41 +225,102 @@ Because state lives entirely in channels, it is exactly what the checkpointer pe
 - Secrets are never in state, so checkpoints are safe to persist and inspect.
 - `messages` channels grow over a run; for long agent loops, prefer the agent node's internal context management over stuffing everything into a graph channel.
 
-## 8. Long-term memory (Store)
+## 8. Long-term memory (`runtime.memory`)
 
-For data that must persist **across** threads/runs (user preferences, learned facts), LangGraph's **Store** is exposed via `runtime.store`. Nodes, skills, and registered `code` functions access it via `ctx.store`. This is distinct from checkpointed thread state.
+Checkpointed state lives for one thread. **Memory** persists across threads and runs: learned fixes, counters, preferences, notes about an incident. It lives in the same database as the checkpointer (a `.flowgraph/checkpoints.db` sqlite file for the CLI), in `fg_memory_*` tables.
 
 ```yaml
 runtime:
-  store:
-    enabled: true      # default: true
-    backend: memory    # memory | none | sqlite | postgres; default memory
+  checkpoint:
+    backend: sqlite             # memory needs a durable checkpointer
+  memory:
+    backend: checkpoint         # default; `memory` = process-local, tests only (warns)
+    subject:                    # optional: a per-incident / per-ticket scope
+      type: incident            # [a-z][a-z0-9_-]{0,31}
+      key: "{{ input.alert.fingerprint }}"
+      required: true            # fail the run (MEMORY_SUBJECT_UNRESOLVED) if it renders empty
+      ttl: 180d                 # sliding: refreshed on every write to the subject
+      hash: false               # true → store sha256:<hex> instead of the raw key
+    limits:                     # optional; defaults shown, hard caps in brackets
+      itemBytes: 8192           # [65536]
+      itemsPerScope: 500        # [10000] (subject: 100)
+      bytesPerScope: 2097152    # [52428800] (subject: 256KB)
+      subjectsPerType: 5000     # [50000]
+      onFull: evict-oldest      # or reject; org/project scopes always reject
 ```
 
+### Scopes
+
+Every item lives in one scope. The run's handle is pre-bound to its org, project, graph, user and subject; nothing in YAML or `ctx.memory` can name another graph, user or subject.
+
+| Scope | Shared by | CLI value |
+|---|---|---|
+| `org` | every graph in the org | `FLOWGRAPH_ORG` → `memory.org` in `.flowgraph/config.yaml` or `~/.config/flowgraph/config.yaml` → `local` |
+| `project` | every graph in the project | `FLOWGRAPH_PROJECT` → `memory.project` → normalized git origin (`github.com/acme/web`) → `path:<hash>` (with a notice) |
+| `graph` | runs of this graph (`metadata.name`) in the project | — |
+| `user` | this user's runs of this graph | `FLOWGRAPH_USER` → `memory.user` → `git config user.email` → OS username |
+| `subject` | runs about the same subject in the project, across graphs | rendered from `runtime.memory.subject.key` at run start |
+
+Reads with no explicit scope check **user → subject → graph → project → org** and return the first hit. A thread's scope is bound when it starts; `resume` and `continue` reuse that binding even from a new process. Embedded subgraphs use the root graph's scope.
+
+### The `memory` node
+
+```yaml
+- id: seen-before
+  type: memory
+  with:
+    op: get                      # get | search | put | patch | increment | append | delete
+    key: "fix/{{ state.errorSignature }}"
+    scopes: [subject, graph]     # reads: optional, default precedence above
+    output: { to: priorFix }     # → { key, scope, version, value, attrs } or null
+
+- id: count-deploy
+  type: memory
+  with:
+    op: increment                # atomic; also patch (shallow merge) and append (bounded list)
+    scope: project               # writes: name the scope (MEMORY_SCOPE_IMPLICIT warns otherwise)
+    key: deploys
+    field: n                     # "" bumps a bare number
+    by: 1
+```
+
+`search` takes `prefix`, `attrs` (exact match on the item's indexed attributes) and `limit` (default 20, max 200). Writes accept `attrs` (≤ 8 scalar values), `ttl` ("7d"; ignored in subject scope, which uses the subject TTL), and `ifVersion` for compare-and-set (`0` = create only). `get` with `required: true` fails the node when the key is missing.
+
+### `ctx.memory` in code
+
 ```ts
-// In a registered code function or tool handler:
-registerFunction("rememberAnswer", async (input, ctx) => {
-  const key = String(input.questionKey);
-  const cached = await ctx.store?.get(["answers"], key);
-  if (cached?.value) return cached.value;
-
-  // ... ask_human or other logic to obtain answer ...
-
-  await ctx.store?.put(["answers"], key, { answer: input.answer });
-  return { answer: input.answer };
+registerFunction("learnFix", async (input, ctx) => {
+  const prior = await ctx.memory!.get(`fix/${input.sig}`);          // precedence read
+  await ctx.memory!.increment("graph", "attempts", "n");             // atomic, no lost updates
+  await ctx.memory!.update("subject", "timeline", (cur) => [...((cur as unknown[]) ?? []), input.step]);
+  return prior?.value ?? null;
 });
 ```
 
-How the store is chosen (first match wins):
+`ctx.memory` exists only when the graph declares `runtime.memory` (or the `runtime.store` alias below). `increment`, `patch`, `append` and `delete` are atomic in the database; `update(scope, key, fn)` is a compare-and-set loop. Writes are **replay-safe**: a node that writes and is then retried or resumed (e.g. it called `ctx.interrupt`) does not apply the same write twice.
 
-1. A `BaseStore` instance passed as `compileGraph(spec, { store })` — always used.
-2. `runtime.store.enabled: false`, `backend: none`, or `{ store: "none" }` — no store; `ctx.store` is `undefined`.
-3. `{ store: "memory" }` from the caller (e.g. `@flowgraph/testing`) — a fresh process-local `InMemoryStore`.
-4. `backend: memory` (the default) — a fresh process-local `InMemoryStore`. It is **ephemeral**: it is lost when the process exits and is not shared between CLI invocations.
-5. `backend: sqlite` / `postgres` without an injected instance — **compile error**. There is no silent fallback to memory. The CLI and server do not wire a durable store yet, so such YAML fails in `flowgraph run` until they do.
+Guards on every write: values must be JSON and within `itemBytes`; items that look like credentials (bearer tokens, `ghp_…`, `sk-…`, AWS keys, private keys) are refused with `MEMORY_SECRET_DETECTED`; a full scope evicts the oldest item or rejects (`MEMORY_SCOPE_FULL`).
 
-Any other `backend` value is a schema error at load time.
+### `ctx.store` (LangGraph Store) compatibility
 
-**Subgraphs share the parent's store.** A `subgraph` node passes the parent's `ctx.store` to the child, so memory written in a child is visible to the parent and to later runs that share the store. The child's own `runtime.store.backend` is ignored (the host picks the backend); a child with `runtime.store.enabled: false` or `backend: none` gets no store.
+`ctx.store` keeps working. It is now a view onto **graph** scope: namespaces become key prefixes, so two graphs never see each other's `ctx.store` items.
 
-Scoped, durable memory (org / project / graph / user / subject namespaces on sqlite and Postgres) is planned; see [10 — Roadmap](./10-roadmap.md).
+- No `runtime.store` / `backend: memory` (default) — process-local, lost on exit, as before.
+- `runtime.store.backend: sqlite | postgres` — an alias for `runtime.memory` on the checkpoint database: `ctx.store` and `ctx.memory` become durable. The backend must match `runtime.checkpoint.backend`.
+- `runtime.store.enabled: false`, `backend: none`, or `compileGraph(…, { store: "none" })` — no `ctx.store`.
+- A `BaseStore` instance passed as `compileGraph(spec, { store })` is used as-is.
+
+`runtime.store` and `runtime.memory` together is an error (`MEMORY_STORE_AND_MEMORY`).
+
+### Hosts
+
+| Host | sqlite | postgres | memory |
+|---|---|---|---|
+| CLI (`flowgraph run/resume`) | durable, same `.db` file as checkpoints | `MEMORY_BACKEND_UNAVAILABLE` (planned) | ephemeral |
+| `compileGraph` | pass `memory: { backend, identity }` from `openSqliteBackend(path)` in `@flowgraph/checkpoint-sqlite` | — | `memory: "ephemeral"` |
+| `@flowgraph/testing` | — | — | fresh ephemeral backend per compile |
+| server | not yet: `runtime.memory` graphs fail to compile | | |
+
+`compileGraph` never falls back to in-memory silently: `runtime.memory` without a durable host backend is a compile error, and `flowgraph validate` reports the same problem (`MEMORY_BACKEND_UNAVAILABLE`) before you run.
+
+Validation codes: `MEMORY_BACKEND_UNAVAILABLE`, `MEMORY_BACKEND_EPHEMERAL` (warning), `MEMORY_STORE_AND_MEMORY`, `MEMORY_LIMIT_EXCEEDS_CAP`, `MEMORY_NOT_CONFIGURED`, `MEMORY_SUBJECT_UNDECLARED`, `MEMORY_SCOPE_IMPLICIT` (warning). Runtime error codes are prefixed in the message (`MEMORY_VERSION_CONFLICT: …`).
