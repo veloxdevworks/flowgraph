@@ -1,6 +1,6 @@
 # ADR-0013 — Rename to flowgraph under the @veloxdevworks scope
 
-- **Status:** Accepted
+- **Status:** Partially superseded by [ADR-0015](./0015-flowgraph-npm-scope.md) (npm scope only)
 - **Date:** 2026-07-02
 - **Supersedes:** [ADR-0001](./0001-naming.md)
 

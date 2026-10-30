@@ -3,11 +3,12 @@
  * plus run/resume/inspect with durability, HITL, and retry/timeout.
  */
 
-import { START, END, StateGraph, MemorySaver, InMemoryStore, Command, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
+import { START, END, StateGraph, MemorySaver, InMemoryStore, Command, Send, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import * as path from "node:path";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
-import { evalGuard, renderDeep } from "@veloxdevworks/flowgraph-expr";
+import type { GraphSpec } from "@flowgraph/spec";
+import { MapWithSchema } from "@flowgraph/spec";
+import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
 import { createEventBus, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { createEnvSecretProvider } from "./secrets.js";
@@ -19,7 +20,16 @@ import {
   type RunMeta,
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
-import { buildStateAnnotation, ONCE_CHANNEL } from "./runtime/state-annotation.js";
+import { buildStateAnnotation, ONCE_CHANNEL, REPLAY_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import {
+  appendRunIssue,
+  issueDedupeKey,
+  readRunIssues,
+  runIssuesKey,
+  stampIssue,
+  type IssueInput,
+  type RunIssue,
+} from "./runtime/run-issues.js";
 import { OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
 import { ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
@@ -33,9 +43,11 @@ import {
   getWebhookRoute,
   type WebhookServerConfig,
 } from "./runtime/webhook-server.js";
-import { terminateThreadServices } from "./runtime/service-manager.js";
+import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
+import { cleanupWorktrees } from "./nodes/worktree.js";
 import { registerProvider, type ProviderAdapter } from "./providers/index.js";
-import { clearThreadReplayCache } from "./providers/replay-cache.js";
+import { clearThreadReplayCache, hydrateReplay, hydrateReplayFromInterruptPayload, replayCacheKey, snapshotReplay } from "./providers/replay-cache.js";
+import { collectMapResults, mapSyntheticIds, runMapItem, type MapTask } from "./nodes/map.js";
 import type { ToolWiring } from "./providers/tools.js";
 import type { BudgetState } from "./context.js";
 import type { McpHub } from "./mcp/types.js";
@@ -62,6 +74,11 @@ export interface CompileOptions {
   hooks?: Hook[];
   /** MCP hub for mcp nodes and intelligent MCP tools (built from mcpServers by CLI). */
   mcp?: McpHub;
+  /**
+   * Called with the result of a background resume fired by a `wait` timeout
+   * (onInterrupt "fail"/"webhook" runs). Errors are also emitted as `run.error`.
+   */
+  onWaitTimeout?: (result: RunResult) => void;
 }
 
 export interface InterruptInfo {
@@ -71,6 +88,8 @@ export interface InterruptInfo {
   /** How the interrupt should be answered (approval, free-text question, choice list). */
   kind?: import("./context.js").InterruptKind;
   choices?: string[];
+  /** ISO timestamp when a wait node's timeout elapses. */
+  deadlineAt?: string;
 }
 
 export interface RunOptions {
@@ -97,6 +116,8 @@ export interface ResumeOptions {
   sinks?: EventSink[];
   onInterrupt?: InterruptPolicy;
   resolveInterrupt?: (interrupts: InterruptInfo[]) => Promise<unknown> | unknown;
+  /** Time-travel: start this resume from a historical checkpoint id. */
+  checkpointId?: string;
 }
 
 /** Continue a paused (or checkpointed) thread from its next nodes — not HITL resume. */
@@ -117,6 +138,8 @@ export interface RunResult {
   interrupts?: InterruptInfo[] | undefined;
   error?: Error | undefined;
   durationMs: number;
+  /** Non-fatal degradations recorded during the run (from the issues log). */
+  issues?: RunIssue[] | undefined;
 }
 
 export interface StateSnapshot {
@@ -137,10 +160,24 @@ export interface CompiledGraph {
   continueRun(opts: ContinueOptions): Promise<RunResult>;
   getState(threadId: string): Promise<StateSnapshot | null>;
   getStateHistory(threadId: string): Promise<StateSnapshot[]>;
+  /** Continue from a historical checkpoint id (thin wrapper on getStateHistory). */
+  resumeFrom(opts: ResumeOptions & { checkpointId: string }): Promise<RunResult>;
+  /**
+   * Run exactly one superstep of a paused/checkpointed thread, then stop with
+   * `status: "paused"` (or `completed` / `interrupted` if that step finished
+   * the graph or raised a HITL interrupt). Requires a checkpointer.
+   */
+  step(opts: ContinueOptions): Promise<RunResult>;
   stream(opts?: RunOptions): AsyncIterable<FlowgraphEvent>;
 }
 
 type ExecuteMode = "start" | "resume" | "continue";
+
+/** Per-invocation execution options (never written back to the shared spec). */
+interface InvokeOverrides {
+  /** Stop after one superstep (LangGraph invoke-time `interruptAfter: "*"`). */
+  singleStep?: boolean;
+}
 
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
 export interface EmbeddedCompiledGraph {
@@ -189,13 +226,18 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     defaultPolicy,
   } = assembled;
 
+  // Per compiled graph: two graphs that reuse a thread id must not cancel each other's timers.
+  const waitTimers: WaitTimerMap = new Map();
+
   const executeInvoke = async (
     payload: Record<string, unknown> | Command | null,
     runOpts: RunOptions | ResumeOptions | ContinueOptions,
     mode: ExecuteMode,
+    overrides: InvokeOverrides = {},
   ): Promise<RunResult> => {
     const startMs = Date.now();
     const threadId = runOpts.threadId ?? `thread-${runId}`;
+    clearWaitTimeoutTimer(waitTimers, threadId);
     const startedAt = new Date().toISOString();
     const runMeta: RunMeta = { runId, graph: graphSpec.metadata.name, startedAt, threadId };
 
@@ -209,7 +251,18 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
     const unsubs = (runOpts.sinks ?? []).map((s) => events.subscribe(s));
     const policy = runOpts.onInterrupt ?? defaultPolicy;
-    const cfg = buildInvokeConfig(threadId, graphSpec);
+    const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
+    if (overrides.singleStep) cfg["interruptAfter"] = "*";
+    const workspace = (baseCtx as RunContext).workspace;
+    const finish = (r: RunResult): RunResult => {
+      try {
+        const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
+        if (issues.length > 0) r.issues = issues;
+      } catch {
+        /* ignore unreadable issue logs */
+      }
+      return r;
+    };
 
     // CLI/IPC resume should drop any in-process HTTP listener for this thread.
     if (mode === "resume") {
@@ -220,6 +273,19 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // interrupted run on the same thread that was never resumed.
     if (mode === "start") {
       clearThreadReplayCache(threadId);
+    } else if (checkpointer) {
+      const snap = await compiledLg.getState(cfg);
+      await hydrateDurableRuntime(snap, threadId, graphSpec, {
+        executeInvoke,
+        rehydrateWebhooks: mode !== "resume",
+        ...(runOpts.signal ? { signal: runOpts.signal } : {}),
+        ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
+      });
+      const expired = expiredWaitResume(snap);
+      if (expired) {
+        payload = new Command({ resume: expired });
+        mode = "resume";
+      }
     }
 
     const startEvent =
@@ -240,25 +306,58 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         if (r.payload.input) current = r.payload.input;
       }
 
+      if (current instanceof Command && hooks.has("interrupt:beforeResume")) {
+        const resumeVal = (runOpts as ResumeOptions).resume;
+        await hooks.run("interrupt:beforeResume", {
+          state: {},
+          run: runMeta,
+          payload: { interruptPayload: resumeVal },
+        });
+      }
+
       // eslint-disable-next-line no-constant-condition
       while (true) {
         const result = ((await compiledLg.invoke(
           current as Parameters<typeof compiledLg.invoke>[0],
           { ...cfg, signal: runOpts.signal } as Parameters<typeof compiledLg.invoke>[1],
         )) ?? {}) as Record<string, unknown>;
+        // Time-travel checkpoint_id applies only to the first superstep.
+        if (cfg.configurable && typeof cfg.configurable === "object") {
+          delete (cfg.configurable as Record<string, unknown>)["checkpoint_id"];
+        }
 
         const interrupts = extractInterrupts(result);
+
+        if (hooks.has("interrupt:beforeRaise") && interrupts.length > 0) {
+          await hooks.run("interrupt:beforeRaise", {
+            state: result,
+            run: runMeta,
+            payload: {
+              ...(interrupts[0]?.reason ? { reason: interrupts[0].reason } : {}),
+              interruptPayload: interrupts[0]?.payload,
+            },
+          });
+        }
 
         if (isPauseInterrupt(interrupts)) {
           const clean = stripReserved(result);
           events.emit("run.paused", { state: clean, durationMs: Date.now() - startMs });
-          return {
+          return finish({
             status: "paused",
             state: clean,
             runId,
             threadId,
             durationMs: Date.now() - startMs,
-          };
+          });
+        }
+
+        if (interrupts.length === 0 && overrides.singleStep && checkpointer) {
+          const snap = await compiledLg.getState(cfg);
+          if (snap && Array.isArray(snap.next) && snap.next.length > 0) {
+            const clean = stripReserved(result);
+            events.emit("run.paused", { state: clean, next: [...snap.next], step: true, durationMs: Date.now() - startMs });
+            return finish({ status: "paused", state: clean, runId, threadId, durationMs: Date.now() - startMs });
+          }
         }
 
         if (interrupts.length === 0) {
@@ -269,7 +368,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
               const bp: InterruptInfo[] = [{ id: `breakpoint:${snap.next.join(",")}`, reason: `Paused before: ${snap.next.join(", ")}` }];
               events.emit("interrupt.raised", { interrupts: bp });
               if (policy === "fail" || policy === "webhook" || !runOpts.resolveInterrupt) {
-                return { status: "interrupted", state: clean, runId, threadId, interrupts: bp, durationMs: Date.now() - startMs };
+                return finish({ status: "interrupted", state: clean, runId, threadId, interrupts: bp, durationMs: Date.now() - startMs });
               }
               await runOpts.resolveInterrupt(bp);
               current = new Command({ resume: null });
@@ -281,8 +380,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             await hooks.run("run:after", { state: clean, run: runMeta, payload: { update: clean } });
           }
           events.emit("run.end", { state: clean, durationMs: Date.now() - startMs });
-          await maybeTerminateServices(graphSpec, threadId);
-          return { status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs };
+          await maybeTerminateServices(graphSpec, threadId, result);
+          return finish({ status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs });
         }
 
         await attachWebhookUrls(interrupts, {
@@ -296,15 +395,49 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         events.emit("interrupt.raised", { interrupts });
 
         if (policy === "fail" || policy === "webhook") {
+          scheduleWaitTimeoutTimer(waitTimers, threadId, interrupts, () => {
+            executeInvoke(
+              new Command({ resume: { timedOut: true } }),
+              { threadId, resume: { timedOut: true }, onInterrupt: "fail" },
+              "resume",
+            ).then(
+              (timedOutResult) => {
+                try {
+                  opts.onWaitTimeout?.(timedOutResult);
+                } catch (cbErr) {
+                  const m = cbErr instanceof Error ? cbErr.message : String(cbErr);
+                  events.emit("run.error", { message: `onWaitTimeout callback failed: ${m}`, error: m, threadId });
+                }
+              },
+              (err: unknown) => {
+                // executeInvoke normally returns status "error"; this catches anything that escaped it
+                // so a background timer can never become an unhandled rejection.
+                const m = err instanceof Error ? err.message : String(err);
+                events.emit("run.error", { message: `wait timeout resume failed: ${m}`, error: m, threadId });
+                try {
+                  opts.onWaitTimeout?.({
+                    status: "error",
+                    state: {},
+                    runId,
+                    threadId,
+                    error: err instanceof Error ? err : new Error(m),
+                    durationMs: 0,
+                  });
+                } catch {
+                  /* already reported */
+                }
+              },
+            );
+          });
           const clean = stripReserved(result);
-          return {
+          return finish({
             status: "interrupted",
             state: clean,
             runId,
             threadId,
             interrupts,
             durationMs: Date.now() - startMs,
-          };
+          });
         }
 
         // Resolving via prompt/approve — drop the HTTP listener for this thread.
@@ -317,14 +450,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           resumeValue = true;
         } else {
           const clean = stripReserved(result);
-          return {
+          return finish({
             status: "interrupted",
             state: clean,
             runId,
             threadId,
             interrupts,
             durationMs: Date.now() - startMs,
-          };
+          });
         }
 
         events.emit("interrupt.resumed", { resume: resumeValue });
@@ -335,14 +468,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (isAbortFailure(err, runOpts.signal)) {
         events.emit("run.aborted", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
         await maybeTerminateServices(graphSpec, threadId);
-        return { status: "aborted", state: {}, runId, threadId, error, durationMs: Date.now() - startMs };
+        return finish({ status: "aborted", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
       }
       if (hooks.has("run:error")) {
         try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
       }
       events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
       await maybeTerminateServices(graphSpec, threadId);
-      return { status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs };
+      return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
     } finally {
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       for (const u of unsubs) u();
@@ -350,7 +483,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   };
 
   const toSnapshot = (
-    snap: { values: Record<string, unknown>; next: readonly string[]; config?: { configurable?: { checkpoint_id?: string } }; createdAt?: string; tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id: string; value?: unknown }> }> },
+    snap: { values: Record<string, unknown>; next: readonly string[]; config?: { configurable?: { checkpoint_id?: string } }; createdAt?: string; tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }> },
     threadId?: string,
   ): StateSnapshot => {
     const interrupts: InterruptInfo[] = [];
@@ -379,7 +512,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     };
   };
 
-  const continueRun = async (continueOpts: ContinueOptions): Promise<RunResult> => {
+  const continueRun = async (
+    continueOpts: ContinueOptions,
+    overrides: InvokeOverrides = {},
+  ): Promise<RunResult> => {
     let payload: Record<string, unknown> | Command | null = null;
     if (checkpointer) {
       const snap = await compiledLg.getState({ configurable: { thread_id: continueOpts.threadId } });
@@ -391,7 +527,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         payload = new Command({ resume: true });
       }
     }
-    return executeInvoke(payload, continueOpts, "continue");
+    return executeInvoke(payload, continueOpts, "continue", overrides);
   };
 
   const resume = async (resumeOpts: ResumeOptions): Promise<RunResult> => {
@@ -418,10 +554,16 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     events,
     run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, "start"),
     resume,
-    continueRun,
+    continueRun: (opts: ContinueOptions) => continueRun(opts),
     getState: async (threadId: string) => {
       if (!checkpointer) return null;
-      const snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
+      let snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
+      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, rehydrateWebhooks: true });
+      const expired = expiredWaitResume(snap);
+      if (expired) {
+        await executeInvoke(new Command({ resume: expired }), { threadId, resume: expired, onInterrupt: "fail" }, "resume");
+        snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return toSnapshot(snap as any, threadId);
     },
@@ -433,6 +575,17 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         snapshots.push(toSnapshot(snap as any, threadId));
       }
       return snapshots;
+    },
+    resumeFrom: async (opts: ResumeOptions & { checkpointId: string }) => {
+      return resume({ ...opts, checkpointId: opts.checkpointId });
+    },
+    step: async (opts: ContinueOptions) => {
+      if (!checkpointer) {
+        throw new Error("step() needs a checkpointer: stepping resumes a checkpointed thread one superstep at a time.");
+      }
+      // Per-invocation interruptAfter: "*" — the shared spec / compiled graph is
+      // never mutated, so concurrent run()/step() calls don't affect each other.
+      return continueRun(opts, { singleStep: true });
     },
     stream: async function* (runOpts: RunOptions = {}) {
       const streamP = events.stream();
@@ -452,6 +605,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     opts.graphPath != null
       ? path.dirname(path.resolve(cwd, opts.graphPath))
       : cwd;
+  const graphWorkspace = resolveGraphWorkspace(spec, graphDir);
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const events = createEventBus({ runId, graph: spec.metadata.name });
   for (const sink of opts.sinks ?? []) events.subscribe(sink);
@@ -501,7 +655,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     },
     secrets: createEnvSecretProvider(),
     events,
-    workspace: graphDir,
+    workspace: graphWorkspace,
     budget,
     hooks,
     mcp: opts.mcp,
@@ -510,6 +664,8 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
 
   const defaultRetry = spec.runtime?.retry;
   const defaultTimeout = spec.runtime?.timeoutDefault;
+
+  const mapJoinById = new Map<string, string>();
 
   for (const nodeSpec of spec.nodes) {
     const factory = registry.get(nodeSpec.type);
@@ -523,8 +679,33 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       );
     }
 
+    if (nodeSpec.type === "map") {
+      addCheckpointedMap(
+        graph,
+        spec,
+        nodeSpec,
+        configResult.data,
+        {
+          runId,
+          events,
+          baseCtx,
+          graphWorkspace,
+          hooks,
+          toolWiring,
+          defaultRetry,
+          defaultTimeout,
+        },
+        mapJoinById,
+      );
+      continue;
+    }
+
     const compiled = factory.build(
-      { graphName: spec.metadata.name, toolWiring } as Parameters<typeof factory.build>[0],
+      {
+        graphName: spec.metadata.name,
+        toolWiring,
+        ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
+      } as Parameters<typeof factory.build>[0],
       nodeSpec as unknown as Record<string, unknown>,
       configResult.data,
     );
@@ -535,7 +716,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     const scope = { nodeId: nodeSpec.id, nodeType: nodeSpec.type };
     const nsRecord = nodeSpec as unknown as Record<string, unknown>;
 
-    type NodeRun = { res: NodeResult; ctx: NodeRunContext & { _onceUpdates: Record<string, unknown> } };
+    type NodeRun = { res: NodeResult; ctx: NodeRunContext & { _onceUpdates: Record<string, unknown>; _issueUpdates: RunIssue[] } };
     const runOnce = (
       state: Record<string, unknown>,
       inputOverride?: Record<string, unknown>,
@@ -543,7 +724,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     ): Promise<NodeRun> =>
       runWithPolicy<NodeRun>(
         (attempt) => {
-          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphDir, attempt, inputOverride, lgConfig);
+          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attempt, inputOverride, lgConfig);
           return compiled.run(state, ctx).then((res) => ({ res, ctx }));
         },
         {
@@ -559,6 +740,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       const update = resultToUpdate(run.res);
       const onceUpdates = run.ctx._onceUpdates;
       if (Object.keys(onceUpdates).length > 0) update[ONCE_CHANNEL] = onceUpdates;
+      if (run.ctx._issueUpdates.length > 0) update[ISSUES_CHANNEL] = run.ctx._issueUpdates;
       return update;
     };
 
@@ -649,7 +831,24 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
           const c = r.control;
           if (c?.kind === "veto") {
             events.emit("node.error", { nodeId: nodeSpec.id, error: error.message, swallowed: true }, scope);
-            return {};
+            const swallowed: RunIssue = stampIssue(
+              {
+                code: "ERROR_SWALLOWED",
+                severity: "warning",
+                message: `node "${nodeSpec.id}" error was swallowed: ${error.message}`,
+                impact: "The node did not produce its expected result; downstream steps may be incomplete.",
+                nodeId: nodeSpec.id,
+                nodeType: nodeSpec.type,
+              },
+              { nodeId: nodeSpec.id, nodeType: nodeSpec.type },
+            );
+            events.emit("run.issue", swallowed, scope);
+            try {
+              appendRunIssue(graphWorkspace, runIssuesKey(runMeta), swallowed);
+            } catch {
+              /* ignore */
+            }
+            return { [ISSUES_CHANNEL]: [swallowed] };
           }
           if (c?.kind === "route") {
             events.emit("node.error", { nodeId: nodeSpec.id, error: error.message, routed: c.to }, scope);
@@ -680,7 +879,16 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       nodeId: id,
       _input: args,
       render(template: string, extra: Record<string, unknown> = {}) {
-        return renderDeep(template, { state, input: args, config: ctx.config, run: ctx.meta, ...extra });
+        const issues = (state[ISSUES_CHANNEL] as RunIssue[] | undefined) ?? [];
+        return renderDeep(template, { state, input: args, config: ctx.config, run: ctx.meta, issues, ...extra });
+      },
+      issue(input: IssueInput) {
+        const targetType = spec.nodes.find((n) => n.id === id)?.type;
+        return ctx.issue({
+          ...input,
+          nodeId: input.nodeId ?? id,
+          ...(targetType && !input.nodeType ? { nodeType: targetType } : {}),
+        });
       },
     } as typeof ctx & { _input: Record<string, unknown> };
     const res = await target.run(state, childCtx);
@@ -712,7 +920,8 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const routerIds = new Set(spec.nodes.filter((n) => n.type === "router").map((n) => n.id));
   for (const edge of spec.edges) {
     if (routerIds.has(edge.from)) continue;
-    const from = edge.from === "START" ? START : edge.from;
+    let from = edge.from === "START" ? START : edge.from;
+    if (typeof from === "string" && mapJoinById.has(from)) from = mapJoinById.get(from)!;
     if ("to" in edge) {
       const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
       for (const t of tos) graph.addEdge(from as typeof START, (t === "END" ? END : t) as typeof END);
@@ -779,11 +988,80 @@ function isPauseInterrupt(interrupts: InterruptInfo[]): boolean {
   });
 }
 
-function buildInvokeConfig(threadId: string, spec: GraphSpec): Record<string, unknown> {
-  const concurrency = spec.runtime?.concurrency;
+function earliestDeadlineMs(interrupts: InterruptInfo[]): number | undefined {
+  let earliest: number | undefined;
+  for (const info of interrupts) {
+    if (!info.deadlineAt) continue;
+    const t = Date.parse(info.deadlineAt);
+    if (Number.isNaN(t)) continue;
+    if (earliest === undefined || t < earliest) earliest = t;
+  }
+  return earliest;
+}
+
+type WaitTimerMap = Map<string, ReturnType<typeof setTimeout>>;
+
+function clearWaitTimeoutTimer(waitTimeoutTimers: WaitTimerMap, threadId: string): void {
+  const timer = waitTimeoutTimers.get(threadId);
+  if (timer) {
+    clearTimeout(timer);
+    waitTimeoutTimers.delete(threadId);
+  }
+}
+
+function scheduleWaitTimeoutTimer(
+  waitTimeoutTimers: WaitTimerMap,
+  threadId: string,
+  interrupts: InterruptInfo[],
+  onFire: () => void,
+): void {
+  clearWaitTimeoutTimer(waitTimeoutTimers, threadId);
+  const deadline = earliestDeadlineMs(interrupts);
+  if (deadline === undefined) return;
+  const delay = Math.max(0, deadline - Date.now());
+  const timer = setTimeout(() => {
+    waitTimeoutTimers.delete(threadId);
+    onFire();
+  }, delay);
+  timer.unref?.();
+  waitTimeoutTimers.set(threadId, timer);
+}
+
+function namespacedRunnableConfig(
+  lgConfig: LangGraphRunnableConfig | undefined,
+  itemId: string,
+): LangGraphRunnableConfig | undefined {
+  if (!lgConfig) return undefined;
+  const prev = (lgConfig.configurable ?? {}) as Record<string, unknown>;
+  const prevNs = typeof prev["checkpoint_ns"] === "string" ? prev["checkpoint_ns"] : "";
+  return {
+    ...lgConfig,
+    configurable: {
+      ...prev,
+      checkpoint_ns: prevNs ? `${prevNs}|${itemId}` : itemId,
+    },
+  };
+}
+
+function buildInvokeConfig(
+  threadId: string,
+  spec: GraphSpec,
+  checkpointId?: string,
+): Record<string, unknown> {
+  const mapConc = spec.nodes
+    .filter((n) => n.type === "map")
+    .map((n) => {
+      const c = (n.with as { concurrency?: number } | undefined)?.concurrency;
+      return typeof c === "number" ? c : undefined;
+    })
+    .filter((n): n is number => n != null);
+  const concurrency = spec.runtime?.concurrency ?? (mapConc.length ? Math.min(...mapConc) : undefined);
   const recursionLimit = spec.runtime?.recursionLimit;
   return {
-    configurable: { thread_id: threadId },
+    configurable: {
+      thread_id: threadId,
+      ...(checkpointId ? { checkpoint_id: checkpointId } : {}),
+    },
     ...(concurrency ? { maxConcurrency: concurrency } : {}),
     ...(recursionLimit ? { recursionLimit } : {}),
   };
@@ -797,11 +1075,19 @@ function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpo
   const enabled = spec.runtime?.checkpoint?.enabled !== false;
   if (!enabled) return undefined;
   if (opts.checkpointer === "none") return undefined;
+  // An explicit caller choice of "memory" (tests, ephemeral runs) is not a silent fallback.
+  if (opts.checkpointer === "memory") return new MemorySaver();
 
-  const backend = spec.runtime?.checkpoint?.backend ?? (opts.checkpointer as string) ?? "memory";
+  const backend = spec.runtime?.checkpoint?.backend ?? "memory";
   if (backend === "memory") return new MemorySaver();
-  // sqlite/postgres are provided by external packages and passed as instances.
-  return new MemorySaver();
+  if (backend === "postgres" || backend === "sqlite") {
+    throw new Error(
+      `runtime.checkpoint.backend "${backend}" requires passing a checkpointer instance to compileGraph ` +
+        `(the CLI wires sqlite/postgres from runtime.checkpoint.path / DATABASE_URL). ` +
+        `Silent MemorySaver fallback is not allowed.`,
+    );
+  }
+  throw new Error(`Unknown checkpoint backend "${String(backend)}".`);
 }
 
 function resolveStore(spec: GraphSpec, opts: CompileOptions): BaseStore | undefined {
@@ -865,16 +1151,23 @@ function extractInterrupts(result: Record<string, unknown>): InterruptInfo[] {
   return raw.map((it) => toInterruptInfo(it as { id: string; value?: unknown }));
 }
 
-function toInterruptInfo(it: { id: string; value?: unknown }): InterruptInfo {
+function toInterruptInfo(it: { id?: string; value?: unknown }): InterruptInfo {
   const value = it.value as
-    | { reason?: string; kind?: InterruptInfo["kind"]; data?: { choices?: string[] } }
+    | {
+        reason?: string;
+        kind?: InterruptInfo["kind"];
+        data?: { choices?: string[]; deadlineAt?: string };
+        deadlineAt?: string;
+      }
     | undefined;
-  const info: InterruptInfo = { id: it.id, payload: it.value, kind: "approval" };
+  const info: InterruptInfo = { id: it.id ?? "", payload: it.value, kind: "approval" };
   if (value && typeof value === "object") {
     if (typeof value.reason === "string") info.reason = value.reason;
     if (value.kind) info.kind = value.kind;
     const choices = value.data?.choices;
     if (Array.isArray(choices) && choices.length > 0) info.choices = choices;
+    const deadline = value.data?.deadlineAt ?? value.deadlineAt;
+    if (typeof deadline === "string") info.deadlineAt = deadline;
   }
   return info;
 }
@@ -955,6 +1248,7 @@ async function attachWebhookUrls(
       threadId: opts.threadId,
       nodeId,
       url,
+      ...(serverCfg?.token ? { token: serverCfg.token } : {}),
       resume: async (body) => {
         if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
         const result = await opts.executeInvoke(
@@ -977,22 +1271,28 @@ async function attachWebhookUrls(
 }
 
 function stripReserved(state: Record<string, unknown>): Record<string, unknown> {
+  const reserved = new Set<string>([...RESERVED_STATE_CHANNELS, "__interrupt__"]);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(state)) {
-    if (k === ONCE_CHANNEL || k === "__interrupt__") continue;
+    if (reserved.has(k)) continue;
     out[k] = v;
   }
   return out;
 }
 
-/** Tear down non-keepAlive services when a run reaches completed/error. */
-async function maybeTerminateServices(spec: GraphSpec, threadId: string): Promise<void> {
+/** Tear down non-keepAlive services (and optional worktrees) when a run reaches completed/error. */
+async function maybeTerminateServices(spec: GraphSpec, threadId: string, state?: Record<string, unknown>): Promise<void> {
   const terminate = spec.runtime?.services?.terminateOnEnd ?? true;
-  if (!terminate) return;
-  try {
-    await terminateThreadServices(threadId);
-  } catch {
-    /* best-effort cleanup — do not fail the run result */
+  if (terminate) {
+    try {
+      await terminateThreadServices(threadId);
+    } catch {
+      /* best-effort cleanup — do not fail the run result */
+    }
+  }
+  if (spec.runtime?.worktrees?.cleanupOnEnd) {
+    const entries = (state?.[WORKTREES_CHANNEL] as Array<{ path?: unknown; repo?: unknown }>) ?? [];
+    await cleanupWorktrees(entries);
   }
 }
 
@@ -1016,32 +1316,63 @@ function buildNodeCtx(
   const nodeType = String(nodeSpec["type"]);
   const onceState = (state[ONCE_CHANNEL] as Record<string, unknown> | undefined) ?? {};
   const _onceUpdates: Record<string, unknown> = {};
+  const existingIssues = (state[ISSUES_CHANNEL] as RunIssue[] | undefined) ?? [];
+  const _issueUpdates: RunIssue[] = [];
+  const seenIssueKeys = new Set(existingIssues.map((i) => issueDedupeKey(i)));
+  const parentSpanId = typeof nodeSpec["__parentSpanId"] === "string" ? nodeSpec["__parentSpanId"] : undefined;
+
+  let resolvedWorkspace = workspace;
+  const wsTpl = nodeSpec["workspace"];
+  if (typeof wsTpl === "string" && wsTpl.trim()) {
+    const rendered = String(renderDeep(wsTpl, { ...scope, input: _input }));
+    resolvedWorkspace = path.isAbsolute(rendered) ? rendered : path.resolve(workspace, rendered);
+  }
+
+  const logger = (base as RunContext).logger ?? { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 
   const ctx: NodeRunContext & {
     _input: Record<string, unknown>;
     _onceUpdates: Record<string, unknown>;
+    _issueUpdates: RunIssue[];
     _lgConfig?: LangGraphRunnableConfig;
   } = {
     ...(base as RunContext),
     meta: (base.meta ?? { runId: "", graph: "", startedAt: "" }) as RunContext["meta"],
     secrets: base.secrets!,
     events,
-    logger: (base as RunContext).logger ?? { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
-    workspace,
+    logger,
+    workspace: resolvedWorkspace,
     nodeId,
     nodeType,
     attempt,
     _input,
     _onceUpdates,
+    _issueUpdates,
     render(template: string, extra: Record<string, unknown> = {}) {
-      return renderDeep(template, { state, input: _input, config: base.config, run: base.meta, ...extra });
+      const issues = [...existingIssues, ..._issueUpdates];
+      return renderDeep(template, {
+        state,
+        input: _input,
+        config: base.config,
+        run: base.meta,
+        issues,
+        ...extra,
+      });
     },
-    emit(type, data) { events.emit(type, data, { nodeId, nodeType }); },
+    emit(type, data) { events.emit(type, data, { nodeId, nodeType, ...(parentSpanId ? { parentSpanId } : {}) }); },
     interrupt<T = unknown>(payload: { reason: string; data?: unknown; kind?: import("./context.js").InterruptKind }): T {
       const data =
         payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
           ? { ...(payload.data as Record<string, unknown>), __nodeId: nodeId }
           : { ...(payload.data !== undefined ? { value: payload.data } : {}), __nodeId: nodeId };
+      const threadId = (base.meta as RunMeta | undefined)?.threadId ?? (base.meta as RunMeta | undefined)?.runId;
+      if (threadId) {
+        const key = replayCacheKey(threadId, nodeId);
+        const dump = snapshotReplay(key);
+        if (Object.keys(dump).length > 0) {
+          (data as Record<string, unknown>)["__agentReplay"] = { key, entries: dump };
+        }
+      }
       const tagged = { ...payload, data };
       events.emit("interrupt.raised", { reason: tagged.reason, data: tagged.data }, { nodeId, nodeType });
       return lgInterrupt(tagged) as T;
@@ -1053,8 +1384,251 @@ function buildNodeCtx(
       _onceUpdates[scopedKey] = value;
       return value;
     },
+    issue(input: IssueInput): RunIssue {
+      const stamped = stampIssue(input, { nodeId, nodeType });
+      const key = issueDedupeKey(stamped);
+      if (seenIssueKeys.has(key)) return stamped;
+      seenIssueKeys.add(key);
+      _issueUpdates.push(stamped);
+      events.emit("run.issue", stamped, { nodeId, nodeType });
+      try {
+        appendRunIssue(
+          resolvedWorkspace,
+          runIssuesKey({
+            ...(base.meta?.threadId ? { threadId: base.meta.threadId } : {}),
+            ...(base.meta?.runId ? { runId: base.meta.runId } : {}),
+          }),
+          stamped,
+        );
+      } catch (err) {
+        logger.warn("failed to append run issue", { reason: err instanceof Error ? err.message : String(err) });
+      }
+      return stamped;
+    },
   };
   if (lgConfig !== undefined) ctx._lgConfig = lgConfig;
   if (base.signal !== undefined) ctx.signal = base.signal;
   return ctx;
+}
+
+function resolveGraphWorkspace(spec: GraphSpec, graphDir: string): string {
+  const raw = spec.runtime?.workspace;
+  if (typeof raw !== "string" || !raw.trim()) return graphDir;
+  return path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(graphDir, raw);
+}
+
+function expiredWaitResume(snap: {
+  tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }>;
+} | null | undefined): { timedOut: true } | undefined {
+  if (!snap) return undefined;
+  const now = Date.now();
+  for (const task of snap.tasks ?? []) {
+    for (const it of task.interrupts ?? []) {
+      const info = toInterruptInfo(it);
+      if (info.deadlineAt && Date.parse(info.deadlineAt) <= now) {
+        return { timedOut: true };
+      }
+    }
+  }
+  return undefined;
+}
+
+async function hydrateDurableRuntime(
+  snap: {
+    values?: Record<string, unknown>;
+    tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }>;
+  } | null | undefined,
+  threadId: string,
+  graphSpec: GraphSpec,
+  opts: {
+    executeInvoke: (
+      payload: Record<string, unknown> | Command | null,
+      runOpts: RunOptions | ResumeOptions | ContinueOptions,
+      mode: ExecuteMode,
+    ) => Promise<RunResult>;
+    signal?: AbortSignal;
+    sinks?: EventSink[];
+    rehydrateWebhooks?: boolean;
+  },
+): Promise<void> {
+  if (!snap) return;
+  for (const task of snap.tasks ?? []) {
+    for (const it of task.interrupts ?? []) {
+      hydrateReplayFromInterruptPayload(it.value);
+    }
+  }
+  const replayState = snap.values?.[REPLAY_CHANNEL];
+  if (replayState && typeof replayState === "object" && !Array.isArray(replayState)) {
+    for (const [key, entries] of Object.entries(replayState as Record<string, unknown>)) {
+      if (entries && typeof entries === "object" && !Array.isArray(entries)) {
+        hydrateReplay(key, entries as Record<string, unknown>);
+      }
+    }
+  }
+
+  const interrupts: InterruptInfo[] = [];
+  for (const task of snap.tasks ?? []) {
+    for (const it of task.interrupts ?? []) interrupts.push(toInterruptInfo(it));
+  }
+  if (opts.rehydrateWebhooks !== false && interrupts.some(isWebhookInterrupt) && !getWebhookRoute(threadId)) {
+    await attachWebhookUrls(interrupts, {
+      threadId,
+      graphSpec,
+      executeInvoke: opts.executeInvoke,
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.sinks ? { sinks: opts.sinks } : {}),
+    });
+  }
+
+  if (graphSpec.runtime?.services?.rehydrateOnResume) {
+    const intents = snap.values?.[SERVICES_CHANNEL];
+    if (intents && typeof intents === "object") {
+      for (const [name, raw] of Object.entries(intents as Record<string, unknown>)) {
+        if (!raw || typeof raw !== "object") continue;
+        const current = statusService(threadId, name);
+        if (current.status === "running") continue;
+        const spec = raw as ServiceStartSpec;
+        try {
+          await startService(threadId, { ...spec, name });
+        } catch (err) {
+          (raw as Record<string, unknown>)["needsRestart"] = true;
+          (raw as Record<string, unknown>)["rehydrateError"] = err instanceof Error ? err.message : String(err);
+        }
+      }
+    }
+  }
+}
+
+function addCheckpointedMap(
+  graph: StateGraph<unknown>,
+  spec: GraphSpec,
+  nodeSpec: { id: string; type: string; with?: unknown; retry?: unknown; timeout?: unknown },
+  configUnknown: unknown,
+  ctx: {
+    runId: string;
+    events: EventBus;
+    baseCtx: Partial<RunContext>;
+    graphWorkspace: string;
+    hooks: HookBus;
+    toolWiring: ToolWiring;
+    defaultRetry: unknown;
+    defaultTimeout: unknown;
+  },
+  mapJoinById: Map<string, string>,
+): void {
+  const parsed = MapWithSchema.safeParse(configUnknown);
+  if (!parsed.success) {
+    throw new Error(
+      `Node "${nodeSpec.id}" config error: ` +
+        parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", "),
+    );
+  }
+  const config = parsed.data;
+  const mapId = nodeSpec.id;
+  const { workerId, joinId } = mapSyntheticIds(mapId);
+  mapJoinById.set(mapId, joinId);
+
+  const innerType = String((config.node as Record<string, unknown>)["type"] ?? "");
+  const buildCtx = {
+    graphName: spec.metadata.name,
+    toolWiring: ctx.toolWiring,
+    ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
+  };
+  const nodeRetry = (nodeSpec.retry ?? ctx.defaultRetry) as RetryConfigInput;
+  const nodeTimeout = (nodeSpec.timeout ?? ctx.defaultTimeout) as string | undefined;
+
+  graph.addNode(
+    mapId,
+    async (state: Record<string, unknown>) => {
+      const scope = { state, config: ctx.baseCtx.config ?? {}, run: ctx.baseCtx.meta ?? {} };
+      const collection = renderDeep(config.over, scope);
+      if (!Array.isArray(collection)) {
+        throw new Error(`map node "${mapId}": "over" did not evaluate to an array.`);
+      }
+      ctx.events.emit("node.start", { nodeId: mapId, type: "map" }, { nodeId: mapId, nodeType: "map" });
+      ctx.events.emit("node.output", { map: { over: config.over, count: collection.length, concurrency: config.concurrency } }, { nodeId: mapId, nodeType: "map" });
+      if (collection.length === 0) {
+        const update = collectMapResults(config, [], mapId, scope);
+        ctx.events.emit("node.end", { nodeId: mapId, update }, { nodeId: mapId, nodeType: "map" });
+        return new Command({ goto: joinId, update }) as unknown as Record<string, unknown>;
+      }
+      return new Command({
+        goto: collection.map(
+          (item, index) =>
+            new Send(workerId, {
+              ...state,
+              [MAP_TASK_CHANNEL]: { mapId, index, item, as: config.as, count: collection.length } satisfies MapTask,
+            }),
+        ),
+      }) as unknown as Record<string, unknown>;
+    },
+    { ends: [workerId, joinId] } as Parameters<typeof graph.addNode>[2],
+  );
+
+  graph.addNode(workerId, async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
+    const task = state[MAP_TASK_CHANNEL] as MapTask | undefined;
+    if (!task || task.mapId !== mapId) {
+      throw new Error(`map worker "${workerId}": missing __mapTask payload.`);
+    }
+    const itemId = `${mapId}[${task.index}]`;
+    const itemScope = { nodeId: itemId, nodeType: innerType, parentSpanId: mapId };
+    const itemLgConfig = namespacedRunnableConfig(lgConfig, itemId);
+    ctx.events.emit("node.start", { nodeId: itemId, type: innerType, mapId, index: task.index }, itemScope);
+
+    try {
+      const run = await runWithPolicy(
+        (attempt) => {
+          const nodeCtx = buildNodeCtx(
+            {
+              ...(config.node as Record<string, unknown>),
+              id: itemId,
+              type: innerType,
+              __parentSpanId: mapId,
+            },
+            state,
+            ctx.baseCtx,
+            ctx.events,
+            ctx.graphWorkspace,
+            attempt,
+            undefined,
+            itemLgConfig,
+          );
+          return runMapItem(buildCtx, mapId, config, state, nodeCtx, task).then((value) => ({
+            value,
+            onceUpdates: nodeCtx._onceUpdates,
+            issueUpdates: nodeCtx._issueUpdates,
+          }));
+        },
+        {
+          retry: nodeRetry,
+          timeout: nodeTimeout,
+          signal: ctx.baseCtx.signal,
+          onRetry: (info) => ctx.events.emit("node.retry", { nodeId: itemId, ...info }, itemScope),
+          onTimeout: (info) => ctx.events.emit("node.timeout", { nodeId: itemId, ...info }, itemScope),
+        },
+      );
+      ctx.events.emit("node.end", { nodeId: itemId, mapId, index: task.index }, itemScope);
+      const update: Record<string, unknown> = {
+        [MAP_COLLECT_CHANNEL]: { [mapId]: [{ i: task.index, v: run.value }] },
+      };
+      if (Object.keys(run.onceUpdates).length > 0) update[ONCE_CHANNEL] = run.onceUpdates;
+      if (run.issueUpdates.length > 0) update[ISSUES_CHANNEL] = run.issueUpdates;
+      return update;
+    } catch (err) {
+      if (isInterruptLike(err)) throw err;
+      ctx.events.emit("node.error", { nodeId: itemId, error: String(err) }, itemScope);
+      throw err;
+    }
+  });
+
+  graph.addNode(joinId, async (state: Record<string, unknown>) => {
+    const bagRaw = (state[MAP_COLLECT_CHANNEL] as Record<string, unknown> | undefined)?.[mapId];
+    const bag = Array.isArray(bagRaw) ? (bagRaw as Array<{ i: number; v: unknown }>) : [];
+    const scope = { state, config: ctx.baseCtx.config ?? {}, run: ctx.baseCtx.meta ?? {} };
+    const update = collectMapResults(config, bag, mapId, scope);
+    ctx.events.emit("node.end", { nodeId: mapId, update, joined: true }, { nodeId: mapId, nodeType: "map" });
+    return update;
+  });
+
+  graph.addEdge(workerId as typeof START, joinId as typeof END);
 }

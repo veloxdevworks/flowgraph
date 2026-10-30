@@ -7,12 +7,18 @@
 
 import { spawn } from "node:child_process";
 import { z } from "zod";
-import { ShellWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { ShellWithSchema } from "@flowgraph/spec";
+import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
+import {
+  findMissingBins,
+  isCommandNotFoundExit,
+  missingToolIssue,
+  spawnMissingToolError,
+} from "../runtime/requires.js";
 
 const configSchema = ShellWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -71,6 +77,30 @@ export const shellNode = defineNode<Config>({
         const timeoutMs = config.timeout ? parseDuration(config.timeout) : DEFAULT_TIMEOUT_MS;
         const allowedExit = config.expect?.exitCode ?? [0];
 
+        const missing = await findMissingBins(config.requires);
+        if (missing.length > 0) {
+          const skip = config.onMissingTool === "skip";
+          ctx.issue(missingToolIssue(missing, { command, skipped: skip }));
+          if (skip) {
+            const result = {
+              ok: false,
+              skipped: true,
+              missing: missing.map((m) => m.bin),
+              stdout: "",
+              stderr: "",
+              exitCode: null,
+            };
+            ctx.emit("node.output", result);
+            return {
+              update: applyOutput(config.output, result, {
+                nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+                scope,
+              }),
+            };
+          }
+          throw new Error(missingToolIssue(missing, { command, skipped: false }).message);
+        }
+
         const env: NodeJS.ProcessEnv = {
           ...process.env,
           ...renderedEnv,
@@ -91,18 +121,36 @@ export const shellNode = defineNode<Config>({
           timeoutMs,
         });
 
-        const { stdout, stderr, exitCode } = await runProcess({
-          command,
-          ...(args !== undefined ? { args } : {}),
-          shell: useShell,
-          cwd,
-          env,
-          timeoutMs,
-          ...(ctx.signal ? { signal: ctx.signal } : {}),
-          ...(stdinData !== undefined ? { stdin: stdinData } : {}),
-        });
+        let proc: { stdout: string; stderr: string; exitCode: number };
+        try {
+          proc = await runProcess({
+            command,
+            ...(args !== undefined ? { args } : {}),
+            shell: useShell,
+            cwd,
+            env,
+            timeoutMs,
+            ...(ctx.signal ? { signal: ctx.signal } : {}),
+            ...(stdinData !== undefined ? { stdin: stdinData } : {}),
+          });
+        } catch (err) {
+          const mapped = spawnMissingToolError(err, command);
+          if (mapped) {
+            ctx.issue(missingToolIssue([{ bin: command }], { command, skipped: false }));
+            throw mapped;
+          }
+          throw err;
+        }
+        const { stdout, stderr, exitCode } = proc;
 
         if (!allowedExit.includes(exitCode)) {
+          if (isCommandNotFoundExit(exitCode, stderr)) {
+            ctx.issue(missingToolIssue([{ bin: command }], { command, skipped: false }));
+            throw new Error(
+              `required binary for "${command}" was not found (exit ${exitCode}). Install it and re-run.` +
+                (stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : ""),
+            );
+          }
           const excerpt = stderr.trim().slice(0, 500) || stdout.trim().slice(0, 500);
           throw new Error(
             `shell node: command exited with code ${exitCode}` +

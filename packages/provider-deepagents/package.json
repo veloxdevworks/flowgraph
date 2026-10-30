@@ -1,0 +1,41 @@
+{
+  "name": "@flowgraph/provider-deepagents",
+  "version": "0.1.0",
+  "description": "Deep Agents hub adapter for flowgraph agent nodes (inherits the graph LangChain model/key)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
+    "deepagents": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "deepagents": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
+    "@langchain/core": "^1.2.0",
+    "@types/node": "^26.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
+  }
+}

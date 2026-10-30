@@ -16,7 +16,7 @@ pnpm start
 ### Reducer plugin module
 
 ```ts
-import type { ReducerFn } from "@veloxdevworks/flowgraph-core";
+import type { ReducerFn } from "@flowgraph/core";
 
 const uniqueById: ReducerFn = (cur, inc) => { /* merge by id */ };
 

@@ -1,5 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+export class PayloadTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`Request body exceeds ${maxBytes} bytes`);
+    this.name = "PayloadTooLargeError";
+  }
+}
+
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -9,10 +16,23 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
   res.end(payload);
 }
 
-export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+/**
+ * Read a JSON body with an optional byte cap (`0` / omitted = unlimited).
+ */
+export async function readJsonBody(
+  req: IncomingMessage,
+  maxBytes = 0,
+): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    size += buf.length;
+    if (maxBytes > 0 && size > maxBytes) {
+      req.destroy();
+      throw new PayloadTooLargeError(maxBytes);
+    }
+    chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf-8");
   if (!raw.trim()) return {};

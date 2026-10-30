@@ -1,4 +1,5 @@
-import type { ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { log } from "../metrics.js";
 import type { ServerEvent } from "../types.js";
 import type { SessionRegistry } from "../session-registry.js";
 
@@ -8,7 +9,15 @@ export function attachSse(
   registry: SessionRegistry,
   threadId: string,
   lastEventId: string | undefined,
+  req?: IncomingMessage,
 ): () => void {
+  const started = Date.now();
+  log("info", "events.subscribe", {
+    threadId,
+    lastEventId: lastEventId ?? null,
+    remote: req?.socket.remoteAddress,
+  });
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -43,6 +52,11 @@ export function attachSse(
   const cleanup = () => {
     clearInterval(heartbeat);
     unsub();
+    log("info", "events.close", {
+      threadId,
+      durationMs: Date.now() - started,
+      lastSeq: registry.get(threadId)?.lastSeq ?? 0,
+    });
   };
 
   res.on("close", cleanup);

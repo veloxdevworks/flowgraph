@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as path from "node:path";
 import * as url from "node:url";
-import { loadGraph, compileGraph, createScriptedProvider } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, compileGraph, createScriptedProvider } from "@flowgraph/core";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const graphPath = path.join(__dirname, "hitl-demo.graph.yaml");
@@ -27,7 +27,7 @@ describe("hitl-demo example", () => {
     const { spec } = await loadGraph(graphPath, { cwd: __dirname });
     if (!spec) throw new Error("no spec");
 
-    const { compileGraph } = await import("@veloxdevworks/flowgraph-core");
+    const { compileGraph } = await import("@flowgraph/core");
     const graph = await compileGraph(spec, {
       cwd: __dirname,
       checkpointer: "memory",

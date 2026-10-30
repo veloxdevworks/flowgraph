@@ -5,7 +5,7 @@ import { registry } from "../registry.js";
 import { loadGraphImports } from "./load-imports.js";
 import { validateSpec } from "../loader.js";
 import { buildStateAnnotation } from "./state-annotation.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const pluginPath = path.join(__dirname, "fixtures", "reducers-plugin.ts");

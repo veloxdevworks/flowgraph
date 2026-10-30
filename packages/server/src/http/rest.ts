@@ -1,8 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ClientSecretsRejectedError, credentialStatus } from "../credentials.js";
+import { processIdentity } from "../diagnostics.js";
+import { TooManyRunsError } from "../errors.js";
 import type { RunService } from "../run-service.js";
 import { attachSse } from "./sse.js";
-import { readJsonBody, sendJson, matchPath } from "./util.js";
+import { matchPath, PayloadTooLargeError, readJsonBody, sendJson } from "./util.js";
 
 export async function handleRest(
   req: IncomingMessage,
@@ -12,6 +14,7 @@ export async function handleRest(
 ): Promise<boolean> {
   const { pathname } = url;
   const method = req.method ?? "GET";
+  const maxBodyBytes = service.config.maxBodyBytes ?? 2_000_000;
 
   if (method === "GET" && pathname === "/healthz") {
     sendJson(res, 200, {
@@ -20,19 +23,31 @@ export async function handleRest(
       metrics: service.metrics.snapshot(),
       database: service.config.databaseUrl ? "postgres" : "memory",
       credentials: credentialStatus(),
+      authRequired: !service.config.authDisabled && Boolean(service.config.authToken),
+      identity: processIdentity(service.config),
     });
+    return true;
+  }
+
+  if (method === "GET" && pathname === "/runs") {
+    try {
+      sendJson(res, 200, { runs: await service.listRuns() });
+    } catch (err) {
+      sendError(res, err);
+    }
     return true;
   }
 
   if (method === "POST" && pathname === "/runs") {
     try {
-      const body = (await readJsonBody(req)) as {
+      const body = (await readJsonBody(req, maxBodyBytes)) as {
         threadId?: string;
         yaml?: string;
         input?: Record<string, unknown>;
         label?: string;
         env?: Record<string, string>;
         stream?: boolean;
+        dryRun?: boolean;
       };
       const result = await service.startRun({
         threadId: body.threadId ?? "",
@@ -40,6 +55,7 @@ export async function handleRest(
         ...(body.input ? { input: body.input } : {}),
         ...(body.label ? { label: body.label } : {}),
         ...(body.env ? { env: body.env } : {}),
+        ...(body.dryRun ? { dryRun: true } : {}),
       });
       if (body.stream) {
         // Start already fired; attach SSE on the same response via redirect pattern —
@@ -59,7 +75,7 @@ export async function handleRest(
         (req.headers["last-event-id"] as string | undefined) ??
         url.searchParams.get("afterSeq") ??
         undefined;
-      attachSse(res, service.registry, m.threadId, lastEventId);
+      attachSse(res, service.registry, m.threadId, lastEventId, req);
       return true;
     }
   }
@@ -68,7 +84,7 @@ export async function handleRest(
     const m = matchPath<"threadId">(pathname, "/runs/:threadId/resume");
     if (m && method === "POST") {
       try {
-        const body = (await readJsonBody(req)) as {
+        const body = (await readJsonBody(req, maxBodyBytes)) as {
           resume?: unknown;
           yaml?: string;
         };
@@ -113,12 +129,36 @@ export async function handleRest(
     const m = matchPath<"threadId">(pathname, "/runs/:threadId/continue");
     if (m && method === "POST") {
       try {
-        const body = (await readJsonBody(req)) as { yaml?: string };
+        const body = (await readJsonBody(req, maxBodyBytes)) as { yaml?: string };
         sendJson(
           res,
           202,
           await service.continueRun(m.threadId, body.yaml),
         );
+      } catch (err) {
+        sendError(res, err);
+      }
+      return true;
+    }
+  }
+
+  {
+    const m = matchPath<"threadId">(pathname, "/runs/:threadId/journal");
+    if (m && method === "GET") {
+      try {
+        sendJson(res, 200, { events: service.getJournal(m.threadId) });
+      } catch (err) {
+        sendError(res, err);
+      }
+      return true;
+    }
+  }
+
+  {
+    const m = matchPath<"threadId">(pathname, "/runs/:threadId/issues");
+    if (m && method === "GET") {
+      try {
+        sendJson(res, 200, { issues: service.listIssues(m.threadId) });
       } catch (err) {
         sendError(res, err);
       }
@@ -152,12 +192,37 @@ export async function handleRest(
     }
   }
 
+  {
+    const m = matchPath<"threadId">(pathname, "/runs/:threadId");
+    if (m && method === "GET") {
+      try {
+        const detail = await service.getRun(m.threadId);
+        if (!detail) {
+          sendJson(res, 404, { error: `No run "${m.threadId}"` });
+        } else {
+          sendJson(res, 200, detail);
+        }
+      } catch (err) {
+        sendError(res, err);
+      }
+      return true;
+    }
+  }
+
   return false;
 }
 
 function sendError(res: ServerResponse, err: unknown): void {
   if (err instanceof ClientSecretsRejectedError) {
     sendJson(res, 400, { error: err.message, code: "CLIENT_SECRETS_REJECTED" });
+    return;
+  }
+  if (err instanceof PayloadTooLargeError) {
+    sendJson(res, 413, { error: err.message, code: "PAYLOAD_TOO_LARGE" });
+    return;
+  }
+  if (err instanceof TooManyRunsError) {
+    sendJson(res, 429, { error: err.message, code: "TOO_MANY_RUNS" });
     return;
   }
   const message = err instanceof Error ? err.message : String(err);

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { messagesStateReducer } from "@langchain/langgraph";
 import { buildStateAnnotation, channelReducerAndDefault } from "./state-annotation.js";
 import { registry } from "../registry.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 
 const baseSpec = (channels: GraphSpec["state"]): GraphSpec =>
   ({

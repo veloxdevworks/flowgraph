@@ -3,17 +3,22 @@
  * Server-side only — no CLI fallbacks (container may not have local CLIs).
  */
 
-import type { ProviderAdapter } from "@veloxdevworks/flowgraph-core";
+import type { ProviderAdapter } from "@flowgraph/core";
 import {
   createLangChainProviderFromConfig,
   isKnownLangChainVendor,
-} from "@veloxdevworks/flowgraph-core";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+  mockProvider,
+} from "@flowgraph/core";
+import type { GraphSpec } from "@flowgraph/spec";
 
 export async function buildServerProviders(
   spec: GraphSpec,
   cwd = process.cwd(),
+  opts: { dryRun?: boolean } = {},
 ): Promise<ProviderAdapter[]> {
+  if (opts.dryRun) {
+    return [mockProvider];
+  }
   const providers: ProviderAdapter[] = [];
   const built = new Set<string>();
 

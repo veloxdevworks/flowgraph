@@ -277,6 +277,20 @@ The primary escape hatch for custom logic: run any CLI, script, or shell pipelin
 
 **Defaults:** timeout `30s`, `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
 
+Declare toolchains with `requires` so missing binaries are caught at preflight and (optionally) skipped instead of failing the run:
+
+```yaml
+- id: verify
+  type: shell
+  with:
+    command: go
+    args: [test, ./...]
+    requires: [{ bin: go, version: ">=1.22" }]
+    onMissingTool: skip     # fail (default) | skip
+```
+
+`onMissingTool: skip` returns `{ ok: false, skipped: true }` and records a `TOOL_NOT_FOUND` run issue so later agents can see that verification never ran. Even in `fail` mode, a missing binary (ENOENT / exit 127) is reported as `TOOL_NOT_FOUND` rather than a raw spawn error.
+
 **Injection caveat:** shell-string mode interpolates templates into the command line. Treat untrusted state values the same way you would for `http` URL/body templates — prefer argv mode (`args`) when values come from external input.
 
 **Load-time `${ENV}` gotcha:** do **not** write braced `${MY_VAR}` / `${MY_VAR:-default}` inside `command`, `args`, or `env` values when `MY_VAR` comes from this node's own `with.env`. Graph load rewrites those against the host process environment *before* the node runs (often to empty), so a script that does `BRANCH="plan/${SLUG}"` becomes `BRANCH="plan/"` even when `env.SLUG` is set correctly. Use unbraced `$MY_VAR` instead:
@@ -426,7 +440,7 @@ Legacy escape hatch for programmatic embedders — prefer [`shell`](#5-shell--ru
 
 ```ts
 // registered at compile time
-import { registerFunction } from "@veloxdevworks/flowgraph-core";
+import { registerFunction } from "@flowgraph/core";
 
 registerFunction("dedupeFindings", (input, ctx) => {
   const seen = new Set<string>();
@@ -670,7 +684,7 @@ When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTT
 
 ### `timeout` (informational only)
 
-`timeout` on `until`/`signal`/`webhook` is **surfaced as metadata** on the interrupt payload but is **not enforced** by the runtime today. A durable, cross-restart deadline would require an external scheduler to resume or fail the run after the deadline (same class of feature as cron-driven resume). Until that exists, treat `timeout` as documentation for operators and external tooling.
+`timeout` on `until`/`signal`/`webhook` sets `deadlineAt` on the interrupt. It is enforced two ways, both best-effort and in-process: (1) when a run returns `interrupted` under `onInterrupt: fail` or `webhook`, the compiled graph arms a timer that resumes the thread with `{ timedOut: true }` at the deadline (pass `onWaitTimeout(result)` to `compileGraph` to receive that background run's result; failures are also emitted as `run.error`); (2) any later resume after the deadline receives `{ timedOut: true }`. Timers do not survive a process restart, so a durable cross-restart deadline still needs an external scheduler (same class of feature as cron-driven resume).
 
 `wait` for external signals/conditions/webhooks uses interrupt/resume so the pause survives restarts (the HTTP listener itself does not).
 
@@ -678,9 +692,9 @@ When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTT
 
 ## 9b. `demo` — best-effort artifact capture
 
-Capture a small artifact that demonstrates what a pipeline produced — an API request/response transcript, a web screenshot (optional short video of the page load), or an attached file/document. Modes are **explicit** (no auto-detection of "is this a web app"); richer interaction (login, click-through, mobile simulator recording) belongs in a prior `shell`/`script` node, with `demo` attaching the resulting file via `file` mode.
+Capture a small artifact that demonstrates what a pipeline produced — an API request/response transcript, a web screenshot, a short page-load video, a mobile-simulator recording, or an attached file/document. Modes are **explicit** (no auto-detection of "is this a web app"). Interactive flows (login, click-through) still belong in a prior `shell`/`script` node (or Playwright MCP), with `demo` attaching the resulting file via `file` mode. Simulator screenshot/video capture **is** in-scope.
 
-**Exactly one** of `http`, `screenshot`, or `file` must be set.
+**Exactly one** of `http`, `screenshot`, `file`, `video`, or `simulator` must be set.
 
 ```yaml
 # API request/response transcript
@@ -711,6 +725,27 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
   with:
     file:
       path: "{{ state.outputs.build.reportPath }}"
+
+# Web video (requires optional peer `playwright`)
+- id: prove-ui-video
+  type: demo
+  with:
+    video:
+      url: "http://localhost:{{ state.port }}/"
+      duration: 5s
+      waitFor: "main"
+      scroll: true
+
+# iOS Simulator recording (requires Xcode `xcrun simctl`)
+- id: prove-mobile
+  type: demo
+  with:
+    simulator:
+      platform: ios
+      device: "iPhone 15"
+      app: com.example.app
+      capture: video
+      duration: 15s
 ```
 
 ### Modes
@@ -718,7 +753,9 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
 | Mode | What it does | Extra deps |
 |---|---|---|
 | `http` | Re-issues the request; writes a JSON transcript (redacted headers) under `.flowgraph/demo/<nodeId>/` | none |
-| `screenshot` | Headless Chromium via Playwright; PNG screenshot (+ optional `.webm` when `video: true`) | optional peer `playwright` (+ `npx playwright install chromium`) |
+| `screenshot` | Headless Chromium via Playwright; PNG screenshot (+ tracked `.webm` extra when `video: true`) | optional peer `playwright` (+ `npx playwright install chromium`) |
+| `video` | Headless Chromium page recording; `.webm` is the primary artifact | optional peer `playwright` |
+| `simulator` | iOS (`xcrun simctl`) or Android (`adb`) screenshot / `recordVideo` / `screenrecord` | Xcode CLT or Android SDK platform-tools |
 | `file` | Copies an existing path into the demo artifact dir | none |
 
 ### Best effort vs `strict`
@@ -730,13 +767,14 @@ By default, capture failures (Playwright missing, DNS error, source file not fou
 ```ts
 {
   ok: boolean;
-  kind: "http" | "screenshot" | "file";
+  kind: "http" | "screenshot" | "file" | "video" | "simulator";
   path?: string;         // artifact file path when ok
   mimeType?: string;
   sizeBytes?: number;
   reason?: string;       // when ok: false
   capturedAt: string;
   label?: string;
+  extra?: Array<{ path, mimeType, kind, sizeBytes? }>; // e.g. screenshot + video
   // http mode also includes request/response summaries (headers redacted)
 }
 ```
@@ -806,7 +844,41 @@ The agent may call each tool zero or more times with different arguments. Each c
 
 ### Compose for anything harder
 
-Need to log in, click through a flow, or record a mobile simulator? Do that in a `shell`/`script` node (or Playwright MCP), then attach the resulting file with `demo` `file` mode. Keeping `demo` narrow avoids baking environment-specific tooling into the engine.
+Need to log in, click through a flow, or drive a custom mobile script? Do that in a `shell`/`script` node (or Playwright MCP), then attach the resulting file with `demo` `file` mode. Simulator screenshot/video capture is in-scope for `demo`; arbitrary interactive flows are not.
+
+---
+
+## 9c. `worktree` — isolated git worktrees
+
+Creates, removes, or lists `git worktree`s so parallel branches (e.g. a `map` of agents) each get their own checkout.
+
+```yaml
+- id: isolate
+  type: worktree
+  with:
+    action: add                # add (default) | remove | status
+    branch: "farm/{{ state.item.id }}"
+    path: ".worktrees/{{ state.item.id }}"   # relative to runtime.workspace
+    # repo: ../other-repo      # git repo root; default runtime.workspace
+    # reset: false             # add only: allow resetting an EXISTING branch to HEAD
+    output: { to: worktree }   # { path, branch, head, action }
+```
+
+Safety rules (enforced at run time; violations fail the node with a clear error):
+
+- **Branch names** must pass `git check-ref-format --branch` unchanged; names starting with `-`, containing whitespace, or using `@{…}` are rejected.
+- **Paths** must resolve strictly inside the worktree root (`runtime.worktrees.root`, absolute or workspace-relative; default `runtime.workspace`), also after resolving symlinks. Values starting with `-` are rejected, and paths are passed to git after `--`.
+- **Existing branches are never moved silently.** `add` uses `git worktree add -b`; if the branch already exists the node fails unless `reset: true` is set (then `-B`, which resets the branch to HEAD).
+- **`remove`** uses `--force` only for a worktree this thread's own `worktree` nodes created (tracked in the reserved `__worktrees` channel). Any other worktree is removed without `--force`, so git refuses if it has uncommitted changes.
+
+`runtime.worktrees.cleanupOnEnd: true` force-removes the thread's own worktrees when the graph completes (not on a HITL pause).
+
+```yaml
+runtime:
+  worktrees:
+    root: .worktrees        # optional
+    cleanupOnEnd: true
+```
 
 ---
 
@@ -815,11 +887,11 @@ Need to log in, click through a flow, or record a mobile simulator? Do that in a
 | `type` | Purpose | Capabilities | Package |
 |---|---|---|---|
 | `agent` | Agent loop w/ tools (hub & spoke) | streaming, interruptible, side-effecting | core (+ provider pkg) |
-| `skill` | Run a declared skill | varies by skill | core (+ `@veloxdevworks/flowgraph-skills`) |
+| `skill` | Run a declared skill | varies by skill | core (+ `@flowgraph/skills`) |
 | `router` | Choose next node(s) | routing | core |
 | `http` | Outbound HTTP | side-effecting | core |
-| `demo` | Best-effort artifact capture (HTTP transcript / screenshot / file) | side-effecting | core (+ optional `playwright` for screenshot) |
-| `mcp` | MCP tool/resource call | side-effecting | core (+ `@veloxdevworks/flowgraph-mcp` at runtime) |
+| `demo` | Best-effort artifact capture (HTTP / screenshot / video / simulator / file) | side-effecting | core (+ optional `playwright`; simulators need Xcode/adb) |
+| `mcp` | MCP tool/resource call | side-effecting | core (+ `@flowgraph/mcp` at runtime) |
 | `webhook` | Outbound HTTP notify | side-effecting | core |
 | `shell` | Run a local command / shell string | side-effecting | core |
 | `service` | Start/stop long-running background processes | side-effecting | core |
@@ -830,6 +902,7 @@ Need to log in, click through a flow, or record a mobile simulator? Do that in a
 | `map` | Fan-out over a collection | composite, parallel | core |
 | `hitl` | Human approve / question / choice gate | interruptible | core |
 | `wait` | Delay / condition / signal / inbound webhook gate | interruptible | core |
+| `worktree` | Add / remove / list isolated git worktrees | side-effecting | core |
 
 ---
 
@@ -839,7 +912,7 @@ Third parties extend the registry by publishing a node plugin package and import
 
 ```ts
 // @acme/flowgraph-nodes-aws
-import { defineNode } from "@veloxdevworks/flowgraph-core";
+import { defineNode } from "@flowgraph/core";
 import { z } from "zod";
 
 export const s3Put = defineNode({

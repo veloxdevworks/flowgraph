@@ -6,8 +6,8 @@
  */
 
 import { z } from "zod";
-import { WebhookWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { WebhookWithSchema } from "@flowgraph/spec";
+import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { applyOutput } from "./output.js";

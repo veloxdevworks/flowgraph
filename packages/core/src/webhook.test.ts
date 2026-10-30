@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { compileGraph } from "./compiler.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 
 describe("webhook node (emit)", () => {
   const originalFetch = global.fetch;

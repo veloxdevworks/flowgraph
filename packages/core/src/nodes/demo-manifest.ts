@@ -8,8 +8,16 @@
 
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { runScopedKey, sanitizeRunKey } from "../runtime/run-key.js";
 
-export type DemoKind = "http" | "screenshot" | "file";
+export type DemoKind = "http" | "screenshot" | "file" | "video" | "simulator";
+
+export type DemoExtraArtifact = {
+  path: string;
+  mimeType: string;
+  kind: string;
+  sizeBytes?: number;
+};
 
 export type DemoManifestEntry = {
   ok: boolean;
@@ -21,10 +29,11 @@ export type DemoManifestEntry = {
   sizeBytes?: number;
   reason?: string;
   label?: string;
+  extra?: DemoExtraArtifact[];
 };
 
 export function demoManifestPath(workspace: string, key: string): string {
-  const safe = key.replace(/[^a-zA-Z0-9._-]+/g, "_") || "run";
+  const safe = sanitizeRunKey(key);
   return join(workspace, ".flowgraph", "demo", "runs", safe, "manifest.jsonl");
 }
 
@@ -59,6 +68,4 @@ export function readDemoManifest(workspace: string, key: string): DemoManifestEn
 }
 
 /** Prefer threadId (survives HITL resume) over the compile-time runId. */
-export function demoManifestKey(meta: { threadId?: string; runId?: string }): string {
-  return meta.threadId || meta.runId || "anonymous";
-}
+export const demoManifestKey = runScopedKey;

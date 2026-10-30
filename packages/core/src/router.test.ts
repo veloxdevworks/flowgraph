@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 
 /**
  * Router drives exclusive routing via Command{ goto } alone — no duplicate

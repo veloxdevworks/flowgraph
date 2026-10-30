@@ -7,8 +7,8 @@
  * Optional `to` / `map` are additive projections. `none` opts out entirely.
  */
 
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
-import type { OutputMapping } from "@veloxdevworks/flowgraph-spec";
+import { renderDeep } from "@flowgraph/expr";
+import type { OutputMapping } from "@flowgraph/spec";
 
 /** Reserved channel holding per-node results: `state.outputs.<nodeId>`. */
 export const OUTPUTS_CHANNEL = "outputs";

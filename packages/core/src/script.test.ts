@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { compileGraph } from "./compiler.js";
-import { ScriptWithSchema, type GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import { ScriptWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { runScriptSandboxed } from "./nodes/script.js";
 
 function scriptSpec(nodeWith: Record<string, unknown>): GraphSpec {

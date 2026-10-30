@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { compileGraph } from "../compiler.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "../events.js";
 import { closeWebhookServers } from "../runtime/webhook-server.js";
 
@@ -180,5 +180,61 @@ describe("wait node", () => {
     });
     expect(r2.status).toBe("interrupted");
     expect(interruptData(r2.interrupts)["mode"]).toBe("until");
+  });
+
+  it("expires overdue waits with timedOut on the next resume", async () => {
+    const compiled = await compileGraph(
+      waitGraph({ signal: "deploy-finished", timeout: "1ms", output: { to: "approval" } }),
+      {},
+    );
+    const r1 = await compiled.run({ threadId: "wait-deadline", onInterrupt: "fail" });
+    expect(r1.status).toBe("interrupted");
+    expect(r1.interrupts?.[0]?.deadlineAt).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 40));
+    const snap = await compiled.getState("wait-deadline");
+    const fromSnap = snap?.values["approval"];
+    if (fromSnap && typeof fromSnap === "object" && (fromSnap as { timedOut?: boolean }).timedOut) {
+      expect(fromSnap).toEqual({ timedOut: true });
+      return;
+    }
+    const r2 = await compiled.resume({
+      threadId: "wait-deadline",
+      resume: { deployFinished: true },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("completed");
+    expect(r2.state["approval"]).toEqual({ timedOut: true });
+  });
+
+  it("reports the background timeout resume result via onWaitTimeout", async () => {
+    let resolveResult!: (r: { status: string; state: Record<string, unknown> }) => void;
+    const got = new Promise<{ status: string; state: Record<string, unknown> }>((r) => (resolveResult = r));
+    const compiled = await compileGraph(
+      waitGraph({ signal: "deploy-finished", timeout: "5ms", output: { to: "approval" } }),
+      { onWaitTimeout: (r) => resolveResult(r) },
+    );
+    const r1 = await compiled.run({ threadId: "wait-timer-result", onInterrupt: "fail" });
+    expect(r1.status).toBe("interrupted");
+    const r2 = await got;
+    expect(r2.status).toBe("completed");
+    expect(r2.state["approval"]).toEqual({ timedOut: true });
+  });
+
+  it("keeps wait timers per compiled graph when thread ids collide", async () => {
+    const fired: string[] = [];
+    const a = await compileGraph(
+      waitGraph({ signal: "s", timeout: "20ms", output: { to: "approval" } }),
+      { onWaitTimeout: (r) => fired.push(`a:${r.status}`) },
+    );
+    const b = await compileGraph(
+      waitGraph({ signal: "s", output: { to: "approval" } }),
+      { onWaitTimeout: (r) => fired.push(`b:${r.status}`) },
+    );
+    expect((await a.run({ threadId: "shared-thread", onInterrupt: "fail" })).status).toBe("interrupted");
+    // A run on another graph with the same thread id must not cancel graph a's timer.
+    expect((await b.run({ threadId: "shared-thread", onInterrupt: "fail" })).status).toBe("interrupted");
+    await new Promise((r) => setTimeout(r, 80));
+    expect(fired).toEqual(["a:completed"]);
+    expect((await a.getState("shared-thread"))?.values["approval"]).toEqual({ timedOut: true });
   });
 });

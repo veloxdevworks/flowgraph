@@ -4,7 +4,7 @@ import {
   resolveAndValidateInput,
   InputValidationError,
 } from "./inputs.js";
-import type { InputField } from "@veloxdevworks/flowgraph-spec";
+import type { InputField } from "@flowgraph/spec";
 
 const schema: InputField[] = [
   { key: "name", label: "Name", type: "string", required: true },

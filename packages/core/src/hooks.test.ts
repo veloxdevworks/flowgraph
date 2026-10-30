@@ -3,7 +3,7 @@ import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
 import { registerTool, mockProvider } from "./providers/index.js";
 import type { Hook } from "./hooks/types.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 
 let flakyCalls = 0;
 

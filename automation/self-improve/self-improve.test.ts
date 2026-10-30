@@ -8,7 +8,7 @@ import {
   createScriptedProvider,
   loadGraphImports,
   validateSpec,
-} from "@veloxdevworks/flowgraph-core";
+} from "@flowgraph/core";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const graphPath = path.join(__dirname, "self-improve.graph.yaml");

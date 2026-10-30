@@ -6,7 +6,7 @@ import type { ToolSpec } from "./types.js";
 import type { NodeRunContext } from "../context.js";
 import { getTool } from "./registry.js";
 import { loadResolvedSkill, runSkill } from "../nodes/skill-runner.js";
-import type { SkillDef } from "@veloxdevworks/flowgraph-skills";
+import type { SkillDef } from "@flowgraph/skills";
 import type { McpHub } from "../mcp/types.js";
 import { isMcpToolRef, type McpToolRef } from "../mcp/expand.js";
 
@@ -96,10 +96,28 @@ export function normalizeTools(
       });
     } else if ("builtin" in ref) {
       for (const b of ref.builtin) {
-        specs.push({ name: b, kind: "builtin", ref: b });
-        executors.set(b, () => {
-          throw new Error(`builtin tool "${b}" is provider-native; the selected provider must implement it.`);
-        });
+        const mapped = mapBuiltinToRegisteredTool(b);
+        if (mapped) {
+          const def = getTool(mapped);
+          const spec: ToolSpec = {
+            name: b,
+            kind: "function",
+            ref: mapped,
+            ...(def?.description ? { description: def.description } : {}),
+            ...(def?.schema ? { schema: def.schema } : {}),
+          };
+          specs.push(spec);
+          executors.set(b, async (args, ctx) => {
+            const d = getTool(mapped);
+            if (!d) throw new Error(`mapped builtin "${b}" → "${mapped}" is not registered.`);
+            return d.handler(args, ctx);
+          });
+        } else {
+          specs.push({ name: b, kind: "builtin", ref: b });
+          executors.set(b, () => {
+            throw new Error(`builtin tool "${b}" is provider-native; the selected provider must implement it.`);
+          });
+        }
       }
     }
   }
@@ -117,4 +135,19 @@ export function mergeTools(a: NormalizedTools, b: NormalizedTools): NormalizedTo
 function toolName(ref: string): string {
   const seg = ref.split("/").filter(Boolean).pop() ?? ref;
   return seg.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+/** Map Claude/Cursor-style builtins onto registered localTools.fs handlers when present. */
+const BUILTIN_TO_FS: Record<string, string> = {
+  Read: "fs_read",
+  Write: "fs_write",
+  Edit: "fs_edit",
+  Glob: "fs_list",
+  Bash: "fs_bash",
+};
+
+function mapBuiltinToRegisteredTool(name: string): string | undefined {
+  const mapped = BUILTIN_TO_FS[name];
+  if (mapped && getTool(mapped)) return mapped;
+  return undefined;
 }

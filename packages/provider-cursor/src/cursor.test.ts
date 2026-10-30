@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compileGraph, registerTool, type GraphSpec } from "@veloxdevworks/flowgraph-core";
+import { compileGraph, registerTool, type GraphSpec } from "@flowgraph/core";
 import { createCursorProvider, type CursorAgentFactory } from "./provider.js";
 
 function fakeAgentFactory(streamEvents: unknown[], waitResult = { status: "finished", result: "Done." }): CursorAgentFactory {
@@ -30,7 +30,7 @@ const baseSpec = (withBlock: Record<string, unknown>): GraphSpec =>
     runtime: { checkpoint: { enabled: false } },
   }) as unknown as GraphSpec;
 
-describe("@veloxdevworks/flowgraph-provider-cursor", () => {
+describe("@flowgraph/provider-cursor", () => {
   it("returns assistant text from stream + wait", async () => {
     const provider = createCursorProvider({
       apiKey: "test-key",
@@ -78,5 +78,25 @@ describe("@veloxdevworks/flowgraph-provider-cursor", () => {
     expect(diags?.some((d) => d.severity === "warning" && d.message.includes("cannot gate native builtin"))).toBe(
       true,
     );
+  });
+
+  it("trusts the local workspace by default (no TTY after handoff)", async () => {
+    let created: Record<string, unknown> | undefined;
+    const inner = fakeAgentFactory([]);
+    const provider = createCursorProvider({
+      apiKey: "test-key",
+      agentFactory: async (opts) => {
+        created = opts;
+        return inner(opts);
+      },
+    });
+
+    const compiled = await compileGraph(
+      baseSpec({ prompt: "Hi", output: { to: "answer" } }),
+      { providers: [provider] },
+    );
+    await compiled.run({ input: {} });
+    const local = created?.["local"] as { trust?: boolean } | undefined;
+    expect(local?.trust).toBe(true);
   });
 });

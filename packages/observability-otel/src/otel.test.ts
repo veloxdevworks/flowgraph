@@ -4,7 +4,7 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { compileGraph, registerFunction, type GraphSpec } from "@veloxdevworks/flowgraph-core";
+import { compileGraph, registerFunction, type GraphSpec } from "@flowgraph/core";
 import { otelSink } from "./index.js";
 
 function demoSpec(): GraphSpec {

@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { compileGraph } from "./compiler.js";
-import { ShellWithSchema } from "@veloxdevworks/flowgraph-spec";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import { ShellWithSchema } from "@flowgraph/spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import { normalizeShellText } from "./nodes/shell.js";
 
 function shellSpec(nodeWith: Record<string, unknown>): GraphSpec {
@@ -251,6 +251,40 @@ describe("shell node", () => {
     expect(r.status).toBe("interrupted");
     expect(r.interrupts?.[0]?.reason).toContain("Hello world!");
     expect(r.state["shell"]).toMatchObject({ stdout: expect.stringContaining("Hello world!") });
+  });
+
+  it("skips and records an issue when requires.bin is missing and onMissingTool is skip", async () => {
+    const compiled = await compileGraph(
+      shellSpec({
+        command: "definitely-not-installed-bin-xyz",
+        args: ["--version"],
+        requires: [{ bin: "definitely-not-installed-bin-xyz" }],
+        onMissingTool: "skip",
+        output: { to: "out" },
+      }),
+      {},
+    );
+    const r = await compiled.run({ threadId: "shell-skip-tool", input: {} });
+    expect(r.status).toBe("completed");
+    const out = r.state["out"] as { skipped?: boolean; ok?: boolean };
+    expect(out.skipped).toBe(true);
+    expect(r.issues?.some((i) => i.code === "TOOL_NOT_FOUND")).toBe(true);
+  });
+
+  it("fails with an actionable TOOL_NOT_FOUND message when a required bin is missing", async () => {
+    const compiled = await compileGraph(
+      shellSpec({
+        command: "definitely-not-installed-bin-xyz",
+        args: ["--version"],
+        requires: [{ bin: "definitely-not-installed-bin-xyz" }],
+        output: { to: "out" },
+      }),
+      {},
+    );
+    const r = await compiled.run({ threadId: "shell-fail-tool", input: {} });
+    expect(r.status).toBe("error");
+    expect(r.error?.message).toMatch(/definitely-not-installed-bin-xyz/);
+    expect(r.issues?.some((i) => i.code === "TOOL_NOT_FOUND")).toBe(true);
   });
 });
 

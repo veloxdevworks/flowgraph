@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { discoverAgentUses } from "./discover-agents.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 
 describe("discoverAgentUses", () => {
   it("returns with.agent from top-level agent nodes", () => {

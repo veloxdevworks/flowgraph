@@ -77,9 +77,9 @@ These three span the complexity range the system must serve gracefully.
 
 The project name is **flowgraph** — plain and descriptive (a graph of AI/automation nodes). It derives:
 
-- npm scope: `@veloxdevworks/flowgraph-*` (e.g. `@veloxdevworks/flowgraph-core`, `@veloxdevworks/flowgraph-cli`)
+- npm scope: `@flowgraph/*` (e.g. `@flowgraph/core`, `@flowgraph/cli`)
 - CLI binary: `flowgraph`
 - spec token: `apiVersion: flowgraph/v1`
 - env/config prefix: `FLOWGRAPH_*`; OTel attribute namespace: `flowgraph.*`
 
-Before the first public release, verify package-name / GitHub repo availability and run a quick trademark sanity check; if a conflict forces a change it is a mechanical repo-wide rename. See [ADR-0013](./adr/0013-rename-to-flowgraph.md) (supersedes [ADR-0001](./adr/0001-naming.md)).
+Before the first public release, verify package-name / GitHub repo availability and run a quick trademark sanity check; if a conflict forces a change it is a mechanical repo-wide rename. See [ADR-0015](./adr/0015-flowgraph-npm-scope.md) (npm scope) and [ADR-0013](./adr/0013-rename-to-flowgraph.md) (product name; supersedes [ADR-0001](./adr/0001-naming.md)).

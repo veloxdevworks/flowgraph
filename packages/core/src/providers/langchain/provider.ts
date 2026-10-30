@@ -8,7 +8,7 @@
  *
  * @example
  * import { ChatOpenAI } from "@langchain/openai";
- * import { createLangChainProvider } from "@veloxdevworks/flowgraph-core";
+ * import { createLangChainProvider } from "@flowgraph/core";
  * const provider = createLangChainProvider(new ChatOpenAI({ model: "gpt-4o" }));
  * const compiled = await compileGraph(spec, { providers: [provider] });
  */

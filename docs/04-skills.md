@@ -102,7 +102,7 @@ When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 ### `executable` handler signature
 
 ```ts
-import type { SkillHandler } from "@veloxdevworks/flowgraph-skills";
+import type { SkillHandler } from "@flowgraph/skills";
 
 const handler: SkillHandler<
   { project: string; summary: string; priority: "low" | "medium" | "high" },

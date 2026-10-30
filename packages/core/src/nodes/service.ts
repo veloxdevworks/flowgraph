@@ -8,8 +8,8 @@
  */
 
 import { z } from "zod";
-import { ServiceWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { ServiceWithSchema } from "@flowgraph/spec";
+import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { applyOutput } from "./output.js";
@@ -22,6 +22,7 @@ import {
   type ServiceReady,
   type ServiceStartSpec,
 } from "../runtime/service-manager.js";
+import { SERVICES_CHANNEL } from "../runtime/state-annotation.js";
 
 const configSchema = ServiceWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -152,11 +153,32 @@ export const serviceNode = defineNode<Config>({
 
         ctx.emit("node.output", result);
 
+        const intentUpdate =
+          action === "start" || action === "restart"
+            ? {
+                [SERVICES_CHANNEL]: {
+                  [name]: {
+                    name,
+                    command: config.command ? String(renderDeep(config.command, scope)) : undefined,
+                    args: config.args?.map((a) => String(renderDeep(a, scope))),
+                    cwd: config.cwd ? String(renderDeep(config.cwd, scope)) : ctx.workspace,
+                    keepAlive: Boolean(config.keepAlive),
+                    ready: config.ready,
+                  },
+                },
+              }
+            : action === "stop"
+              ? { [SERVICES_CHANNEL]: { [name]: null } }
+              : {};
+
         return {
-          update: applyOutput(config.output, result, {
-            nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
-            scope,
-          }),
+          update: {
+            ...applyOutput(config.output, result, {
+              nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+              scope,
+            }),
+            ...intentUpdate,
+          },
         };
       },
     };

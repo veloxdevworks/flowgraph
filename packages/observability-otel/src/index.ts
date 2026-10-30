@@ -1,5 +1,5 @@
 /**
- * @veloxdevworks/flowgraph-observability-otel
+ * @flowgraph/observability-otel
  *
  * Maps the flowgraph event tree to OpenTelemetry signals with zero user
  * instrumentation:

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { compileGraph } from "./compiler.js";
 import { mockProvider } from "./providers/index.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 
 function hitlGraph(
   mode: "approve" | "question" | "choice",
@@ -252,5 +252,75 @@ describe("ask_human tool", () => {
     expect(r2.status).toBe("completed");
     const out = r2.state["answer"] as { toolResults: Record<string, { answer: string }> };
     expect(out.toolResults["ask_human"]?.answer).toBe("use option B");
+  });
+
+  it("form mode validates resume against JSON Schema", async () => {
+    const spec = hitlGraph("approve", {});
+    spec.nodes[0]!.with = {
+      mode: "form",
+      message: "Fill in",
+      schema: {
+        type: "object",
+        required: ["title"],
+        properties: { title: { type: "string" } },
+      },
+      output: { to: "gateResult" },
+    };
+    const compiled = await compileGraph(spec, {});
+    const r1 = await compiled.run({ threadId: "hitl-form", onInterrupt: "fail" });
+    expect(r1.status).toBe("interrupted");
+    expect(r1.interrupts?.[0]?.kind).toBe("form");
+
+    const r2 = await compiled.resume({
+      threadId: "hitl-form",
+      resume: { title: "Epic" },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("completed");
+    expect((r2.state["gateResult"] as { title: string }).title).toBe("Epic");
+  });
+
+  it("question mode renders a missing templated message as empty, not the word null", async () => {
+    const spec = hitlGraph("question", {
+      message: "{{ state.interview.question }}",
+    });
+    spec.state = {
+      channels: {
+        gateResult: { type: "object" },
+        interview: { type: "object" },
+      },
+    };
+    const compiled = await compileGraph(spec, {});
+    const r1 = await compiled.run({ threadId: "hitl-null-msg", onInterrupt: "fail" });
+    expect(r1.status).toBe("interrupted");
+    expect(r1.interrupts?.[0]?.reason).toBe("");
+    expect(r1.interrupts?.[0]?.reason).not.toBe("null");
+  });
+
+  it("review mode maps approve/request-changes and feedback", async () => {
+    const spec = hitlGraph("approve", {});
+    spec.nodes[0]!.with = {
+      mode: "review",
+      message: "Review the diff",
+      diff: { before: "a", after: "b" },
+      output: { to: "gateResult" },
+    };
+    const compiled = await compileGraph(spec, {});
+    const r1 = await compiled.run({ threadId: "hitl-review", onInterrupt: "fail" });
+    expect(r1.status).toBe("interrupted");
+    expect(r1.interrupts?.[0]?.kind).toBe("review");
+    const data = (r1.interrupts?.[0]?.payload as { data?: { diffStat?: string } }).data;
+    expect(data?.diffStat).toBeTruthy();
+
+    const r2 = await compiled.resume({
+      threadId: "hitl-review",
+      resume: { decision: "request-changes", feedback: "add tests" },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("completed");
+    const out = r2.state["gateResult"] as { decision: string; feedback: string; approved: boolean };
+    expect(out.decision).toBe("request-changes");
+    expect(out.feedback).toBe("add tests");
+    expect(out.approved).toBe(false);
   });
 });

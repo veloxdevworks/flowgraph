@@ -18,7 +18,8 @@ Format: [MADR](https://adr.github.io/madr/)-lite — Context · Decision · Stat
 | [0010](./0010-safe-expression-language.md) | Custom sandboxed expression language (no `eval`) | Accepted |
 | [0011](./0011-mcp-first-integrations.md) | MCP-first integrations (deterministic + agentic) | Accepted |
 | [0012](./0012-langchain-provider-in-core.md) | LangChain provider built into core | Accepted |
-| [0013](./0013-rename-to-flowgraph.md) | Rename to flowgraph under the @veloxdevworks scope | Accepted |
+| [0013](./0013-rename-to-flowgraph.md) | Rename to flowgraph under the @veloxdevworks scope | Partially superseded by 0015 (npm scope) |
 | [0014](./0014-oss-control-plane-client.md) | OSS control-plane client in flowgraph-server | Accepted |
+| [0015](./0015-flowgraph-npm-scope.md) | Publish OSS packages under the `@flowgraph` scope | Accepted |
 
 > All current ADRs are Accepted except where noted as superseded. New decisions are added as new ADRs.

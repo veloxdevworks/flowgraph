@@ -1,12 +1,49 @@
 /** Lightweight structured logging / metrics for the hosted run server. */
 
-export type LogLevel = "info" | "warn" | "error" | "debug";
+export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export interface LogFields {
   [key: string]: unknown;
 }
 
+const LEVEL_RANK: Record<LogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
+
+const STACK_CAP = 8_000;
+
+function configuredLogLevel(env: NodeJS.ProcessEnv = process.env): LogLevel {
+  const v = env.FLOWGRAPH_LOG_LEVEL?.trim().toLowerCase();
+  if (v === "debug" || v === "info" || v === "warn" || v === "error") return v;
+  return "info";
+}
+
+function cap(text: string): string {
+  if (text.length <= STACK_CAP) return text;
+  return `${text.slice(0, STACK_CAP)}…`;
+}
+
+/** Fields for logs only — never put `stack` / `cause` in HTTP JSON bodies. */
+export function errorFields(err: unknown): { message: string; stack?: string; cause?: string } {
+  if (!(err instanceof Error)) {
+    return { message: String(err) };
+  }
+  const fields: { message: string; stack?: string; cause?: string } = {
+    message: err.message,
+  };
+  if (err.stack) fields.stack = cap(err.stack);
+  if (err.cause !== undefined) {
+    const cause = err.cause;
+    fields.cause = cap(cause instanceof Error ? (cause.stack ?? cause.message) : String(cause));
+  }
+  return fields;
+}
+
 export function log(level: LogLevel, message: string, fields: LogFields = {}): void {
+  if (LEVEL_RANK[level] < LEVEL_RANK[configuredLogLevel()]) return;
   const line = JSON.stringify({
     ts: new Date().toISOString(),
     level,

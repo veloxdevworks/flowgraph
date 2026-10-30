@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
-import { MUTATING_FS_OPERATIONS } from "@veloxdevworks/flowgraph-tools-fs";
+import type { GraphSpec } from "@flowgraph/spec";
+import { MUTATING_FS_OPERATIONS } from "@flowgraph/tools-fs";
 
 // Inline the warning helpers for unit testing without dynamic import side effects.
 function hasMutatingFsHook(spec: GraphSpec): boolean {

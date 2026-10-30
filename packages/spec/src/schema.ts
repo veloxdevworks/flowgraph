@@ -254,10 +254,16 @@ export const AgentWithSchema = BaseWithSchema.extend({
   maxSteps: z.number().int().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
   permission: z.union([z.literal("auto"), z.literal("ask"), z.literal("deny")]).optional(),
+  /**
+   * Optional hub implementation for this agent node. `deepagents` reuses the
+   * graph's LangChain ChatModel/key (see `@flowgraph/provider-deepagents`).
+   */
+  hub: z.enum(["deepagents"]).optional(),
   // provider-namespaced escape hatches (any shape)
   claude: z.record(z.unknown()).optional(),
   cursor: z.record(z.unknown()).optional(),
   langchain: z.record(z.unknown()).optional(),
+  deepagents: z.record(z.unknown()).optional(),
 });
 
 /** @deprecated Use AgentWithSchema */
@@ -313,9 +319,21 @@ const DemoHttpMethodSchema = z.union([
   z.literal("DELETE"),
 ]);
 
+export const ToolRequireSchema = z.object({
+  bin: z.string().min(1).describe("Binary that must be on PATH"),
+  version: z.string().optional().describe("Human-readable constraint, e.g. \">=1.22\""),
+});
+
+export const OnMissingToolSchema = z
+  .union([z.literal("fail"), z.literal("skip")])
+  .optional()
+  .default("fail")
+  .describe("fail (default) throws; skip records a TOOL_NOT_FOUND issue and continues");
+
 /**
- * Best-effort artifact capture. Exactly one of `http`, `screenshot`, or `file`
- * must be set. Capture failures return `{ ok: false }` unless `strict: true`.
+ * Best-effort artifact capture. Exactly one of `http`, `screenshot`, `file`,
+ * `video`, or `simulator` must be set. Capture failures return `{ ok: false }`
+ * unless `strict: true`.
  */
 export const DemoWithSchema = BaseWithSchema.extend({
   strict: z
@@ -349,23 +367,51 @@ export const DemoWithSchema = BaseWithSchema.extend({
       timeout: DurationSchema.optional(),
     })
     .optional(),
+  video: z
+    .object({
+      url: z.string(),
+      duration: DurationSchema.optional().describe("How long to record after the page loads (default 5s)"),
+      waitFor: z
+        .union([z.string(), DurationSchema])
+        .optional()
+        .describe("CSS selector or a duration to wait before recording starts"),
+      viewport: z
+        .object({
+          width: z.number().int().positive(),
+          height: z.number().int().positive(),
+        })
+        .optional(),
+      timeout: DurationSchema.optional(),
+      scroll: z.boolean().optional().describe("Slow-scroll the page during recording"),
+    })
+    .optional(),
+  simulator: z
+    .object({
+      platform: z.union([z.literal("ios"), z.literal("android")]),
+      device: z.string().optional().describe("Simulator/emulator name, UDID, or AVD"),
+      app: z.string().optional().describe("Bundle id / package to launch"),
+      deepLink: z.string().optional(),
+      capture: z.union([z.literal("video"), z.literal("screenshot")]).optional().default("video"),
+      duration: DurationSchema.optional().describe("Recording length (default 10s)"),
+    })
+    .optional(),
   file: z
     .object({
       path: z.string(),
     })
     .optional(),
 }).superRefine((val, ctx) => {
-  const modes = [val.http, val.screenshot, val.file].filter((m) => m != null);
+  const modes = [val.http, val.screenshot, val.file, val.video, val.simulator].filter((m) => m != null);
   if (modes.length === 0) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "demo: set exactly one of http, screenshot, or file",
+      message: "demo: set exactly one of http, screenshot, file, video, or simulator",
       path: [],
     });
   } else if (modes.length > 1) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "demo: set only one of http, screenshot, or file",
+      message: "demo: set only one of http, screenshot, file, video, or simulator",
       path: [],
     });
   }
@@ -389,6 +435,8 @@ export const ShellWithSchema = BaseWithSchema.extend({
   input: z.record(z.unknown()).optional().describe("Rendered, passed via FLOWGRAPH_INPUT env + stdin JSON"),
   timeout: DurationSchema.optional(),
   expect: z.object({ exitCode: z.array(z.number()).optional() }).optional(),
+  requires: z.array(ToolRequireSchema).optional(),
+  onMissingTool: OnMissingToolSchema,
 });
 
 // service node — start/stop long-running background processes
@@ -464,6 +512,8 @@ export const ScriptWithSchema = BaseWithSchema.extend({
   env: z.record(z.string()).optional().describe("Environment variables available to the child process"),
   timeout: DurationSchema.optional(),
   permissions: ScriptPermissionsSchema.optional(),
+  requires: z.array(ToolRequireSchema).optional(),
+  onMissingTool: OnMissingToolSchema,
 });
 
 // subgraph node
@@ -485,11 +535,52 @@ export const MapWithSchema = z.object({
   collect: OutputMappingSchema.optional(),
 });
 
-// hitl node — human-in-the-loop gate (approve, question, choice)
+// worktree node — git worktree add/remove/status against runtime.workspace
+export const WorktreeWithSchema = z.object({
+  action: z.union([z.literal("add"), z.literal("remove"), z.literal("status")]).default("add"),
+  /** Branch to create/checkout (templates ok). Required for action: add. */
+  branch: z.string().optional(),
+  /** Worktree directory (absolute or workspace-relative; templates ok). */
+  path: z.string().optional(),
+  /** Git repo root. Defaults to runtime.workspace. */
+  repo: z.string().optional(),
+  /**
+   * `action: add` only. When the branch already exists, reset it to HEAD
+   * (`git worktree add -B`). Default false: fail instead of moving the branch.
+   */
+  reset: z.boolean().optional(),
+  output: OutputMappingSchema.optional(),
+});
+
+// hitl node — human-in-the-loop gate (approve, question, choice, form, review)
 export const HitlWithSchema = BaseWithSchema.extend({
-  mode: z.union([z.literal("approve"), z.literal("question"), z.literal("choice")]).default("approve"),
+  mode: z
+    .union([
+      z.literal("approve"),
+      z.literal("question"),
+      z.literal("choice"),
+      z.literal("form"),
+      z.literal("review"),
+    ])
+    .default("approve"),
   message: z.string(),
   choices: z.array(z.string()).optional(),
+  /** JSON Schema for `mode: form` (and optional notes on `mode: review`). */
+  schema: z.record(z.unknown()).optional(),
+  /** `mode: review` — compute a git diff at interrupt time, or pass inline before/after. */
+  diff: z
+    .object({
+      cwd: z.string().optional(),
+      base: z.string().optional(),
+      paths: z.array(z.string()).optional(),
+      before: z.string().optional(),
+      after: z.string().optional(),
+    })
+    .optional(),
+  /** `mode: review` — artifact paths or demo-manifest refs shown to the human. */
+  artifacts: z.array(z.string()).optional(),
+  /** `mode: review` — extra decision labels beyond approve / request-changes. */
+  decision: z.array(z.string()).optional(),
 });
 
 // wait node — duration / until / signal / webhook (inbound HTTP resume)
@@ -612,6 +703,11 @@ export const NodeSpecSchema = z.object({
       "Inline embedded subgraph spec (bundling output); mutually exclusive with `uses`",
     ),
   input: z.record(z.string()).optional(),
+  /**
+   * Per-node workspace override (absolute or graph-relative; templates ok).
+   * Defaults to `runtime.workspace` then the graph directory.
+   */
+  workspace: z.string().optional(),
   with: z.record(z.unknown()).optional(),
   retry: RetrySchema.optional(),
   timeout: DurationSchema.optional(),
@@ -716,6 +812,7 @@ export const ClaudePermissionModeSchema = z.enum([
   "acceptEdits",
   "bypassPermissions",
   "plan",
+  "dontAsk",
 ]);
 
 export const ClaudeProviderConfigSchema = z.object({
@@ -750,11 +847,20 @@ export const CliProviderConfigSchema = z.object({
   options: z.record(z.unknown()).optional(),
 });
 
+export const DeepAgentsProviderConfigSchema = z.object({
+  kind: z.literal("deepagents"),
+  /** Inherit ChatModel from this providers.* entry (default: graph defaults.provider). */
+  modelProvider: z.string().optional(),
+  model: z.string().optional(),
+  options: z.record(z.unknown()).optional(),
+});
+
 export const ProviderConfigSchema = z.discriminatedUnion("kind", [
   LangChainProviderConfigSchema,
   ClaudeProviderConfigSchema,
   CursorProviderConfigSchema,
   CliProviderConfigSchema,
+  DeepAgentsProviderConfigSchema,
 ]);
 
 export const ProvidersSchema = z.record(ProviderConfigSchema);
@@ -798,13 +904,18 @@ export const RuntimeSchema = z.object({
       backend: StoreBackendSchema.optional().default("memory"),
     })
     .optional(),
-  /** Embedded HTTP ingress for `wait` nodes with `webhook: true`. Local/trusted-network only (no auth in v1). */
+  /** Embedded HTTP ingress for `wait` nodes with `webhook: true`. */
   webhookServer: z
     .object({
       /** Default 8878. Use 0 for an OS-assigned ephemeral port. */
       port: z.number().int().nonnegative().optional(),
       /** Default 127.0.0.1. */
       host: z.string().optional(),
+      /**
+       * Shared secret for this graph's webhook routes. When set, inbound GET/POST
+       * must send `Authorization: Bearer <token>` or `X-Flowgraph-Token: <token>`.
+       */
+      token: z.string().optional(),
     })
     .optional(),
   /**
@@ -815,6 +926,24 @@ export const RuntimeSchema = z.object({
   services: z
     .object({
       terminateOnEnd: z.boolean().optional().default(true),
+      /** Re-spawn persisted service intents after process restart. Default false. */
+      rehydrateOnResume: z.boolean().optional().default(false),
+    })
+    .optional(),
+  /**
+   * Authoritative filesystem root for providers, localTools, and shell/worktree.
+   * Absolute or graph-directory-relative. Falls back to the graph file directory / `--cwd`.
+   */
+  workspace: z.string().optional(),
+  worktrees: z
+    .object({
+      /** Remove worktrees created this run when the graph completes (not on HITL pause). */
+      cleanupOnEnd: z.boolean().optional().default(false),
+      /**
+       * Directory worktree paths must live under (absolute or workspace-relative).
+       * Defaults to runtime.workspace.
+       */
+      root: z.string().optional(),
     })
     .optional(),
   hitl: z
@@ -966,6 +1095,7 @@ export type LangChainProviderConfig = z.infer<typeof LangChainProviderConfigSche
 export type ClaudeProviderConfig = z.infer<typeof ClaudeProviderConfigSchema>;
 export type CursorProviderConfig = z.infer<typeof CursorProviderConfigSchema>;
 export type CliProviderConfig = z.infer<typeof CliProviderConfigSchema>;
+export type DeepAgentsProviderConfig = z.infer<typeof DeepAgentsProviderConfigSchema>;
 export type CliVendor = z.infer<typeof CliVendorSchema>;
 export type LangChainVendor = z.infer<typeof LangChainVendorSchema>;
 

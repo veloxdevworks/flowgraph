@@ -70,7 +70,7 @@ interface CompiledNode {
 }
 ```
 
-Built-in factories (`intelligent`, `skill`, `http`, `webhook`, `router`, `code`, `subgraph`, `map`, `wait`) are registered by `@veloxdevworks/flowgraph-core`. Users register custom factories programmatically or via plugin packages. See [03 — Node Types](./03-node-types.md).
+Built-in factories (`intelligent`, `skill`, `http`, `webhook`, `router`, `code`, `subgraph`, `map`, `wait`) are registered by `@flowgraph/core`. Users register custom factories programmatically or via plugin packages. See [03 — Node Types](./03-node-types.md).
 
 ## 4. Runtime composition
 
@@ -90,7 +90,7 @@ This wrapper is what guarantees "observable & extensible by default": node autho
 
 ## 5. Monorepo layout
 
-We use a pnpm + Turborepo monorepo ([ADR-0006](./adr/0006-monorepo-tooling.md)). Rationale: clear public/extension boundaries, independent versioning of optional adapters (so a CI user pulling only `@veloxdevworks/flowgraph-core` does not transitively install the Claude or Cursor SDKs), and room to grow plugins.
+We use a pnpm + Turborepo monorepo ([ADR-0006](./adr/0006-monorepo-tooling.md)). Rationale: clear public/extension boundaries, independent versioning of optional adapters (so a CI user pulling only `@flowgraph/core` does not transitively install the Claude or Cursor SDKs), and room to grow plugins.
 
 Packages under `packages/` fall into three tiers. Install only the adapters and plugins you need so `core` never pulls native bindings or optional SDKs transitively.
 
@@ -108,20 +108,20 @@ flowgraph/                      (repo root)
 │   └── software-factory/
 └── packages/
     │  # Foundation — always relevant; no optional native/SDK deps
-    ├── core/                  @veloxdevworks/flowgraph-core         — compiler, registry, runtime, built-in nodes, event bus, hooks, LangChain provider
-    ├── spec/                  @veloxdevworks/flowgraph-spec         — Zod schemas + generated JSON Schema (no runtime deps)
-    ├── skills/                @veloxdevworks/flowgraph-skills       — SKILL.md loader, front-matter parsing, contract & env preflight
-    ├── expr/                  @veloxdevworks/flowgraph-expr         — the safe expression language ({{ ... }}) parser/evaluator
-    ├── cli/                   @veloxdevworks/flowgraph-cli          — the `flowgraph` binary
-    ├── testing/               @veloxdevworks/flowgraph-testing      — in-memory harness, fixtures, golden-run helpers
+    ├── core/                  @flowgraph/core         — compiler, registry, runtime, built-in nodes, event bus, hooks, LangChain provider
+    ├── spec/                  @flowgraph/spec         — Zod schemas + generated JSON Schema (no runtime deps)
+    ├── skills/                @flowgraph/skills       — SKILL.md loader, front-matter parsing, contract & env preflight
+    ├── expr/                  @flowgraph/expr         — the safe expression language ({{ ... }}) parser/evaluator
+    ├── cli/                   @flowgraph/cli          — the `flowgraph` binary
+    ├── testing/               @flowgraph/testing      — in-memory harness, fixtures, golden-run helpers
     │  # Adapters — peer-dep on core + one provider SDK
-    ├── provider-claude/       @veloxdevworks/flowgraph-provider-claude    — Claude Agent SDK adapter
-    ├── provider-cursor/       @veloxdevworks/flowgraph-provider-cursor    — Cursor SDK adapter
+    ├── provider-claude/       @flowgraph/provider-claude    — Claude Agent SDK adapter
+    ├── provider-cursor/       @flowgraph/provider-cursor    — Cursor SDK adapter
     │  # Runtime plugins — peer-dep on core + one optional capability
-    ├── checkpoint-sqlite/     @veloxdevworks/flowgraph-checkpoint-sqlite  — durable file/sqlite checkpointer
-    ├── checkpoint-postgres/   @veloxdevworks/flowgraph-checkpoint-postgres— durable pg checkpointer
-    ├── observability-otel/    @veloxdevworks/flowgraph-observability-otel — OpenTelemetry exporter wiring
-    └── tools-fs/              @veloxdevworks/flowgraph-tools-fs           — sandboxed local filesystem tools
+    ├── checkpoint-sqlite/     @flowgraph/checkpoint-sqlite  — durable file/sqlite checkpointer
+    ├── checkpoint-postgres/   @flowgraph/checkpoint-postgres— durable pg checkpointer
+    ├── observability-otel/    @flowgraph/observability-otel — OpenTelemetry exporter wiring
+    └── tools-fs/              @flowgraph/tools-fs           — sandboxed local filesystem tools
 ```
 
 ### Package dependency rules
@@ -142,17 +142,17 @@ testing ── (dev) ── all
           ▲   ◄── tools-fs
 ```
 
-- `@veloxdevworks/flowgraph-spec` has **no runtime dependencies** (only Zod). It is importable by editor tooling and the future GUI to validate specs without pulling the engine.
-- `@veloxdevworks/flowgraph-core` depends on LangGraph.js, `@veloxdevworks/flowgraph-spec`, `@veloxdevworks/flowgraph-expr`, `@veloxdevworks/flowgraph-skills`. It contains the engine integration and all *deterministic* built-in nodes.
-- **Adapters and runtime plugins are separate packages** that `peerDependencies` on `@veloxdevworks/flowgraph-core` and on their heavy SDK or native driver (`@anthropic-ai/claude-agent-sdk`, `@cursor/sdk`, `better-sqlite3`/`pg`, `@opentelemetry/*`). A user installs only the packages they reference. The CLI lazy-loads them by name with a helpful "install `@veloxdevworks/flowgraph-provider-claude`" error if missing.
+- `@flowgraph/spec` has **no runtime dependencies** (only Zod). It is importable by editor tooling and the future GUI to validate specs without pulling the engine.
+- `@flowgraph/core` depends on LangGraph.js, `@flowgraph/spec`, `@flowgraph/expr`, `@flowgraph/skills`. It contains the engine integration and all *deterministic* built-in nodes.
+- **Adapters and runtime plugins are separate packages** that `peerDependencies` on `@flowgraph/core` and on their heavy SDK or native driver (`@anthropic-ai/claude-agent-sdk`, `@cursor/sdk`, `better-sqlite3`/`pg`, `@opentelemetry/*`). A user installs only the packages they reference. The CLI lazy-loads them by name with a helpful "install `@flowgraph/provider-claude`" error if missing.
 - If a new capability does **not** need an optional heavy/native dependency, it probably belongs inside `core`, not a new package. See [CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-package).
 
 ## 6. Public API surface (programmatic)
 
-The CLI is a thin wrapper over a small, stable programmatic API in `@veloxdevworks/flowgraph-core`:
+The CLI is a thin wrapper over a small, stable programmatic API in `@flowgraph/core`:
 
 ```ts
-import { loadGraph, compileGraph, runGraph } from "@veloxdevworks/flowgraph-core";
+import { loadGraph, compileGraph, runGraph } from "@flowgraph/core";
 
 // 1. Load + validate (no side effects)
 const spec = await loadGraph("./triage.graph.yaml");
@@ -178,7 +178,7 @@ for await (const event of runGraph.stream(compiled, { input })) {
 }
 ```
 
-The future GUI imports the **same** `loadGraph`/`compileGraph` and the `@veloxdevworks/flowgraph-spec` schemas — it does not get a private API. This keeps the standalone honest.
+The future GUI imports the **same** `loadGraph`/`compileGraph` and the `@flowgraph/spec` schemas — it does not get a private API. This keeps the standalone honest.
 
 ## 7. Execution context & secrets
 
@@ -207,8 +207,8 @@ This matrix is realized purely through `RunContext` configuration — the spec a
 
 This repo intentionally stops at L5 = CLI + programmatic API. A future GUI/agentic authoring tool is a **separate downstream consumer** that:
 
-- uses `@veloxdevworks/flowgraph-spec` to validate and autocomplete YAML,
-- uses `@veloxdevworks/flowgraph-core` `loadGraph`/`compileGraph` to dry-run and lint,
+- uses `@flowgraph/spec` to validate and autocomplete YAML,
+- uses `@flowgraph/core` `loadGraph`/`compileGraph` to dry-run and lint,
 - subscribes to the **event stream** for live run visualization,
 - emits flowgraph YAML as its output format (no private back-channel).
 
@@ -221,10 +221,10 @@ Designing the engine as a clean standalone with a stable event stream and schema
 | Language | TypeScript (ESM, Node ≥ 20) | Strict mode; types are part of the public contract |
 | Engine | `@langchain/langgraph` | L0; not abstracted away |
 | Schema/validation | Zod → JSON Schema | One source of truth; JSON Schema generated for editors |
-| Expression language | custom safe evaluator (`@veloxdevworks/flowgraph-expr`) | No `eval`; sandboxed, see [05](./05-state-and-data.md) |
+| Expression language | custom safe evaluator (`@flowgraph/expr`) | No `eval`; sandboxed, see [05](./05-state-and-data.md) |
 | Monorepo | pnpm workspaces + Turborepo | [ADR-0006](./adr/0006-monorepo-tooling.md) |
 | Build | tsup (esbuild) | dual ESM/CJS where needed; CLI is ESM |
-| Tests | Vitest | unit + golden-run integration via `@veloxdevworks/flowgraph-testing` |
+| Tests | Vitest | unit + golden-run integration via `@flowgraph/testing` |
 | Release | Changesets | independent semver per package |
 | Observability | OpenTelemetry | [ADR-0007](./adr/0007-observability-otel.md) |
 | CLI framework | clipanion or commander + prompts | TBD in implementation; see [09](./09-cli.md) |

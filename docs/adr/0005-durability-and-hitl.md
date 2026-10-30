@@ -9,7 +9,7 @@ Target use cases include long-running "software factories" and multi-step approv
 
 ## Decision
 
-**First-class in v1.** Build a checkpointer abstraction over LangGraph's `BaseCheckpointSaver`, ship `MemorySaver` + a durable `@veloxdevworks/flowgraph-checkpoint-sqlite`, and implement HITL via LangGraph's `interrupt()` + `Command({ resume })` keyed by `thread_id`. Support dynamic interrupts, static breakpoints, durable `wait`/`webhook` gates, time-travel (state history / resume-from), and per-environment `onInterrupt` policy.
+**First-class in v1.** Build a checkpointer abstraction over LangGraph's `BaseCheckpointSaver`, ship `MemorySaver` + a durable `@flowgraph/checkpoint-sqlite`, and implement HITL via LangGraph's `interrupt()` + `Command({ resume })` keyed by `thread_id`. Support dynamic interrupts, static breakpoints, durable `wait`/`webhook` gates, time-travel (state history / resume-from), and per-environment `onInterrupt` policy.
 
 ## Consequences
 

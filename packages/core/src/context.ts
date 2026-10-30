@@ -7,11 +7,12 @@ import type { HookBus } from "./hooks/bus.js";
 import type { McpHub } from "./mcp/types.js";
 import type { SecretProvider } from "./secrets.js";
 import type { BaseStore } from "@langchain/langgraph";
+import type { IssueInput, RunIssue } from "./runtime/run-issues.js";
 
 export type { SecretProvider };
 
 /** How a HITL interrupt should be presented and answered. */
-export type InterruptKind = "approval" | "question" | "choice" | "custom";
+export type InterruptKind = "approval" | "question" | "choice" | "form" | "review" | "custom";
 
 export interface RunMeta {
   runId: string;
@@ -111,4 +112,9 @@ export interface NodeRunContext extends RunContext {
    * graph state so side effects don't re-fire when a node replays on resume.
    */
   once<T>(key: string, fn: () => Promise<T> | T): Promise<T>;
+  /**
+   * Record a non-fatal issue that may affect the trustworthiness of results.
+   * Emits `run.issue`, appends to the run issues log, and merges into `__issues`.
+   */
+  issue(issue: IssueInput): RunIssue;
 }

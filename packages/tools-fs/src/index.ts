@@ -5,8 +5,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { z } from "zod";
-import { registerTool } from "@veloxdevworks/flowgraph-core";
-import type { NodeRunContext } from "@veloxdevworks/flowgraph-core";
+import { registerTool } from "@flowgraph/core";
+import type { NodeRunContext } from "@flowgraph/core";
 import { resolveSandboxPath, SandboxError } from "./sandbox.js";
 
 export type FsOperation = "read" | "list" | "write" | "edit" | "delete";

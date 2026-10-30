@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "./events.js";
 
 beforeAll(() => {
@@ -106,5 +106,98 @@ describe("pause / continueRun", () => {
     expect(result.state["a"]).toBe("a");
     expect(result.state["b"]).toBe("b");
     expect(result.state["c"]).toBe("c");
+  });
+
+  it("resumeFrom continues from a historical checkpoint id", async () => {
+    const compiled = await compileGraph(threeStepSpec());
+    const threadId = "resume-from-t1";
+    const pause = new AbortController();
+    const unsub = compiled.events.subscribe((ev) => {
+      if (ev.type === "node.end" && ev.scope.nodeId === "n1") pause.abort();
+    });
+    const paused = await compiled.run({
+      threadId,
+      pauseSignal: pause.signal,
+      onInterrupt: "fail",
+    });
+    unsub();
+    expect(paused.status).toBe("paused");
+
+    const history = await compiled.getStateHistory(threadId);
+    expect(history.length).toBeGreaterThan(0);
+    const afterN1 = history.find((s) => s.values["a"] === "a" && s.values["b"] == null);
+    expect(afterN1?.checkpointId).toBeTruthy();
+
+    const resumed = await compiled.resumeFrom({
+      threadId,
+      checkpointId: afterN1!.checkpointId!,
+      resume: true,
+      onInterrupt: "fail",
+    });
+    expect(resumed.status).toBe("completed");
+    expect(resumed.state["a"]).toBe("a");
+    expect(resumed.state["b"]).toBe("b");
+    expect(resumed.state["c"]).toBe("c");
+  });
+
+  it("step advances a single superstep", async () => {
+    const compiled = await compileGraph(threeStepSpec());
+    const threadId = "step-t1";
+    const pause = new AbortController();
+    const unsub = compiled.events.subscribe((ev) => {
+      if (ev.type === "node.end" && ev.scope.nodeId === "n1") pause.abort();
+    });
+    await compiled.run({ threadId, pauseSignal: pause.signal, onInterrupt: "fail" });
+    unsub();
+
+    const stepped = await compiled.step({ threadId, onInterrupt: "fail" });
+    expect(stepped.status).toBe("paused");
+    expect(stepped.state["a"]).toBe("a");
+    expect(stepped.state["b"]).toBe("b");
+    expect(stepped.state["c"] ?? undefined).toBeUndefined();
+    expect((await compiled.getState(threadId))?.next).toEqual(["n3"]);
+
+    const last = await compiled.step({ threadId, onInterrupt: "fail" });
+    expect(last.status).toBe("completed");
+    expect(last.state["c"]).toBe("c");
+    expect((await compiled.getState(threadId))?.next).toEqual([]);
+  });
+
+  it("step does not mutate the shared spec or limit concurrent runs", async () => {
+    const spec = threeStepSpec();
+    (spec.runtime as Record<string, unknown>)["recursionLimit"] = 10;
+    const compiled = await compileGraph(spec);
+    const threadId = "step-shared";
+    const pause = new AbortController();
+    const unsub = compiled.events.subscribe((ev) => {
+      if (ev.type === "node.end" && ev.scope.nodeId === "n1") pause.abort();
+    });
+    await compiled.run({ threadId, pauseSignal: pause.signal, onInterrupt: "fail" });
+    unsub();
+
+    // A full run on another thread overlapping the step must not inherit any
+    // step-only limit (the old implementation set runtime.recursionLimit = 1).
+    const seenLimits: unknown[] = [];
+    const unsubSeen = compiled.events.subscribe((ev) => {
+      if (ev.type === "node.start") seenLimits.push(compiled.spec.runtime?.recursionLimit);
+    });
+    const [stepped, other] = await Promise.all([
+      compiled.step({ threadId, onInterrupt: "fail" }),
+      compiled.run({ threadId: "step-shared-other", onInterrupt: "fail" }),
+    ]);
+    expect(stepped.status).toBe("paused");
+    expect(other.status).toBe("completed");
+    expect(other.state["c"]).toBe("c");
+    unsubSeen();
+    expect(seenLimits.length).toBeGreaterThan(0);
+    expect(new Set(seenLimits)).toEqual(new Set([10]));
+    expect(compiled.spec.runtime?.recursionLimit).toBe(10);
+  });
+
+  it("step without a checkpointer fails clearly", async () => {
+    const spec = threeStepSpec();
+    (spec.runtime as Record<string, unknown>)["checkpoint"] = { enabled: false };
+    const compiled = await compileGraph(spec);
+    await expect(compiled.step({ threadId: "x" })).rejects.toThrow(/needs a checkpointer/);
   });
 });

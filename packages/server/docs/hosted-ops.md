@@ -18,10 +18,18 @@ Remote clients **must not** send provider secrets. The server rejects any `env` 
 
 ## Observability
 
-- Structured JSON logs on stdout (`level`, `msg`, `threadId`, `runId`, …).
-- `GET /healthz` returns `{ ok, metrics: { runsStarted, runsCompleted, runsInterrupted, runsFailed, runsCancelled }, activeRuns, database, credentials }` where `credentials` is the same introspection object as on `GET /` (`vendorKeys`, `awsRegion`, `hasAwsKeys`, `hasBedrockIamHint`).
-- ECS: CloudWatch log group `/ecs/flowgraph-server` (see Terraform).
-- Desktop Runner surfaces `run.error` and HTTP error messages in the EVENT LOG.
+- Structured JSON logs on stdout (`level`, `msg`, `threadId`, `runId`, `stack` on errors). Honor `FLOWGRAPH_LOG_LEVEL` (`debug`/`info`/`warn`/`error`, default `info`).
+- `http.access` on every request (method, path, status, durationMs, remote). `GET /ping` is logged at **debug** so Docker healthchecks stay quiet.
+- `events.subscribe` / `events.close` for SSE attach/detach (`threadId`, `lastEventId` / `lastSeq`). Heartbeats are not logged.
+- Uncaught exceptions and unhandled rejections are logged with stack then the process exits.
+- `GET /healthz` and `GET /` include `identity` (`version`, `node`, `platform`, `arch`, `hostname`, `pid`, `uptimeSec`, `graphStoreDir`, `database`, `gitSha`) plus existing `metrics`, `activeRuns`, and `credentials` (`vendorKeys`, `awsRegion`, `hasAwsKeys`, `hasBedrockIamHint` — keys present, not values).
+- Per-thread event journal: `{FLOWGRAPH_GRAPH_STORE}/{threadId}.events.jsonl`. `GET /runs/:threadId/journal` returns the same events after a process restart.
+- ECS: CloudWatch log group `/ecs/flowgraph-server` (see Terraform). On a Mac mini, redirect stdout to `~/Library/Logs/flowgraph-server.log`.
+- Desktop Runner surfaces `run.error` and HTTP error messages in the EVENT LOG. Settings → Test connection shows identity from `/healthz`.
+
+### Bug report (lab)
+
+Paste `/healthz`, the log tail, `threadId`, and the graph-store YAML + `events.jsonl`. Do not include env dumps or auth tokens.
 
 ## Known gaps (Bedrock)
 

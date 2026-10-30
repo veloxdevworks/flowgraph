@@ -14,8 +14,8 @@ Use a **monorepo** with **pnpm workspaces + Turborepo**, **tsup** (esbuild) for 
 ## Consequences
 
 - Clear public/extension boundaries; adapters publish on their own cadence.
-- A CI user installing `@veloxdevworks/flowgraph-core` does not pull the Claude/Cursor SDKs (peer-depended adapter packages).
-- `@veloxdevworks/flowgraph-spec` is dependency-light and reusable by editor tooling and the future GUI.
+- A CI user installing `@flowgraph/core` does not pull the Claude/Cursor SDKs (peer-depended adapter packages).
+- `@flowgraph/spec` is dependency-light and reusable by editor tooling and the future GUI.
 - Slightly more upfront config (workspace, pipeline, release flow) than a single package.
 
 ## Alternatives considered

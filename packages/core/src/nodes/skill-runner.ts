@@ -3,7 +3,7 @@
  * Used by both the `skill` node and skill-as-tool for intelligent nodes.
  */
 
-import { loadSkill, preflightSkill, type SkillDef } from "@veloxdevworks/flowgraph-skills";
+import { loadSkill, preflightSkill, type SkillDef } from "@flowgraph/skills";
 import { resolveSkillPath } from "../skill-resolver.js";
 import type { NodeRunContext } from "../context.js";
 

@@ -11,7 +11,7 @@ import type {
   AgentStep,
   TokenUsage,
   ToolSpec,
-} from "@veloxdevworks/flowgraph-core";
+} from "@flowgraph/core";
 
 export const CLAUDE_BUILTIN_TOOLS = [
   "Read",
@@ -27,7 +27,12 @@ export const CLAUDE_BUILTIN_TOOLS = [
 
 export type ClaudeBuiltinTool = (typeof CLAUDE_BUILTIN_TOOLS)[number];
 
-export type ClaudePermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan";
+export type ClaudePermissionMode =
+  | "default"
+  | "acceptEdits"
+  | "bypassPermissions"
+  | "plan"
+  | "dontAsk";
 
 export interface ClaudeQueryRequest {
   prompt: string;
@@ -227,6 +232,11 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Provi
     },
 
     async run(req: AgentRequest, ctx: ProviderRunContext): Promise<AgentResult> {
+      const cachedResult = ctx.replay?.get("provider:result");
+      if (isRecord(cachedResult) && "output" in cachedResult) {
+        return cachedResult as unknown as AgentResult;
+      }
+
       const deps = await getDeps();
       const { mcpServers, allowedBuiltin } = buildInvokableTools(req.tools, deps, ctx);
 
@@ -234,11 +244,18 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Provi
         .filter((t) => t.kind !== "builtin")
         .map((t) => (t.kind === "mcp" || t.kind === "skill" || t.kind === "node" || t.kind === "function" ? `mcp__flowgraph-tools__${t.name}` : t.name));
 
+      // Headless: no TTY for Claude's workspace-trust / permission prompts.
+      // `dontAsk` skips interactive prompts; `canUseTool` still governs tools
+      // when permission is not deny. Explicit providers.*.permissionMode wins.
+      const permissionMode =
+        options.permissionMode ??
+        (req.permission === "ask" ? "default" : "dontAsk");
+
       const queryOptions: Record<string, unknown> = {
         systemPrompt: req.system,
         maxTurns: req.maxSteps ?? 10,
-        cwd: options.cwd ?? ctx.node.workspace,
-        permissionMode: options.permissionMode ?? "default",
+        cwd: ctx.node.workspace ?? options.cwd,
+        permissionMode,
         mcpServers,
         allowedTools: [...allowedBuiltin, ...invokableNames],
         abortController: ctx.signal ? { signal: ctx.signal } : undefined,
@@ -255,9 +272,18 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Provi
       }
 
       if (req.permission !== "deny") {
+        let nativeSeq = 0;
         queryOptions["canUseTool"] = async (toolName: string, input: Record<string, unknown>) => {
           try {
             const gated = await ctx.checkToolCall(toolName, input);
+            const idx = `claude:native:${nativeSeq++}`;
+            if (ctx.replay?.get(idx) === "applied") {
+              return {
+                behavior: "deny" as const,
+                message: "Already applied on replay; do not repeat this file change.",
+              };
+            }
+            ctx.replay?.set(idx, "applied");
             return {
               behavior: "allow" as const,
               updatedInput: (gated ?? input) as Record<string, unknown>,
@@ -328,12 +354,14 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Provi
 
       if (usage) ctx.emit("usage", usage);
 
-      return {
+      const agentResult: AgentResult = {
         output,
         steps,
         ...(usage ? { usage } : {}),
         stopReason,
       };
+      ctx.replay?.set("provider:result", agentResult);
+      return agentResult;
     },
   };
 }

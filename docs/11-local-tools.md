@@ -1,8 +1,8 @@
 # 11 — Local Tools
 
-Opt-in tool packages extend agent nodes with capabilities that need local I/O (filesystem, shell, etc.). They register **function tools** via `@veloxdevworks/flowgraph-core`'s `registerTool()` API so any provider (including LangChain) can invoke them.
+Opt-in tool packages extend agent nodes with capabilities that need local I/O (filesystem, shell, etc.). They register **function tools** via `@flowgraph/core`'s `registerTool()` API so any provider (including LangChain) can invoke them.
 
-## 1. Filesystem tools (`@veloxdevworks/flowgraph-tools-fs`)
+## 1. Filesystem tools (`@flowgraph/tools-fs`)
 
 Declare in your graph:
 
@@ -69,18 +69,18 @@ See [examples/fs-agent](../examples/fs-agent/).
 
 ### Provider-native file tools
 
-When using `provider: claude`, prefer Claude Agent SDK builtin tools (`Read`, `Edit`, `Bash`, …). They are gated by the same `permission` / `runtime.hooks` model via the SDK's `canUseTool` callback mapped to flowgraph governance — no need for `@veloxdevworks/flowgraph-tools-fs` unless you want a provider-agnostic sandbox.
+When using `provider: claude`, prefer Claude Agent SDK builtin tools (`Read`, `Edit`, `Bash`, …). They are gated by the same `permission` / `runtime.hooks` model via the SDK's `canUseTool` callback mapped to flowgraph governance — no need for `@flowgraph/tools-fs` unless you want a provider-agnostic sandbox.
 
-For `provider: cursor`, use `@veloxdevworks/flowgraph-tools-fs` function tools (`fs_read`, `fs_write`, …) when you need per-call HITL on file operations; Cursor native builtins cannot be gated per-call.
+For `provider: cursor`, use `@flowgraph/tools-fs` function tools (`fs_read`, `fs_write`, …) when you need per-call HITL on file operations; Cursor native builtins cannot be gated per-call.
 
-For `provider: langchain` (no native file tools), `@veloxdevworks/flowgraph-tools-fs` is the supported path.
+For `provider: langchain` (no native file tools), `@flowgraph/tools-fs` is the supported path.
 
 ## 2. Programmatic registration
 
 For embedded / test runners, call `registerFsTools` directly:
 
 ```ts
-import { registerFsTools } from "@veloxdevworks/flowgraph-tools-fs";
+import { registerFsTools } from "@flowgraph/tools-fs";
 
 registerFsTools({
   workspaceRoot: "/path/to/project",

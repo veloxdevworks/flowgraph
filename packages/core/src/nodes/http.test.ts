@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { compileGraph } from "../compiler.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "../events.js";
 import { redactHeaders } from "./http.js";
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import { unconditionalFanOutDiagnostics } from "./validate-graph.js";
 
 describe("unconditionalFanOutDiagnostics", () => {

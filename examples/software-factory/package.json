@@ -9,9 +9,9 @@
     "validate": "flowgraph validate software-factory.graph.yaml"
   },
   "dependencies": {
-    "@veloxdevworks/flowgraph-cli": "workspace:*",
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-testing": "workspace:*"
+    "@flowgraph/cli": "workspace:*",
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/testing": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^4.1.9"

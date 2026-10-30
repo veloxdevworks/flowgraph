@@ -182,12 +182,16 @@ async function isCursorAgentBinary(
 function buildArgs(vendor: CliVendor, prompt: string, model?: string): string[] {
   switch (vendor) {
     case "claude": {
-      const args = ["-p", prompt, "--output-format", "json"];
+      // `-p` skips Claude's workspace-trust dialog. `dontAsk` skips leftover
+      // permission prompts — there is no TTY after flowgraph hands off.
+      const args = ["-p", prompt, "--output-format", "json", "--permission-mode", "dontAsk"];
       if (model) args.push("--model", model);
       return args;
     }
     case "cursor": {
-      const args = ["-p", prompt];
+      // `-p` is headless; Cursor still prompts to trust the cwd unless `--trust`
+      // is set (Desktop/sidecar has no TTY to answer that dialog).
+      const args = ["-p", "--trust", prompt];
       if (model) args.push("--model", model);
       return args;
     }
@@ -244,6 +248,26 @@ function parseCliStdout(vendor: CliVendor, stdout: string): unknown {
   return trimmed;
 }
 
+function tryParseJson(text: string): unknown {
+  const trimmed = text.trim();
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
+  const candidate = (fenced?.[1] ?? trimmed).trim();
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(candidate.slice(start, end + 1));
+      } catch {
+        /* fall through */
+      }
+    }
+    return undefined;
+  }
+}
+
 export function createCliProvider(options: CliProviderOptions): ProviderAdapter {
   const vendor = options.vendor;
   const runExec = options.execFileFn ?? execFile;
@@ -271,10 +295,13 @@ export function createCliProvider(options: CliProviderOptions): ProviderAdapter 
       }
       const binary = detected.binary;
 
-      const prompt = req.system ? `${req.system}\n\n${req.prompt}` : req.prompt;
+      let prompt = req.system ? `${req.system}\n\n${req.prompt}` : req.prompt;
+      if (req.schema) {
+        prompt = `${prompt}\n\nRespond with JSON matching this schema:\n${JSON.stringify(req.schema)}`;
+      }
       const model = req.model ?? options.model;
       const args = buildArgs(vendor, prompt, model);
-      const cwd = options.cwd ?? ctx.node.workspace;
+      const cwd = ctx.node.workspace ?? options.cwd;
 
       ctx.emit("step", { provider: options.name, vendor, binary, model });
 
@@ -288,7 +315,10 @@ export function createCliProvider(options: CliProviderOptions): ProviderAdapter 
         if (stderr?.trim()) {
           ctx.node.logger.debug(`[cli:${vendor}] stderr: ${stderr.trim().slice(0, 500)}`);
         }
-        const output = parseCliStdout(vendor, stdout);
+        let output = parseCliStdout(vendor, stdout);
+        if (req.schema && typeof output === "string") {
+          output = tryParseJson(output) ?? { text: output };
+        }
         return {
           output,
           messages: [

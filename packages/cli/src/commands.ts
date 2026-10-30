@@ -2,8 +2,8 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, waitForWebhookResume, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@veloxdevworks/flowgraph-core";
-import { isError, generateJsonSchema } from "@veloxdevworks/flowgraph-spec";
+import { loadGraph, validateSpec, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildSkillsCommand } from "./skills-command.js";
 import { checkpointerOption, promptResolver, serializePendingInterrupts } from "./interrupts.js";
 import { mcpHubForRun, closeMcpHub, loginMcpServer, mcpOAuthStatus, logoutMcpServer } from "./mcp.js";
@@ -13,6 +13,25 @@ import { loadDotenvFromCwd } from "./env.js";
 import { templateFor, listTemplates } from "./templates.js";
 import { migrateSpec } from "./migrate.js";
 import { printDiagnostics, printBanner, printSuccess, printError, printInfo, printWarning, formatDuration } from "./ui.js";
+
+function printIssues(result: RunResult): void {
+  const issues = result.issues ?? [];
+  if (issues.length === 0) return;
+  printWarning(`Issues (${issues.length})`);
+  for (const issue of issues) {
+    const loc = issue.nodeId ? ` [${issue.nodeId}]` : "";
+    printWarning(`  • [${issue.severity}] ${issue.code}${loc}: ${issue.message}`);
+    if (issue.impact) printInfo(`      impact: ${issue.impact}`);
+    if (issue.remediation) printInfo(`      fix: ${issue.remediation}`);
+  }
+}
+
+function maybeFailOnIssues(result: RunResult, failOnIssues: boolean | undefined): void {
+  if (failOnIssues && (result.issues?.length ?? 0) > 0) {
+    printError("Run completed with issues (--fail-on-issues).");
+    process.exit(1);
+  }
+}
 
 function webhookUrlFromInterrupts(interrupts: InterruptInfo[] | undefined): string | undefined {
   for (const it of interrupts ?? []) {
@@ -94,7 +113,7 @@ const program = new Command()
 program.addCommand(buildSkillsCommand());
 
 // ---------------------------------------------------------------------------
-// tui — interactive terminal UI (optional @veloxdevworks/flowgraph-tui package)
+// tui — interactive terminal UI (optional @flowgraph/tui package)
 // ---------------------------------------------------------------------------
 program
   .command("tui [graph]")
@@ -102,7 +121,7 @@ program
   .option("--cwd <dir>", "Working directory")
   .action(async (graphPath: string | undefined, opts: { cwd?: string }) => {
     try {
-      const { launchTui } = await import("@veloxdevworks/flowgraph-tui");
+      const { launchTui } = await import("@flowgraph/tui");
       await launchTui({
         ...(graphPath ? { graphPath } : {}),
         cwd: opts.cwd ?? process.cwd(),
@@ -110,7 +129,7 @@ program
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("Cannot find") || msg.includes("ERR_MODULE_NOT_FOUND")) {
-        printError("TUI is not installed. Install it: pnpm add @veloxdevworks/flowgraph-tui");
+        printError("TUI is not installed. Install it: pnpm add @flowgraph/tui");
       } else {
         printError(msg);
       }
@@ -150,6 +169,8 @@ program
           agentAliases: imported.agentAliases,
         });
         allDiags.push(...agentPf.diagnostics);
+        const reqPf = await preflightGraphRequires(spec, { cwd });
+        allDiags.push(...reqPf.diagnostics);
       }
     }
 
@@ -185,6 +206,7 @@ program
   .option("--json", "Emit events as JSONL on stdout")
   .option("--on-interrupt <policy>", "HITL policy: prompt|fail|approve|webhook", "fail")
   .option("--no-mcp-oauth", "Do not prompt for MCP OAuth on connect; fail if tokens are missing")
+  .option("--fail-on-issues", "Exit 1 when the run recorded any issues")
   .option("--cwd <dir>", "Working directory")
   .action(async (
     graphPath: string,
@@ -195,6 +217,7 @@ program
       json?: boolean;
       onInterrupt?: "prompt" | "fail" | "approve" | "webhook";
       noMcpOauth?: boolean;
+      failOnIssues?: boolean;
       cwd?: string;
     },
   ) => {
@@ -238,6 +261,15 @@ program
       printError("Agent preflight failed — fix agent definitions before running:");
       printDiagnostics(agentPreflight.diagnostics, graphPath);
       process.exit(2);
+    }
+    const reqPreflight = await preflightGraphRequires(spec, { cwd: graphDir });
+    if (!reqPreflight.ok) {
+      printError("Toolchain preflight failed — install missing binaries or set onMissingTool: skip:");
+      printDiagnostics(reqPreflight.diagnostics, graphPath);
+      process.exit(2);
+    }
+    for (const d of reqPreflight.diagnostics.filter((x) => x.severity === "warning")) {
+      printWarning(d.message);
     }
 
     // Parse --input flags and validate against declared `inputs` schema (fail fast)
@@ -296,12 +328,16 @@ program
         if (result.status === "completed") {
           printSuccess(`Completed in ${formatDuration(result.durationMs)}`);
           printInfo(`Run ID: ${result.runId}`);
+          printIssues(result);
+          maybeFailOnIssues(result, opts.failOnIssues);
         } else if (result.status === "interrupted") {
           reportInterrupts(result.interrupts, result.threadId);
           result = await awaitWebhookIfNeeded(result);
           if (result.status === "completed") {
             printSuccess("Completed after webhook resume.");
             printInfo(`Run ID: ${result.runId}`);
+            printIssues(result);
+            maybeFailOnIssues(result, opts.failOnIssues);
           } else if (result.status === "error") {
             process.exit(1);
           } else {
@@ -335,10 +371,12 @@ program
   .requiredOption("--thread <id>", "Thread ID to resume")
   .option("--list", "List pending interrupts for the thread and exit")
   .option("--resume <json>", "Resume value passed to the interrupt (JSON)")
+  .option("--from <checkpointId>", "Resume from a historical checkpoint id")
   .option("--stream", "Stream events to stdout")
   .option("--json", "Emit events as JSONL on stdout")
   .option("--on-interrupt <policy>", "HITL policy if it interrupts again: prompt|fail|approve|webhook", "fail")
   .option("--no-mcp-oauth", "Do not prompt for MCP OAuth on connect; fail if tokens are missing")
+  .option("--fail-on-issues", "Exit 1 when the run recorded any issues")
   .option("--cwd <dir>", "Working directory")
   .action(async (
     graphPath: string,
@@ -346,10 +384,12 @@ program
       thread: string;
       list?: boolean;
       resume?: string;
+      from?: string;
       stream?: boolean;
       json?: boolean;
       onInterrupt?: "prompt" | "fail" | "approve" | "webhook";
       noMcpOauth?: boolean;
+      failOnIssues?: boolean;
       cwd?: string;
     },
   ) => {
@@ -381,6 +421,12 @@ program
     if (!agentPreflight.ok) {
       printError("Agent preflight failed:");
       printDiagnostics(agentPreflight.diagnostics, graphPath);
+      process.exit(2);
+    }
+    const reqPreflight = await preflightGraphRequires(spec, { cwd: graphDir });
+    if (!reqPreflight.ok) {
+      printError("Toolchain preflight failed:");
+      printDiagnostics(reqPreflight.diagnostics, graphPath);
       process.exit(2);
     }
 
@@ -453,16 +499,22 @@ program
     if (policy === "prompt") resumeOpts.resolveInterrupt = promptResolver;
     let result;
     try {
-      result = await compiled.resume(resumeOpts);
+      result = opts.from
+        ? await compiled.resumeFrom({ ...resumeOpts, checkpointId: opts.from })
+        : await compiled.resume(resumeOpts);
 
       if (!opts.json) {
         if (result.status === "completed") {
           printSuccess(`Completed in ${formatDuration(result.durationMs)}`);
+          printIssues(result);
+          maybeFailOnIssues(result, opts.failOnIssues);
         } else if (result.status === "interrupted") {
           reportInterrupts(result.interrupts, result.threadId);
           result = await awaitWebhookIfNeeded(result);
           if (result.status === "completed") {
             printSuccess("Completed after webhook resume.");
+            printIssues(result);
+            maybeFailOnIssues(result, opts.failOnIssues);
           } else if (result.status === "error") {
             process.exit(1);
           } else {
@@ -778,7 +830,7 @@ async function parseInputFlags(
   return result;
 }
 
-function toMermaid(spec: import("@veloxdevworks/flowgraph-spec").GraphSpec): string {
+function toMermaid(spec: import("@flowgraph/spec").GraphSpec): string {
   const lines = ["graph TD"];
   for (const edge of spec.edges) {
     const from = edge.from === "START" ? "START([START])" : edge.from;
@@ -799,7 +851,7 @@ function toMermaid(spec: import("@veloxdevworks/flowgraph-spec").GraphSpec): str
   return lines.join("\n");
 }
 
-function toAscii(spec: import("@veloxdevworks/flowgraph-spec").GraphSpec): string {
+function toAscii(spec: import("@flowgraph/spec").GraphSpec): string {
   const lines: string[] = [];
   lines.push(pc.bold(`Graph: ${spec.metadata.name}`));
   lines.push("");

@@ -1,5 +1,5 @@
 {
-  "name": "@veloxdevworks/flowgraph-server",
+  "name": "@flowgraph/server",
   "version": "0.1.0",
   "description": "HTTP run server for hosted flowgraph execution (ECS/Fargate + Bedrock AgentCore)",
   "license": "Apache-2.0",
@@ -25,9 +25,9 @@
   },
   "dependencies": {
     "@langchain/langgraph": "^1.4.7",
-    "@veloxdevworks/flowgraph-checkpoint-postgres": "workspace:*",
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-spec": "workspace:*",
+    "@flowgraph/checkpoint-postgres": "workspace:*",
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

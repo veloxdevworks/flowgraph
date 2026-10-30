@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { compileGraph } from "./compiler.js";
 import { preflightGraphSkills } from "./preflight-graph.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "./events.js";
 
 let fixtureDir = "";

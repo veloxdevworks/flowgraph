@@ -5,5 +5,5 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: ["@veloxdevworks/flowgraph-core", "@veloxdevworks/flowgraph-spec", "@anthropic-ai/claude-agent-sdk", "zod"],
+  external: ["@flowgraph/core", "@flowgraph/spec", "@anthropic-ai/claude-agent-sdk", "zod"],
 });

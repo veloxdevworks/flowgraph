@@ -1,4 +1,4 @@
-import { registerFunction, type ReducerFn } from "@veloxdevworks/flowgraph-core";
+import { registerFunction, type ReducerFn } from "@flowgraph/core";
 
 registerFunction("tagAlpha", () => "alpha");
 registerFunction("tagBeta", () => "beta");

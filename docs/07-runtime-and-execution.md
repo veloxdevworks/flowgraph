@@ -38,8 +38,8 @@ Checkpointing is **first-class in v1**. A checkpointer persists graph state at e
 | Backend | Package | Use |
 |---|---|---|
 | `memory` | core (`MemorySaver`) | tests, ephemeral CI runs |
-| `sqlite` | `@veloxdevworks/flowgraph-checkpoint-sqlite` | desktop/local, single-machine CI artifact (a `.db` file) |
-| `postgres` | `@veloxdevworks/flowgraph-checkpoint-postgres` | shared/durable, multi-worker (later milestone) |
+| `sqlite` | `@flowgraph/checkpoint-sqlite` | desktop/local, single-machine CI artifact (a `.db` file) |
+| `postgres` | `@flowgraph/checkpoint-postgres` | shared/durable, multi-worker (later milestone) |
 | custom | implement `CheckpointerAdapter` | bring your own (Redis, S3, etc.) |
 
 ```yaml
@@ -58,8 +58,9 @@ The adapter interface wraps LangGraph's `BaseCheckpointSaver` (`put`, `putWrites
 Because every superstep is checkpointed, the runtime exposes:
 
 ```ts
-const history = await getStateHistory(compiled, { threadId });   // list of StateSnapshots
-await resumeFrom(compiled, { threadId, checkpointId });          // fork/replay from a point
+const history = await compiled.getStateHistory(threadId);                  // list of StateSnapshots
+await compiled.resumeFrom({ threadId, checkpointId, resume: true });       // fork/replay from a point
+await compiled.step({ threadId });                                         // run exactly one superstep, then pause
 ```
 
 This powers `flowgraph run --resume`, debugging, and "what if I re-run from here" flows.

@@ -4,10 +4,33 @@
  */
 
 import { Annotation, messagesStateReducer } from "@langchain/langgraph";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
+import { ISSUES_CHANNEL_CAP, issueDedupeKey, type RunIssue } from "./run-issues.js";
 
 export const ONCE_CHANNEL = "__once";
+/** Serialized agent replay dumps keyed by `threadId:nodeId`. */
+export const REPLAY_CHANNEL = "__agentReplay";
+/** Fan-in bag for checkpointed map workers: `{ [mapId]: Array<{ i, v }> }`. */
+export const MAP_COLLECT_CHANNEL = "__mapCollect";
+/** Per-Send map worker payload (index, item, binding name). */
+export const MAP_TASK_CHANNEL = "__mapTask";
+/** Persisted `service` start intents for rehydrate-on-resume. */
+export const SERVICES_CHANNEL = "__services";
+/** Paths of git worktrees created by `type: worktree` (cleanupOnEnd). */
+export const WORKTREES_CHANNEL = "__worktrees";
+/** Accumulated run issues (capped; full history is on disk). */
+export const ISSUES_CHANNEL = "__issues";
+
+export const RESERVED_STATE_CHANNELS = [
+  ONCE_CHANNEL,
+  REPLAY_CHANNEL,
+  MAP_COLLECT_CHANNEL,
+  MAP_TASK_CHANNEL,
+  SERVICES_CHANNEL,
+  WORKTREES_CHANNEL,
+  ISSUES_CHANNEL,
+] as const;
 
 type ChannelDef = NonNullable<GraphSpec["state"]>["channels"][string];
 
@@ -92,9 +115,72 @@ export function buildStateAnnotation(spec: GraphSpec): ReturnType<typeof Annotat
     });
   }
 
-  // Reserved idempotency channel: merge of completed once-keys → results
-  fields[ONCE_CHANNEL] = Annotation<Record<string, unknown>>({
+  const mergeRecords = {
     reducer: (cur: Record<string, unknown> = {}, inc: Record<string, unknown>) => ({ ...cur, ...inc }),
+    default: () => ({}),
+  };
+
+  // Reserved idempotency channel: merge of completed once-keys → results
+  fields[ONCE_CHANNEL] = Annotation<Record<string, unknown>>(mergeRecords);
+  fields[REPLAY_CHANNEL] = Annotation<Record<string, unknown>>({
+    reducer: (cur: Record<string, unknown> = {}, inc: Record<string, unknown>) => {
+      const out: Record<string, unknown> = { ...cur };
+      for (const [k, v] of Object.entries(inc ?? {})) {
+        if (v == null) delete out[k];
+        else out[k] = v;
+      }
+      return out;
+    },
+    default: () => ({}),
+  });
+  fields[SERVICES_CHANNEL] = Annotation<Record<string, unknown>>({
+    reducer: (cur: Record<string, unknown> = {}, inc: Record<string, unknown>) => {
+      const out: Record<string, unknown> = { ...cur };
+      for (const [k, v] of Object.entries(inc ?? {})) {
+        if (v == null) delete out[k];
+        else out[k] = v;
+      }
+      return out;
+    },
+    default: () => ({}),
+  });
+  fields[MAP_TASK_CHANNEL] = Annotation<unknown>({
+    reducer: (_cur: unknown, inc: unknown) => inc,
+    default: () => null,
+  });
+  fields[WORKTREES_CHANNEL] = Annotation<unknown[]>({
+    reducer: (cur: unknown[] = [], inc: unknown) => {
+      const incoming = Array.isArray(inc) ? inc : [inc];
+      return [...cur, ...incoming];
+    },
+    default: () => [],
+  });
+  fields[ISSUES_CHANNEL] = Annotation<RunIssue[]>({
+    reducer: (cur: RunIssue[] = [], inc: unknown) => {
+      const incoming = (Array.isArray(inc) ? inc : [inc]) as RunIssue[];
+      const out = [...cur];
+      const seen = new Set(cur.map((i) => issueDedupeKey(i)));
+      for (const issue of incoming) {
+        if (!issue || typeof issue !== "object" || typeof issue.code !== "string") continue;
+        const key = issueDedupeKey(issue);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(issue);
+      }
+      return out.length > ISSUES_CHANNEL_CAP ? out.slice(-ISSUES_CHANNEL_CAP) : out;
+    },
+    default: () => [],
+  });
+  fields[MAP_COLLECT_CHANNEL] = Annotation<Record<string, unknown>>({
+    reducer: (cur: Record<string, unknown> = {}, inc: Record<string, unknown>) => {
+      const out: Record<string, unknown> = { ...cur };
+      for (const [k, v] of Object.entries(inc ?? {})) {
+        const prev = Array.isArray(out[k]) ? (out[k] as unknown[]) : [];
+        const add = Array.isArray(v) ? v : [v];
+        out[k] = [...prev, ...add];
+      }
+      return out;
+    },
     default: () => ({}),
   });
 

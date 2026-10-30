@@ -6,7 +6,7 @@ import { resolveAgentPath } from "./agent-resolver.js";
 import { loadAgentDef } from "./agents/loader.js";
 import { compileGraph } from "./compiler.js";
 import { createScriptedProvider } from "./providers/index.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 import type { AgentRequest } from "./providers/types.js";
 
 describe("resolveAgentPath + loadAgentDef", () => {

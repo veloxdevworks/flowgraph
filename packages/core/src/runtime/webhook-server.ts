@@ -2,11 +2,13 @@
  * Embedded HTTP ingress for `wait` nodes with `webhook: true`.
  *
  * Process-scoped: one listener per host:port. Routes are one-shot and live
- * only in memory — a process restart loses pending registrations.
- * No auth in v1 (local / trusted-network only).
+ * in memory, so a process restart loses pending registrations. Optional
+ * shared-secret auth via `runtime.webhookServer.token`, enforced per route
+ * (each graph's token guards only its own routes).
  */
 
 import * as http from "node:http";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 export const DEFAULT_WEBHOOK_HOST = "127.0.0.1";
@@ -16,6 +18,8 @@ const MAX_BODY_BYTES = 1_048_576; // 1 MiB
 export interface WebhookServerConfig {
   host?: string;
   port?: number;
+  /** Shared secret; required on POST when set. */
+  token?: string;
 }
 
 export interface WebhookServerInfo {
@@ -31,6 +35,8 @@ export interface WebhookRoute {
   resume: WebhookResumeFn;
   /** Generated listening URL (set by the engine when registering). */
   url?: string;
+  /** Shared secret required on GET/POST for this route (from the graph's `webhookServer.token`). */
+  token?: string;
 }
 
 interface PendingRoute extends WebhookRoute {
@@ -43,6 +49,7 @@ interface ServerEntry {
   host: string;
   port: number;
   key: string;
+  token?: string;
 }
 
 const servers = new Map<string, ServerEntry>();
@@ -115,6 +122,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  if (route.token && !webhookAuthorized(req, route.token)) {
+    sendJson(res, 401, { error: "unauthorized", message: "Missing or invalid webhook token" });
+    return;
+  }
+
   if (req.method === "GET") {
     sendJson(res, 200, {
       waiting: true,
@@ -167,6 +179,23 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       message,
     });
   }
+}
+
+function sameSecret(a: string, b: string): boolean {
+  const ha = createHash("sha256").update(a, "utf8").digest();
+  const hb = createHash("sha256").update(b, "utf8").digest();
+  return timingSafeEqual(ha, hb);
+}
+
+function webhookAuthorized(req: http.IncomingMessage, token: string): boolean {
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string") {
+    const m = /^Bearer\s+(.+)$/i.exec(auth);
+    if (m?.[1] && sameSecret(m[1], token)) return true;
+  }
+  const header = req.headers["x-flowgraph-token"];
+  if (typeof header === "string" && sameSecret(header, token)) return true;
+  return false;
 }
 
 function listenOnce(

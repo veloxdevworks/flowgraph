@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as net from "node:net";
-import { PortWithSchema, type GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import { PortWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 
 function portGraph(withConfig: Record<string, unknown>): GraphSpec {

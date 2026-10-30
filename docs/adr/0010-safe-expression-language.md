@@ -9,7 +9,7 @@ The hybrid authoring model ([ADR-0002](./0002-hybrid-authoring-model.md)) needs 
 
 ## Decision
 
-Build a **purpose-built, sandboxed expression evaluator** (`@veloxdevworks/flowgraph-expr`): member/index access, literals, comparison/logical/arithmetic operators, ternary/nullish/pipe, and a curated, side-effect-free standard library. **No JavaScript `eval`/`Function`**, no host access (`process`, `require`, prototypes). Expressions are parsed at compile time so referenced channels/inputs can be statically checked.
+Build a **purpose-built, sandboxed expression evaluator** (`@flowgraph/expr`): member/index access, literals, comparison/logical/arithmetic operators, ternary/nullish/pipe, and a curated, side-effect-free standard library. **No JavaScript `eval`/`Function`**, no host access (`process`, `require`, prototypes). Expressions are parsed at compile time so referenced channels/inputs can be statically checked.
 
 ## Consequences
 

@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import * as path from "node:path";
 import * as url from "node:url";
-import { registerFunction } from "@veloxdevworks/flowgraph-core";
-import { runGraphFile, eventsOfType } from "@veloxdevworks/flowgraph-testing";
+import { registerFunction } from "@flowgraph/core";
+import { runGraphFile, eventsOfType } from "@flowgraph/testing";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 

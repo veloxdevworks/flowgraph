@@ -1,5 +1,5 @@
 {
-  "name": "@veloxdevworks/flowgraph-checkpoint-postgres",
+  "name": "@flowgraph/checkpoint-postgres",
   "version": "0.1.0",
   "description": "Durable Postgres checkpointer for flowgraph",
   "license": "Apache-2.0",
@@ -26,7 +26,7 @@
     "@langchain/langgraph": "^1.4.7"
   },
   "devDependencies": {
-    "@veloxdevworks/flowgraph-core": "workspace:*",
+    "@flowgraph/core": "workspace:*",
     "@langchain/langgraph": "^1.4.7",
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",

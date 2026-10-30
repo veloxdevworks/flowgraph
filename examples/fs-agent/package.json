@@ -10,13 +10,13 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@veloxdevworks/flowgraph-cli": "workspace:*",
-    "@veloxdevworks/flowgraph-core": "workspace:*",
-    "@veloxdevworks/flowgraph-tools-fs": "workspace:*",
+    "@flowgraph/cli": "workspace:*",
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/tools-fs": "workspace:*",
     "@langchain/xai": "^1.0.0"
   },
   "devDependencies": {
-    "@veloxdevworks/flowgraph-testing": "workspace:*",
+    "@flowgraph/testing": "workspace:*",
     "vitest": "^4.1.9"
   }
 }

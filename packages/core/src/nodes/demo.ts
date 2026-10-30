@@ -4,19 +4,21 @@
  * Best-effort artifact capture to demonstrate what a pipeline produced:
  *  - http: re-issue a request and save a request/response transcript
  *  - screenshot: navigate to a URL via Playwright and capture a screenshot
- *    (optional short video of the page load)
+ *    (optional short video of the page load, tracked as an extra artifact)
+ *  - video: record a short page-load video via Playwright
+ *  - simulator: iOS (simctl) or Android (adb) screenshot / video
  *  - file: attach an existing file produced earlier in the pipeline
  *
  * Capture failures return `{ ok: false, reason }` unless `with.strict: true`.
  */
 
 import { createRequire } from "node:module";
-import { copyFileSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { DemoWithSchema } from "@veloxdevworks/flowgraph-spec";
-import { renderDeep } from "@veloxdevworks/flowgraph-expr";
+import { DemoWithSchema } from "@flowgraph/spec";
+import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { parseDuration } from "../runtime/duration.js";
@@ -27,7 +29,10 @@ import {
   demoManifestKey,
   type DemoKind,
   type DemoManifestEntry,
+  type DemoExtraArtifact,
 } from "./demo-manifest.js";
+import { ISSUE_CODE } from "../runtime/run-issues.js";
+import { captureSimulator } from "./demo-simulator.js";
 
 const configSchema = DemoWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -43,6 +48,7 @@ export type DemoResult = {
   reason?: string;
   capturedAt: string;
   label?: string;
+  extra?: DemoExtraArtifact[];
   /** Present for http mode when capture succeeded. */
   request?: {
     method: string;
@@ -120,16 +126,21 @@ function isMissingModuleError(err: unknown): boolean {
   );
 }
 
+type PlaywrightPage = {
+  goto: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
+  waitForSelector: (sel: string, opts?: Record<string, unknown>) => Promise<unknown>;
+  waitForTimeout: (ms: number) => Promise<void>;
+  screenshot: (opts?: Record<string, unknown>) => Promise<Buffer>;
+  mouse: { wheel: (x: number, y: number) => Promise<void> };
+  evaluate: (fn: string | ((...args: unknown[]) => unknown), ...args: unknown[]) => Promise<unknown>;
+  video: () => { path: () => Promise<string> } | null;
+};
+
 type PlaywrightModule = {
   chromium: {
     launch: (opts?: Record<string, unknown>) => Promise<{
       newContext: (opts?: Record<string, unknown>) => Promise<{
-        newPage: () => Promise<{
-          goto: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
-          waitForSelector: (sel: string, opts?: Record<string, unknown>) => Promise<unknown>;
-          waitForTimeout: (ms: number) => Promise<void>;
-          screenshot: (opts?: Record<string, unknown>) => Promise<Buffer>;
-        }>;
+        newPage: () => Promise<PlaywrightPage>;
         close: () => Promise<void>;
       }>;
       close: () => Promise<void>;
@@ -155,6 +166,19 @@ async function importPlaywright(cwd: string): Promise<PlaywrightModule> {
       );
     }
     throw err;
+  }
+}
+
+async function waitForPage(
+  page: PlaywrightPage,
+  waitFor: string | undefined,
+  timeoutMs: number,
+): Promise<void> {
+  if (!waitFor) return;
+  if (/^\d+(\.\d+)?(ms|s|m|h|d)$/.test(waitFor)) {
+    await page.waitForTimeout(parseDuration(waitFor));
+  } else {
+    await page.waitForSelector(waitFor, { timeout: timeoutMs });
   }
 }
 
@@ -247,28 +271,28 @@ async function captureScreenshot(
   const shotPath = join(dir, shotName);
 
   const browser = await pw.chromium.launch({ headless: true });
+  let extra: DemoExtraArtifact | undefined;
   try {
     const contextOpts: Record<string, unknown> = {
       viewport,
       ...(config.video ? { recordVideo: { dir, size: viewport } } : {}),
     };
     const context = await browser.newContext(contextOpts);
+    const page = await context.newPage();
+    const videoHandle = config.video && typeof page.video === "function" ? page.video() : null;
     try {
-      const page = await context.newPage();
       await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
-
-      if (config.waitFor) {
-        const waitFor = String(renderDeep(config.waitFor, scope));
-        if (/^\d+(\.\d+)?(ms|s|m|h|d)$/.test(waitFor)) {
-          await page.waitForTimeout(parseDuration(waitFor));
-        } else {
-          await page.waitForSelector(waitFor, { timeout: timeoutMs });
-        }
-      }
-
+      await waitForPage(
+        page,
+        config.waitFor ? String(renderDeep(config.waitFor, scope)) : undefined,
+        timeoutMs,
+      );
       await page.screenshot({ path: shotPath, fullPage: true });
     } finally {
       await context.close();
+    }
+    if (videoHandle) {
+      extra = await videoHandleToExtra(videoHandle, dir, slug);
     }
   } finally {
     await browser.close();
@@ -277,9 +301,6 @@ async function captureScreenshot(
   const sizeBytes = statSync(shotPath).size;
   const capturedAt = new Date().toISOString();
 
-  // When video recording is enabled, Playwright writes a .webm next to the context.
-  // Prefer returning the screenshot path (primary artifact); video path is a bonus
-  // left on disk under the same artifact dir for operators to find.
   return {
     ok: true,
     kind: "screenshot",
@@ -287,6 +308,96 @@ async function captureScreenshot(
     mimeType: "image/png",
     sizeBytes,
     capturedAt,
+    ...(label ? { label } : {}),
+    ...(extra ? { extra: [extra] } : {}),
+  };
+}
+
+async function videoHandleToExtra(
+  handle: { path: () => Promise<string> },
+  destDir: string,
+  slug: string,
+): Promise<DemoExtraArtifact | undefined> {
+  try {
+    const raw = await handle.path();
+    if (!raw || !existsSync(raw)) return undefined;
+    const dest = join(destDir, `${timestampSlug()}-${slug}.webm`);
+    if (resolve(raw) !== resolve(dest)) {
+      copyFileSync(raw, dest);
+    }
+    return {
+      path: dest,
+      mimeType: "video/webm",
+      kind: "video",
+      sizeBytes: statSync(dest).size,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function captureVideo(
+  config: NonNullable<Config["video"]>,
+  scope: ReturnType<typeof buildScope>,
+  ctx: NodeRunContext,
+  nodeId: string,
+  label: string | undefined,
+): Promise<DemoResult> {
+  const url = String(renderDeep(config.url, scope));
+  const timeoutMs = config.timeout ? parseDuration(config.timeout) : 30_000;
+  const durationMs = config.duration ? parseDuration(config.duration) : 5_000;
+  const viewport = config.viewport ?? { width: 1280, height: 720 };
+
+  const pw = await importPlaywright(ctx.workspace);
+  const dir = ensureArtifactDir(ctx.workspace, nodeId);
+  const slug = slugify(label ?? "video");
+
+  const browser = await pw.chromium.launch({ headless: true });
+  let videoPath: string | undefined;
+  try {
+    const context = await browser.newContext({
+      viewport,
+      recordVideo: { dir, size: viewport },
+    });
+    const page = await context.newPage();
+    const videoHandle = typeof page.video === "function" ? page.video() : null;
+    try {
+      await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
+      await waitForPage(
+        page,
+        config.waitFor ? String(renderDeep(config.waitFor, scope)) : undefined,
+        timeoutMs,
+      );
+      if (config.scroll) {
+        const steps = Math.max(3, Math.floor(durationMs / 400));
+        for (let i = 0; i < steps; i++) {
+          await page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 0.4))");
+          await page.waitForTimeout(Math.floor(durationMs / steps));
+        }
+      } else {
+        await page.waitForTimeout(durationMs);
+      }
+    } finally {
+      await context.close();
+    }
+    if (videoHandle) {
+      const extra = await videoHandleToExtra(videoHandle, dir, slug);
+      videoPath = extra?.path;
+    }
+  } finally {
+    await browser.close();
+  }
+
+  if (!videoPath || !existsSync(videoPath)) {
+    throw new Error("demo video: Playwright did not produce a recording");
+  }
+  return {
+    ok: true,
+    kind: "video",
+    path: videoPath,
+    mimeType: "video/webm",
+    sizeBytes: statSync(videoPath).size,
+    capturedAt: new Date().toISOString(),
     ...(label ? { label } : {}),
   };
 }
@@ -358,6 +469,7 @@ function trackManifest(
       ...(result.sizeBytes != null ? { sizeBytes: result.sizeBytes } : {}),
       ...(result.reason ? { reason: result.reason } : {}),
       ...(result.label ? { label: result.label } : {}),
+      ...(result.extra && result.extra.length > 0 ? { extra: result.extra } : {}),
     };
     appendDemoManifestEntry(ctx.workspace, key, entry);
   } catch (err) {
@@ -389,10 +501,18 @@ export const demoNode = defineNode<Config>({
         let kind: DemoKind;
         if (config.http) kind = "http";
         else if (config.screenshot) kind = "screenshot";
+        else if (config.video) kind = "video";
+        else if (config.simulator) kind = "simulator";
         else if (config.file) kind = "file";
         else {
           // Schema should prevent this; treat as best-effort failure.
           const result = failureResult("http", "demo: no capture mode configured", label);
+          ctx.issue({
+            code: ISSUE_CODE.CAPTURE_FAILED,
+            severity: "warning",
+            message: result.reason!,
+            impact: "No demo artifact was captured.",
+          });
           if (strict) throw new Error(result.reason);
           ctx.logger.warn(result.reason!);
           trackManifest(ctx, nodeId, result);
@@ -408,6 +528,21 @@ export const demoNode = defineNode<Config>({
             result = await captureHttp(config.http, scope, ctx, nodeId, label);
           } else if (kind === "screenshot" && config.screenshot) {
             result = await captureScreenshot(config.screenshot, scope, ctx, nodeId, label);
+          } else if (kind === "video" && config.video) {
+            result = await captureVideo(config.video, scope, ctx, nodeId, label);
+          } else if (kind === "simulator" && config.simulator) {
+            const dir = ensureArtifactDir(ctx.workspace, nodeId);
+            const slug = `${timestampSlug()}-${slugify(label ?? "simulator")}`;
+            const sim = await captureSimulator(config.simulator, { artifactDir: dir, fileSlug: slug });
+            result = {
+              ok: true,
+              kind: "simulator",
+              path: sim.path,
+              mimeType: sim.mimeType,
+              sizeBytes: sim.sizeBytes,
+              capturedAt: new Date().toISOString(),
+              ...(label ? { label } : {}),
+            };
           } else {
             result = captureFile(config.file!, scope, ctx, nodeId, label);
           }
@@ -419,6 +554,23 @@ export const demoNode = defineNode<Config>({
           };
         } catch (err) {
           const reason = errMessage(err);
+          ctx.issue({
+            code: /is not installed|not found on PATH/i.test(reason)
+              ? ISSUE_CODE.TOOL_NOT_FOUND
+              : ISSUE_CODE.CAPTURE_FAILED,
+            severity: "warning",
+            message: `demo ${kind} capture failed: ${reason}`,
+            impact: "The expected demo artifact is missing; the run result is harder to verify.",
+            remediation:
+              kind === "simulator"
+                ? /xcrun/i.test(reason)
+                  ? "Install Xcode command-line tools (`xcode-select --install`)."
+                  : "Install the Android SDK platform-tools and ensure adb is on PATH."
+                : kind === "screenshot" || kind === "video"
+                  ? "Install playwright (`npm install playwright` then `npx playwright install chromium`)."
+                  : undefined,
+            detail: { kind, reason },
+          });
           if (strict) throw err instanceof Error ? err : new Error(reason);
           const result = failureResult(kind, reason, label);
           ctx.logger.warn(`demo: capture failed (${kind})`, { reason });

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import * as net from "node:net";
-import { ServiceWithSchema, type GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import { ServiceWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import {
   listThreadServices,

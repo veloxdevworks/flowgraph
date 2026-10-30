@@ -1,14 +1,14 @@
 /**
- * Ambient types for the optional @veloxdevworks/flowgraph-mcp peer dependency.
+ * Ambient types for the optional @flowgraph/mcp peer dependency.
  *
  * The CLI never imports this package's runtime code directly — it's loaded lazily via
  * lazyOptionalImport() so `flowgraph run`/`validate` work without it installed. This
  * shim lets the CLI typecheck without the package present in the workspace; it mirrors
- * the package's public surface (see @veloxdevworks/flowgraph-mcp's src/index.ts).
+ * the package's public surface (see @flowgraph/mcp's src/index.ts).
  */
-declare module "@veloxdevworks/flowgraph-mcp" {
-  import type { McpHub } from "@veloxdevworks/flowgraph-core";
-  import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+declare module "@flowgraph/mcp" {
+  import type { McpHub } from "@flowgraph/core";
+  import type { GraphSpec } from "@flowgraph/spec";
 
   export type McpServerDefs = NonNullable<GraphSpec["mcpServers"]>;
 

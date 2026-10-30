@@ -3,7 +3,7 @@
  * Mirrors desktop `packages/ui-graph` validateRunInput — keep behaviors in sync.
  */
 
-import type { InputField, InputFieldType } from "@veloxdevworks/flowgraph-spec";
+import type { InputField, InputFieldType } from "@flowgraph/spec";
 
 export class InputValidationError extends Error {
   readonly issues: string[];

@@ -1,4 +1,4 @@
-import { registerFunction } from "@veloxdevworks/flowgraph-core";
+import { registerFunction } from "@flowgraph/core";
 
 registerFunction("draftContent", (input) => {
   const { topic = "Untitled", revision = 0 } = input as { topic?: string; revision?: number };

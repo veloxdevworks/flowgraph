@@ -2,8 +2,8 @@
  * Build a Cursor provider from declarative provider config (YAML `providers` block).
  */
 
-import type { ProviderAdapter } from "@veloxdevworks/flowgraph-core";
-import type { CursorProviderConfig } from "@veloxdevworks/flowgraph-spec";
+import type { ProviderAdapter } from "@flowgraph/core";
+import type { CursorProviderConfig } from "@flowgraph/spec";
 import { createCursorProvider, type CursorRuntime } from "./provider.js";
 
 const DEFAULT_API_KEY_ENV = "CURSOR_API_KEY";

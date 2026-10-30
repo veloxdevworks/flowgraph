@@ -21,7 +21,7 @@ export {
   InputValidationError,
 } from "./inputs.js";
 export { compileGraph } from "./compiler.js";
-export type { GraphSpec, NodeSpec, EdgeSpec, InputField, InputFieldType } from "@veloxdevworks/flowgraph-spec";
+export type { GraphSpec, NodeSpec, EdgeSpec, InputField, InputFieldType } from "@flowgraph/spec";
 export type {
   CompileOptions,
   RunOptions,
@@ -34,6 +34,24 @@ export type {
   StateSnapshot,
 } from "./compiler.js";
 
+export {
+  ONCE_CHANNEL,
+  REPLAY_CHANNEL,
+  MAP_COLLECT_CHANNEL,
+  MAP_TASK_CHANNEL,
+  SERVICES_CHANNEL,
+  WORKTREES_CHANNEL,
+  ISSUES_CHANNEL,
+  RESERVED_STATE_CHANNELS,
+} from "./runtime/state-annotation.js";
+export {
+  clearAllReplayCaches,
+  clearThreadReplayCache,
+  hydrateReplay,
+  hydrateReplayFromInterruptPayload,
+  snapshotReplay,
+  replayCacheKey,
+} from "./providers/replay-cache.js";
 export { parseDuration, sleep } from "./runtime/duration.js";
 export { runWithPolicy, isTimeoutError } from "./runtime/retry.js";
 export type { RetryConfig } from "./runtime/retry.js";
@@ -108,14 +126,14 @@ export { expandMcpTools, requireMcpHub, mcpToolName, parseMcpToolName, isMcpTool
 export type { McpToolRef } from "./mcp/expand.js";
 export { resolveSkillPath } from "./skill-resolver.js";
 export type { SkillAliasMap, SkillResolverOptions } from "./skill-resolver.js";
-export { discoverSkillUses } from "./discover-skills.js";
+export { discoverSkillUses, discoverSubgraphFileUses, walkNodes } from "./discover-skills.js";
 export { resolveAgentPath } from "./agent-resolver.js";
 export type { AgentAliasMap, AgentResolverOptions } from "./agent-resolver.js";
 export { discoverAgentUses } from "./discover-agents.js";
 export { loadAgentDef } from "./agents/loader.js";
 export type { AgentDef, AgentFrontMatter } from "./agents/schema.js";
 export { AgentFrontMatterSchema } from "./agents/schema.js";
-export { preflightGraphSkills, preflightGraphAgents } from "./preflight-graph.js";
+export { preflightGraphSkills, preflightGraphAgents, preflightGraphRequires } from "./preflight-graph.js";
 export type { PreflightGraphOptions, PreflightGraphResult } from "./preflight-graph.js";
 export { bundleGraphForRemote } from "./runtime/bundle-graph.js";
 export type { BundleResult, BundleGraphOptions } from "./runtime/bundle-graph.js";
@@ -183,6 +201,7 @@ export type { BudgetState } from "./context.js";
 export {
   createLangChainProvider,
   createLangChainProviderFromConfig,
+  createLangChainChatModelFromConfig,
   isKnownLangChainVendor,
   LANGCHAIN_VENDORS,
 } from "./providers/langchain/index.js";
@@ -213,6 +232,7 @@ export {
   hitlNode,
   webhookNode,
   demoNode,
+  worktreeNode,
 } from "./nodes/index.js";
 
 export {
@@ -221,5 +241,15 @@ export {
   readDemoManifest,
   demoManifestKey,
 } from "./nodes/demo-manifest.js";
-export type { DemoManifestEntry } from "./nodes/demo-manifest.js";
-export type { DemoResult, DemoKind } from "./nodes/demo.js";
+export type { DemoManifestEntry, DemoKind, DemoExtraArtifact } from "./nodes/demo-manifest.js";
+export type { DemoResult } from "./nodes/demo.js";
+export type { RunIssue, RunIssueSeverity, IssueInput } from "./runtime/run-issues.js";
+export {
+  appendRunIssue,
+  readRunIssues,
+  runIssuesPath,
+  runIssuesKey,
+  ISSUE_CODE,
+  ISSUES_CHANNEL_CAP,
+} from "./runtime/run-issues.js";
+export { checkBinOnPath, isMissingBinaryError, toolNotFoundMessage } from "./runtime/which.js";

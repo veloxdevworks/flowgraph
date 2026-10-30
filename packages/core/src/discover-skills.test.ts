@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { discoverSkillUses } from "./discover-skills.js";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec } from "@flowgraph/spec";
 
 describe("discoverSkillUses", () => {
   it("returns uses from top-level skill nodes", () => {

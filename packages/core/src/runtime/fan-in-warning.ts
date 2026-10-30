@@ -6,7 +6,7 @@
  * edge). Does not trace multi-hop paths before a join node.
  */
 
-import type { GraphSpec, NodeSpec, Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import type { GraphSpec, NodeSpec, Diagnostic } from "@flowgraph/spec";
 import type { Logger } from "../context.js";
 
 /** Channels a node writes via explicit `with.output` / `with.collect` projections. */

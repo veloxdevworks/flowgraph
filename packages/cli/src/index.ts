@@ -1,6 +1,6 @@
 export { program } from "./commands.js";
 
-// Shared run-setup helpers (used by @veloxdevworks/flowgraph-tui and the CLI)
+// Shared run-setup helpers (used by @flowgraph/tui and the CLI)
 export {
   checkpointerOption,
   formatInterruptPrompt,

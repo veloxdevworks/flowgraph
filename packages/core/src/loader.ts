@@ -5,7 +5,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@veloxdevworks/flowgraph-spec";
+import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import {
   envExpansionCollisionDiagnostics,
   LOAD_TIME_ENV_VAR_RE,

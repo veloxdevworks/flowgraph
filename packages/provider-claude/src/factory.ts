@@ -2,8 +2,8 @@
  * Build a Claude provider from declarative provider config (YAML `providers` block).
  */
 
-import type { ProviderAdapter } from "@veloxdevworks/flowgraph-core";
-import type { ClaudeProviderConfig } from "@veloxdevworks/flowgraph-spec";
+import type { ProviderAdapter } from "@flowgraph/core";
+import type { ClaudeProviderConfig } from "@flowgraph/spec";
 import { createClaudeProvider, type ClaudePermissionMode } from "./provider.js";
 
 const DEFAULT_API_KEY_ENV = "ANTHROPIC_API_KEY";

@@ -1,4 +1,4 @@
-import { registerFunction } from "@veloxdevworks/flowgraph-core";
+import { registerFunction } from "@flowgraph/core";
 
 type Feature = {
   title?: string;
@@ -328,6 +328,18 @@ registerFunction("deploy", (input) => {
     title: artifact?.title,
     url: `https://${environment}.example.internal/${artifact?.id ?? "app"}`,
     deployedAt: new Date().toISOString(),
+  };
+});
+
+registerFunction("stampPackage", (input) => {
+  const { pkg } = input as { pkg?: { name?: string; slug?: string } };
+  const name = pkg?.name ?? "pkg";
+  const slug = pkg?.slug ?? "pkg";
+  return {
+    name,
+    slug,
+    note: `stamped ${name} in isolated worktree`,
+    diff: { before: "", after: `// ${name}\nexport const slug = "${slug}";\n` },
   };
 });
 

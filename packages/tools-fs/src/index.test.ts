@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resolveSandboxPath, SandboxError } from "./sandbox.js";
 import { registerFsTools } from "./index.js";
-import { getTool } from "@veloxdevworks/flowgraph-core";
+import { getTool } from "@flowgraph/core";
 
 describe("resolveSandboxPath", () => {
   let tmp: string;

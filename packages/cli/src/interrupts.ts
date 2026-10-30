@@ -1,19 +1,23 @@
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import type { GraphSpec } from "@veloxdevworks/flowgraph-spec";
-import type { CompileOptions, InterruptInfo } from "@veloxdevworks/flowgraph-core";
+import type { GraphSpec } from "@flowgraph/spec";
+import type { CompileOptions, InterruptInfo } from "@flowgraph/core";
 import { printInfo } from "./ui.js";
 import { lazyOptionalImport } from "./optional-deps.js";
 
-const loadCheckpointSqlite = lazyOptionalImport<typeof import("@veloxdevworks/flowgraph-checkpoint-sqlite")>(
-  "@veloxdevworks/flowgraph-checkpoint-sqlite",
-  "Install it: pnpm add @veloxdevworks/flowgraph-checkpoint-sqlite",
+const loadCheckpointSqlite = lazyOptionalImport<typeof import("@flowgraph/checkpoint-sqlite")>(
+  "@flowgraph/checkpoint-sqlite",
+  "Install it: pnpm add @flowgraph/checkpoint-sqlite",
+);
+
+const loadCheckpointPostgres = lazyOptionalImport<typeof import("@flowgraph/checkpoint-postgres")>(
+  "@flowgraph/checkpoint-postgres",
+  "Install it: pnpm add @flowgraph/checkpoint-postgres",
 );
 
 /**
  * Build a durable checkpointer for CLI runs based on the graph's runtime config.
- * sqlite → persistent file (resume survives process restarts). Otherwise leaves
- * the compiler default (in-memory).
+ * sqlite → persistent file; postgres → DATABASE_URL / connectionString.
  */
 export async function checkpointerOption(
   spec: GraphSpec,
@@ -25,13 +29,36 @@ export async function checkpointerOption(
     const dbPath = ck.path ?? ".flowgraph/checkpoints.db";
     return { checkpointer: checkpoint.createSqliteCheckpointer(dbPath) };
   }
+  if (ck?.backend === "postgres") {
+    const checkpoint = await loadCheckpointPostgres();
+    const connectionString =
+      ck.path ??
+      process.env["DATABASE_URL"] ??
+      process.env["FLOWGRAPH_DATABASE_URL"];
+    if (!connectionString) {
+      throw new Error(
+        "runtime.checkpoint.backend is postgres but no connection string was set. " +
+          "Pass runtime.checkpoint.path or set DATABASE_URL.",
+      );
+    }
+    return { checkpointer: await checkpoint.createPostgresCheckpointer(connectionString) };
+  }
   return {};
+}
+
+function interruptData(it: InterruptInfo): Record<string, unknown> | undefined {
+  const payload = it.payload;
+  if (!payload || typeof payload !== "object") return undefined;
+  const data = (payload as { data?: unknown }).data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+  return data as Record<string, unknown>;
 }
 
 /** Prompt text shown before collecting an interrupt answer. */
 export function formatInterruptPrompt(it: InterruptInfo): string {
   const kind = it.kind ?? "approval";
   const reason = it.reason ?? it.id;
+  const data = interruptData(it);
 
   if (kind === "question") {
     return `${reason}\nYour answer: `;
@@ -40,6 +67,29 @@ export function formatInterruptPrompt(it: InterruptInfo): string {
   if (kind === "choice" && it.choices?.length) {
     const lines = it.choices.map((c, i) => `  ${i + 1}. ${c}`).join("\n");
     return `${reason}\n${lines}\nEnter choice (number or text): `;
+  }
+
+  if (kind === "form") {
+    const schema = data?.["schema"];
+    const hint = schema ? `\nJSON Schema: ${JSON.stringify(schema)}` : "";
+    return `${reason}${hint}\nPaste JSON form values: `;
+  }
+
+  if (kind === "review") {
+    const stat = typeof data?.["diffStat"] === "string" ? `\n${data["diffStat"]}` : "";
+    const artifacts = Array.isArray(data?.["artifactRefs"])
+      ? `\nArtifacts: ${(data["artifactRefs"] as string[]).join(", ")}`
+      : "";
+    const decisions = Array.isArray(data?.["decision"])
+      ? (data["decision"] as string[]).join(", ")
+      : "approve, request-changes";
+    return `${reason}${stat}${artifacts}\nDecision (${decisions}) or JSON { "decision", "feedback" }: `;
+  }
+
+  const tool = typeof data?.["tool"] === "string" ? data["tool"] : undefined;
+  if (tool) {
+    const args = data?.["args"] !== undefined ? ` ${JSON.stringify(data["args"])}` : "";
+    return `Interrupt: ${reason}\nTool: ${tool}${args}\nApprove? (yes/no, or JSON resume value): `;
   }
 
   return `Interrupt: ${reason}\nApprove? (yes/no, or JSON resume value): `;
@@ -80,6 +130,34 @@ export function parseInterruptAnswer(it: InterruptInfo, raw: string): unknown {
       /* fall through */
     }
     return { choice: trimmed };
+  }
+
+  if (kind === "form") {
+    if (trimmed === "") return {};
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      /* fall through */
+    }
+    return { value: trimmed };
+  }
+
+  if (kind === "review") {
+    const lower = trimmed.toLowerCase();
+    if (lower === "approve" || lower === "yes" || lower === "y") {
+      return { decision: "approve" };
+    }
+    if (lower === "request-changes" || lower === "reject" || lower === "no" || lower === "n") {
+      return { decision: "request-changes" };
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      /* fall through */
+    }
+    return { decision: trimmed };
   }
 
   // approval / custom / default
