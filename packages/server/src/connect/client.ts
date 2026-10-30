@@ -275,6 +275,14 @@ export class ConnectClient {
       this.send({ type: "event.batch", threadId, events: batch });
       if (events.length === 0) this.pending.delete(threadId);
     }
+    // More than one batch was queued for some thread: keep draining instead of
+    // waiting for the next enqueue (which may never come once a run ends).
+    if (this.pending.size > 0 && !this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        this.flushAll();
+      }, 0);
+    }
   }
 }
 

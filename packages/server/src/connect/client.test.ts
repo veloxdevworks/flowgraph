@@ -121,4 +121,35 @@ describe("ConnectClient", () => {
     });
     client.stop();
   });
+
+  it("drains more than one 50-event batch without a further enqueue", async () => {
+    let socket: FakeSocket | undefined;
+    const service = { registry: new SessionRegistry() } as unknown as RunService;
+    const client = new ConnectClient({
+      url: "ws://platform.test/connect",
+      service,
+      webSocket: class {
+        constructor() {
+          socket = new FakeSocket();
+          return socket;
+        }
+      } as unknown as new (url: string) => WebSocketLike,
+    });
+    client.start();
+    socket!.emit("open");
+    socket!.emit(
+      "message",
+      JSON.stringify({ type: "hello.ack", protocolVersion: CONNECT_PROTOCOL_VERSION, sessionId: "s1" }),
+    );
+    const enqueue = (client as unknown as { enqueue(t: string, e: unknown): void }).enqueue.bind(client);
+    for (let i = 0; i < 120; i++) enqueue("t1", { id: `e${i}`, seq: i });
+    await vi.waitFor(() => {
+      const sent = socket!.sent
+        .map((s) => JSON.parse(s) as { type: string; events?: unknown[] })
+        .filter((m) => m.type === "event.batch")
+        .reduce((n, m) => n + (m.events?.length ?? 0), 0);
+      expect(sent).toBe(120);
+    });
+    client.stop();
+  });
 });
