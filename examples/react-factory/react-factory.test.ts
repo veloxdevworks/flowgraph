@@ -23,7 +23,7 @@ const frontendDev = createScriptedProvider("frontend-dev", async (req, ctx) => {
   const conv = block(req.prompt, "conventions");
   const css = conv.match(/"css":"([^"]+)"/)?.[1] ?? "unknown";
   const tests = conv.match(/"tests":"([^"]+)"/)?.[1] ?? "unknown";
-  let exportStyle = block(req.system, "prefs").includes('prefs/exports: "named"') ? "named" : "default";
+  let exportStyle = block(req.system, "prefs").includes('"prefs/exports": "named"') ? "named" : "default";
   if (/prefer named exports/i.test(req.prompt)) {
     await ctx.invokeTool("remember", { scope: "user", key: "exports", value: "named" });
     exportStyle = "named";
@@ -72,7 +72,7 @@ describe("react-factory example", () => {
 
   it("remembers the requester's preference for their next build only", async () => {
     const again = await build("alice@acme.test", { title: "Cart drawer" }, repo, "f-2");
-    expect(block(again.req.system, "prefs")).toContain('prefs/exports: "named"');
+    expect(block(again.req.system, "prefs")).toContain('"prefs/exports": "named"');
     expect(again.result["exportStyle"]).toBe("named");
 
     const bob = await build("bob@acme.test", { title: "Search bar" }, repo, "f-3");

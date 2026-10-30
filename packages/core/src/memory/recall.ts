@@ -109,7 +109,26 @@ function truncateBytes(s: string, max: number): string {
   return out + TRUNC_MARKER;
 }
 
-const fence = (s: string): string => s.replace(/<\/?memory/gi, (m) => m.replace("<", "&lt;"));
+/**
+ * Angle brackets and their look-alikes (after NFKC folds fullwidth/small forms
+ * to ASCII): single angle quotes, CJK and mathematical angle brackets,
+ * ornamental and modifier angles, Canadian syllabics look-alikes.
+ */
+const ANGLE_CHARS = /[<>\u2039\u203A\u2329\u232A\u3008\u3009\u27E8\u27E9\u276C-\u2771\u29FC\u29FD\u02C2\u02C3\u1433\u1438\uFE64\uFE65\uFF1C\uFF1E]/g;
+const CONTROL_CHARS = /[\p{Cc}\u2028\u2029]/gu;
+
+/**
+ * Make stored text safe inside a `<memory>` wrapper: NFKC-normalize, escape
+ * every angle bracket (and look-alikes) as an entity, and escape control and
+ * line-separator characters, so content can neither close the wrapper nor
+ * start a new item line.
+ */
+export function fenceRecallText(s: string): string {
+  return s
+    .normalize("NFKC")
+    .replace(ANGLE_CHARS, (c) => (c === "<" ? "&lt;" : c === ">" ? "&gt;" : `&#x${c.codePointAt(0)!.toString(16).toUpperCase()};`))
+    .replace(CONTROL_CHARS, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, "0")}`);
+}
 
 function itemLine(it: RecallItem): { line: string; truncated: boolean } {
   let json: string;
@@ -119,7 +138,8 @@ function itemLine(it: RecallItem): { line: string; truncated: boolean } {
     json = String(it.value);
   }
   const date = new Date(it.updatedAt).toISOString().slice(0, 10);
-  const full = fence(`- [${it.label} ${date}] ${it.key}: ${json}`);
+  // Keys are JSON-encoded so a key can't fake the rest of a line or a new one.
+  const full = `- [${fenceRecallText(it.label)} ${date}] ${fenceRecallText(JSON.stringify(it.key))}: ${fenceRecallText(json)}`;
   const max = MEMORY_RECALL_ITEM_TOKENS * 4;
   const line = truncateBytes(full, max);
   return { line, truncated: line !== full };
@@ -142,8 +162,8 @@ export function compareRecallItems(a: RecallItem, b: RecallItem): number {
 }
 
 /**
- * Pure budgeting + rendering over already-fetched candidates. Exposed for tests
- * and probes: the same inputs always produce byte-identical output.
+ * Pure budgeting + rendering over already-fetched candidates. Exposed for tests:
+ * the same inputs always produce byte-identical output.
  */
 export function fitRecall(
   blocks: Array<{ id: string; sources: string }>,
@@ -211,12 +231,14 @@ export function fitRecall(
   };
 }
 
-/** Ids referenced as `memory.<id>` in raw templates. */
+/** Ids referenced as `memory.<id>` inside `{{ … }}` expressions of raw templates. */
 export function referencedRecallIds(templates: Array<string | undefined>): Set<string> {
   const out = new Set<string>();
   for (const t of templates) {
     if (!t) continue;
-    for (const m of t.matchAll(/\bmemory\.([A-Za-z_][A-Za-z0-9_]*)/g)) out.add(m[1]!);
+    for (const expr of t.matchAll(/\{\{([\s\S]*?)\}\}/g)) {
+      for (const m of expr[1]!.matchAll(/\bmemory\.([A-Za-z_][A-Za-z0-9_]*)/g)) out.add(m[1]!);
+    }
   }
   return out;
 }

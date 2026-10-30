@@ -50,7 +50,7 @@ describe("fitRecall (pure budgeting)", () => {
 
   it("drops the lowest-precedence, oldest items first", () => {
     const r = fitRecall(blocks, many, new Set(), { maxTokens: 400, maxItems: 200 });
-    const kept = new Set([...r.appendix.matchAll(/\] (k\d+):/g)].map((m) => m[1]));
+    const kept = new Set([...r.appendix.matchAll(/\] "(k\d+)":/g)].map((m) => m[1]));
     // every subject item that was dropped must be older than every kept subject item, and
     // no project item survives while a subject item was dropped
     const subj = many.filter((i) => i.rank === 1).sort((x, y) => y.updatedAt - x.updatedAt);
@@ -166,7 +166,7 @@ async function seed(backend: MemoryBackend, subjectKey: string, key: string, val
 describe("agent with.memory.recall", () => {
   it("injects referenced blocks into the prompt and the rest after the system prompt; nothing reaches state", async () => {
     const backend = createInMemoryMemoryBackend();
-    await seed(backend, "INC-1", "attempt/1", { action: "restart pool", worked: false });
+    await seed(backend, "inc-1", "attempt/1", { action: "restart pool", worked: false });
     await seed(backend, "", "runbook/db", "Raise max_connections before restarting");
     const { calls, provider } = recorder();
     const c = await compileGraph(
@@ -187,7 +187,7 @@ describe("agent with.memory.recall", () => {
     c.events.subscribe((e) => {
       events.push(e);
     });
-    const r = await c.run({ input: { incident: "INC-1" } });
+    const r = await c.run({ input: { incident: "inc-1" } });
     expect(r.status).toBe("completed");
     const req = calls[0]!;
     expect(req.prompt).toContain('<memory id="thisIncident"');
@@ -199,7 +199,7 @@ describe("agent with.memory.recall", () => {
     expect(JSON.stringify(r.state)).not.toContain("restart pool");
     const ev = events.find((e) => e.type === "memory.recall")?.data as Record<string, unknown>;
     expect(ev).toMatchObject({ items: 2, dropped: 0, maxTokens: 500 });
-    expect(ev["bytes"]).toBe(byteLen(req.system!.slice("You fix incidents.\n\n".length)) + byteLen(req.prompt) - byteLen("Fix INC-1.\n"));
+    expect(ev["bytes"]).toBe(byteLen(req.system!.slice("You fix incidents.\n\n".length)) + byteLen(req.prompt) - byteLen("Fix inc-1.\n"));
   });
 
   it("leaves prompts byte-identical when no recall is declared", async () => {
@@ -207,9 +207,9 @@ describe("agent with.memory.recall", () => {
     await seed(backend, "", "runbook/db", "x");
     const { calls, provider } = recorder();
     const c = await compileGraph(agentGraph({ system: "S", prompt: "P {{ state.incident }}" }), { providers: [provider], memory: { backend, identity } });
-    await c.run({ input: { incident: "INC-1" } });
+    await c.run({ input: { incident: "inc-1" } });
     expect(calls[0]!.system).toBe("S");
-    expect(calls[0]!.prompt).toBe("P INC-1");
+    expect(calls[0]!.prompt).toBe("P inc-1");
     expect(calls[0]!.tools.map((t) => t.name)).not.toContain("remember");
   });
 
@@ -243,10 +243,10 @@ describe("agent with.memory.recall", () => {
   it("recalls what fixed similar incidents (not this one) via similarSubjects", async () => {
     const backend = createInMemoryMemoryBackend();
     const now = Date.now();
-    await seed(backend, "INC-1", "attempt/1", { action: "raise pool size" }, { service: "db", outcome: "resolved" }, now - 3000);
-    await seed(backend, "INC-2", "attempt/1", { action: "reboot" }, { service: "db", outcome: "failed" }, now - 2000);
-    await seed(backend, "INC-3", "attempt/1", { action: "purge cdn" }, { service: "web", outcome: "resolved" }, now - 1000);
-    await seed(backend, "INC-9", "attempt/1", { action: "my own attempt" }, { service: "db", outcome: "resolved" }, now);
+    await seed(backend, "inc-1", "attempt/1", { action: "raise pool size" }, { service: "db", outcome: "resolved" }, now - 3000);
+    await seed(backend, "inc-2", "attempt/1", { action: "reboot" }, { service: "db", outcome: "failed" }, now - 2000);
+    await seed(backend, "inc-3", "attempt/1", { action: "purge cdn" }, { service: "web", outcome: "resolved" }, now - 1000);
+    await seed(backend, "inc-9", "attempt/1", { action: "my own attempt" }, { service: "db", outcome: "resolved" }, now);
     const { calls, provider } = recorder();
     const c = await compileGraph(
       agentGraph({
@@ -263,9 +263,9 @@ describe("agent with.memory.recall", () => {
       }),
       { providers: [provider], memory: { backend, identity } },
     );
-    await c.run({ input: { incident: "INC-9", service: "db" } });
+    await c.run({ input: { incident: "inc-9", service: "db" } });
     const p = calls[0]!.prompt;
-    expect(p).toContain("[incident INC-1 ");
+    expect(p).toContain("[incident inc-1 ");
     expect(p).toContain("raise pool size");
     expect(p).not.toContain("reboot");
     expect(p).not.toContain("purge cdn");
@@ -274,13 +274,13 @@ describe("agent with.memory.recall", () => {
 
   it("a match value that renders empty matches nothing instead of everything", async () => {
     const backend = createInMemoryMemoryBackend();
-    await seed(backend, "INC-1", "attempt/1", "a", { service: "db" });
+    await seed(backend, "inc-1", "attempt/1", "a", { service: "db" });
     const { calls, provider } = recorder();
     const c = await compileGraph(
       agentGraph({ prompt: "{{ memory.p }}", memory: { recall: [{ id: "p", similarSubjects: { match: { service: "{{ state.service }}" } } }] } }),
       { providers: [provider], memory: { backend, identity } },
     );
-    await c.run({ input: { incident: "INC-2" } });
+    await c.run({ input: { incident: "inc-2" } });
     expect(calls[0]!.prompt).toContain("(nothing recalled)");
   });
 
@@ -295,12 +295,12 @@ describe("agent with.memory.recall", () => {
     const graph = (onError?: string) =>
       agentGraph({ prompt: "x", memory: { recall: [{ id: "p", similarSubjects: {}, ...(onError ? { onError } : {}) }] } });
     const ok = await compileGraph(graph("skip"), { providers: [provider], memory: { backend: broken, identity } });
-    const r = await ok.run({ input: { incident: "INC-1" } });
+    const r = await ok.run({ input: { incident: "inc-1" } });
     expect(r.status).toBe("completed");
     expect(r.issues?.map((i) => i.code)).toContain("MEMORY_RECALL_FAILED");
     expect(calls).toHaveLength(1);
     const bad = await compileGraph(graph(), { providers: [provider], memory: { backend: broken, identity } });
-    const r2 = await bad.run({ input: { incident: "INC-1" } });
+    const r2 = await bad.run({ input: { incident: "inc-1" } });
     expect(r2.status).toBe("error");
     expect(String(r2.error)).toMatch(/recall block "p" failed: db down/);
   });
@@ -325,7 +325,7 @@ describe("remember tool", () => {
       }),
       { providers: [provider], memory: { backend, identity } },
     );
-    const r = await c.run({ input: { incident: "INC-7", service: "db" } });
+    const r = await c.run({ input: { incident: "inc-7", service: "db" } });
     expect(r.status).toBe("completed");
     const remember = calls[0]!.tools.find((t) => t.name === "remember")!;
     expect((remember.schema as { properties: { scope: { enum: string[] } } }).properties.scope.enum).toEqual(["subject", "user"]);
@@ -336,7 +336,7 @@ describe("remember tool", () => {
     expect(results.slice(4).map((x) => (x as { ok: boolean }).ok)).toEqual([true, true, false, false]);
     expect(results[6]).toMatchObject({ error: "MEMORY_WRITE_LIMIT" });
     const stored = await backend.get(
-      { org: identity.org, project: identity.project, graph: "", usr: "", subjectType: "incident", subjectKey: "INC-7" },
+      { org: identity.org, project: identity.project, graph: "", usr: "", subjectType: "incident", subjectKey: "inc-7" },
       "learned/fix",
     );
     expect(stored?.attrs).toEqual({ outcome: "resolved", service: "db" });
