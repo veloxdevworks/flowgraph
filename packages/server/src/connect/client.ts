@@ -9,7 +9,7 @@
 import type { ServerEvent } from "../types.js";
 import type { RunService } from "../run-service.js";
 import { errorFields, log } from "../metrics.js";
-import { ServerRequestError } from "../errors.js";
+import { refusalOf, ServerRequestError } from "../errors.js";
 import type { Principal } from "../identity.js";
 import {
   CONNECT_PROTOCOL_VERSION,
@@ -270,7 +270,7 @@ export class ConnectClient {
         id: cmd.id,
         ok: false,
         error: err instanceof Error ? err.message : String(err),
-        ...(err instanceof ServerRequestError ? { code: err.code } : {}),
+        ...(refusalOf(err) ? { code: refusalOf(err)!.code } : {}),
       });
     }
   }

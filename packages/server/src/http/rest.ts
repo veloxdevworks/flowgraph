@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { ClientSecretsRejectedError, credentialStatus } from "../credentials.js";
 import { processIdentity } from "../diagnostics.js";
 import { authModeOf } from "../identity.js";
-import { ServerRequestError, TooManyRunsError } from "../errors.js";
+import { refusalOf, TooManyRunsError } from "../errors.js";
 import type { Principal } from "../identity.js";
 import type { RunService } from "../run-service.js";
 import { attachSse } from "./sse.js";
@@ -234,8 +234,10 @@ export async function handleRest(
 }
 
 export function sendError(res: ServerResponse, err: unknown): void {
-  if (err instanceof ServerRequestError) {
-    sendJson(res, err.status, { error: err.message, code: err.code, ...(err.diagnostics ? { diagnostics: err.diagnostics } : {}) });
+  const refusal = refusalOf(err);
+  if (refusal) {
+    const { status, ...body } = refusal;
+    sendJson(res, status, { error: (err as Error).message, ...body });
     return;
   }
   if (err instanceof VoiceRequestError) {

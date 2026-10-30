@@ -50,6 +50,7 @@ import type {
 } from "./types.js";
 
 import { ServerRequestError, TooManyRunsError } from "./errors.js";
+import { assertUntrustedUploadAllowed, UNTRUSTED_NODE_POLICY } from "./upload-policy.js";
 import { authModeOf, createAuthenticator, singleUserPrincipal, type Authenticator, type Principal } from "./identity.js";
 
 /** sqlite memory is optional: the package is loaded only when configured. */
@@ -298,11 +299,13 @@ export class RunService {
     extras: { label?: string; status?: RunStatus } = {},
   ): Promise<{ spec: GraphSpec; yaml: string; cwd: string; importsStripped: boolean }> {
     if (yaml) {
-      const parsed = parseGraphYaml(yaml);
+      // Untrusted uploads never see the server environment.
+      const parsed = parseGraphYaml(yaml, { expandEnv: principal.trusted });
       if (!parsed.spec) {
         const msg = parsed.diagnostics.map((d) => d.message).join("; ");
         throw new Error(`Invalid graph YAML: ${msg}`);
       }
+      if (!principal.trusted) assertUntrustedUploadAllowed(yaml, parsed.spec);
       if (parsed.importsStripped) {
         log("warn", "stripped client imports from uploaded graph", { threadId });
       }
@@ -322,6 +325,8 @@ export class RunService {
         `No persisted graph for thread "${threadId}". Provide yaml on start/resume.`,
       );
     }
+    // Trust is checked again on every run: the author may have lost it since the upload.
+    if (!principal.trusted) assertUntrustedUploadAllowed(persisted.yaml, persisted.spec);
     return {
       spec: persisted.spec,
       yaml: persisted.yaml,
@@ -348,6 +353,7 @@ export class RunService {
       checkpointer,
       legacyStoreBackend: this.legacyStoreBackend,
       ...(identity ? { memoryIdentity: identity } : {}),
+      ...(principal.trusted ? {} : { nodePolicy: UNTRUSTED_NODE_POLICY }),
       ...(this.durableMemory && identity
         ? { memory: { backend: this.durableMemory.backend, identity } }
         : { memoryUnavailableHint: SERVER_MEMORY_HINT }),

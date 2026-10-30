@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ClientSecretsRejectedError } from "../credentials.js";
 import type { RunService } from "../run-service.js";
-import { ServerRequestError } from "../errors.js";
+import { refusalOf } from "../errors.js";
 import type { Principal } from "../identity.js";
 import { streamEventsUntilTerminal } from "./sse.js";
 import { readJsonBody, sendJson } from "./util.js";
@@ -129,8 +129,10 @@ export async function handleAgentCore(
           return true;
       }
     } catch (err) {
-      if (err instanceof ServerRequestError) {
-        sendJson(res, err.status, { error: err.message, code: err.code, ...(err.diagnostics ? { diagnostics: err.diagnostics } : {}) });
+      const refusal = refusalOf(err);
+      if (refusal) {
+        const { status, ...rest } = refusal;
+        sendJson(res, status, { error: (err as Error).message, ...rest });
         return true;
       }
       if (err instanceof ClientSecretsRejectedError) {

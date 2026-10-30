@@ -33,10 +33,11 @@ function expandEnvVars(yaml: string): string {
 
 /**
  * Parse uploaded YAML into a GraphSpec. Strips `imports` so client code
- * modules are never loaded.
+ * modules are never loaded. `${VAR}` placeholders are filled from the server
+ * environment unless `expandEnv` is false (untrusted uploads, stored graphs).
  */
-export function parseGraphYaml(raw: string): ParseGraphYamlResult {
-  const expanded = expandEnvVars(raw);
+export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}): ParseGraphYamlResult {
+  const expanded = opts.expandEnv === false ? raw : expandEnvVars(raw);
   let parsed: unknown;
   try {
     parsed = parseYaml(expanded);
@@ -238,7 +239,9 @@ export async function loadPersistedGraph(
   const filePath = graphPathFor(dir, threadId);
   try {
     const yaml = await fs.readFile(filePath, "utf-8");
-    const parsed = parseGraphYaml(yaml);
+    // Stored YAML was expanded when it was uploaded; expanding again would read
+    // the server environment for text that only looks like a placeholder.
+    const parsed = parseGraphYaml(yaml, { expandEnv: false });
     if (!parsed.spec) return null;
     const meta = await readGraphMeta(dir, threadId);
     return { yaml: parsed.yaml, spec: parsed.spec, meta };
