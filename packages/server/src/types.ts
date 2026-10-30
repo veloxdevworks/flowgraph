@@ -154,6 +154,13 @@ export interface ServerConfig {
    * Env: `FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS`. Default: the checkpoint-postgres default.
    */
   setupLockTimeoutMs?: number;
+  /**
+   * Hosts that http and webhook nodes in graphs from untrusted authors may reach
+   * even though they resolve to non-public addresses (`host`, `host:port`,
+   * `*.domain`). Cloud metadata and link-local addresses stay blocked.
+   * Env: `FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS` (comma-separated). Default: none.
+   */
+  untrustedHttpAllowHosts?: string[];
   /** Directory for persisted uploaded graphs. */
   graphStoreDir: string;
   /** Max events retained per thread for SSE replay. */
@@ -368,6 +375,16 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
     }
     config.setupLockTimeoutMs = Number(lockRaw);
   }
+  const allowHosts = (env.FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS ?? "")
+    .split(",")
+    .map((h) => h.trim())
+    .filter(Boolean);
+  for (const h of allowHosts) {
+    if (!/^(\*\.)?[A-Za-z0-9.-]+(:\d+)?$|^\[[0-9A-Fa-f:.]+\](:\d+)?$/.test(h)) {
+      throw new Error(`FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS: "${h}" is not host, host:port or *.domain`);
+    }
+  }
+  if (allowHosts.length) config.untrustedHttpAllowHosts = allowHosts;
   const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION;
   if (region) config.awsRegion = region;
   if (env.FLOWGRAPH_CONNECT_URL?.trim()) config.connectUrl = env.FLOWGRAPH_CONNECT_URL.trim();

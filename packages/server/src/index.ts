@@ -44,6 +44,7 @@ export {
   UNTRUSTED_BLOCKED_NODE_TYPES,
   UNTRUSTED_NODE_POLICY,
   UNTRUSTED_PROVIDER_OPTIONS,
+  untrustedNodePolicy,
   type UploadViolation,
   type UploadViolationCode,
 } from "./upload-policy.js";

@@ -1,13 +1,14 @@
 /**
  * What an untrusted author may upload to a multi-user server. Graphs from
  * untrusted principals may not run host commands, read host files or paths,
- * read the server's environment, or point providers at other endpoints or
- * keys. The server checks every upload here and compiles untrusted graphs
+ * read the server's environment, reach non-public addresses, or point
+ * providers at other endpoints or keys. The server checks every upload here and compiles untrusted graphs
  * with a matching core NodePolicy, so a stored graph that skipped this check
  * still cannot run a blocked node.
  */
 
-import { walkNodes, type NodePolicy } from "@flowgraph/core";
+import { classifyAddress, hostIsAllowListed, walkNodes, type NodePolicy } from "@flowgraph/core";
+import { isIP } from "node:net";
 import type { GraphSpec } from "@flowgraph/spec";
 import { ServerRequestError } from "./errors.js";
 
@@ -41,6 +42,8 @@ export type UploadViolationCode =
   | "UPLOAD_SUBGRAPH_FILE_BLOCKED"
   | "UPLOAD_AGENT_SKILL_TOOL_BLOCKED"
   | "UPLOAD_PROVIDER_OVERRIDE_BLOCKED"
+  | "UPLOAD_PROVIDER_ENDPOINT_BLOCKED"
+  | "UPLOAD_HTTP_TARGET_BLOCKED"
   | "UPLOAD_HOST_PATH_BLOCKED";
 
 export interface UploadViolation {
@@ -52,19 +55,34 @@ export interface UploadViolation {
 
 const REASON = "uploaded graphs from untrusted authors";
 
-/** The core policy the server compiles untrusted graphs with. */
+/** The core policy the server compiles untrusted graphs with (no host allow list). */
 export const UNTRUSTED_NODE_POLICY: NodePolicy = {
   blockedTypes: UNTRUSTED_BLOCKED_NODE_TYPES,
   blockSubgraphFiles: true,
   blockSecrets: true,
+  outboundHttp: { publicOnly: true },
   reason: REASON,
 };
+
+/** UNTRUSTED_NODE_POLICY with the operator's http allow list (FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS). */
+export function untrustedNodePolicy(allowHosts?: readonly string[]): NodePolicy {
+  if (!allowHosts?.length) return UNTRUSTED_NODE_POLICY;
+  return { ...UNTRUSTED_NODE_POLICY, outboundHttp: { publicOnly: true, allowHosts } };
+}
+
+/** LangChain vendors whose default endpoint is on the server itself. */
+const LOCAL_ENDPOINT_VENDORS: readonly string[] = ["ollama"];
+
+export interface UntrustedUploadOptions {
+  /** Hosts http / webhook nodes may reach even on non-public addresses. */
+  allowHosts?: readonly string[] | undefined;
+}
 
 const ENV_PLACEHOLDER = /\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}/;
 const SECRET_REFERENCE = /\{\{[^}]*\bsecrets?\s*(?:\.|\[)/;
 
 /** Check an untrusted upload. `raw` is the YAML text as sent; `spec` its parse without env expansion. */
-export function checkUntrustedUpload(raw: string, spec: GraphSpec): UploadViolation[] {
+export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: UntrustedUploadOptions = {}): UploadViolation[] {
   const out: UploadViolation[] = [];
   const add = (code: UploadViolationCode, path: string, message: string) => out.push({ severity: "error", code, path, message });
 
@@ -109,6 +127,10 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec): UploadViolat
         }
       });
     }
+    if ((type === "http" || type === "webhook") && typeof w.url === "string") {
+      const why = literalUrlProblem(w.url, opts.allowHosts);
+      if (why) add("UPLOAD_HTTP_TARGET_BLOCKED", `${path}.with.url`, why);
+    }
     if (type === "workshop" && w.diff !== undefined && w.diff !== false) {
       add("UPLOAD_HOST_PATH_BLOCKED", `${path}.with.diff`, "workshop diff runs git in a directory on the server");
     }
@@ -121,6 +143,10 @@ function checkGraphLevel(
   where: string,
   add: (code: UploadViolationCode, path: string, message: string) => void,
 ): void {
+  const defaultProvider = graph.config?.defaults?.provider;
+  if (typeof defaultProvider === "string" && LOCAL_ENDPOINT_VENDORS.includes(defaultProvider) && !graph.providers?.[defaultProvider]) {
+    add("UPLOAD_PROVIDER_ENDPOINT_BLOCKED", `${where}config.defaults.provider`, `vendor "${defaultProvider}" talks to a model server on the host`);
+  }
   const runtime = (graph.runtime ?? {}) as Record<string, unknown>;
   if (typeof runtime.workspace === "string" && runtime.workspace) {
     add("UPLOAD_HOST_PATH_BLOCKED", `${where}runtime.workspace`, "runtime.workspace is a path on the server");
@@ -132,7 +158,11 @@ function checkGraphLevel(
   for (const [name, cfg] of Object.entries(graph.providers ?? {})) {
     const c = cfg as Record<string, unknown>;
     const at = `${where}providers.${name}`;
-    for (const key of ["baseUrl", "apiKeyEnv", "cwd"] as const) {
+    if (c.baseUrl !== undefined) add("UPLOAD_PROVIDER_ENDPOINT_BLOCKED", `${at}.baseUrl`, `providers.${name}.baseUrl points the provider at another endpoint`);
+    if (typeof c.vendor === "string" && LOCAL_ENDPOINT_VENDORS.includes(c.vendor)) {
+      add("UPLOAD_PROVIDER_ENDPOINT_BLOCKED", `${at}.vendor`, `vendor "${c.vendor}" talks to a model server on the host`);
+    }
+    for (const key of ["apiKeyEnv", "cwd"] as const) {
       if (c[key] !== undefined) add("UPLOAD_PROVIDER_OVERRIDE_BLOCKED", `${at}.${key}`, `providers.${name}.${key} is set by the server operator`);
     }
     const options = c.options;
@@ -148,6 +178,31 @@ function checkGraphLevel(
       }
     }
   }
+}
+
+/**
+ * Why a literal http / webhook URL is refused at upload, or undefined. URLs
+ * with templates are checked only when the request is made.
+ */
+function literalUrlProblem(raw: string, allowHosts: readonly string[] | undefined): string | undefined {
+  if (raw.includes("{{")) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return `${url.protocol} URLs may not be fetched; use http or https`;
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (isIP(host)) {
+    const v = classifyAddress(host);
+    if (v.blocked && (v.always || !hostIsAllowListed(url, allowHosts))) return `${host} is a ${v.reason} address; only public addresses may be reached`;
+    return undefined;
+  }
+  if ((host === "localhost" || host.endsWith(".localhost")) && !hostIsAllowListed(url, allowHosts)) {
+    return `${host} is the server itself; only public addresses may be reached`;
+  }
+  return undefined;
 }
 
 /** The root spec and every inline subgraph spec, with a path prefix. */
@@ -170,8 +225,8 @@ function walkStrings(v: unknown, path: string, visit: (value: string, path: stri
 }
 
 /** Refuse an untrusted upload with every violation listed. */
-export function assertUntrustedUploadAllowed(raw: string, spec: GraphSpec): void {
-  const violations = checkUntrustedUpload(raw, spec);
+export function assertUntrustedUploadAllowed(raw: string, spec: GraphSpec, opts: UntrustedUploadOptions = {}): void {
+  const violations = checkUntrustedUpload(raw, spec, opts);
   if (violations.length === 0) return;
   const first = violations[0]!;
   const more = violations.length > 1 ? ` (and ${violations.length - 1} more)` : "";

@@ -1,16 +1,19 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as http from "node:http";
 import * as path from "node:path";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseGraphYaml } from "./graph-source.js";
-import { checkUntrustedUpload } from "./upload-policy.js";
+import { checkUntrustedUpload, untrustedNodePolicy, UNTRUSTED_NODE_POLICY } from "./upload-policy.js";
+import { buildServerProviders } from "./providers.js";
 import { RunService } from "./run-service.js";
 import type { Principal, ServerAuthConfig } from "./identity.js";
 
-function codesOf(yaml: string): string[] {
+function codesOf(yaml: string, allowHosts?: string[]): string[] {
   const parsed = parseGraphYaml(yaml, { expandEnv: false });
   expect(parsed.diagnostics.filter((d) => d.severity === "error"), JSON.stringify(parsed.diagnostics)).toEqual([]);
-  return checkUntrustedUpload(yaml, parsed.spec!).map((v) => `${v.code} ${v.path}`);
+  return checkUntrustedUpload(yaml, parsed.spec!, { allowHosts }).map((v) => `${v.code} ${v.path}`);
 }
 
 const graph = (nodes: string, extra = "") => `
@@ -94,13 +97,94 @@ runtime:
         "UPLOAD_HOST_PATH_BLOCKED nodes.b.workspace",
         "UPLOAD_AGENT_SKILL_TOOL_BLOCKED nodes.b.with.tools[0]",
         "UPLOAD_HOST_PATH_BLOCKED nodes.c.with.diff",
-        "UPLOAD_PROVIDER_OVERRIDE_BLOCKED providers.openai.baseUrl",
+        "UPLOAD_PROVIDER_ENDPOINT_BLOCKED providers.openai.baseUrl",
         "UPLOAD_PROVIDER_OVERRIDE_BLOCKED providers.openai.apiKeyEnv",
         "UPLOAD_PROVIDER_OVERRIDE_BLOCKED providers.openai.options.configuration",
         "UPLOAD_HOST_PATH_BLOCKED runtime.workspace",
         "UPLOAD_HOST_PATH_BLOCKED runtime.worktrees.root",
       ].sort(),
     );
+  });
+});
+
+describe("untrusted outbound targets and provider endpoints", () => {
+  const httpNode = (url: string, type = "http") =>
+    type === "http"
+      ? `  - { id: a, type: http, with: { url: "${url}", output: { to: out } } }`
+      : `  - { id: a, type: webhook, with: { url: "${url}" } }`;
+
+  it("refuses literal http and webhook URLs on loopback, private, metadata or non-http targets", () => {
+    for (const url of [
+      "http://127.0.0.1:8080/",
+      "http://localhost/",
+      "http://api.localhost/",
+      "http://10.1.2.3/",
+      "http://192.168.0.10/",
+      "http://100.64.0.1/",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://[::1]/",
+      "http://[fd00:ec2::254]/",
+      "http://[::ffff:127.0.0.1]/",
+      "file:///etc/passwd",
+    ]) {
+      expect(codesOf(graph(httpNode(url))), url).toEqual(["UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url"]);
+    }
+    expect(codesOf(graph(httpNode("http://10.0.0.5/hook", "webhook")))).toEqual(["UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url"]);
+  });
+
+  it("allows public and templated URLs, and allow-listed hosts but never metadata", () => {
+    expect(codesOf(graph(httpNode("https://api.example.com/v1")))).toEqual([]);
+    expect(codesOf(graph(httpNode("{{ state.url }}")))).toEqual([]);
+    expect(codesOf(graph(httpNode("http://10.1.2.3:9000/")), ["10.1.2.3:9000"])).toEqual([]);
+    expect(codesOf(graph(httpNode("http://localhost:9000/")), ["localhost:9000"])).toEqual([]);
+    expect(codesOf(graph(httpNode("http://169.254.169.254/")), ["169.254.169.254"])).toEqual(["UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url"]);
+  });
+
+  it("refuses the ollama vendor, an ollama default provider and custom endpoints, including in inline subgraphs", () => {
+    const hitl = `  - { id: a, type: hitl, with: { mode: approve, message: "ok?" } }`;
+    expect(codesOf(graph(hitl, `providers:\n  local: { kind: langchain, vendor: ollama, model: llama3 }\n`))).toEqual([
+      "UPLOAD_PROVIDER_ENDPOINT_BLOCKED providers.local.vendor",
+    ]);
+    expect(codesOf(graph(hitl, `config:\n  defaults: { provider: ollama, model: llama3 }\n`))).toEqual([
+      "UPLOAD_PROVIDER_ENDPOINT_BLOCKED config.defaults.provider",
+    ]);
+    expect(codesOf(graph(hitl, `providers:\n  openai: { kind: langchain, vendor: openai, baseUrl: "http://10.0.0.1/v1" }\n`))).toEqual([
+      "UPLOAD_PROVIDER_ENDPOINT_BLOCKED providers.openai.baseUrl",
+    ]);
+    const inline = graph(`  - id: a
+    type: subgraph
+    spec:
+      apiVersion: flowgraph/v1
+      kind: Graph
+      metadata: { name: child }
+      providers:
+        local: { kind: langchain, vendor: ollama, model: llama3 }
+      nodes:
+        - { id: h, type: http, with: { url: "http://127.0.0.1/" } }
+      edges:
+        - { from: START, to: h }
+        - { from: h, to: END }`);
+    expect(codesOf(inline).sort()).toEqual(
+      ["UPLOAD_HTTP_TARGET_BLOCKED nodes.a.subgraph.h.with.url", "UPLOAD_PROVIDER_ENDPOINT_BLOCKED nodes.a.spec.providers.local.vendor"].sort(),
+    );
+  });
+
+  it("refuses ollama and custom endpoints again when building providers for an untrusted author", async () => {
+    const parse = (extra: string) => parseGraphYaml(graph(`  - { id: a, type: hitl, with: { mode: approve, message: "ok?" } }`, extra), { expandEnv: false }).spec!;
+    await expect(buildServerProviders(parse(`config:\n  defaults: { provider: ollama, model: llama3 }\n`), process.cwd(), { untrusted: true })).rejects.toMatchObject({
+      status: 403,
+      code: "PROVIDER_ENDPOINT_BLOCKED",
+    });
+    await expect(
+      buildServerProviders(parse(`providers:\n  o: { kind: langchain, vendor: openai, baseUrl: "http://10.0.0.1/v1" }\n`), process.cwd(), { untrusted: true }),
+    ).rejects.toMatchObject({ code: "PROVIDER_ENDPOINT_BLOCKED" });
+    await expect(buildServerProviders(parse(`config:\n  defaults: { provider: ollama, model: llama3 }\n`), process.cwd(), {})).resolves.toBeDefined();
+  });
+
+  it("builds the compile policy with the operator allow list", () => {
+    expect(UNTRUSTED_NODE_POLICY.outboundHttp).toEqual({ publicOnly: true });
+    expect(untrustedNodePolicy([]).outboundHttp).toEqual({ publicOnly: true });
+    expect(untrustedNodePolicy(["hooks.internal:8443"]).outboundHttp).toEqual({ publicOnly: true, allowHosts: ["hooks.internal:8443"] });
   });
 });
 
@@ -153,9 +237,9 @@ describe("RunService upload policy", () => {
   afterEach(async () => {
     for (const c of cleanup.splice(0)) await c();
   });
-  async function svc(): Promise<RunService> {
+  async function svc(extra: { untrustedHttpAllowHosts?: string[] } = {}): Promise<RunService> {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-"));
-    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, auth: OIDC });
+    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, auth: OIDC, ...extra });
     await s.init();
     cleanup.push(async () => {
       await s.close();
@@ -212,5 +296,42 @@ describe("RunService upload policy", () => {
     } finally {
       delete process.env["FG_UPLOAD_TEST_SECRET"];
     }
+  });
+
+  it("keeps untrusted http nodes off the server's own addresses at run time, unless allow-listed", async () => {
+    let hits = 0;
+    const inner = http.createServer((_req, res) => {
+      hits++;
+      res.setHeader("content-type", "application/json");
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>((r) => inner.listen(0, "127.0.0.1", r));
+    cleanup.push(() => new Promise<void>((r) => inner.close(() => r())));
+    const port = (inner.address() as AddressInfo).port;
+    const yaml = (name: string) => `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: ${name} }
+state:
+  channels:
+    url: { type: string }
+    out: { type: object }
+nodes:
+  - { id: a, type: http, with: { url: "{{ state.url }}", output: { to: out } } }
+edges:
+  - { from: START, to: a }
+  - { from: a, to: END }
+`;
+    const ursula = principal("ursula", false);
+    const blocked = await svc();
+    await blocked.startRun({ threadId: "s1", yaml: yaml("u-ssrf"), input: { url: `http://127.0.0.1:${port}/admin` } }, ursula);
+    expect(await settle(blocked, "s1", ["completed", "error"])).toBe("error");
+    expect(JSON.stringify(blocked.registry.get("s1")?.events)).toContain("a loopback address; only public addresses may be reached");
+    expect(hits).toBe(0);
+
+    const allowed = await svc({ untrustedHttpAllowHosts: [`127.0.0.1:${port}`] });
+    await allowed.startRun({ threadId: "s2", yaml: yaml("u-ssrf-ok"), input: { url: `http://127.0.0.1:${port}/admin` } }, ursula);
+    expect(await settle(allowed, "s2", ["completed", "error"])).toBe("completed");
+    expect(hits).toBe(1);
   });
 });

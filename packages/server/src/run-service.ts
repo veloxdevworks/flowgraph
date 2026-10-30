@@ -50,7 +50,7 @@ import type {
 } from "./types.js";
 
 import { ServerRequestError, TooManyRunsError } from "./errors.js";
-import { assertUntrustedUploadAllowed, UNTRUSTED_NODE_POLICY } from "./upload-policy.js";
+import { assertUntrustedUploadAllowed, untrustedNodePolicy } from "./upload-policy.js";
 import { authModeOf, createAuthenticator, singleUserPrincipal, type Authenticator, type Principal } from "./identity.js";
 
 /** sqlite memory is optional: the package is loaded only when configured. */
@@ -134,6 +134,10 @@ export class RunService {
     this.sweeper?.stop();
     this.sweeper = undefined;
     for (const c of this.closers.splice(0).reverse()) await c();
+  }
+
+  private get uploadOptions(): { allowHosts?: readonly string[] } {
+    return this.config.untrustedHttpAllowHosts ? { allowHosts: this.config.untrustedHttpAllowHosts } : {};
   }
 
   /** True when callers are told apart (OIDC); token and none modes have one principal. */
@@ -309,7 +313,7 @@ export class RunService {
         const msg = parsed.diagnostics.map((d) => d.message).join("; ");
         throw new Error(`Invalid graph YAML: ${msg}`);
       }
-      if (!principal.trusted) assertUntrustedUploadAllowed(yaml, parsed.spec);
+      if (!principal.trusted) assertUntrustedUploadAllowed(yaml, parsed.spec, this.uploadOptions);
       if (parsed.importsStripped) {
         log("warn", "stripped client imports from uploaded graph", { threadId });
       }
@@ -330,7 +334,7 @@ export class RunService {
       );
     }
     // Trust is checked again on every run: the author may have lost it since the upload.
-    if (!principal.trusted) assertUntrustedUploadAllowed(persisted.yaml, persisted.spec);
+    if (!principal.trusted) assertUntrustedUploadAllowed(persisted.yaml, persisted.spec, this.uploadOptions);
     return {
       spec: persisted.spec,
       yaml: persisted.yaml,
@@ -348,7 +352,7 @@ export class RunService {
     dryRun = false,
   ): Promise<CompiledGraph> {
     const checkpointer = await this.getCheckpointer();
-    const providers = await buildServerProviders(spec, cwd, { dryRun });
+    const providers = await buildServerProviders(spec, cwd, { dryRun, untrusted: !principal.trusted });
     const identity = this.memoryIdentityFor(principal);
     const graphPath = path.join(cwd, `${threadId.replace(/[^a-zA-Z0-9._-]/g, "_")}.graph.yaml`);
     return compileGraph(spec, {
@@ -357,7 +361,7 @@ export class RunService {
       checkpointer,
       legacyStoreBackend: this.legacyStoreBackend,
       ...(identity ? { memoryIdentity: identity } : {}),
-      ...(principal.trusted ? {} : { nodePolicy: UNTRUSTED_NODE_POLICY }),
+      ...(principal.trusted ? {} : { nodePolicy: untrustedNodePolicy(this.config.untrustedHttpAllowHosts) }),
       ...(this.durableMemory && identity
         ? { memory: { backend: this.durableMemory.backend, identity } }
         : { memoryUnavailableHint: SERVER_MEMORY_HINT }),

@@ -27,6 +27,16 @@ describe("defaultServerConfig", () => {
     expect(cfg.connectToken).toBe("ctok");
   });
 
+  it("reads FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS", () => {
+    expect(defaultServerConfig({}).untrustedHttpAllowHosts).toBeUndefined();
+    expect(defaultServerConfig({ FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS: " hooks.internal:8443, *.corp.example ,[fd00::1]:80" }).untrustedHttpAllowHosts).toEqual([
+      "hooks.internal:8443",
+      "*.corp.example",
+      "[fd00::1]:80",
+    ]);
+    expect(() => defaultServerConfig({ FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS: "http://x/" })).toThrow(/FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS/);
+  });
+
   it("reads FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS", () => {
     expect(defaultServerConfig({}).setupLockTimeoutMs).toBeUndefined();
     expect(defaultServerConfig({ FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS: "0" }).setupLockTimeoutMs).toBe(0);
