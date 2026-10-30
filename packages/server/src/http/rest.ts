@@ -5,7 +5,7 @@ import { TooManyRunsError } from "../errors.js";
 import type { RunService } from "../run-service.js";
 import { attachSse } from "./sse.js";
 import { matchPath, PayloadTooLargeError, readJsonBody, sendJson } from "./util.js";
-import { mintVoiceClientSecret } from "../voice.js";
+import { mintVoiceClientSecret, VoiceRequestError } from "../voice.js";
 
 export async function handleRest(
   req: IncomingMessage,
@@ -33,7 +33,7 @@ export async function handleRest(
   if (method === "POST" && pathname === "/voice/client-secrets") {
     try {
       const body = (await readJsonBody(req, maxBodyBytes)) as { provider?: string; model?: string };
-      sendJson(res, 200, await mintVoiceClientSecret(body ?? {}));
+      sendJson(res, 200, await mintVoiceClientSecret(body ?? {}, service.config));
     } catch (err) {
       sendError(res, err);
     }
@@ -224,6 +224,10 @@ export async function handleRest(
 }
 
 function sendError(res: ServerResponse, err: unknown): void {
+  if (err instanceof VoiceRequestError) {
+    sendJson(res, err.status, { error: err.message, code: err.code });
+    return;
+  }
   if (err instanceof ClientSecretsRejectedError) {
     sendJson(res, 400, { error: err.message, code: "CLIENT_SECRETS_REJECTED" });
     return;

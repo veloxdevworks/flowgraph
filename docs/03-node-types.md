@@ -691,6 +691,8 @@ A specialized HITL node for a **bounded conversation** that produces a structure
 
 The node is **interrupt-and-map only** — no side effects. Research belongs in a prior `prepare` agent node; writing plans/tickets belongs in a later `post` node. Headless: `--on-interrupt fail` then `flowgraph resume` with the output JSON, or paste the output object at the CLI prompt.
 
+`voice` is a hint for the client. When a client asks `@flowgraph/server` for a voice token (`POST /voice/client-secrets`), the server only mints for models in its allowlist (`FLOWGRAPH_VOICE_ALLOWED_MODELS`, default each provider's default model) and refuses while REST auth is off unless `FLOWGRAPH_VOICE_ALLOW_UNAUTHENTICATED=1` is set. See the [server README](../packages/server/README.md#voice-tokens-post-voiceclient-secrets).
+
 Prefer cheap `hitl` `approve` / `review` when a single decision is enough. Use `workshop` when the human and facilitator need to think together against an agenda.
 
 ---
