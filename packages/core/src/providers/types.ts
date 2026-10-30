@@ -7,9 +7,15 @@
  */
 
 import type { NodeRunContext } from "../context.js";
+import type { ProviderContextManager } from "../context/types.js";
 
 export interface ProviderCapabilities {
   toolCalling: boolean;
+  /**
+   * The provider sends `AgentRequest.messages` as real chat turns. Otherwise
+   * the agent node renders history into the prompt as a transcript.
+   */
+  contextMessages?: boolean;
   structuredOutput: boolean;
   streaming: boolean;
   builtinTools?: string[];
@@ -21,6 +27,14 @@ export interface Message {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   name?: string;
+  /** Stable id (history channels key messages by id). */
+  id?: string;
+  /** Assistant tool calls; each must be answered by a `tool` message with the same id. */
+  toolCalls?: Array<{ id: string; name: string; args: unknown }>;
+  /** For `tool` messages: the id of the call this result answers. */
+  toolCallId?: string;
+  /** flowgraph bookkeeping on system messages (e.g. the running summary). */
+  meta?: Record<string, unknown>;
 }
 
 export type ToolKind = "skill" | "node" | "function" | "builtin" | "mcp";
@@ -65,6 +79,8 @@ export interface AgentRequest {
 export interface AgentResult {
   output: unknown;
   messages?: Message[];
+  /** Assistant and tool messages this run produced, in order (used by with.context.record: all). */
+  turn?: Message[];
   steps?: AgentStep[];
   usage?: TokenUsage;
   stopReason: "done" | "maxSteps" | "interrupted" | "error";
@@ -98,6 +114,12 @@ export interface ProviderRunContext {
     get(index: string): unknown | undefined;
     set(index: string, value: unknown): void;
   };
+  /**
+   * Context budget for this agent (present when with.context or
+   * runtime.context applies). Providers that run their own tool loop call
+   * `fit` before every model call and send what it returns.
+   */
+  context?: ProviderContextManager;
 }
 
 export interface ProviderAdapter {

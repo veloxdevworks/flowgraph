@@ -263,3 +263,35 @@ export {
   ISSUES_CHANNEL_CAP,
 } from "./runtime/run-issues.js";
 export { checkBinOnPath, isMissingBinaryError, toolNotFoundMessage } from "./runtime/which.js";
+
+// Context budgets for agent nodes (with.context / runtime.context)
+export {
+  registerTokenEstimator,
+  getTokenEstimator,
+  hasTokenEstimator,
+  bytesEstimator,
+  messageTokens,
+  ContextWindow,
+  ContextOverflowError,
+  resolveContextPolicy,
+  extractiveSummarizer,
+  capToolResult,
+  toUnits,
+  fromStoredMessage,
+  toLangChainMessage,
+  summaryMessageId,
+  CONTEXT_DEFAULT_MAX_TOKENS,
+} from "./context/index.js";
+export type {
+  TokenEstimator,
+  ContextPolicy,
+  ContextConfigInput,
+  ContextStats,
+  ContextStrategy,
+  ContextMessage,
+  FittedContext,
+  ProviderContextManager,
+  Summarizer,
+  SummarizeRequest,
+} from "./context/index.js";
+export { isNonRetryable } from "./runtime/retry.js";
