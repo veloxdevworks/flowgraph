@@ -163,7 +163,9 @@ describe("self-improve automation", () => {
     } finally {
       restore();
     }
-  });
+    // The live preflight spawns pnpm, git and gh (gh auth status may reach the
+    // network), which can take several seconds on a loaded CI runner.
+  }, 30_000);
 
   it("opens a PR on the happy path", async () => {
     const { graph, restore } = await compileWithEnv({ SELF_IMPROVE_TEST_OPEN_PR: "1" });
