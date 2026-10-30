@@ -1,0 +1,79 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: react-factory
+  description: >
+    React front-end feature factory with memory. Project conventions (CSS,
+    test runner, routing) are detected and stored once at project scope, so
+    every graph in the repo can recall them; each requester's preferences are
+    remembered by the agent itself at user scope.
+
+state:
+  channels:
+    feature: { type: object }
+    repo: { type: object }
+    conventions: { type: object }
+    result: { type: object }
+
+runtime:
+  checkpoint: { backend: sqlite }
+  memory: {}
+
+nodes:
+  - id: detect-conventions
+    type: function
+    with:
+      fn: reactFactory.detectConventions
+      input:
+        repo: "{{ state.repo }}"
+      output: { to: conventions }
+
+  - id: learn-conventions
+    type: memory
+    with:
+      op: patch
+      scope: project
+      key: conventions/frontend
+      value:
+        css: "{{ state.conventions.css }}"
+        tests: "{{ state.conventions.tests }}"
+        routing: "{{ state.conventions.routing }}"
+
+  - id: build-feature
+    type: agent
+    provider: frontend-dev
+    with:
+      system: You are a senior React engineer. Follow the project conventions and the requester's saved preferences.
+      prompt: |
+        Build this feature: {{ state.feature.title }}
+        {{ state.feature.notes }}
+
+        Project conventions:
+        {{ memory.conventions }}
+
+        If the requester states a lasting preference, save it with the remember tool.
+      schema:
+        type: object
+        properties:
+          files: { type: array, items: { type: string } }
+          css: { type: string }
+          tests: { type: string }
+          exportStyle: { type: string }
+        required: [files]
+      memory:
+        maxTokens: 800
+        recall:
+          - { id: conventions, scopes: [project, org], prefix: conventions/ }
+          # Not referenced in a template: appended to the system prompt as fenced data.
+          - { id: prefs, scopes: [user], prefix: prefs/, limit: 10 }
+        agentWrites:
+          scopes: [user]
+          maxPerRun: 3
+          keyPrefix: prefs/
+      output: { to: result }
+
+edges:
+  - { from: START, to: detect-conventions }
+  - { from: detect-conventions, to: learn-conventions }
+  - { from: learn-conventions, to: build-feature }
+  - { from: build-feature, to: END }

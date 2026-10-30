@@ -9,6 +9,8 @@ import type { GraphSpec } from "@flowgraph/spec";
 
 export interface TestCompileOptions {
   store?: CompileOptions["store"];
+  /** Memory backend for runtime.memory / durable runtime.store graphs. Default: a fresh in-process backend. */
+  memory?: CompileOptions["memory"];
 }
 
 export interface TestRunOptions {
@@ -17,6 +19,8 @@ export interface TestRunOptions {
   onInterrupt?: InterruptPolicy;
   resolveInterrupt?: (interrupts: InterruptInfo[]) => Promise<unknown> | unknown;
   store?: CompileOptions["store"];
+  /** Memory backend for runtime.memory / durable runtime.store graphs. Default: a fresh in-process backend. */
+  memory?: CompileOptions["memory"];
 }
 
 export interface TestRunResult {
@@ -41,6 +45,7 @@ export async function compileForTest(
   const compiled = await compileGraph(spec, {
     checkpointer: "memory",
     store: opts.store ?? "memory",
+    memory: opts.memory ?? "ephemeral",
     sinks: [(ev) => { events.push(ev); }],
   });
   return { compiled, events };
@@ -59,6 +64,7 @@ export async function runInMemory(
   const compiled = await compileGraph(spec, {
     checkpointer: "memory",
     store: opts.store ?? "memory",
+    memory: opts.memory ?? "ephemeral",
     sinks: [(ev) => { collectedEvents.push(ev); }],
   });
 

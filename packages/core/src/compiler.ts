@@ -3,7 +3,7 @@
  * plus run/resume/inspect with durability, HITL, and retry/timeout.
  */
 
-import { START, END, StateGraph, MemorySaver, InMemoryStore, Command, Send, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
+import { START, END, StateGraph, MemorySaver, Command, Send, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
@@ -56,6 +56,8 @@ import { createHookBus, type HookBus } from "./hooks/bus.js";
 import type { Hook } from "./hooks/types.js";
 import { hooksFromSpec, defaultGuardrailHooks } from "./hooks/builtin.js";
 import "./nodes/index.js";
+import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
+import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
 
 export type InterruptPolicy = "prompt" | "fail" | "approve" | "webhook";
 
@@ -66,7 +68,26 @@ export interface CompileOptions {
   sinks?: EventSink[];
   runConfig?: RunConfig;
   checkpointer?: "memory" | "none" | BaseCheckpointSaver;
+  /**
+   * Legacy `ctx.store`. A BaseStore instance is used as-is and is NOT scoped
+   * (every graph sharing it sees every key). "none" disables ctx.store; the
+   * default is a graph-scoped adapter over the memory backend.
+   */
   store?: "memory" | "none" | BaseStore;
+  /**
+   * Scoped memory backend. Hosts with a durable checkpointer pass
+   * `{ backend, identity }` (the CLI does this for sqlite). "ephemeral" allows
+   * an in-process backend for runtime.memory (tests). Subgraphs receive the
+   * parent's MemoryRuntime.
+   */
+  memory?: MemoryHostOptions | MemoryBackend | MemoryRuntime | "ephemeral";
+  /**
+   * Backend for the graph-scoped `ctx.store` of graphs that do not declare
+   * runtime.memory. Long-lived hosts (the server) pass one shared backend so
+   * `ctx.store` survives recompiles between a run and its resume while each
+   * graph still sees only its own keys. Does not enable `ctx.memory`.
+   */
+  legacyStoreBackend?: MemoryBackend;
   extraFactories?: NodeFactory[];
   providers?: ProviderAdapter[];
   interruptBefore?: string[];
@@ -330,6 +351,23 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           payload: { input: current as Record<string, unknown> },
         });
         if (r.payload.input) current = r.payload.input;
+      }
+
+      // Bind this thread's memory scope (subject rendered from input/run at start;
+      // stored binding reused on resume/continue so a resume can't switch scope).
+      const memoryRuntime = (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
+      if (memoryRuntime?.exposeMemory) {
+        const inputForSubject = mode === "start" && current != null && !(current instanceof Command) ? current : {};
+        const binding = await memoryRuntime.beginRun(threadId, mode, { input: inputForSubject, run: runMeta });
+        if (binding) {
+          runMeta.memoryScope = Object.freeze({
+            org: binding.org,
+            project: binding.project,
+            graph: binding.graph,
+            ...(binding.user ? { user: binding.user } : {}),
+            ...(binding.subject ? { subject: { ...binding.subject } } : {}),
+          });
+        }
       }
 
       if (current instanceof Command && hooks.has("interrupt:beforeResume")) {
@@ -703,7 +741,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   for (const h of hooksFromSpec(spec)) hooks.register(h);
   for (const h of opts.hooks ?? []) hooks.register(h);
 
-  const store = resolveStore(spec, opts);
+  const { runtime: memoryRuntime, store } = resolveMemory(spec, opts);
 
   const baseCtx: Partial<RunContext> = {
     config: {
@@ -722,6 +760,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     mcp: opts.mcp,
     store,
   };
+  if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
 
   const defaultRetry = spec.runtime?.retry;
   const defaultTimeout = spec.runtime?.timeoutDefault;
@@ -1151,19 +1190,118 @@ function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpo
   throw new Error(`Unknown checkpoint backend "${String(backend)}".`);
 }
 
-function resolveStore(spec: GraphSpec, opts: CompileOptions): BaseStore | undefined {
-  if (opts.store && typeof opts.store === "object") {
-    return opts.store;
-  }
-  const enabled = spec.runtime?.store?.enabled !== false;
-  if (!enabled) return undefined;
-  if (opts.store === "none") return undefined;
+/** Host-provided memory for `CompileOptions.memory`. */
+export interface MemoryHostOptions {
+  backend: MemoryBackend;
+  /** Org/project/user for scope tuples. Default org "local", project "local", no user. */
+  identity?: MemoryIdentity | undefined;
+}
 
-  const backend = spec.runtime?.store?.backend ?? (opts.store as string) ?? "memory";
-  if (backend === "none") return undefined;
-  if (backend === "memory") return new InMemoryStore();
-  // Durable backends are provided by external packages and passed as instances.
-  return new InMemoryStore();
+function memoryUnavailable(what: string, checkpoint: string | undefined): MemoryError {
+  const tail =
+    `Silent in-memory fallback is not allowed — use runtime.memory.backend: memory for an ephemeral store in tests.`;
+  if (checkpoint === "sqlite" || checkpoint === "postgres") {
+    // The graph already has a durable checkpointer; what's missing is a host-provided memory backend.
+    const hint =
+      checkpoint === "postgres"
+        ? `Postgres memory is not available yet (the flowgraph CLI stores memory only in sqlite checkpoint databases); ` +
+          `pass CompileOptions.memory with a postgres-capable backend, or use runtime.checkpoint.backend: sqlite. `
+        : `Run it with the flowgraph CLI (memory then lives in the checkpoint database), or pass CompileOptions.memory ` +
+          `(e.g. openSqliteBackend(path).memory from @flowgraph/checkpoint-sqlite). `;
+    return new MemoryError(
+      "MEMORY_BACKEND_UNAVAILABLE",
+      `${what} needs a memory backend for its ${checkpoint} checkpointer, and this host provided none. ${hint}${tail}`,
+    );
+  }
+  return new MemoryError(
+    "MEMORY_BACKEND_UNAVAILABLE",
+    `${what} needs a durable checkpointer; set runtime.checkpoint.backend: sqlite ` +
+      `(the CLI then stores memory in the checkpoint database), or pass CompileOptions.memory. ${tail}`,
+  );
+}
+
+/**
+ * Resolve the memory runtime and the legacy `ctx.store` for a compile.
+ *
+ * ctx.store: an injected BaseStore instance wins (documented as unscoped);
+ * otherwise a graph-scoped adapter over the memory runtime's backend.
+ * ctx.memory: only when runtime.memory is declared (or runtime.store names a
+ * durable backend, which is an alias for runtime.memory.backend: checkpoint).
+ */
+function resolveMemory(
+  spec: GraphSpec,
+  opts: CompileOptions,
+): { runtime: MemoryRuntime | undefined; store: BaseStore | undefined } {
+  const memCfg = spec.runtime?.memory as RuntimeMemoryConfig | undefined;
+  const storeCfg = spec.runtime?.store;
+  const storeEnabled = storeCfg?.enabled !== false;
+  const storeBackend: string = storeCfg?.backend ?? "memory";
+  if (memCfg && storeCfg) {
+    throw new MemoryError(
+      "MEMORY_STORE_AND_MEMORY",
+      "runtime.store and runtime.memory are mutually exclusive; move to runtime.memory (ctx.store keeps working on top of it)",
+    );
+  }
+  if (!["memory", "none", "sqlite", "postgres"].includes(storeBackend)) {
+    throw new MemoryError("MEMORY_BACKEND_UNKNOWN", `Unknown store backend "${storeBackend}". Expected memory | none | sqlite | postgres.`);
+  }
+  const storeAlias =
+    storeEnabled && opts.store !== "none" && (storeBackend === "sqlite" || storeBackend === "postgres");
+  const exposeMemory = !!memCfg || storeAlias;
+  const injectedStore = opts.store && typeof opts.store === "object" ? opts.store : undefined;
+
+  let runtime: MemoryRuntime | undefined;
+  const m = opts.memory;
+  if (m instanceof MemoryRuntime) {
+    // Embedded subgraph: share the root graph's runtime (scopes, bindings, backend).
+    runtime = m;
+  } else {
+    const ephemeralOk = m === "ephemeral" || opts.store === "memory";
+    const host: MemoryHostOptions | undefined =
+      m && typeof m === "object" ? ("backend" in m ? (m as MemoryHostOptions) : { backend: m as MemoryBackend }) : undefined;
+    const graph = spec.metadata.name;
+    const wantsDurable = memCfg ? (memCfg.backend ?? "checkpoint") === "checkpoint" : storeAlias;
+    const ephemeral = () => createEphemeralMemoryRuntime(graph, { config: memCfg, exposeMemory, identity: host?.identity });
+    if (memCfg?.backend === "memory") {
+      runtime = ephemeral();
+    } else if (host && exposeMemory) {
+      // Only graphs that opt into durable memory (runtime.memory, or
+      // runtime.store.backend sqlite|postgres) land in the host backend; a
+      // plain graph keeps its process-local ctx.store as before.
+      runtime = new MemoryRuntime({
+        backend: host.backend,
+        identity: host.identity ?? LOCAL_MEMORY_IDENTITY,
+        graph,
+        config: memCfg,
+        exposeMemory,
+      });
+    } else if (wantsDurable && !ephemeralOk) {
+      if (storeAlias && injectedStore) {
+        // Programmatic host injected a raw BaseStore for runtime.store: sqlite|postgres.
+        runtime = undefined;
+      } else {
+        const ck = spec.runtime?.checkpoint;
+        const ckBackend = ck && ck.enabled !== false ? (ck.backend ?? "memory") : undefined;
+        throw memoryUnavailable(memCfg ? "runtime.memory" : `runtime.store.backend "${storeBackend}"`, ckBackend);
+      }
+    } else if (opts.legacyStoreBackend && !exposeMemory) {
+      runtime = new MemoryRuntime({
+        backend: opts.legacyStoreBackend,
+        identity: host?.identity ?? LOCAL_MEMORY_IDENTITY,
+        graph,
+        config: memCfg,
+        exposeMemory: false,
+      });
+    } else {
+      runtime = ephemeral();
+    }
+  }
+
+  let store: BaseStore | undefined;
+  if (injectedStore) store = injectedStore;
+  else if (!storeEnabled || opts.store === "none" || storeBackend === "none") store = undefined;
+  else store = runtime?.legacyStore();
+  return { runtime, store };
 }
 
 function resultToUpdate(result: NodeResult): Record<string, unknown> {
@@ -1476,6 +1614,18 @@ function buildNodeCtx(
   };
   if (lgConfig !== undefined) ctx._lgConfig = lgConfig;
   if (base.signal !== undefined) ctx.signal = base.signal;
+  const memoryRuntime = (base as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
+  if (memoryRuntime?.exposeMemory) {
+    const conf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
+    const threadId = typeof conf["thread_id"] === "string" ? conf["thread_id"] : base.meta?.threadId;
+    const memory = memoryRuntime.memoryFor(threadId, {
+      checkpointNs: typeof conf["checkpoint_ns"] === "string" ? conf["checkpoint_ns"] : undefined,
+      taskId: typeof conf["__pregel_task_id"] === "string" ? conf["__pregel_task_id"] : undefined,
+      nodeId,
+      runId: base.meta?.runId,
+    });
+    if (memory) ctx.memory = memory;
+  }
   return ctx;
 }
 

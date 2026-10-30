@@ -1,7 +1,9 @@
 export { program } from "./commands.js";
 
 // Shared run-setup helpers (used by @flowgraph/tui and the CLI)
+export { normalizeGitRemote, resolveMemoryIdentity, type ResolvedMemoryIdentity } from "./memory-identity.js";
 export {
+  CLI_MEMORY_BACKENDS,
   checkpointerOption,
   formatInterruptPrompt,
   parseInterruptAnswer,

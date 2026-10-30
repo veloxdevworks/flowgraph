@@ -34,6 +34,7 @@ export const ISSUE_CODE = {
   ROUTE_EVAL_ERROR: "ROUTE_EVAL_ERROR",
   ERROR_SWALLOWED: "ERROR_SWALLOWED",
   AGENT_REPORTED: "AGENT_REPORTED",
+  MEMORY_RECALL_FAILED: "MEMORY_RECALL_FAILED",
 } as const;
 
 export type IssueInput = Omit<RunIssue, "raisedAt"> & { raisedAt?: string };

@@ -1,12 +1,14 @@
 import * as path from "node:path";
-import type { BaseCheckpointSaver } from "@langchain/langgraph";
+import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph";
 import {
   compileGraph,
+  createInMemoryMemoryBackend,
   resolveAndValidateInput,
   isInputValidationError,
   readRunIssues,
   type CompiledGraph,
   type FlowgraphEvent,
+  type MemoryBackend,
   type RunIssue,
   type RunResult,
 } from "@flowgraph/core";
@@ -34,8 +36,15 @@ import { TooManyRunsError } from "./errors.js";
 export class RunService {
   readonly registry: SessionRegistry;
   readonly metrics = createMetrics();
-  private checkpointer: BaseCheckpointSaver | "memory" | null = null;
-  private checkpointerPromise: Promise<BaseCheckpointSaver | "memory"> | null = null;
+  private checkpointer: BaseCheckpointSaver | null = null;
+  private checkpointerPromise: Promise<BaseCheckpointSaver> | null = null;
+  /**
+   * One in-process memory backend for the whole service. compile() runs on every
+   * start/resume/getState, so a per-compile store would drop ctx.store data between a
+   * run and its own resume. Each compile gets a graph-scoped ctx.store view on it, so
+   * graphs never see each other's keys; the backend caps total items.
+   */
+  private readonly legacyStoreBackend: MemoryBackend = createInMemoryMemoryBackend({ maxItems: 50_000 });
 
   constructor(readonly config: ServerConfig) {
     this.registry = new SessionRegistry(config.eventBufferSize, {
@@ -57,7 +66,7 @@ export class RunService {
     });
   }
 
-  private async getCheckpointer(): Promise<BaseCheckpointSaver | "memory"> {
+  private async getCheckpointer(): Promise<BaseCheckpointSaver> {
     if (this.checkpointer) return this.checkpointer;
     if (!this.checkpointerPromise) {
       this.checkpointerPromise = (async () => {
@@ -66,9 +75,12 @@ export class RunService {
           this.checkpointer = cp;
           return cp;
         }
-        // Let compileGraph create its own MemorySaver.
-        this.checkpointer = "memory";
-        return "memory";
+        // One MemorySaver shared by every compile. Letting compileGraph create its own
+        // per call gave each start/resume/getState an empty saver, so HITL resume
+        // "completed" without running the remaining nodes.
+        const cp = new MemorySaver();
+        this.checkpointer = cp;
+        return cp;
       })();
     }
     return this.checkpointerPromise;
@@ -123,7 +135,8 @@ export class RunService {
     return compileGraph(spec, {
       cwd,
       graphPath,
-      ...(checkpointer === "memory" ? {} : { checkpointer }),
+      checkpointer,
+      legacyStoreBackend: this.legacyStoreBackend,
       providers,
       sinks: [
         (event) => {

@@ -1,7 +1,8 @@
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import type { GraphSpec } from "@flowgraph/spec";
-import type { CompileOptions, InterruptInfo } from "@flowgraph/core";
+import type { CompileOptions, InterruptInfo, MemoryIdentity } from "@flowgraph/core";
+import { resolveMemoryIdentity } from "./memory-identity.js";
 import { printInfo } from "./ui.js";
 import { lazyOptionalImport } from "./optional-deps.js";
 
@@ -15,19 +16,42 @@ const loadCheckpointPostgres = lazyOptionalImport<typeof import("@flowgraph/chec
   "Install it: pnpm add @flowgraph/checkpoint-postgres",
 );
 
+/** Checkpoint backends whose database the CLI can also keep memory in. */
+export const CLI_MEMORY_BACKENDS = ["sqlite"] as const;
+
+export interface CheckpointerOptionExtras {
+  /** Directory the memory project is resolved from (git origin, .flowgraph/config.yaml). */
+  cwd?: string;
+  /** Resolve (org, project, user) for memory. Defaults to resolveMemoryIdentity(). */
+  identity?: () => MemoryIdentity;
+  /** Called with the identity notice (e.g. no git origin) when memory is used. */
+  onNotice?: (msg: string) => void;
+}
+
 /**
  * Build a durable checkpointer for CLI runs based on the graph's runtime config.
- * sqlite → persistent file; postgres → DATABASE_URL / connectionString.
+ * sqlite → persistent file, which also holds runtime.memory / durable ctx.store;
+ * postgres → DATABASE_URL / connectionString (no memory yet).
  */
 export async function checkpointerOption(
   spec: GraphSpec,
-): Promise<Pick<CompileOptions, "checkpointer">> {
+  extras: CheckpointerOptionExtras = {},
+): Promise<Pick<CompileOptions, "checkpointer" | "memory">> {
   const ck = spec.runtime?.checkpoint;
   if (ck?.enabled === false) return { checkpointer: "none" };
   if (ck?.backend === "sqlite") {
     const checkpoint = await loadCheckpointSqlite();
     const dbPath = ck.path ?? ".flowgraph/checkpoints.db";
-    return { checkpointer: checkpoint.createSqliteCheckpointer(dbPath) };
+    if (!usesDurableMemory(spec)) return { checkpointer: checkpoint.createSqliteCheckpointer(dbPath) };
+    const sqlite = await checkpoint.openSqliteBackend(dbPath);
+    let identity: MemoryIdentity;
+    if (extras.identity) identity = extras.identity();
+    else {
+      const resolved = resolveMemoryIdentity(extras.cwd ? { cwd: extras.cwd } : {});
+      if (resolved.notice) (extras.onNotice ?? printInfo)(resolved.notice);
+      identity = { org: resolved.org, project: resolved.project, ...(resolved.user ? { user: resolved.user } : {}) };
+    }
+    return { checkpointer: sqlite.checkpointer, memory: { backend: sqlite.memory, identity } };
   }
   if (ck?.backend === "postgres") {
     const checkpoint = await loadCheckpointPostgres();
@@ -44,6 +68,14 @@ export async function checkpointerOption(
     return { checkpointer: await checkpoint.createPostgresCheckpointer(connectionString) };
   }
   return {};
+}
+
+/** True when the graph keeps memory in the checkpoint database. */
+function usesDurableMemory(spec: GraphSpec): boolean {
+  const mem = spec.runtime?.memory;
+  if (mem) return (mem.backend ?? "checkpoint") === "checkpoint";
+  const st = spec.runtime?.store;
+  return !!st && st.enabled !== false && (st.backend === "sqlite" || st.backend === "postgres");
 }
 
 function interruptData(it: InterruptInfo): Record<string, unknown> | undefined {

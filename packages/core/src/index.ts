@@ -21,6 +21,9 @@ export {
   InputValidationError,
 } from "./inputs.js";
 export { compileGraph, ResumeAttemptsExhaustedError } from "./compiler.js";
+export type { MemoryHostOptions } from "./compiler.js";
+export * from "./memory/index.js";
+export { memoryNode } from "./nodes/memory.js";
 export {
   DEFAULT_MAX_RESUME_ATTEMPTS,
   interruptUntilValid,

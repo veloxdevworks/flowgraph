@@ -52,3 +52,34 @@ describe("map node — fan-out / fan-in", () => {
     expect(r.state["total"]).toBe(20);
   });
 });
+
+describe("map node — inner agent", () => {
+  it("collects agent outputs, not the agent's reserved replay bookkeeping", async () => {
+    const { createScriptedProvider } = await import("./providers/index.js");
+    const echo = createScriptedProvider("map-echo", (req) => ({ output: { text: `seen:${req.prompt}` }, stopReason: "done" }));
+    const spec = {
+      metadata: { name: "map-agent" },
+      state: { channels: { docs: { type: "array" }, summaries: { type: "array" } } },
+      nodes: [
+        {
+          id: "fan",
+          type: "map",
+          with: {
+            over: "{{ state.docs }}",
+            as: "doc",
+            node: { type: "agent", provider: "map-echo", with: { prompt: "{{ item.doc }}" } },
+            collect: { to: "summaries" },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "fan" },
+        { from: "fan", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(spec, { checkpointer: "memory", providers: [echo] });
+    const r = await compiled.run({ threadId: "map-agent-collect", input: { docs: ["a", "b", "c"] } });
+    expect(r.status).toBe("completed");
+    expect(r.state["summaries"]).toEqual([{ text: "seen:a" }, { text: "seen:b" }, { text: "seen:c" }]);
+  });
+});

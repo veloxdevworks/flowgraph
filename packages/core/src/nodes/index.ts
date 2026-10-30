@@ -20,6 +20,7 @@ import { hitlNode } from "./hitl.js";
 import { workshopNode } from "./workshop.js";
 import { worktreeNode } from "./worktree.js";
 import { webhookNode } from "./webhook.js";
+import { memoryNode } from "./memory.js";
 import "../providers/ask-human.js";
 import "../providers/list-services.js";
 import "../providers/service-tools.js";
@@ -44,6 +45,7 @@ const BUILT_INS = [
   workshopNode,
   worktreeNode,
   webhookNode,
+  memoryNode,
 ];
 for (const node of BUILT_INS) {
   if (!registry.has(node.type)) registry.register(node);
@@ -73,4 +75,5 @@ export {
   workshopNode,
   worktreeNode,
   webhookNode,
+  memoryNode,
 };

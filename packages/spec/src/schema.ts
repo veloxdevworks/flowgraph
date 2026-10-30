@@ -233,6 +233,85 @@ const BaseWithSchema = z.object({
   output: OutputMappingSchema.optional(),
 });
 
+export const MemoryScopeSchema = z.enum(["org", "project", "graph", "user", "subject"], {
+  errorMap: (issue, ctx) =>
+    issue.code === "invalid_enum_value"
+      ? { message: `must be one of org | project | graph | user | subject (got "${String(issue.received)}")` }
+      : { message: ctx.defaultError },
+});
+
+// ── agent memory (recall + remember) ──────────────────────────────────────
+
+/** Identifier usable as `{{ memory.<id> }}`. */
+const RecallIdSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "recall id must be an identifier ([A-Za-z_][A-Za-z0-9_]*)");
+
+export const SimilarSubjectsSchema = z
+  .object({
+    /** Subject type; defaults to runtime.memory.subject.type and must match it. */
+    type: z.string().optional(),
+    /** Exact match on item attrs (templates ok). */
+    match: z.record(z.unknown()).optional(),
+    /** More exact attr filters (e.g. outcome: resolved). */
+    where: z.record(z.unknown()).optional(),
+    /** Max subjects (default 5, max 50). */
+    limit: z.number().int().min(1).max(50).optional(),
+    /** Newest items per subject (default 2, max 10). */
+    perSubject: z.number().int().min(1).max(10).optional(),
+  })
+  .strict();
+
+export const MemoryRecallBlockSchema = z
+  .object({
+    id: RecallIdSchema,
+    /** Scopes to read (default: user > subject > graph > project > org). */
+    scopes: z.array(MemoryScopeSchema).min(1).optional(),
+    /** Key prefix (templates ok). */
+    prefix: z.string().optional(),
+    /** Exact attr filters (templates ok). */
+    attrs: z.record(z.unknown()).optional(),
+    /** Max items from this block before the node budget applies (default 20, max 200). */
+    limit: z.number().int().min(1).max(200).optional(),
+    /** Collapse the same key across scopes, narrowest wins (default true). */
+    dedupe: z.boolean().optional(),
+    /** Search other subjects of the same type in this project instead of this run's scopes. */
+    similarSubjects: SimilarSubjectsSchema.optional(),
+    /** fail (default): a backend error fails the node. skip: record a run issue and continue. */
+    onError: z.enum(["fail", "skip"]).optional(),
+  })
+  .strict()
+  .superRefine((b, ctx) => {
+    if (b.similarSubjects && (b.scopes || b.dedupe !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a similarSubjects block cannot also set scopes or dedupe", path: ["scopes"] });
+    }
+  });
+
+export const AgentMemoryWritesSchema = z
+  .object({
+    /** Scopes the `remember` tool may write to; the model must name one. */
+    scopes: z.array(MemoryScopeSchema).min(1),
+    /** Max remember calls per run of this node (default 5, max 50). */
+    maxPerRun: z.number().int().min(1).max(50).optional(),
+    /** Prefix added to every key the model chooses (default "agent/"). */
+    keyPrefix: z.string().min(1).optional(),
+    /** Attrs added to every write (templates ok); they override the model's attrs. */
+    attrs: z.record(z.unknown()).optional(),
+    /** Per-item TTL for non-subject writes, e.g. 90d. */
+    ttl: DurationSchema.optional(),
+  })
+  .strict();
+
+export const AgentMemorySchema = z
+  .object({
+    /** Token budget for all recalled memory in this node (estimated bytes/4; default 1000, cap 4000). */
+    maxTokens: z.number().int().positive().optional(),
+    /** Max recalled items across all blocks (default 20, max 200). */
+    maxItems: z.number().int().min(1).max(200).optional(),
+    recall: z.array(MemoryRecallBlockSchema).optional(),
+    /** Enables the builtin `remember` tool. */
+    agentWrites: AgentMemoryWritesSchema.optional(),
+  })
+  .strict();
+
 // agent node (formerly "intelligent")
 export const AgentWithSchema = BaseWithSchema.extend({
   /** Reference to a reusable agent definition (AGENT.md), resolved at run time. */
@@ -259,6 +338,8 @@ export const AgentWithSchema = BaseWithSchema.extend({
    * graph's LangChain ChatModel/key (see `@flowgraph/provider-deepagents`).
    */
   hub: z.enum(["deepagents"]).optional(),
+  /** Long-term memory: recall into the prompt within a token budget, and the `remember` tool. */
+  memory: AgentMemorySchema.optional(),
   // provider-namespaced escape hatches (any shape)
   claude: z.record(z.unknown()).optional(),
   cursor: z.record(z.unknown()).optional(),
@@ -421,6 +502,46 @@ export const DemoWithSchema = BaseWithSchema.extend({
 export const FunctionWithSchema = BaseWithSchema.extend({
   fn: z.string().describe("Registered function name"),
   input: z.record(z.string()).optional(),
+});
+
+// memory node — read/write scoped durable memory (requires runtime.memory)
+export const MemoryOpSchema = z.enum(["get", "search", "put", "patch", "increment", "append", "delete"]);
+
+export const MemoryWithSchema = BaseWithSchema.extend({
+  op: MemoryOpSchema,
+  /**
+   * Target scope for writes. Omitted: user (or graph when the run has no user),
+   * with a MEMORY_SCOPE_IMPLICIT lint warning. Required for subject/project/org.
+   */
+  scope: MemoryScopeSchema.optional(),
+  /** Read scopes for get/search, in order. Default: user, subject, graph, project, org. */
+  scopes: z.array(MemoryScopeSchema).min(1).optional(),
+  key: z.string().optional(),
+  /** search: key prefix. */
+  prefix: z.string().optional(),
+  /** put/patch: the value; append: the item. Templates are rendered. */
+  value: z.unknown().optional(),
+  attrs: z.record(z.unknown()).optional(),
+  /** increment: object field to bump (default "count"; "" bumps a bare number). */
+  field: z.string().optional(),
+  by: z.union([z.number(), z.string()]).optional(),
+  /** append: max list length (default 100, cap 1000). */
+  max: z.number().int().positive().optional(),
+  /** CAS: expected version; 0 = create only. */
+  ifVersion: z.union([z.number().int().nonnegative(), z.string()]).optional(),
+  ttl: DurationSchema.optional(),
+  /** search: max results (default 20, max 200). */
+  limit: z.number().int().positive().max(200).optional(),
+  /** get: fail the node when the key is absent. */
+  required: z.boolean().optional(),
+}).superRefine((v, ctx) => {
+  if (v.op !== "search" && !v.key) ctx.addIssue({ code: "custom", path: ["key"], message: `op "${v.op}" requires key` });
+  if ((v.op === "put" || v.op === "patch" || v.op === "append") && v.value === undefined) {
+    ctx.addIssue({ code: "custom", path: ["value"], message: `op "${v.op}" requires value` });
+  }
+  if ((v.op === "get" || v.op === "search") && v.scope !== undefined && v.scopes !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["scope"], message: "use either scope or scopes, not both" });
+  }
 });
 
 /** @deprecated Use FunctionWithSchema */
@@ -930,18 +1051,28 @@ export const ProvidersSchema = z.record(ProviderConfigSchema);
 // Runtime block
 // ---------------------------------------------------------------------------
 
-export const CheckpointBackendSchema = z.union([
-  z.literal("memory"),
-  z.literal("sqlite"),
-  z.literal("postgres"),
-  z.string(),
-]);
+/**
+ * Checkpoint backends. `memory` is process-local; `sqlite` / `postgres` need the host
+ * (CLI, server, or a programmatic caller) to inject a saver instance.
+ */
+export const CheckpointBackendSchema = z.enum(["memory", "sqlite", "postgres"], {
+  errorMap: (issue, ctx) =>
+    issue.code === "invalid_enum_value"
+      ? { message: `must be one of memory | sqlite | postgres (got "${String(issue.received)}")` }
+      : { message: ctx.defaultError },
+});
 
-export const StoreBackendSchema = z.union([
-  z.literal("memory"),
-  z.literal("none"),
-  z.string(),
-]);
+/**
+ * Long-term store backends. `memory` is process-local and ephemeral; `none` disables
+ * `ctx.store`. `sqlite` / `postgres` are reserved for the durable store and fail at
+ * compile time until a store instance is injected — there is no silent in-memory fallback.
+ */
+export const StoreBackendSchema = z.enum(["memory", "none", "sqlite", "postgres"], {
+  errorMap: (issue, ctx) =>
+    issue.code === "invalid_enum_value"
+      ? { message: `must be one of memory | none | sqlite | postgres (got "${String(issue.received)}")` }
+      : { message: ctx.defaultError },
+});
 
 export const HitlPolicySchema = z.union([
   z.literal("prompt"),
@@ -949,6 +1080,48 @@ export const HitlPolicySchema = z.union([
   z.literal("approve"),
   z.literal("webhook"),
 ]);
+
+/**
+ * `runtime.memory` — scoped durable memory (org/project/graph/user/subject).
+ * `checkpoint` stores memory in the checkpointer's database and needs a durable
+ * checkpointer (sqlite today). `memory` is process-local, for tests.
+ */
+export const MemoryBackendSchema = z.enum(["checkpoint", "memory"], {
+  errorMap: (issue, ctx) =>
+    issue.code === "invalid_enum_value"
+      ? { message: `must be one of checkpoint | memory (got "${String(issue.received)}")` }
+      : { message: ctx.defaultError },
+});
+
+export const RuntimeMemorySchema = z
+  .object({
+    backend: MemoryBackendSchema.optional().default("checkpoint"),
+    subject: z
+      .object({
+        /** Subject type, e.g. incident, build, ticket. */
+        type: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/, "must match ^[a-z][a-z0-9_-]{0,63}$"),
+        /** Template rendered at run start from input/run only. */
+        key: z.string().min(1),
+        required: z.boolean().optional().default(false),
+        /** Sliding TTL, refreshed on every write to the subject. */
+        ttl: DurationSchema.optional().default("180d"),
+        /** Store sha256 of the rendered key instead of the key. */
+        hash: z.boolean().optional().default(false),
+      })
+      .strict()
+      .optional(),
+    limits: z
+      .object({
+        itemBytes: z.number().int().positive().optional(),
+        itemsPerScope: z.number().int().positive().optional(),
+        bytesPerScope: z.number().int().positive().optional(),
+        subjectsPerType: z.number().int().positive().optional(),
+        onFull: z.enum(["evict-oldest", "reject"]).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
 
 export const RuntimeSchema = z.object({
   checkpoint: z
@@ -965,6 +1138,8 @@ export const RuntimeSchema = z.object({
       backend: StoreBackendSchema.optional().default("memory"),
     })
     .optional(),
+  /** Scoped durable memory (see RuntimeMemorySchema). Mutually exclusive with `store`. */
+  memory: RuntimeMemorySchema.optional(),
   /** Embedded HTTP ingress for `wait` nodes with `webhook: true`. */
   webhookServer: z
     .object({

@@ -7,6 +7,7 @@ import type { HookBus } from "./hooks/bus.js";
 import type { McpHub } from "./mcp/types.js";
 import type { SecretProvider } from "./secrets.js";
 import type { BaseStore } from "@langchain/langgraph";
+import type { MemoryScopeInfo, ScopedMemory } from "./memory/handle.js";
 import type { IssueInput, RunIssue } from "./runtime/run-issues.js";
 
 export type { SecretProvider };
@@ -27,6 +28,8 @@ export interface RunMeta {
   startedAt: string;
   graph: string;
   labels?: Record<string, string> | undefined;
+  /** Scope tuple this run's `ctx.memory` is bound to (when runtime.memory is in use). Read-only. */
+  memoryScope?: Readonly<MemoryScopeInfo> | undefined;
 }
 
 export interface Logger {
@@ -76,8 +79,16 @@ export interface RunContext {
   hooks?: HookBus | undefined;
   /** MCP hub for deterministic mcp nodes and agent MCP tools. */
   mcp?: McpHub | undefined;
-  /** Cross-thread long-term memory (LangGraph BaseStore). */
+  /**
+   * Legacy cross-thread store (LangGraph BaseStore API). Confined to this
+   * graph's scope unless the host injected a raw BaseStore instance.
+   */
   store?: BaseStore | undefined;
+  /**
+   * Scoped durable memory (org/project/graph/user/subject), pre-bound to this
+   * run. Present when `runtime.memory` is declared.
+   */
+  memory?: ScopedMemory | undefined;
 }
 
 export function createLogger(events: EventBus, graphName: string): Logger {
