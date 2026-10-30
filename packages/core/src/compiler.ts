@@ -305,6 +305,17 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   ): Promise<RunResult> => {
     const startMs = Date.now();
     const threadId = runOpts.threadId ?? `thread-${runId}`;
+    const graphRetention = graphSpec.runtime?.checkpoint?.retention;
+    if (
+      checkpointer &&
+      isRetentionSaver(checkpointer) &&
+      (graphRetention !== undefined || opts.checkpointRetention !== undefined)
+    ) {
+      checkpointer.noteThreadPolicy?.(
+        threadId,
+        resolveCheckpointRetention(graphRetention, opts.checkpointRetention),
+      );
+    }
     clearWaitTimeoutTimer(waitTimers, threadId);
     const startedAt = new Date().toISOString();
     const runMeta: RunMeta = { runId, graph: graphSpec.metadata.name, startedAt, threadId };
@@ -331,10 +342,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
       if (checkpointer && isRetentionSaver(checkpointer)) {
         try {
-          await checkpointer.noteThreadStatus(
-            threadId,
-            retentionStatusForRun(r.status, (r.interrupts?.length ?? 0) > 0),
-          );
+          await checkpointer.noteThreadStatus(threadId, retentionStatusForRun(r.status));
         } catch {
           // Retention bookkeeping must not fail a run that already finished.
         }

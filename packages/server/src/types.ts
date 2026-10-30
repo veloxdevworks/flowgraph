@@ -1,4 +1,4 @@
-import type { FlowgraphEvent, RunResult, StateSnapshot } from "@flowgraph/core";
+import type { CheckpointRetentionInput, FlowgraphEvent, RunResult, StateSnapshot } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
 
 /** Client-facing event shape (mirrors desktop EngineEvent / FlowgraphEvent). */
@@ -150,6 +150,13 @@ export interface ServerConfig {
   connectToken?: string;
   /** `POST /voice/client-secrets` policy. */
   voice?: VoiceConfig;
+  /**
+   * Host default for checkpoint retention. A graph's `runtime.checkpoint.retention`
+   * overrides this per thread. Thread deletion stays off unless this or the graph
+   * sets `finishedTtl` or `maxFinishedThreads`. Env: `FLOWGRAPH_CHECKPOINT_RETENTION`
+   * (`false` or a JSON object).
+   */
+  checkpointRetention?: boolean | CheckpointRetentionInput | null;
 }
 
 export type ServerMemoryBackend = "memory" | "postgres" | "sqlite";
@@ -241,6 +248,18 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
   if (region) config.awsRegion = region;
   if (env.FLOWGRAPH_CONNECT_URL?.trim()) config.connectUrl = env.FLOWGRAPH_CONNECT_URL.trim();
   if (env.FLOWGRAPH_CONNECT_TOKEN?.trim()) config.connectToken = env.FLOWGRAPH_CONNECT_TOKEN.trim();
+  const retentionRaw = env.FLOWGRAPH_CHECKPOINT_RETENTION?.trim();
+  if (retentionRaw) {
+    if (retentionRaw === "false") config.checkpointRetention = false;
+    else if (retentionRaw === "true") config.checkpointRetention = true;
+    else {
+      try {
+        config.checkpointRetention = JSON.parse(retentionRaw) as CheckpointRetentionInput;
+      } catch {
+        throw new Error(`FLOWGRAPH_CHECKPOINT_RETENTION must be true, false, or a JSON object (got "${retentionRaw}")`);
+      }
+    }
+  }
   const allowedModels = (env.FLOWGRAPH_VOICE_ALLOWED_MODELS ?? "")
     .split(",")
     .map((m) => m.trim())

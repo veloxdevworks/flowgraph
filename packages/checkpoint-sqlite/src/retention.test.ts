@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { compileGraph, createScopedMemory, defaultMemoryPolicy, registerFunction, type GraphSpec } from "@flowgraph/core";
-import { createSqliteCheckpointer, openSqliteBackend, sqliteCheckpointStats, type SqliteBackend } from "./index.js";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { createSqliteCheckpointer, FG_CHECKPOINT_TYPE, openSqliteBackend, sqliteCheckpointStats, type SqliteBackend } from "./index.js";
 
 registerFunction("sqlRet", () => "done");
 
@@ -87,6 +88,13 @@ describe("sqlite checkpoint retention", () => {
       { threadId: "mem" },
     );
     await memory.put("graph", "keep-me", { v: 1 });
+    backend.db
+      .prepare(
+        `INSERT INTO fg_memory_threads
+           (thread_id, org, project, graph, usr, subject_type, subject_key, created_at)
+         VALUES ('short-1', 'o', 'p', 'g', '', '', '', 1)`,
+      )
+      .run();
     const before = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_items`).get() as { n: number };
     expect(before.n).toBe(1);
 
@@ -109,6 +117,8 @@ describe("sqlite checkpoint retention", () => {
     expect(after.n).toBe(1);
     const got = await memory.get("keep-me");
     expect(got?.value).toEqual({ v: 1 });
+    const binding = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_threads`).get() as { n: number };
+    expect(binding.n).toBe(0);
   });
 
   it("keeps a single blob for a channel version that does not change", async () => {
@@ -150,5 +160,75 @@ describe("sqlite checkpoint retention", () => {
     expect(tuple?.checkpoint.channel_values["pad"]).toBe(pad);
     expect(tuple?.checkpoint.channel_values["n"]).toBe(2);
     expect(stats.checkpointBytes).toBeLessThan(pad.length);
+    const stamped = backend.db.prepare(`SELECT type FROM checkpoints WHERE checkpoint_id = '2'`).get() as { type: string };
+    expect(stamped.type).toBe(FG_CHECKPOINT_TYPE);
+  });
+
+  it("reads deduped checkpoints when dedupe or retention is turned off, and a stock saver refuses them", async () => {
+    const dbPath = tmpDb();
+    const threadId = "dedupe-read";
+    const spec = {
+      metadata: { name: "dedupe-read" },
+      state: { channels: { tag: { type: "string" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const first = createSqliteCheckpointer({ path: dbPath });
+    const started = await compileGraph(spec, { checkpointer: first });
+    const ran = await started.run({ threadId, onInterrupt: "fail" });
+    expect(ran.status).toBe("completed");
+    expect(ran.state["tag"]).toBe("done");
+    (first as unknown as { db: { close(): void } }).db.close();
+
+    for (const retention of [{ dedupeChannels: false }, false] as const) {
+      const again = createSqliteCheckpointer({ path: dbPath, retention });
+      const compiled = await compileGraph(spec, { checkpointer: again });
+      const snap = await compiled.getState(threadId);
+      expect(snap?.values["tag"]).toBe("done");
+      (again as unknown as { db: { close(): void } }).db.close();
+    }
+
+    const raw = SqliteSaver.fromConnString(dbPath);
+    await expect(raw.getTuple({ configurable: { thread_id: threadId, checkpoint_ns: "" } })).rejects.toThrow(/serialization type/);
+    raw.db.close();
+  });
+
+  it("does not delete checkpoints it never recorded, even when thread deletion is on", async () => {
+    const dbPath = tmpDb();
+    const spec = {
+      metadata: { name: "untracked" },
+      state: { channels: { tag: { type: "string" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const writer = createSqliteCheckpointer({ path: dbPath, retention: false });
+    const compiled = await compileGraph(spec, { checkpointer: writer });
+    expect((await compiled.run({ threadId: "old", onInterrupt: "fail" })).status).toBe("completed");
+    const before = sqliteCheckpointStats((writer as unknown as { db: SqliteBackend["db"] }).db).checkpoints;
+    (writer as unknown as { db: { close(): void } }).db.close();
+
+    const reader = createSqliteCheckpointer({
+      path: dbPath,
+      retention: { finishedTtl: "1ms", maxFinishedThreads: 0 },
+    });
+    const after = sqliteCheckpointStats((reader as unknown as { db: SqliteBackend["db"] }).db).checkpoints;
+    expect(after).toBe(before);
+    expect(after).toBeGreaterThan(0);
+    (reader as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("refuses a checkpoint schema newer than this build", () => {
+    const dbPath = tmpDb();
+    const first = createSqliteCheckpointer({ path: dbPath, retention: false });
+    const db = (first as unknown as { db: SqliteBackend["db"] }).db;
+    db.prepare(`INSERT INTO fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 99, 1)`).run();
+    db.close();
+    expect(() => createSqliteCheckpointer({ path: dbPath })).toThrow(/newer than this flowgraph/);
   });
 });

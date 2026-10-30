@@ -4,7 +4,7 @@ import type { GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import { registerFunction } from "../nodes/function.js";
 import { FlowgraphMemorySaver } from "./memory-saver.js";
-import { resolveCheckpointRetention } from "./retention.js";
+import { resolveCheckpointRetention, retentionStatusForRun } from "./retention.js";
 
 registerFunction("retTag", (input) => {
   const raw = (input as { n?: unknown } | undefined)?.n;
@@ -88,6 +88,19 @@ describe("FlowgraphMemorySaver retention", () => {
     expect(saver.storage["paused"]).toBeDefined();
     const paused = await saver.getTuple(config("paused"));
     expect(paused?.checkpoint.channel_values["n"]).toBe(1);
+  });
+
+  it("keeps an errored or aborted thread even when finished threads are deleted immediately", async () => {
+    const saver = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ maxFinishedThreads: 0, finishedTtl: "1ms" }),
+    );
+    await saver.put(config("err"), checkpoint("1", { n: 1 }, { n: 1 }), meta(1));
+    await saver.noteThreadStatus("err", retentionStatusForRun("error"), 1);
+    await saver.put(config("abort"), checkpoint("1", { n: 1 }, { n: 1 }), meta(1));
+    await saver.noteThreadStatus("abort", retentionStatusForRun("aborted"), 1);
+    await saver.sweep(Date.now() + 60_000);
+    expect(saver.storage["err"]).toBeDefined();
+    expect(saver.storage["abort"]).toBeDefined();
   });
 });
 

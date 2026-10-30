@@ -61,24 +61,30 @@ describe("selectRetainedCheckpointIds", () => {
 });
 
 describe("resolveCheckpointRetention", () => {
-  it("defaults to a bounded policy that stays enabled", () => {
+  it("defaults to pruning and dedupe, with thread deletion off", () => {
     const r = resolveCheckpointRetention();
     expect(r.enabled).toBe(true);
     expect(r.maxCheckpoints).toBe(40);
     expect(r.maxInterruptPoints).toBe(8);
-    expect(r.finishedTtlMs).toBe(14 * 86_400_000);
-    expect(r.maxFinishedThreads).toBe(200);
+    expect(r.finishedTtlMs).toBeNull();
+    expect(r.maxFinishedThreads).toBeNull();
     expect(r.dedupeChannels).toBe(true);
+    expect(r.vacuum).toBe("auto");
   });
 
-  it("lets the host override the graph and turn retention off", () => {
+  it("lets the graph override the host, including an opt-out", () => {
     const r = resolveCheckpointRetention(
       { maxCheckpoints: 10, finishedTtl: "1d" },
       { maxCheckpoints: 4, enabled: false },
     );
-    expect(r.enabled).toBe(false);
-    expect(r.maxCheckpoints).toBe(4);
+    expect(r.enabled).toBe(true);
+    expect(r.maxCheckpoints).toBe(10);
     expect(r.finishedTtlMs).toBe(86_400_000);
+    expect(resolveCheckpointRetention(false, { maxCheckpoints: 4 }).enabled).toBe(false);
+  });
+
+  it("rejects a negative finished-thread cap", () => {
+    expect(() => resolveCheckpointRetention({ maxFinishedThreads: -1 })).toThrow(/maxFinishedThreads/);
   });
 
   it("treats null ttl and null thread cap as unlimited", () => {
@@ -93,15 +99,37 @@ describe("resolveCheckpointRetention", () => {
 });
 
 describe("retentionStatusForRun", () => {
-  it("keeps paused, interrupted, aborted, and exhausted interrupts", () => {
-    expect(retentionStatusForRun("paused", false)).toBe("paused");
-    expect(retentionStatusForRun("interrupted", true)).toBe("paused");
-    expect(retentionStatusForRun("aborted", false)).toBe("paused");
-    expect(retentionStatusForRun("error", true)).toBe("paused");
+  it("keeps paused, interrupted, aborted, and errored runs", () => {
+    expect(retentionStatusForRun("paused")).toBe("paused");
+    expect(retentionStatusForRun("interrupted")).toBe("paused");
+    expect(retentionStatusForRun("aborted")).toBe("paused");
+    expect(retentionStatusForRun("error")).toBe("paused");
   });
 
-  it("marks a clean completion and a terminal error as finished", () => {
-    expect(retentionStatusForRun("completed", false)).toBe("finished");
-    expect(retentionStatusForRun("error", false)).toBe("finished");
+  it("marks only a completed run as finished", () => {
+    expect(retentionStatusForRun("completed")).toBe("finished");
+  });
+});
+
+describe("selectRetainedCheckpointIds branches", () => {
+  it("counts the window separately on each fork", () => {
+    const parentOf = new Map<string, string | null>([
+      ["a", null],
+      ["b", "a"],
+      ["c", "b"],
+      ["d", "a"],
+    ]);
+    const keep = selectRetainedCheckpointIds({
+      idsNewestFirst: ["d", "c", "b", "a"],
+      parentOf,
+      maxCheckpoints: 1,
+      interruptIds: [],
+      explicitPinsNewestFirst: [],
+      maxInterruptPoints: 0,
+    });
+    expect(keep.has("c")).toBe(true);
+    expect(keep.has("d")).toBe(true);
+    expect(keep.has("b")).toBe(false);
+    expect(keep.has("a")).toBe(false);
   });
 });

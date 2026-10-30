@@ -137,7 +137,10 @@ export class RunService {
         if (memBackend === "sqlite") {
           const sqlite = await loadSqlite();
           const file = this.config.memory?.sqlitePath ?? path.join(this.config.graphStoreDir, "memory.db");
-          const b = await sqlite.openSqliteBackend(file);
+          const b = await sqlite.openSqliteBackend({
+            path: file,
+            ...(this.config.checkpointRetention !== undefined ? { retention: this.config.checkpointRetention } : {}),
+          });
           this.closers.push(() => b.close());
           this.useDurableMemory(b.memory);
         }
@@ -145,6 +148,7 @@ export class RunService {
           if (memBackend === "postgres") {
             const pg = await openPostgresBackend({
               connectionString: this.config.databaseUrl,
+              ...(this.config.checkpointRetention !== undefined ? { retention: this.config.checkpointRetention } : {}),
               onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
             });
             this.closers.push(() => pg.close());
@@ -154,14 +158,17 @@ export class RunService {
             this.checkpointer = pg.checkpointer;
             return pg.checkpointer;
           }
-          const cp = await createPostgresCheckpointer(this.config.databaseUrl);
+          const cp = await createPostgresCheckpointer({
+            connectionString: this.config.databaseUrl,
+            ...(this.config.checkpointRetention !== undefined ? { retention: this.config.checkpointRetention } : {}),
+          });
           this.checkpointer = cp;
           return cp;
         }
         // One saver shared by every compile. Letting compileGraph create its own
         // per call gave each start/resume/getState an empty saver, so HITL resume
         // "completed" without running the remaining nodes.
-        const cp = new FlowgraphMemorySaver();
+        const cp = new FlowgraphMemorySaver(this.config.checkpointRetention);
         this.checkpointer = cp;
         return cp;
       })();
@@ -219,6 +226,7 @@ export class RunService {
       cwd,
       graphPath,
       checkpointer,
+      ...(this.config.checkpointRetention !== undefined ? { checkpointRetention: this.config.checkpointRetention } : {}),
       legacyStoreBackend: this.legacyStoreBackend,
       ...(this.durableMemory ? { memory: this.durableMemory } : { memoryUnavailableHint: SERVER_MEMORY_HINT }),
       providers,

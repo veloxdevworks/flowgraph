@@ -13,6 +13,7 @@ import type pg from "pg";
 import {
   CHECKPOINT_PIN_CHANNELS,
   selectRetainedCheckpointIds,
+  threadDeletionRequested,
   type CheckpointThreadStatus,
   type ResolvedCheckpointRetention,
 } from "@flowgraph/core";
@@ -44,39 +45,52 @@ export async function migratePostgresCheckpointRetention(pool: pg.Pool, schema: 
       `SELECT MAX(version) AS v FROM ${s}.fg_schema_migrations WHERE component = 'checkpoint'`,
     );
     const current = currentRow.rows[0]?.v ?? 0;
-    const latest = 1;
+    const latest = 2;
     if (current > latest) {
       throw new Error(
         `postgres schema ${schema}: checkpoint schema version ${current} is newer than this flowgraph supports (${latest}); upgrade flowgraph`,
       );
     }
-    if (current >= latest) {
-      await client.query("COMMIT");
-      return 0;
+    let applied = 0;
+    if (current < 1) {
+      await client.query(`
+        CREATE TABLE ${s}.fg_checkpoint_threads (
+          thread_id  TEXT PRIMARY KEY,
+          status     TEXT NOT NULL CHECK (status IN ('active', 'paused', 'finished')),
+          updated_at BIGINT NOT NULL,
+          deletable  INTEGER NOT NULL DEFAULT 0,
+          finished_ttl_ms BIGINT,
+          max_finished INTEGER
+        );
+        CREATE INDEX fg_checkpoint_threads_finished
+          ON ${s}.fg_checkpoint_threads (updated_at) WHERE status = 'finished';
+        CREATE TABLE ${s}.fg_checkpoint_pins (
+          thread_id     TEXT NOT NULL,
+          checkpoint_ns TEXT NOT NULL DEFAULT '',
+          checkpoint_id TEXT NOT NULL,
+          reason        TEXT NOT NULL,
+          pinned_at     BIGINT NOT NULL,
+          PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+        );
+      `);
+      await client.query(
+        `INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 1, $1)`,
+        [Date.now()],
+      );
+      applied += 1;
     }
-    await client.query(`
-      CREATE TABLE ${s}.fg_checkpoint_threads (
-        thread_id  TEXT PRIMARY KEY,
-        status     TEXT NOT NULL CHECK (status IN ('active', 'paused', 'finished')),
-        updated_at BIGINT NOT NULL
+    if (current < 2) {
+      await client.query(`ALTER TABLE ${s}.fg_checkpoint_threads ADD COLUMN IF NOT EXISTS deletable INTEGER NOT NULL DEFAULT 0`);
+      await client.query(`ALTER TABLE ${s}.fg_checkpoint_threads ADD COLUMN IF NOT EXISTS finished_ttl_ms BIGINT`);
+      await client.query(`ALTER TABLE ${s}.fg_checkpoint_threads ADD COLUMN IF NOT EXISTS max_finished INTEGER`);
+      await client.query(
+        `INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 2, $1)`,
+        [Date.now()],
       );
-      CREATE INDEX fg_checkpoint_threads_finished
-        ON ${s}.fg_checkpoint_threads (updated_at) WHERE status = 'finished';
-      CREATE TABLE ${s}.fg_checkpoint_pins (
-        thread_id     TEXT NOT NULL,
-        checkpoint_ns TEXT NOT NULL DEFAULT '',
-        checkpoint_id TEXT NOT NULL,
-        reason        TEXT NOT NULL,
-        pinned_at     BIGINT NOT NULL,
-        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-      );
-    `);
-    await client.query(
-      `INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 1, $1)`,
-      [Date.now()],
-    );
+      applied += 1;
+    }
     await client.query("COMMIT");
-    return 1;
+    return applied;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw err;
@@ -92,6 +106,9 @@ interface ThreadRow {
   thread_id: string;
   status: string;
   updated_at: string | number;
+  finished_ttl_ms: string | number | null;
+  max_finished: string | number | null;
+  deletable: number;
 }
 
 /**
@@ -103,8 +120,8 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
   readonly retention: ResolvedCheckpointRetention;
   private readonly schemaName: string;
   private readonly q: string;
-  /** Checkpoint rows deleted since the last VACUUM. */
-  private deletedSinceVacuum = 0;
+  private readonly threadPolicy = new Map<string, ResolvedCheckpointRetention>();
+  private lastSweepAt = 0;
 
   constructor(pool: pg.Pool, retention: ResolvedCheckpointRetention, options?: { schema?: string }) {
     const schema = options?.schema ?? "public";
@@ -131,12 +148,14 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     newVersions: Parameters<PostgresSaver["put"]>[3],
   ): Promise<Awaited<ReturnType<PostgresSaver["put"]>>> {
     const result = await super.put(config, checkpoint, metadata, newVersions);
-    if (!this.retention.enabled) return result;
     const threadId = config.configurable?.thread_id;
     if (typeof threadId !== "string") return result;
+    const policy = this.policyFor(threadId);
+    if (!policy.enabled) return result;
     const ns = config.configurable?.checkpoint_ns ?? "";
-    await this.touch(threadId, "active", Date.now());
-    await this.maybeVacuum(await this.pruneNamespace(threadId, ns));
+    await this.touch(threadId, "active", Date.now(), policy);
+    const deleted = await this.pruneNamespace(threadId, ns, policy);
+    await this.maybeVacuum(deleted, policy);
     return result;
   }
 
@@ -146,7 +165,8 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     taskId: Parameters<PostgresSaver["putWrites"]>[2],
   ): Promise<void> {
     await super.putWrites(config, writes, taskId);
-    if (!this.retention.enabled) return;
+    const threadIdEarly = config.configurable?.thread_id;
+    if (typeof threadIdEarly === "string" && !this.policyFor(threadIdEarly).enabled) return;
     const channel = writes.find(([name]) => CHECKPOINT_PIN_CHANNELS.has(String(name)))?.[0];
     const threadId = config.configurable?.thread_id;
     const checkpointId = config.configurable?.checkpoint_id;
@@ -163,65 +183,99 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     const pool = this.db();
     await pool.query(`DELETE FROM ${this.q}.fg_checkpoint_pins WHERE thread_id = $1`, [threadId]);
     await pool.query(`DELETE FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1`, [threadId]);
-    await this.maybeVacuum(Number(counted.rows[0]?.n ?? 0));
+    await pool.query(`DELETE FROM ${this.q}.fg_memory_threads WHERE thread_id = $1`).catch((err: { code?: string }) => {
+      if (err.code !== "42P01") throw err;
+    });
+    await this.maybeVacuum(Number(counted.rows[0]?.n ?? 0), this.retention);
+  }
+
+  noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
+    this.threadPolicy.set(threadId, policy);
   }
 
   async noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = Date.now()): Promise<void> {
-    if (!this.retention.enabled) return;
+    const policy = this.policyFor(threadId);
+    if (!policy.enabled) return;
     if (status === "paused") await this.pinHead(threadId, now);
-    await this.touch(threadId, status, now);
-    if (status === "finished") await this.sweep(now);
+    await this.touch(threadId, status, now, policy);
+    if (status !== "finished" || !threadDeletionRequested(policy)) return;
+    const cap = policy.maxFinishedThreads;
+    let overCap = false;
+    if (cap !== null && cap > 0) {
+      const counted = await this.db().query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM ${this.q}.fg_checkpoint_threads
+         WHERE deletable = 1 AND status = 'finished' AND max_finished IS NOT NULL`,
+      );
+      overCap = Number(counted.rows[0]?.n ?? 0) > cap;
+    }
+    if (cap === 0 || overCap || now - this.lastSweepAt >= 60_000) {
+      this.lastSweepAt = now;
+      await this.sweep(now);
+    }
   }
 
   async sweep(now = Date.now()): Promise<void> {
-    if (!this.retention.enabled) return;
-    const ttl = this.retention.finishedTtlMs;
-    if (ttl !== null) {
-      const cutoff = now - ttl;
-      const stale = await this.db().query<ThreadRow>(
-        `SELECT thread_id, status, updated_at FROM ${this.q}.fg_checkpoint_threads
-         WHERE status <> 'paused' AND updated_at < $1`,
-        [cutoff],
-      );
-      for (const row of stale.rows) {
-        if (row.status === "active" && (await this.headIsPinned(row.thread_id))) {
-          await this.touch(row.thread_id, "paused", Number(row.updated_at));
-          continue;
-        }
-        await this.deleteThread(row.thread_id);
-      }
-      await this.sweepUntracked(cutoff);
+    this.lastSweepAt = now;
+    const aged = await this.db().query<ThreadRow>(
+      `SELECT thread_id, status, updated_at, finished_ttl_ms, max_finished, deletable
+       FROM ${this.q}.fg_checkpoint_threads
+       WHERE deletable = 1 AND status = 'finished' AND finished_ttl_ms IS NOT NULL`,
+    );
+    for (const row of aged.rows) {
+      const ttl = Number(row.finished_ttl_ms);
+      if (!Number.isFinite(ttl) || now - Number(row.updated_at) < ttl) continue;
+      await this.deleteThread(row.thread_id);
     }
-    const cap = this.retention.maxFinishedThreads;
-    if (cap !== null) {
-      const extra = await this.db().query<{ thread_id: string }>(
-        `SELECT thread_id FROM ${this.q}.fg_checkpoint_threads
-         WHERE status = 'finished'
-         ORDER BY updated_at DESC, thread_id DESC
-         OFFSET $1`,
-        [cap],
-      );
-      for (const row of extra.rows) await this.deleteThread(row.thread_id);
+    const capped = await this.db().query<ThreadRow>(
+      `SELECT thread_id, status, updated_at, finished_ttl_ms, max_finished, deletable
+       FROM ${this.q}.fg_checkpoint_threads
+       WHERE deletable = 1 AND status = 'finished' AND max_finished IS NOT NULL
+       ORDER BY max_finished ASC, updated_at ASC, thread_id ASC`,
+    );
+    const groups = new Map<number, ThreadRow[]>();
+    for (const row of capped.rows) {
+      const cap = Number(row.max_finished);
+      const list = groups.get(cap) ?? [];
+      list.push(row);
+      groups.set(cap, list);
     }
-    if (this.retention.vacuum === "always") await this.maybeVacuum(100);
+    for (const [cap, rows] of groups) {
+      if (rows.length <= cap) continue;
+      for (const row of rows.slice(0, rows.length - cap)) await this.deleteThread(row.thread_id);
+    }
+    if (this.retention.vacuum === "always") await this.maybeVacuum(1, { ...this.retention, vacuum: "always" });
   }
 
-  /** Reclaim dead rows once enough checkpoints have been deleted. `always` does not wait. */
-  private async maybeVacuum(deleted: number): Promise<void> {
-    if (!this.retention.enabled || this.retention.vacuum === "never" || deleted <= 0) return;
-    this.deletedSinceVacuum += deleted;
-    if (this.retention.vacuum !== "always" && this.deletedSinceVacuum < 100) return;
-    this.deletedSinceVacuum = 0;
+  /** Blocking VACUUM only when the policy asks for `always`. `auto` does not lock the tables. */
+  private async maybeVacuum(deleted: number, policy: ResolvedCheckpointRetention): Promise<void> {
+    if (!policy.enabled || policy.vacuum !== "always" || deleted <= 0) return;
     for (const table of ["checkpoints", "checkpoint_blobs", "checkpoint_writes", "fg_checkpoint_threads"]) {
       await this.db().query(`VACUUM ${this.q}.${table}`);
     }
   }
 
-  private async touch(threadId: string, status: CheckpointThreadStatus, now: number): Promise<void> {
+  private policyFor(threadId: string): ResolvedCheckpointRetention {
+    return this.threadPolicy.get(threadId) ?? this.retention;
+  }
+
+  private async touch(
+    threadId: string,
+    status: CheckpointThreadStatus,
+    now: number,
+    policy: ResolvedCheckpointRetention,
+  ): Promise<void> {
+    const deletable = status === "finished" && threadDeletionRequested(policy) ? 1 : 0;
     await this.db().query(
-      `INSERT INTO ${this.q}.fg_checkpoint_threads (thread_id, status, updated_at) VALUES ($1, $2, $3)
-       ON CONFLICT (thread_id) DO UPDATE SET status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
-      [threadId, status, now],
+      `INSERT INTO ${this.q}.fg_checkpoint_threads
+         (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (thread_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         updated_at = EXCLUDED.updated_at,
+         deletable = EXCLUDED.deletable,
+         finished_ttl_ms = EXCLUDED.finished_ttl_ms,
+         max_finished = EXCLUDED.max_finished`,
+      [threadId, status, now, deletable, deletable ? policy.finishedTtlMs : null, deletable ? policy.maxFinishedThreads : null],
     );
   }
 
@@ -232,7 +286,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     reason: string,
     now: number,
   ): Promise<void> {
-    const cap = this.retention.maxInterruptPoints;
+    const cap = this.policyFor(threadId).maxInterruptPoints;
     if (cap <= 0) return;
     await this.db().query(
       `INSERT INTO ${this.q}.fg_checkpoint_pins (thread_id, checkpoint_ns, checkpoint_id, reason, pinned_at)
@@ -265,60 +319,10 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     for (const head of heads.rows) await this.addPin(threadId, head.checkpoint_ns, head.checkpoint_id, "paused", now);
   }
 
-  private async headIsPinned(threadId: string): Promise<boolean> {
-    const found = await this.db().query(
-      `SELECT 1
-       FROM ${this.q}.checkpoints c
-       WHERE c.thread_id = $1
-         AND c.checkpoint_id = (
-           SELECT MAX(checkpoint_id) FROM ${this.q}.checkpoints
-           WHERE thread_id = c.thread_id AND checkpoint_ns = c.checkpoint_ns
-         )
-         AND (
-           EXISTS (
-             SELECT 1 FROM ${this.q}.checkpoint_writes w
-             WHERE w.thread_id = c.thread_id AND w.checkpoint_ns = c.checkpoint_ns
-               AND w.checkpoint_id = c.checkpoint_id AND w.channel = ANY($2::text[])
-           )
-           OR EXISTS (
-             SELECT 1 FROM ${this.q}.fg_checkpoint_pins p
-             WHERE p.thread_id = c.thread_id AND p.checkpoint_ns = c.checkpoint_ns
-               AND p.checkpoint_id = c.checkpoint_id
-           )
-         )
-       LIMIT 1`,
-      [threadId, PIN_LIST],
-    );
-    return (found.rowCount ?? 0) > 0;
-  }
-
-  private async sweepUntracked(cutoff: number): Promise<void> {
-    const threads = await this.db().query<{ thread_id: string; ts: string | null }>(
-      `SELECT c.thread_id, c.checkpoint ->> 'ts' AS ts
-       FROM ${this.q}.checkpoints c
-       WHERE c.checkpoint_id = (
-         SELECT MAX(checkpoint_id) FROM ${this.q}.checkpoints WHERE thread_id = c.thread_id
-       )
-         AND NOT EXISTS (
-           SELECT 1 FROM ${this.q}.fg_checkpoint_threads t WHERE t.thread_id = c.thread_id
-         )`,
-      [],
-    );
-    for (const row of threads.rows) {
-      if (await this.headIsPinned(row.thread_id)) {
-        await this.touch(row.thread_id, "paused", cutoff);
-        continue;
-      }
-      const ts = row.ts ? Date.parse(row.ts) : NaN;
-      if (!Number.isFinite(ts) || ts >= cutoff) continue;
-      await this.deleteThread(row.thread_id);
-    }
-  }
-
-  private async pruneNamespace(threadId: string, ns: string): Promise<number> {
+  private async pruneNamespace(threadId: string, ns: string, policy: ResolvedCheckpointRetention): Promise<number> {
     const pool = this.db();
-    const listed = await pool.query<IdRow>(
-      `SELECT checkpoint_id FROM ${this.q}.checkpoints
+    const listed = await pool.query<IdRow & { parent_checkpoint_id: string | null }>(
+      `SELECT checkpoint_id, parent_checkpoint_id FROM ${this.q}.checkpoints
        WHERE thread_id = $1 AND checkpoint_ns = $2
        ORDER BY checkpoint_id DESC`,
       [threadId, ns],
@@ -336,12 +340,14 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
        ORDER BY pinned_at DESC`,
       [threadId, ns],
     );
+    const parentOf = new Map(listed.rows.map((row) => [row.checkpoint_id, row.parent_checkpoint_id]));
     const keep = selectRetainedCheckpointIds({
       idsNewestFirst: ids,
-      maxCheckpoints: this.retention.maxCheckpoints,
+      parentOf,
+      maxCheckpoints: policy.maxCheckpoints,
       interruptIds: interrupts.rows.map((row) => row.checkpoint_id),
       explicitPinsNewestFirst: pins.rows.map((row) => row.checkpoint_id),
-      maxInterruptPoints: this.retention.maxInterruptPoints,
+      maxInterruptPoints: policy.maxInterruptPoints,
     });
     if (keep.size === ids.length) return 0;
     const keepIds = [...keep];

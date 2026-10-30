@@ -52,17 +52,17 @@ runtime:
     path: ".flowgraph/checkpoints.db"
     namespace: "{{ metadata.name }}"     # default
     retention:
-      maxCheckpoints: 40                 # newest checkpoints kept per thread namespace
+      maxCheckpoints: 40                 # newest checkpoints kept on each branch
       maxInterruptPoints: 8              # extra interrupt/resume points outside that window
-      finishedTtl: 14d                   # delete finished threads after this; null keeps them
-      maxFinishedThreads: 200            # also cap how many finished threads are kept
+      finishedTtl: null                  # opt-in: delete completed threads after this
+      maxFinishedThreads: null           # opt-in: cap how many completed threads are kept
       dedupeChannels: true               # store each channel version once
-      vacuum: auto                       # reclaim free pages after deletes (sqlite, and postgres after ~100 dropped checkpoints)
+      vacuum: auto                       # sqlite incremental vacuum; "always" is a blocking VACUUM
 ```
 
-Every superstep writes a checkpoint and its pending writes. Without a limit, a long-lived thread and a series of short runs both keep that history forever, and sqlite repeats every channel value inside every checkpoint. `runtime.checkpoint.retention` bounds that. The default keeps the newest 40 checkpoints of each thread namespace, plus up to 8 interrupt or resume points outside that window, and deletes finished threads after 14 days or once 200 of them have accumulated. The newest checkpoint is always kept. A paused, interrupted, or aborted thread is never deleted, so resume still works after pruning and after a process restart. Set `retention: false` to keep the full history.
+Every superstep writes a checkpoint and its pending writes. Without a limit, a long-lived thread keeps that history forever, and sqlite repeats every channel value inside every checkpoint. `runtime.checkpoint.retention` bounds a thread this process runs. The default keeps the newest 40 checkpoints on each branch, plus up to 8 interrupt or resume points outside that window. The leaf of a branch is always kept. Completed threads are not deleted unless `finishedTtl` or `maxFinishedThreads` is set. Paused, interrupted, aborted, and errored threads are never deleted. Threads this process did not record (older files, or a graph with `retention: false` sharing the database) are left in place. Set `retention: false` to keep the full history for that graph.
 
-Host options override the graph: `createSqliteCheckpointer({ path, retention })`, `openSqliteBackend`, `createPostgresCheckpointer`, `openPostgresBackend`, and `compileGraph(spec, { checkpointRetention })` for the in-memory saver. A checkpointer instance you pass in already carries its own policy. Postgres already versions channel blobs; retention deletes versions no remaining checkpoint references. Sqlite and the in-memory saver store those versions in a side table (`fg_checkpoint_blobs` for sqlite) and leave `fg_memory_*` rows alone.
+A graph's retention overrides the host default field by field. Host options: `createSqliteCheckpointer({ path, retention })`, `openSqliteBackend`, `createPostgresCheckpointer`, `openPostgresBackend`, `compileGraph(spec, { checkpointRetention })`, and on the server `checkpointRetention` / `FLOWGRAPH_CHECKPOINT_RETENTION`. Postgres already versions channel blobs; retention deletes versions no remaining checkpoint references. Sqlite stores each version in `fg_checkpoint_blobs` and stamps the checkpoint row with serde type `fg-checkpoint-v1`. Reads fill state back in even if dedupe or retention is later turned off. A stock saver or an older flowgraph fails that read instead of returning empty state. A checkpoint schema newer than this build is refused when the file is opened. `fg_memory_*` items are left alone; deleting a thread removes its `fg_memory_threads` binding.
 
 `node scripts/checkpoint-growth-bench.mjs --runs 2000` runs the same small graph with and without retention and prints file size, row counts, and byte totals. Set `FLOWGRAPH_TEST_POSTGRES_URL` to include Postgres.
 

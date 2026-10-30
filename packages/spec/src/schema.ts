@@ -1137,13 +1137,14 @@ export const CheckpointRetentionSchema = z.union([
        */
       maxInterruptPoints: z.number().int().nonnegative().optional(),
       /**
-       * Delete finished threads older than this (`14d`, `12h`). `null` disables
-       * the age sweep. Default 14 days. Paused threads are never deleted.
+       * Opt-in. Delete completed threads older than this (`14d`, `12h`).
+       * `null` (the default) keeps them. Errored, aborted, and paused threads
+       * are never deleted.
        */
       finishedTtl: z.union([DurationSchema, z.null()]).optional(),
       /**
-       * How many finished threads to keep. Oldest are deleted first. `null`
-       * disables the cap. Default 200. Paused threads do not count.
+       * Opt-in. How many completed threads to keep. `null` (the default) does
+       * not cap them. `0` deletes a completed thread when the run finishes.
        */
       maxFinishedThreads: z.number().int().nonnegative().nullable().optional(),
       /** Store each channel version once. Default true. */

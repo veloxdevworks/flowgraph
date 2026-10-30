@@ -19,6 +19,7 @@ import {
   CHECKPOINT_PIN_CHANNELS,
   selectRetainedCheckpointIds,
   resolveCheckpointRetention,
+  threadDeletionRequested,
   type CheckpointRetentionInput,
   type CheckpointThreadStatus,
   type ResolvedCheckpointRetention,
@@ -39,6 +40,9 @@ interface PinRec {
 interface ThreadRec {
   status: CheckpointThreadStatus;
   updatedAt: number;
+  deletable: boolean;
+  finishedTtlMs: number | null;
+  maxFinished: number | null;
 }
 
 function writeKey(threadId: string, ns: string, checkpointId: string): string {
@@ -58,6 +62,8 @@ export class FlowgraphMemorySaver extends MemorySaver {
   private readonly blobs: Record<string, Record<string, Record<string, Record<string, BlobRec>>>> = blank();
   private readonly threads = new Map<string, ThreadRec>();
   private readonly pins = new Map<string, PinRec[]>();
+  private readonly threadPolicy = new Map<string, ResolvedCheckpointRetention>();
+  private lastSweepAt = 0;
 
   constructor(
     retention?: boolean | CheckpointRetentionInput | ResolvedCheckpointRetention | null,
@@ -69,7 +75,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
 
   override async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
     const tuple = await super.getTuple(config);
-    if (tuple && this.retention.enabled && this.retention.dedupeChannels) await this.rehydrate(tuple);
+    if (tuple) await this.rehydrate(tuple);
     return tuple;
   }
 
@@ -78,7 +84,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
     options?: Parameters<MemorySaver["list"]>[1],
   ): AsyncGenerator<CheckpointTuple> {
     for await (const tuple of super.list(config, options)) {
-      if (this.retention.enabled && this.retention.dedupeChannels) await this.rehydrate(tuple);
+      await this.rehydrate(tuple);
       yield tuple;
     }
   }
@@ -88,10 +94,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
   ): Promise<Awaited<ReturnType<BaseCheckpointSaver["getDeltaChannelHistory"]>>> {
     // Stored checkpoints omit channel values when deduping. The base walk
     // loads them through getTuple; MemorySaver's own walk reads the raw rows.
-    if (this.retention.enabled && this.retention.dedupeChannels) {
-      return BaseCheckpointSaver.prototype.getDeltaChannelHistory.call(this, options);
-    }
-    return super.getDeltaChannelHistory(options);
+    return BaseCheckpointSaver.prototype.getDeltaChannelHistory.call(this, options);
   }
 
   override async put(
@@ -102,16 +105,17 @@ export class FlowgraphMemorySaver extends MemorySaver {
   ): Promise<RunnableConfig> {
     const threadId = config.configurable?.thread_id;
     const ns = config.configurable?.checkpoint_ns ?? "";
+    const policy = typeof threadId === "string" ? this.policyFor(threadId) : this.retention;
     let stored: Checkpoint = checkpoint;
-    if (this.retention.enabled && this.retention.dedupeChannels && typeof threadId === "string") {
+    if (policy.enabled && policy.dedupeChannels && typeof threadId === "string") {
       stored = copyCheckpoint(checkpoint);
       await this.writeBlobs(threadId, ns, checkpoint, newVersions);
       stored.channel_values = {};
     }
     const result = await super.put(config, stored, metadata);
-    if (this.retention.enabled && typeof threadId === "string") {
-      this.touch(threadId, "active", Date.now());
-      await this.pruneNamespace(threadId, ns);
+    if (policy.enabled && typeof threadId === "string") {
+      this.touch(threadId, "active", Date.now(), policy);
+      await this.pruneNamespace(threadId, ns, policy);
     }
     return result;
   }
@@ -122,7 +126,8 @@ export class FlowgraphMemorySaver extends MemorySaver {
     taskId: string,
   ): Promise<void> {
     await super.putWrites(config, writes, taskId);
-    if (!this.retention.enabled) return;
+    const threadIdEarly = config.configurable?.thread_id;
+    if (typeof threadIdEarly === "string" && !this.policyFor(threadIdEarly).enabled) return;
     const hit = writes.find(([channel]) => CHECKPOINT_PIN_CHANNELS.has(channel));
     const threadId = config.configurable?.thread_id;
     const checkpointId = config.configurable?.checkpoint_id;
@@ -137,36 +142,47 @@ export class FlowgraphMemorySaver extends MemorySaver {
     await super.deleteThread(threadId);
   }
 
+  noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
+    this.threadPolicy.set(threadId, policy);
+  }
+
   async noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = Date.now()): Promise<void> {
-    if (!this.retention.enabled) return;
+    const policy = this.policyFor(threadId);
+    if (!policy.enabled) return;
     if (status === "paused") this.pinHead(threadId, now);
-    this.touch(threadId, status, now);
-    if (status === "finished") await this.sweep(now);
+    this.touch(threadId, status, now, policy);
+    if (status !== "finished" || !threadDeletionRequested(policy)) return;
+    const cap = policy.maxFinishedThreads;
+    const capped = [...this.threads.values()].filter((row) => row.deletable && row.status === "finished" && row.maxFinished !== null);
+    const overCap = cap !== null && capped.length > cap;
+    if (cap === 0 || overCap || now - this.lastSweepAt >= 60_000) {
+      this.lastSweepAt = now;
+      await this.sweep(now);
+    }
   }
 
   async sweep(now = Date.now()): Promise<void> {
-    if (!this.retention.enabled) return;
-    const ttl = this.retention.finishedTtlMs;
-    if (ttl !== null) {
-      for (const [threadId, row] of [...this.threads]) {
-        if (row.status === "paused") continue;
-        if (now - row.updatedAt < ttl) continue;
-        if (row.status === "active" && this.headIsPinned(threadId)) {
-          this.touch(threadId, "paused", row.updatedAt);
-          continue;
-        }
-        await this.deleteThread(threadId);
-      }
+    this.lastSweepAt = now;
+    for (const [threadId, row] of [...this.threads]) {
+      if (!row.deletable || row.status !== "finished" || row.finishedTtlMs === null) continue;
+      if (now - row.updatedAt < row.finishedTtlMs) continue;
+      await this.deleteThread(threadId);
     }
-    const cap = this.retention.maxFinishedThreads;
-    if (cap === null) return;
-    const finished = [...this.threads.entries()]
-      .filter(([, row]) => row.status === "finished")
-      .sort((a, b) => a[1].updatedAt - b[1].updatedAt || (a[0] < b[0] ? -1 : 1));
-    while (finished.length > cap) {
-      const next = finished.shift();
-      if (!next) break;
-      await this.deleteThread(next[0]);
+    const groups = new Map<number, [string, ThreadRec][]>();
+    for (const entry of this.threads) {
+      const row = entry[1];
+      if (!row.deletable || row.status !== "finished" || row.maxFinished === null) continue;
+      const list = groups.get(row.maxFinished) ?? [];
+      list.push(entry);
+      groups.set(row.maxFinished, list);
+    }
+    for (const [cap, rows] of groups) {
+      rows.sort((a, b) => a[1].updatedAt - b[1].updatedAt || (a[0] < b[0] ? -1 : 1));
+      while (rows.length > cap) {
+        const next = rows.shift();
+        if (!next) break;
+        await this.deleteThread(next[0]);
+      }
     }
   }
 
@@ -202,8 +218,24 @@ export class FlowgraphMemorySaver extends MemorySaver {
     return n;
   }
 
-  private touch(threadId: string, status: CheckpointThreadStatus, updatedAt: number): void {
-    this.threads.set(threadId, { status, updatedAt });
+  private policyFor(threadId: string): ResolvedCheckpointRetention {
+    return this.threadPolicy.get(threadId) ?? this.retention;
+  }
+
+  private touch(
+    threadId: string,
+    status: CheckpointThreadStatus,
+    updatedAt: number,
+    policy: ResolvedCheckpointRetention,
+  ): void {
+    const deletable = status === "finished" && threadDeletionRequested(policy);
+    this.threads.set(threadId, {
+      status,
+      updatedAt,
+      deletable,
+      finishedTtlMs: deletable ? policy.finishedTtlMs : null,
+      maxFinished: deletable ? policy.maxFinishedThreads : null,
+    });
   }
 
   private addPin(threadId: string, ns: string, checkpointId: string, reason: string, pinnedAt: number): void {
@@ -232,19 +264,6 @@ export class FlowgraphMemorySaver extends MemorySaver {
       const head = ids[0];
       if (head) this.addPin(threadId, ns, head, "paused", now);
     }
-  }
-
-  private headIsPinned(threadId: string): boolean {
-    const namespaces = this.storage[threadId] ?? {};
-    for (const ns of Object.keys(namespaces)) {
-      const ids = Object.keys(namespaces[ns] ?? {}).sort((a, b) => b.localeCompare(a));
-      const head = ids[0];
-      if (!head) continue;
-      const writes = this.writes[writeKey(threadId, ns, head)];
-      if (writes && Object.values(writes).some((entry) => CHECKPOINT_PIN_CHANNELS.has(entry[1]))) return true;
-      if ((this.pins.get(threadId) ?? []).some((p) => p.ns === ns && p.checkpointId === head)) return true;
-    }
-    return false;
   }
 
   private async writeBlobs(
@@ -287,10 +306,11 @@ export class FlowgraphMemorySaver extends MemorySaver {
     }
   }
 
-  private async pruneNamespace(threadId: string, ns: string): Promise<void> {
+  private async pruneNamespace(threadId: string, ns: string, policy: ResolvedCheckpointRetention): Promise<void> {
     const bucket = this.storage[threadId]?.[ns];
     if (!bucket) return;
     const ids = Object.keys(bucket).sort((a, b) => b.localeCompare(a));
+    const parentOf = new Map(ids.map((id) => [id, bucket[id]?.[2]]));
     const interruptIds: string[] = [];
     for (const id of ids) {
       const writes = this.writes[writeKey(threadId, ns, id)];
@@ -303,10 +323,11 @@ export class FlowgraphMemorySaver extends MemorySaver {
       .map((pin) => pin.checkpointId);
     const keep = selectRetainedCheckpointIds({
       idsNewestFirst: ids,
-      maxCheckpoints: this.retention.maxCheckpoints,
+      parentOf,
+      maxCheckpoints: policy.maxCheckpoints,
       interruptIds,
       explicitPinsNewestFirst: explicit,
-      maxInterruptPoints: this.retention.maxInterruptPoints,
+      maxInterruptPoints: policy.maxInterruptPoints,
     });
     for (const id of ids) {
       if (keep.has(id)) continue;

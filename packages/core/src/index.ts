@@ -31,6 +31,7 @@ export {
   retentionDurationMs,
   retentionStatusForRun,
   selectRetainedCheckpointIds,
+  threadDeletionRequested,
 } from "./checkpoint/retention.js";
 export type {
   CheckpointRetentionInput,

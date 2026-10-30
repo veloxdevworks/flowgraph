@@ -8,11 +8,10 @@
  * short runs, or one long thread whose state grows, therefore grow the
  * database without a ceiling.
  *
- * Retention keeps the newest checkpoints per thread namespace, plus a bounded
- * set of interrupt and resume points, and deletes finished threads after a
- * TTL or once a count cap is exceeded. The newest checkpoint of a thread is
- * always kept, and a thread marked paused is never deleted, so resume of a
- * paused run still works.
+ * Retention keeps the newest checkpoints on each branch of a thread, plus a
+ * bounded set of interrupt and resume points. Deleting a finished thread is
+ * opt-in. The newest checkpoint on a branch is always kept. Errored, aborted,
+ * and paused threads are never deleted.
  */
 
 /** Pending-write channels that mark a checkpoint as an interrupt or resume point. */
@@ -41,15 +40,16 @@ export interface CheckpointRetentionInput {
    */
   maxInterruptPoints?: number | undefined;
   /**
-   * Delete finished threads whose last activity is older than this.
-   * A duration string (`14d`, `12h`) or milliseconds. `null` disables the
-   * age sweep. Default 14 days. Paused threads are never deleted.
+   * Opt-in: delete finished threads whose last activity is older than this.
+   * A duration string (`14d`, `12h`) or milliseconds. `null` (the default)
+   * does not delete threads by age. Errored, aborted, and paused threads are
+   * never deleted.
    */
   finishedTtl?: string | number | null | undefined;
   /**
-   * How many finished threads to keep. Oldest are deleted first. `null`
-   * disables the count cap. `0` deletes a thread as soon as its run completes.
-   * Default 200. Paused threads do not count and are never deleted.
+   * Opt-in: how many finished threads to keep. Oldest are deleted first.
+   * `null` (the default) does not cap finished threads. `0` deletes a thread
+   * as soon as its run completes. Must be a non-negative integer or null.
    */
   maxFinishedThreads?: number | null | undefined;
   /**
@@ -59,9 +59,9 @@ export interface CheckpointRetentionInput {
    */
   dedupeChannels?: boolean | undefined;
   /**
-   * `auto` (default) reclaims free pages after deletes: sqlite when free pages
-   * exceed live data, postgres after about 100 dropped checkpoints.
-   * `always` reclaims on every sweep. `never` leaves free pages to the file.
+   * `auto` (default) runs sqlite incremental vacuum when the file was created
+   * with incremental auto_vacuum. It does not take a blocking VACUUM.
+   * `always` opts into a blocking VACUUM. `never` does neither.
    */
   vacuum?: CheckpointVacuum | undefined;
 }
@@ -82,11 +82,17 @@ export const DEFAULT_CHECKPOINT_RETENTION: ResolvedCheckpointRetention = {
   enabled: true,
   maxCheckpoints: 40,
   maxInterruptPoints: 8,
-  finishedTtlMs: 14 * 86_400_000,
-  maxFinishedThreads: 200,
+  /** Thread deletion is opt-in. */
+  finishedTtlMs: null,
+  maxFinishedThreads: null,
   dedupeChannels: true,
   vacuum: "auto",
 };
+
+/** True when this policy may delete a finished thread. */
+export function threadDeletionRequested(policy: ResolvedCheckpointRetention): boolean {
+  return policy.enabled && (policy.finishedTtlMs !== null || policy.maxFinishedThreads !== null);
+}
 
 const DURATION = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/;
 
@@ -119,10 +125,17 @@ function clampInt(n: number, min: number): number {
   return Math.max(min, Math.floor(n));
 }
 
+function nonNegativeInt(n: number, name: string): number {
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`Invalid ${name}: ${n}. Expected a non-negative integer or null.`);
+  }
+  return n;
+}
+
 /**
- * Merge graph and host retention settings. Host fields win. `false` from the
- * host disables retention; `false` from the graph disables it unless the host
- * turns it back on.
+ * Merge host and graph retention settings. The graph wins on every field it
+ * sets, so a graph that opts out (`retention: false`) or sets its own window
+ * is honored on a shared database. The host fills anything the graph omits.
  */
 export function resolveCheckpointRetention(
   graph?: boolean | CheckpointRetentionInput | null,
@@ -130,7 +143,7 @@ export function resolveCheckpointRetention(
 ): ResolvedCheckpointRetention {
   let enabled = DEFAULT_CHECKPOINT_RETENTION.enabled;
   const merged: CheckpointRetentionInput = {};
-  for (const src of [graph, host]) {
+  for (const src of [host, graph]) {
     if (src === undefined || src === null) continue;
     if (src === false) {
       enabled = false;
@@ -141,6 +154,7 @@ export function resolveCheckpointRetention(
       continue;
     }
     if (src.enabled !== undefined) enabled = src.enabled;
+    else if (src === graph) enabled = true;
     if (src.maxCheckpoints !== undefined) merged.maxCheckpoints = src.maxCheckpoints;
     if (src.maxInterruptPoints !== undefined) merged.maxInterruptPoints = src.maxInterruptPoints;
     if (src.finishedTtl !== undefined) merged.finishedTtl = src.finishedTtl;
@@ -160,7 +174,7 @@ export function resolveCheckpointRetention(
       ? DEFAULT_CHECKPOINT_RETENTION.maxFinishedThreads
       : merged.maxFinishedThreads === null
         ? null
-        : clampInt(merged.maxFinishedThreads, 0);
+        : nonNegativeInt(merged.maxFinishedThreads, "maxFinishedThreads");
 
   return {
     enabled,
@@ -179,6 +193,12 @@ export function resolveCheckpointRetention(
 export interface RetainCheckpointsArgs {
   /** Checkpoint ids, newest first (uuid6 lexicographic order). */
   idsNewestFirst: readonly string[];
+  /**
+   * Parent checkpoint id for each id. When set, `maxCheckpoints` is counted
+   * along each branch (each leaf and its ancestors), so a fork keeps its own
+   * window. When omitted, the newest ids form one linear window.
+   */
+  parentOf?: ReadonlyMap<string, string | null | undefined> | undefined;
   maxCheckpoints: number;
   /** Ids whose pending writes include an interrupt, resume, or error channel. */
   interruptIds: readonly string[];
@@ -188,14 +208,37 @@ export interface RetainCheckpointsArgs {
 }
 
 /**
- * Checkpoints that must survive a prune. The newest `maxCheckpoints` are
- * kept (at least the newest one). Interrupt and resume points outside that
- * window are kept too, up to `maxInterruptPoints`, most recent first.
+ * Checkpoints that must survive a prune. Each branch keeps its newest
+ * `maxCheckpoints` (at least the leaf). Interrupt and resume points outside
+ * those windows are kept too, up to `maxInterruptPoints`, most recent first.
  */
 export function selectRetainedCheckpointIds(args: RetainCheckpointsArgs): Set<string> {
   const keep = new Set<string>();
   const window = Math.max(1, args.maxCheckpoints);
-  for (const id of args.idsNewestFirst.slice(0, window)) keep.add(id);
+  const present = new Set(args.idsNewestFirst);
+  if (args.parentOf) {
+    const isParent = new Set<string>();
+    for (const id of args.idsNewestFirst) {
+      const parent = args.parentOf.get(id);
+      if (parent && present.has(parent)) isParent.add(parent);
+    }
+    const leaves = args.idsNewestFirst.filter((id) => !isParent.has(id));
+    const tips = leaves.length > 0 ? leaves : args.idsNewestFirst.slice(0, 1);
+    for (const leaf of tips) {
+      let kept = 0;
+      let current: string | null | undefined = leaf;
+      const seen = new Set<string>();
+      while (current && present.has(current) && kept < window && !seen.has(current)) {
+        seen.add(current);
+        keep.add(current);
+        kept += 1;
+        const parent = args.parentOf.get(current);
+        current = parent ?? undefined;
+      }
+    }
+  } else {
+    for (const id of args.idsNewestFirst.slice(0, window)) keep.add(id);
+  }
   const head = args.idsNewestFirst[0];
   if (head) keep.add(head);
   if (args.maxInterruptPoints <= 0) return keep;
@@ -214,22 +257,20 @@ export function selectRetainedCheckpointIds(args: RetainCheckpointsArgs): Set<st
 }
 
 /**
- * Map a finished run to the thread status retention is allowed to delete.
- * Paused, interrupted, and aborted runs stay resumable. An error that still
- * has a pending interrupt stays resumable too.
+ * Only a completed run may be deleted, and only when thread deletion is
+ * turned on. Interrupted, paused, aborted, and errored runs stay.
  */
 export function retentionStatusForRun(
   status: "completed" | "interrupted" | "paused" | "error" | "aborted",
-  hasInterrupts: boolean,
 ): CheckpointThreadStatus {
-  if (status === "interrupted" || status === "paused" || status === "aborted") return "paused";
-  if (status === "error" && hasInterrupts) return "paused";
-  return "finished";
+  return status === "completed" ? "finished" : "paused";
 }
 
 export interface CheckpointRetentionSaver {
   noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now?: number): Promise<void> | void;
   sweep(now?: number): Promise<void> | void;
+  /** Remember this thread's graph policy. Graph fields override the host saver. */
+  noteThreadPolicy?(threadId: string, policy: ResolvedCheckpointRetention): void;
 }
 
 export function isRetentionSaver(saver: unknown): saver is CheckpointRetentionSaver {

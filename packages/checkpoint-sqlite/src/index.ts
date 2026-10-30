@@ -29,8 +29,9 @@ export interface SqliteCheckpointerOptions {
   path?: string;
   /**
    * How much checkpoint history to keep. Default keeps the newest 40
-   * checkpoints per thread namespace, a few interrupt points, and finished
-   * threads for 14 days (200 at most). `false` keeps every checkpoint.
+   * checkpoints on each branch and a few interrupt points. Finished threads
+   * are kept unless `finishedTtl` or `maxFinishedThreads` is set. `false`
+   * keeps every checkpoint.
    */
   retention?: boolean | CheckpointRetentionInput | null;
 }
@@ -100,6 +101,7 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
 
 export { SqliteSaver };
 export {
+  FG_CHECKPOINT_TYPE,
   FlowgraphSqliteSaver,
   migrateSqliteCheckpointRetention,
   sqliteCheckpointStats,
