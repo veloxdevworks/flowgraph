@@ -89,6 +89,13 @@ export interface CompileOptions {
    */
   legacyStoreBackend?: MemoryBackend;
   /**
+   * Identity for memory runtimes this compile builds without a host identity:
+   * the `legacyStoreBackend` runtime and in-process ones. A multi-user host
+   * passes the caller's org/project so graphs with the same name in different
+   * orgs never share `ctx.store` keys. Default: { org: "local", project: "local" }.
+   */
+  memoryIdentity?: MemoryIdentity;
+  /**
    * How to get durable memory on this host, shown in the
    * MEMORY_BACKEND_UNAVAILABLE error instead of the CLI/library advice when a
    * graph needs memory and no backend was passed (the server points at its
@@ -1271,7 +1278,9 @@ function resolveMemory(
       m && typeof m === "object" ? ("backend" in m ? (m as MemoryHostOptions) : { backend: m as MemoryBackend }) : undefined;
     const graph = spec.metadata.name;
     const wantsDurable = memCfg ? (memCfg.backend ?? "checkpoint") === "checkpoint" : storeAlias;
-    const ephemeral = () => createEphemeralMemoryRuntime(graph, { config: memCfg, exposeMemory, identity: host?.identity });
+    const fallbackIdentity = opts.memoryIdentity ?? LOCAL_MEMORY_IDENTITY;
+    const ephemeral = () =>
+      createEphemeralMemoryRuntime(graph, { config: memCfg, exposeMemory, identity: host?.identity ?? fallbackIdentity });
     if (memCfg?.backend === "memory") {
       runtime = ephemeral();
     } else if (host && exposeMemory) {
@@ -1280,7 +1289,7 @@ function resolveMemory(
       // plain graph keeps its process-local ctx.store as before.
       runtime = new MemoryRuntime({
         backend: host.backend,
-        identity: host.identity ?? LOCAL_MEMORY_IDENTITY,
+        identity: host.identity ?? fallbackIdentity,
         graph,
         config: memCfg,
         exposeMemory,
@@ -1297,7 +1306,7 @@ function resolveMemory(
     } else if (opts.legacyStoreBackend && !exposeMemory) {
       runtime = new MemoryRuntime({
         backend: opts.legacyStoreBackend,
-        identity: host?.identity ?? LOCAL_MEMORY_IDENTITY,
+        identity: host?.identity ?? fallbackIdentity,
         graph,
         config: memCfg,
         exposeMemory: false,
