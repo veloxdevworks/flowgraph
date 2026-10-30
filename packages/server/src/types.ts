@@ -161,8 +161,8 @@ export interface ServerMemoryConfig {
   sqlitePath?: string;
   /**
    * Who owns memory written by this server: every run shares one identity.
-   * Env: `FLOWGRAPH_ORG`, `FLOWGRAPH_PROJECT`, `FLOWGRAPH_USER`. Default org
-   * and project `local`.
+   * Env: `FLOWGRAPH_ORG` (required for the postgres and sqlite backends),
+   * `FLOWGRAPH_PROJECT` (default `local`), `FLOWGRAPH_USER`.
    */
   identity?: { org: string; project: string; user?: string };
   /** How often to delete expired memory and old op records. Env: `FLOWGRAPH_MEMORY_SWEEP_MS`. Default 1h. */
@@ -216,9 +216,9 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
   }
   config.memory = { backend: memBackend };
   if (env.FLOWGRAPH_MEMORY_SQLITE_PATH?.trim()) config.memory.sqlitePath = env.FLOWGRAPH_MEMORY_SQLITE_PATH.trim();
-  if (env.FLOWGRAPH_ORG?.trim() || env.FLOWGRAPH_PROJECT?.trim()) {
+  if (env.FLOWGRAPH_ORG?.trim()) {
     config.memory.identity = {
-      org: env.FLOWGRAPH_ORG?.trim() || "local",
+      org: env.FLOWGRAPH_ORG.trim(),
       project: env.FLOWGRAPH_PROJECT?.trim() || "local",
       ...(env.FLOWGRAPH_USER?.trim() ? { user: env.FLOWGRAPH_USER.trim() } : {}),
     };

@@ -3,7 +3,6 @@ import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph";
 import {
   compileGraph,
   createInMemoryMemoryBackend,
-  LOCAL_MEMORY_IDENTITY,
   startMemorySweeper,
   resolveAndValidateInput,
   isInputValidationError,
@@ -75,6 +74,14 @@ export class RunService {
     applyServerCredentials({
       ...(config.awsRegion ? { awsRegion: config.awsRegion } : {}),
     });
+    const memBackend = config.memory?.backend ?? "memory";
+    if (memBackend !== "memory" && !config.memory?.identity?.org?.trim()) {
+      throw new Error(
+        `FLOWGRAPH_MEMORY_BACKEND=${memBackend} needs FLOWGRAPH_ORG: durable memory on the server is owned by one org ` +
+          "(and FLOWGRAPH_PROJECT, default \"local\"). Set FLOWGRAPH_ORG, or unset FLOWGRAPH_MEMORY_BACKEND to keep " +
+          "process-local memory. Local use with the flowgraph CLI needs neither.",
+      );
+    }
   }
 
   async init(): Promise<void> {
@@ -94,11 +101,8 @@ export class RunService {
   }
 
   private memoryIdentity(): MemoryIdentity {
-    const id = this.config.memory?.identity;
-    if (!id) {
-      log("warn", "durable memory without FLOWGRAPH_ORG/FLOWGRAPH_PROJECT; using org and project \"local\"", {});
-      return LOCAL_MEMORY_IDENTITY;
-    }
+    // The constructor refuses durable memory without an org.
+    const id = this.config.memory!.identity!;
     return { org: id.org, project: id.project, ...(id.user ? { user: id.user } : {}) };
   }
 

@@ -95,8 +95,22 @@ describe("RunService durable memory", () => {
   it("postgres memory needs DATABASE_URL", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-srvmem-"));
     dirs.push(dir);
-    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 10, memory: { backend: "postgres" } });
+    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 10, memory: { backend: "postgres", identity } });
     await expect(s.init()).rejects.toThrow(/needs DATABASE_URL/);
+  });
+
+  it("durable memory refuses to start without FLOWGRAPH_ORG", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-srvmem-"));
+    dirs.push(dir);
+    for (const backend of ["sqlite", "postgres"] as const) {
+      expect(
+        () => new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 10, memory: { backend } }),
+      ).toThrow(new RegExp(`FLOWGRAPH_MEMORY_BACKEND=${backend} needs FLOWGRAPH_ORG`));
+    }
+    await expect(fs.stat(path.join(dir, "memory.db"))).rejects.toThrow();
+    // The default process-local mode needs no identity.
+    expect(() => new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 10, memory: { backend: "memory" } })).not.toThrow();
+    expect(() => new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 10 })).not.toThrow();
   });
 
   it.skipIf(!PG_URL)("postgres memory shares the checkpoint database and survives a restart", async () => {
@@ -127,6 +141,9 @@ describe("defaultServerConfig memory", () => {
         FLOWGRAPH_MEMORY_SWEEP_MS: "60000",
       }).memory,
     ).toEqual({ backend: "sqlite", sqlitePath: "/data/mem.db", identity: { org: "acme", project: "acme/web", user: "svc" }, sweepIntervalMs: 60_000 });
+    // FLOWGRAPH_PROJECT alone sets no identity; the org is what durable memory needs.
+    expect(defaultServerConfig({ FLOWGRAPH_MEMORY_BACKEND: "postgres", FLOWGRAPH_PROJECT: "acme/web" }).memory).toEqual({ backend: "postgres" });
+    expect(defaultServerConfig({ FLOWGRAPH_ORG: "acme" }).memory).toEqual({ backend: "memory", identity: { org: "acme", project: "local" } });
     expect(() => defaultServerConfig({ FLOWGRAPH_MEMORY_BACKEND: "redis" })).toThrow(/FLOWGRAPH_MEMORY_BACKEND must be one of/);
   });
 });
