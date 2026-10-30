@@ -5,6 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { parseDuration } from "../runtime/duration.js";
+import { assertStorableText, writeFingerprint } from "./engine.js";
 import { availableScopes, isMemoryScopeName, tupleForScope, tupleKey, type MemoryBinding } from "./scope.js";
 import {
   MemoryError,
@@ -27,6 +28,14 @@ export interface MemoryWriteOptions {
   ttl?: string | number | undefined;
   /** CAS: expected current version; 0 = create only. */
   ifVersion?: number | undefined;
+  /**
+   * Caller-chosen identity for this write within the node attempt. The first
+   * payload stored for the key is the one a retry returns; a later call with
+   * the same key and a different payload does not write again. A second call
+   * in the same attempt is a second write. Ignored when the attempt has no
+   * thread and task id (nothing to replay against).
+   */
+  idempotencyKey?: string | undefined;
 }
 
 export interface MemoryReadOptions {
@@ -137,6 +146,43 @@ export interface MemoryOpSource {
   runId?: string | undefined;
 }
 
+function replayHash(parts: readonly string[]): string {
+  return createHash("sha256").update(parts.join("\u0000")).digest("hex");
+}
+
+/**
+ * Op id an older build stored for write number `index` (0-based) of this node
+ * attempt: sha256 of thread, checkpoint namespace, task, node and index.
+ * Current builds still recognize these rows.
+ */
+export function memoryPositionalOpId(source: MemoryOpSource, index: number): string | undefined {
+  if (!source.threadId || !source.taskId || !Number.isInteger(index) || index < 0) return undefined;
+  return replayHash([source.threadId, source.checkpointNs ?? "", source.taskId, source.nodeId ?? "", String(index)]);
+}
+
+/** Fingerprint of a caller idempotency key. It does not include the payload. */
+function idempotencyFingerprint(key: string): string {
+  return replayHash(["idem", key]);
+}
+
+const IDEMPOTENCY_KEY_MAX = 1024;
+
+function validateIdempotencyKey(key: unknown): string {
+  if (typeof key !== "string" || key.length < 1 || key.length > IDEMPOTENCY_KEY_MAX) {
+    throw new MemoryError("MEMORY_KEY_INVALID", `idempotencyKey must be a string of 1 to ${IDEMPOTENCY_KEY_MAX} characters`);
+  }
+  assertStorableText("idempotencyKey", key);
+  return key;
+}
+
+interface ReplayAssignment {
+  opId?: string | undefined;
+  fingerprint?: string | undefined;
+  legacyMatchIndex?: number | undefined;
+  legacyOpIdAt?: ((index: number) => string) | undefined;
+  legacySentinelId?: string | undefined;
+}
+
 export function rowToRecord(row: MemoryRow, scope: MemoryScopeName): MemoryRecord {
   return {
     key: row.key,
@@ -168,14 +214,31 @@ export function createScopedMemory(
   policy: MemoryPolicy,
   source: MemoryOpSource = {},
 ): ScopedMemory {
-  let opIndex = 0;
+  // Replay ids name the write, not its position in the attempt. `occurrences`
+  // counts identical writes (same fingerprint) so two increments of one key
+  // both apply, and a retry of both matches either order. Positional ids from
+  // older builds are read back through legacyOpIdAt.
   const canDedupe = !!(source.threadId && source.taskId);
-  const nextOpId = (): string | undefined => {
-    const n = opIndex++;
-    if (!canDedupe) return undefined;
-    return createHash("sha256")
-      .update([source.threadId, source.checkpointNs ?? "", source.taskId, source.nodeId ?? "", String(n)].join("\u0000"))
-      .digest("hex");
+  const occurrences = new Map<string, number>();
+  const sourceParts = [source.threadId ?? "", source.checkpointNs ?? "", source.taskId ?? "", source.nodeId ?? ""];
+  const legacyOpIdAt = canDedupe ? (index: number) => replayHash([...sourceParts, String(index)]) : undefined;
+  const legacySentinelId = canDedupe ? replayHash([...sourceParts, "v2-nolegacy"]) : undefined;
+
+  const assignReplay = (fingerprint: string, mode: "content" | "idem"): ReplayAssignment => {
+    const n = occurrences.get(fingerprint) ?? 0;
+    occurrences.set(fingerprint, n + 1);
+    if (!canDedupe || !legacyOpIdAt || !legacySentinelId) return { fingerprint };
+    const assigned: ReplayAssignment = {
+      fingerprint,
+      opId: replayHash([...sourceParts, "v2", fingerprint, String(n)]),
+    };
+    // Idempotency keys have no older positional rows; only content-derived writes consult them.
+    if (mode === "content") {
+      assigned.legacyMatchIndex = n;
+      assigned.legacyOpIdAt = legacyOpIdAt;
+      assigned.legacySentinelId = legacySentinelId;
+    }
+    return assigned;
   };
 
   const readScopes = (scopes: MemoryScopeName[] | undefined) =>
@@ -187,10 +250,30 @@ export function createScopedMemory(
     key: string,
     extra: Partial<MemoryWriteOp>,
     opts: MemoryWriteOptions | undefined,
-    opId = nextOpId(),
+    preset?: ReplayAssignment,
   ): Promise<MemoryWriteOutcome> => {
     const s = checkScope(scope);
     const tuple = tupleForScope(binding, s);
+    let assigned = preset;
+    if (!assigned) {
+      const idem = opts?.idempotencyKey !== undefined ? validateIdempotencyKey(opts.idempotencyKey) : undefined;
+      const fingerprint = idem
+        ? idempotencyFingerprint(idem)
+        : (extra.fingerprint ??
+          writeFingerprint({
+            kind,
+            tuple,
+            key,
+            value: extra.value,
+            attrs: opts?.attrs,
+            field: extra.field,
+            by: extra.by,
+            max: extra.max,
+            ifVersion: opts?.ifVersion,
+            ttlMs: toTtlMs(opts?.ttl),
+          }));
+      assigned = assignReplay(fingerprint, idem ? "idem" : "content");
+    }
     const op: MemoryWriteOp = {
       kind,
       tuple,
@@ -200,7 +283,11 @@ export function createScopedMemory(
       ifVersion: opts?.ifVersion,
       ttlMs: toTtlMs(opts?.ttl),
       subjectTtlMs: policy.subjectTtlMs,
-      opId,
+      opId: assigned.opId,
+      fingerprint: extra.fingerprint ?? assigned.fingerprint,
+      legacyMatchIndex: assigned.legacyMatchIndex,
+      legacyOpIdAt: assigned.legacyOpIdAt,
+      legacySentinelId: assigned.legacySentinelId,
       limits: s === "subject" ? policy.subjectLimits : policy.limits,
       writtenBy: binding.user || undefined,
       writtenByRun: source.runId,
@@ -303,16 +390,19 @@ export function createScopedMemory(
       const s = checkScope(scope);
       const tuple = tupleForScope(binding, s);
       const retries = Math.max(0, opts?.retries ?? 5);
-      const opId = nextOpId();
+      const idem = opts?.idempotencyKey !== undefined ? validateIdempotencyKey(opts.idempotencyKey) : undefined;
       // The computed value may differ on a replay (it depends on the current
-      // value), so an update dedupes on its target alone.
-      const fingerprint = createHash("sha256").update([tupleKey(tuple), key, "update"].join("\u0000")).digest("hex");
+      // value). Without an idempotency key, dedupe on the target alone so the
+      // CAS loop still counts once. The id is assigned once for every attempt
+      // of this call, including version-conflict retries.
+      const fingerprint = idem ? idempotencyFingerprint(idem) : replayHash([tupleKey(tuple), key, "update"]);
+      const assigned = assignReplay(fingerprint, idem ? "idem" : "content");
       for (let attempt = 0; ; attempt++) {
         const row = await backend.get(tuple, key);
         const version = row?.version ?? 0;
         const next = await fn(row ? row.value : undefined, version);
         try {
-          return await write("put", s, key, { value: next, fingerprint }, { ...opts, ifVersion: version }, opId);
+          return await write("put", s, key, { value: next, fingerprint }, { ...opts, ifVersion: version }, assigned);
         } catch (err) {
           if (err instanceof MemoryError && err.code === "MEMORY_VERSION_CONFLICT" && attempt < retries) {
             await new Promise((r) => setTimeout(r, Math.random() * Math.min(200, 4 * 2 ** attempt)));

@@ -31,6 +31,15 @@ import {
 /** Op ids older than this are swept. Long enough to cover any resume window. */
 export const MEMORY_OP_RETENTION_MS = 30 * 86_400_000;
 
+/**
+ * Missing positional op ids in a row that end a scan for records an older
+ * build wrote. A failed write burned an index and left no row, so one hole
+ * is normal; a long run of holes means the attempt stopped.
+ */
+const LEGACY_OP_GAP = 8;
+/** Positional indexes read at most, so a scan cannot walk forever. */
+const LEGACY_OP_SCAN_MAX = 1024;
+
 export interface MemoryTable {
   find(t: MemoryTuple, key: string): MemoryRow | undefined;
   insert(row: Omit<MemoryRow, "id">): void;
@@ -299,6 +308,47 @@ function assertWriteStorable(op: MemoryWriteOp): void {
   assertStorableText(`writer for "${op.key}"`, [op.writtenBy, op.writtenByRun]);
 }
 
+type OpRecord = { version: number; value: unknown; fingerprint: string | null };
+type LegacyLookup = { kind: "hit"; row: OpRecord } | { kind: "none" } | { kind: "miss" };
+
+/**
+ * Find the `matchIndex`th positional record (0-based) whose fingerprint equals
+ * `fingerprint`. Rows with a null fingerprint (written before that column
+ * existed) do not match. An older build stored a different write at the same
+ * index under `opId~fingerprint`; that row counts too.
+ * `none`: the attempt has no positional rows. `miss`: rows exist, but not this one.
+ */
+function* lookupLegacy(fingerprint: string, matchIndex: number, opIdAt: (index: number) => string): Program<LegacyLookup> {
+  let seen = 0;
+  let misses = 0;
+  let seenAny = false;
+  for (let i = 0; i < LEGACY_OP_SCAN_MAX; i++) {
+    const id = opIdAt(i);
+    const row = yield* call("opGet", id);
+    let hit: OpRecord | undefined;
+    if (row?.fingerprint === fingerprint) hit = row;
+    else if (row) {
+      const alt = yield* call("opGet", `${id}~${fingerprint}`);
+      if (alt?.fingerprint === fingerprint) hit = alt;
+    }
+    if (hit) {
+      if (seen === matchIndex) return { kind: "hit", row: hit };
+      seen += 1;
+      seenAny = true;
+      misses = 0;
+      continue;
+    }
+    if (!row) {
+      misses += 1;
+      if (misses >= LEGACY_OP_GAP) return seenAny ? { kind: "miss" } : { kind: "none" };
+    } else {
+      seenAny = true;
+      misses = 0;
+    }
+  }
+  return seenAny ? { kind: "miss" } : { kind: "none" };
+}
+
 function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
   const now = op.now ?? Date.now();
   const t = op.tuple;
@@ -308,22 +358,45 @@ function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
   validateMemoryKey(op.key, limits.keyChars);
 
   const fingerprint = op.opId ? (op.fingerprint ?? writeFingerprint(op)) : null;
-  // Op row this write is recorded under. Only the same write (same tuple, key,
-  // kind and arguments) is a replay. A retry that made a different write at this
-  // position is applied, never dropped, and recorded under opId~fingerprint so
-  // the first write's record is kept and alternating retries (A, B, A, B) each
-  // apply once.
+  // The row this write is recorded under. The same id and fingerprint is a
+  // replay. A different fingerprint under that id is applied once and stored
+  // as opId~fingerprint, so alternating payloads each apply once and the first
+  // record stays put.
   let opKey = op.opId;
-  if (op.opId) {
+  let primaryAbsent = false;
+  if (op.opId && fingerprint !== null) {
     const prior = yield* call("opGet", op.opId);
-    if (prior && prior.fingerprint === fingerprint) {
+    if (prior?.fingerprint === fingerprint) {
       return { version: prior.version, value: prior.value, deduped: true, evicted: 0 };
     }
     if (prior) {
       opKey = `${op.opId}~${fingerprint}`;
       const alt = yield* call("opGet", opKey);
-      if (alt && alt.fingerprint === fingerprint) {
+      if (alt?.fingerprint === fingerprint) {
         return { version: alt.version, value: alt.value, deduped: true, evicted: 0 };
+      }
+    } else {
+      primaryAbsent = true;
+    }
+  }
+
+  // Older builds keyed the id by call order. On a miss, adopt the Nth positional
+  // row with this fingerprint (a reordered or repeated write still matches) and
+  // copy it under the new id. A null fingerprint does not match.
+  if (primaryAbsent && op.opId && fingerprint !== null && op.legacyOpIdAt && op.legacyMatchIndex !== undefined) {
+    let scan = true;
+    if (op.legacySentinelId) {
+      const marker = yield* call("opGet", op.legacySentinelId);
+      if (marker) scan = false;
+    }
+    if (scan) {
+      const found = yield* lookupLegacy(fingerprint, op.legacyMatchIndex, op.legacyOpIdAt);
+      if (found.kind === "hit") {
+        yield* call("opPut", op.opId, { version: found.row.version, value: found.row.value }, now, fingerprint);
+        return { version: found.row.version, value: found.row.value, deduped: true, evicted: 0 };
+      }
+      if (found.kind === "none" && op.legacySentinelId) {
+        yield* call("opPut", op.legacySentinelId, { version: 0, value: null }, now, "nolegacy");
       }
     }
   }

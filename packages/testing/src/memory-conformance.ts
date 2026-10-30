@@ -12,8 +12,12 @@ import { describe, it, expect } from "vitest";
 import {
   MEMORY_DEFAULT_LIMITS,
   MemoryError,
+  createScopedMemory,
+  defaultMemoryPolicy,
+  memoryPositionalOpId,
   type MemoryBackend,
   type MemoryLimits,
+  type MemoryOpSource,
   type MemoryTuple,
   type MemoryWriteOp,
 } from "@flowgraph/core";
@@ -70,6 +74,11 @@ export function describeMemoryBackendConformance(
   open: () => Promise<MemoryBackendHarness>,
 ): void {
   const tu = conformanceTuples;
+  const replayBinding = { org: "acme", project: "github.com/acme/web", graph: "a", user: "u1@x" };
+  const attempt = (b: MemoryBackend, taskId = "task-replay", nodeId = "node") => {
+    const source: MemoryOpSource = { threadId: "replay-thread", checkpointNs: "ns", taskId, nodeId };
+    return { source, memory: createScopedMemory(b, replayBinding, defaultMemoryPolicy(), source) };
+  };
   const withBackend = (fn: (b: MemoryBackend, h: MemoryBackendHarness) => Promise<void>) => async () => {
     const h = await open();
     try {
@@ -450,6 +459,123 @@ export function describeMemoryBackendConformance(
       for (let i = 0; i < 5; i++) await b.write(op({ kind: "put", tuple: tu.graphA, key: `l/${i}`, value: i }));
       expect(await b.list(tu.graphA, { prefix: "l/", limit: 3 })).toHaveLength(3);
       expect(await b.list(tu.graphA, { prefix: "l/" })).toHaveLength(5);
+    }));
+
+    it("a reordered retry does not apply an increment or append twice", withBackend(async (b) => {
+      const first = attempt(b, "task-reorder").memory;
+      await first.increment("graph", "c", "n");
+      await first.append("graph", "log", "a");
+      await first.append("graph", "log", "a");
+      await first.append("graph", "log", "b");
+      await first.increment("graph", "d", "n");
+
+      const retry = attempt(b, "task-reorder").memory;
+      expect((await retry.append("graph", "log", "b")).deduped).toBe(true);
+      expect((await retry.increment("graph", "d", "n")).deduped).toBe(true);
+      expect((await retry.append("graph", "log", "a")).deduped).toBe(true);
+      expect((await retry.append("graph", "log", "a")).deduped).toBe(true);
+      expect((await retry.increment("graph", "c", "n")).deduped).toBe(true);
+
+      expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "d"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "log"))?.value).toEqual(["a", "a", "b"]);
+    }));
+
+    it("a retry that adds a write does not apply the original increment or append twice", withBackend(async (b) => {
+      const first = attempt(b, "task-extra").memory;
+      await first.increment("graph", "c", "n");
+      await first.append("graph", "log", "a");
+      await first.increment("graph", "d", "n");
+
+      const retry = attempt(b, "task-extra").memory;
+      expect((await retry.increment("graph", "c", "n")).deduped).toBe(true);
+      expect((await retry.increment("graph", "extra", "n")).deduped).toBe(false);
+      expect((await retry.append("graph", "log", "b")).deduped).toBe(false);
+      expect((await retry.append("graph", "log", "a")).deduped).toBe(true);
+      expect((await retry.increment("graph", "d", "n")).deduped).toBe(true);
+
+      expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "extra"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "d"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "log"))?.value).toEqual(["a", "b"]);
+    }));
+
+    it("a retry that drops a write does not apply the ones it still makes twice", withBackend(async (b) => {
+      const first = attempt(b, "task-drop").memory;
+      await first.increment("graph", "c", "n");
+      await first.append("graph", "log", "a");
+      await first.append("graph", "log", "b");
+      await first.increment("graph", "d", "n");
+
+      const retry = attempt(b, "task-drop").memory;
+      expect((await retry.append("graph", "log", "b")).deduped).toBe(true);
+      expect((await retry.increment("graph", "d", "n")).deduped).toBe(true);
+
+      expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "d"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "log"))?.value).toEqual(["a", "b"]);
+    }));
+
+    it("adopts positional op records from an older build in any order", withBackend(async (b) => {
+      const { source } = attempt(b, "task-legacy");
+      // `by: 1` matches ctx.memory.increment, which always sends it.
+      const inc = (index: number, key: string) =>
+        b.write(op({ kind: "increment", tuple: tu.graphA, key, field: "n", by: 1, opId: memoryPositionalOpId(source, index) }));
+      const app = (index: number, item: string) =>
+        b.write(op({ kind: "append", tuple: tu.graphA, key: "log", value: item, opId: memoryPositionalOpId(source, index) }));
+      await inc(0, "c");
+      await inc(1, "c");
+      await app(2, "a");
+      await app(3, "b");
+      // Index 4 was a write that failed and left no row. Index 5 is d.
+      await inc(5, "d");
+
+      const retry = attempt(b, "task-legacy").memory;
+      expect((await retry.increment("graph", "d", "n")).deduped).toBe(true);
+      expect((await retry.append("graph", "log", "b")).deduped).toBe(true);
+      expect((await retry.append("graph", "log", "a")).deduped).toBe(true);
+      expect((await retry.increment("graph", "c", "n")).deduped).toBe(true);
+      expect((await retry.increment("graph", "c", "n")).deduped).toBe(true);
+      // One more identical increment than the older attempt stored is a new write.
+      expect((await retry.increment("graph", "c", "n")).deduped).toBe(false);
+
+      expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 3 });
+      expect((await b.get(tu.graphA, "d"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "log"))?.value).toEqual(["a", "b"]);
+    }));
+
+    it("adopts an older alternating record stored beside the positional id", withBackend(async (b) => {
+      const { source } = attempt(b, "task-alt-legacy");
+      const id = memoryPositionalOpId(source, 0);
+      await b.write(op({ kind: "increment", tuple: tu.graphA, key: "c", field: "n", by: 1, opId: id }));
+      await b.write(op({ kind: "increment", tuple: tu.graphA, key: "d", field: "n", by: 1, opId: id }));
+
+      const retry = attempt(b, "task-alt-legacy").memory;
+      expect((await retry.increment("graph", "d", "n")).deduped).toBe(true);
+      expect((await retry.increment("graph", "c", "n")).deduped).toBe(true);
+      expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "d"))?.value).toEqual({ n: 1 });
+    }));
+
+    it("an idempotency key keeps the first payload", withBackend(async (b) => {
+      const first = attempt(b, "task-idem").memory;
+      expect((await first.increment("graph", "c", "n", 1, { idempotencyKey: "charge" })).deduped).toBe(false);
+      const retry = attempt(b, "task-idem").memory;
+      const again = await retry.increment("graph", "c", "n", 5, { idempotencyKey: "charge" });
+      expect(again).toMatchObject({ deduped: true, value: { n: 1 } });
+      expect((await retry.increment("graph", "c", "n", 5, { idempotencyKey: "charge-2" })).deduped).toBe(false);
+      expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 6 });
+    }));
+
+    it("concurrent retries of the same writes apply once", withBackend(async (b) => {
+      await Promise.all(
+        Array.from({ length: 8 }, () => {
+          const m = attempt(b, "task-concurrent").memory;
+          return m.increment("graph", "c", "n").then(() => m.append("graph", "log", "a"));
+        }),
+      );
+      expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "log"))?.value).toEqual(["a"]);
     }));
 
     it("survives reopen when durable", withBackend(async (b, h) => {

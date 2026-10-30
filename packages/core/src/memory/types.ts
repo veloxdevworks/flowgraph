@@ -154,17 +154,35 @@ export interface MemoryWriteOp {
   /** Sliding TTL for subject scope (ms); refreshed on every write to the subject. */
   subjectTtlMs?: number | undefined;
   /**
-   * Replay-safe write id. A repeated id whose stored fingerprint matches is a
-   * no-op returning the first result; a mismatched fingerprint (a retry that
-   * made a different write at the same position) is applied as a new write.
+   * Replay id. The same id and fingerprint return the first result and write
+   * nothing. A different fingerprint under that id is applied once and stored
+   * as `opId~fingerprint`, so alternating payloads each apply once.
+   *
+   * `ctx.memory` derives the id from the write's fingerprint and how many
+   * times that write has already run in the attempt, so a retry can reorder,
+   * add or drop writes without applying an earlier one again.
    */
   opId?: string | undefined;
   /**
    * Identity of the write for op-id dedupe. Defaults to a hash of the tuple,
-   * key, kind and arguments; `update()` passes tuple + key so a CAS loop whose
-   * computed value changes on retry still dedupes.
+   * key, kind and arguments. `update()` passes tuple + key so a CAS loop whose
+   * computed value changes on retry still dedupes. An idempotency key passes
+   * a hash of the key, so a different payload does not write again.
    */
   fingerprint?: string | undefined;
+  /**
+   * Which older positional record with this fingerprint to adopt (0 is the
+   * first). Set with {@link legacyOpIdAt}. Absent means positional records
+   * are not consulted. A null fingerprint never matches.
+   */
+  legacyMatchIndex?: number | undefined;
+  /** Positional op id an older build stored at `index` for this node attempt. */
+  legacyOpIdAt?: ((index: number) => string) | undefined;
+  /**
+   * Recorded once a scan finds no positional rows for this attempt, so later
+   * writes skip the scan. Not a write of its own.
+   */
+  legacySentinelId?: string | undefined;
   limits: MemoryLimits;
   /** Skip secret detection (legacy ctx.store adapter only). */
   allowSecrets?: boolean | undefined;
