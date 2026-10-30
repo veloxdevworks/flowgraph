@@ -83,7 +83,15 @@ describe("hostIsAllowListed", () => {
 type Hit = { url: string; method: string; auth?: string };
 const servers: http.Server[] = [];
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
+  await Promise.all(
+    servers.splice(0).map(
+      (s) =>
+        new Promise((r) => {
+          s.close(r);
+          s.closeAllConnections();
+        }),
+    ),
+  );
 });
 
 async function server(handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<{ port: number; hits: Hit[] }> {
@@ -181,6 +189,40 @@ describe("guardedFetch", () => {
     expect(await r.text()).toBe("b");
     expect(a.hits[0]).toMatchObject({ method: "POST", auth: "Bearer t" });
     expect(b.hits[0]).toEqual({ url: "/landing", method: "GET" });
+  });
+
+  it("caps the response size, declared or streamed", async () => {
+    const big = "x".repeat(4096);
+    const s = await server((q, res) => {
+      if (q.url === "/declared") {
+        res.setHeader("content-length", String(big.length));
+        res.end(big);
+        return;
+      }
+      // Chunked, no length up front.
+      res.write(big.slice(0, 2048));
+      res.end(big.slice(2048));
+    });
+    const policy = { publicOnly: true, allowHosts: [`127.0.0.1:${s.port}`], maxResponseBytes: 1000 };
+    await expect(guardedFetch(`http://127.0.0.1:${s.port}/declared`, {}, policy)).rejects.toMatchObject({ code: "OUTBOUND_RESPONSE_TOO_LARGE" });
+    await expect(guardedFetch(`http://127.0.0.1:${s.port}/chunked`, {}, policy)).rejects.toMatchObject({ code: "OUTBOUND_RESPONSE_TOO_LARGE" });
+    const ok = await guardedFetch(`http://127.0.0.1:${s.port}/chunked`, {}, { ...policy, maxResponseBytes: 4096 });
+    expect((await ok.text()).length).toBe(4096);
+  });
+
+  it("times out a server that never finishes the response", async () => {
+    const s = await server((_q, res) => {
+      res.write("partial");
+    });
+    const policy = { publicOnly: true, allowHosts: [`127.0.0.1:${s.port}`], timeoutMs: 150 };
+    const t0 = Date.now();
+    await expect(guardedFetch(`http://127.0.0.1:${s.port}/`, {}, policy)).rejects.toMatchObject({ code: "OUTBOUND_TIMEOUT" });
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    // A caller's own abort is reported as that abort, not as a timeout.
+    const ac = new AbortController();
+    const p = guardedFetch(`http://127.0.0.1:${s.port}/`, { signal: ac.signal }, { ...policy, timeoutMs: 5_000 });
+    setTimeout(() => ac.abort(), 50);
+    await expect(p).rejects.not.toMatchObject({ code: "OUTBOUND_TIMEOUT" });
   });
 
   it("stops after too many redirects", async () => {

@@ -25,7 +25,14 @@ export interface OutboundHttpPolicy {
   allowHosts?: readonly string[] | undefined;
   /** Redirect hops to follow (default 5). */
   maxRedirects?: number | undefined;
+  /** Largest response body read, in bytes (default 10 MiB). Larger bodies fail OUTBOUND_RESPONSE_TOO_LARGE. */
+  maxResponseBytes?: number | undefined;
+  /** Whole-request time limit across redirects and the body, in ms (default 30000). Fails OUTBOUND_TIMEOUT. */
+  timeoutMs?: number | undefined;
 }
+
+export const DEFAULT_OUTBOUND_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+export const DEFAULT_OUTBOUND_TIMEOUT_MS = 30_000;
 
 export interface AddressVerdict {
   blocked: boolean;
@@ -220,13 +227,37 @@ const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
 /**
  * fetch() for untrusted graphs: refuses non-public addresses (see
  * OutboundHttpPolicy) on the first request and on every redirect, and never
- * connects to a refused address. Returns a standard Response.
+ * connects to a refused address. The whole exchange is bounded in time
+ * (`timeoutMs`) and in response size (`maxResponseBytes`). Returns a standard
+ * Response.
  */
 export async function guardedFetch(
   input: string,
   init: GuardedFetchInit,
   policy: OutboundHttpPolicy,
   deps: { resolve?: OutboundResolver } = {},
+): Promise<Response> {
+  const timeoutMs = policy.timeoutMs ?? DEFAULT_OUTBOUND_TIMEOUT_MS;
+  const timer = new AbortController();
+  const handle = setTimeout(() => timer.abort(), timeoutMs);
+  const signal = init.signal ? AbortSignal.any([init.signal, timer.signal]) : timer.signal;
+  try {
+    return await guardedFetchOnce(input, { ...init, signal }, policy, deps);
+  } catch (err) {
+    if (timer.signal.aborted && !init.signal?.aborted) {
+      throw new NodePolicyError("OUTBOUND_TIMEOUT", `${(init.method ?? "GET").toUpperCase()} ${input}: no complete response within ${timeoutMs} ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(handle);
+  }
+}
+
+async function guardedFetchOnce(
+  input: string,
+  init: GuardedFetchInit,
+  policy: OutboundHttpPolicy,
+  deps: { resolve?: OutboundResolver },
 ): Promise<Response> {
   const resolve = deps.resolve ?? defaultResolver;
   const maxRedirects = policy.maxRedirects ?? 5;
@@ -260,8 +291,24 @@ export async function guardedFetch(
       url = next;
       continue;
     }
+    const maxBytes = policy.maxResponseBytes ?? DEFAULT_OUTBOUND_MAX_RESPONSE_BYTES;
+    const tooLarge = () =>
+      new NodePolicyError("OUTBOUND_RESPONSE_TOO_LARGE", `${method} ${input}: response is larger than ${maxBytes} bytes`);
+    const declared = Number(res.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      res.destroy();
+      throw tooLarge();
+    }
     const chunks: Buffer[] = [];
-    for await (const c of res) chunks.push(c as Buffer);
+    let size = 0;
+    for await (const c of res) {
+      size += (c as Buffer).length;
+      if (size > maxBytes) {
+        res.destroy();
+        throw tooLarge();
+      }
+      chunks.push(c as Buffer);
+    }
     const out = new Headers();
     for (const [k, v] of Object.entries(res.headers)) {
       if (v === undefined) continue;

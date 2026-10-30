@@ -39,6 +39,8 @@ export {
 } from "./node-policy.js";
 export {
   classifyAddress,
+  DEFAULT_OUTBOUND_MAX_RESPONSE_BYTES,
+  DEFAULT_OUTBOUND_TIMEOUT_MS,
   guardedFetch,
   hostIsAllowListed,
   type AddressVerdict,
