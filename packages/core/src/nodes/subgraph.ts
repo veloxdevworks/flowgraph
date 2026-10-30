@@ -17,6 +17,7 @@ import { SubgraphWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { BaseStore } from "@langchain/langgraph";
+import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import type { NodeRunContext } from "../context.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
@@ -161,6 +162,7 @@ async function loadChild(
     cwd: ctx.workspace,
     sinks: [forwardSink],
     store: childStore(spec, ctx),
+    ...(parentMemoryRuntime(ctx) ? { memory: parentMemoryRuntime(ctx)! } : { memory: "ephemeral" as const }),
   });
 
   return {
@@ -184,6 +186,14 @@ function childStore(spec: GraphSpec, ctx: NodeRunContext): BaseStore | "none" {
   const childRuntime = spec.runtime?.store;
   if (childRuntime?.enabled === false || childRuntime?.backend === "none") return "none";
   return ctx.store ?? "none";
+}
+
+/**
+ * Subgraphs share the root graph's memory runtime: the same backend, identity,
+ * graph name (scopes are keyed by the root graph) and per-thread bindings.
+ */
+function parentMemoryRuntime(ctx: NodeRunContext): MemoryRuntime | undefined {
+  return (ctx as unknown as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
 }
 
 function stripSubgraphState(state: Record<string, unknown>): Record<string, unknown> {

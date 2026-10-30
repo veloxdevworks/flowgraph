@@ -7,6 +7,7 @@ import { registry } from "../registry.js";
 import { isOutputNone, OUTPUTS_CHANNEL } from "./apply-output.js";
 import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
 import { RESERVED_STATE_CHANNELS } from "./state-annotation.js";
+import { memoryLintDiagnostics } from "../memory/validate.js";
 
 function outgoingTargets(spec: GraphSpec, from: string): string[] {
   const targets: string[] = [];
@@ -430,5 +431,6 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...fanInLastWriteDiagnostics(spec),
     ...unconditionalFanOutDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
+    ...memoryLintDiagnostics(spec),
   ];
 }

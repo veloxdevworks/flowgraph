@@ -1,0 +1,116 @@
+/**
+ * Ephemeral in-process memory backend. For tests and for the legacy
+ * `ctx.store` adapter when no durable backend is configured.
+ */
+import { EngineMemoryBackend, type MemoryTable } from "./engine.js";
+import { tupleKey } from "./scope.js";
+import type { MemoryRow, MemoryThreadBinding, MemoryTuple } from "./types.js";
+
+const clone = <T>(v: T): T => (v === undefined ? v : (JSON.parse(JSON.stringify(v)) as T));
+const live = (r: MemoryRow, now: number) => r.expiresAt === null || r.expiresAt > now;
+
+class InMemoryTable implements MemoryTable {
+  private nextId = 1;
+  private readonly rows = new Map<number, MemoryRow>();
+  private readonly byKey = new Map<string, number>();
+  private readonly ops = new Map<string, { version: number; value: unknown; at: number }>();
+  private readonly threads = new Map<string, MemoryThreadBinding>();
+
+  private k(t: MemoryTuple, key: string) {
+    return `${tupleKey(t)}\u0001${key}`;
+  }
+  private inTuple(t: MemoryTuple): MemoryRow[] {
+    const tk = tupleKey(t);
+    return [...this.rows.values()].filter((r) => tupleKey(r) === tk);
+  }
+
+  find(t: MemoryTuple, key: string) {
+    const id = this.byKey.get(this.k(t, key));
+    const r = id === undefined ? undefined : this.rows.get(id);
+    return r ? clone(r) : undefined;
+  }
+  insert(row: Omit<MemoryRow, "id">) {
+    const id = this.nextId++;
+    this.rows.set(id, clone({ ...row, id }));
+    this.byKey.set(this.k(row, row.key), id);
+  }
+  update(row: MemoryRow) {
+    this.rows.set(row.id, clone(row));
+  }
+  remove(id: number) {
+    const r = this.rows.get(id);
+    if (!r) return;
+    this.rows.delete(id);
+    this.byKey.delete(this.k(r, r.key));
+  }
+  removeExpired(t: MemoryTuple, now: number) {
+    for (const r of this.inTuple(t)) if (!live(r, now)) this.remove(r.id);
+  }
+  usage(t: MemoryTuple, now: number) {
+    let items = 0;
+    let bytes = 0;
+    for (const r of this.inTuple(t)) if (live(r, now)) { items += 1; bytes += r.bytes; }
+    return { items, bytes };
+  }
+  oldest(t: MemoryTuple, limit: number, excludeKey: string, now: number) {
+    return this.inTuple(t)
+      .filter((r) => live(r, now) && r.key !== excludeKey)
+      .sort((a, b) => a.updatedAt - b.updatedAt || a.id - b.id)
+      .slice(0, limit)
+      .map(clone);
+  }
+  list(t: MemoryTuple, prefix: string | undefined, now: number) {
+    return this.inTuple(t)
+      .filter((r) => live(r, now) && (prefix === undefined || r.key.startsWith(prefix)))
+      .sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id)
+      .map(clone);
+  }
+  touchSubject(org: string, project: string, type: string, key: string, expiresAt: number) {
+    for (const r of this.rows.values()) {
+      if (r.org === org && r.project === project && r.subjectType === type && r.subjectKey === key) r.expiresAt = expiresAt;
+    }
+  }
+  subjectsByAge(org: string, project: string, type: string, now: number) {
+    const last = new Map<string, number>();
+    for (const r of this.rows.values()) {
+      if (r.org !== org || r.project !== project || r.subjectType !== type || !live(r, now)) continue;
+      last.set(r.subjectKey, Math.max(last.get(r.subjectKey) ?? 0, r.updatedAt));
+    }
+    return [...last.entries()].sort((a, b) => a[1] - b[1]).map(([k]) => k);
+  }
+  removeSubject(org: string, project: string, type: string, key: string) {
+    let n = 0;
+    for (const r of [...this.rows.values()]) {
+      if (r.org === org && r.project === project && r.subjectType === type && r.subjectKey === key) {
+        this.remove(r.id);
+        n += 1;
+      }
+    }
+    return n;
+  }
+  opGet(opId: string) {
+    const o = this.ops.get(opId);
+    return o ? { version: o.version, value: clone(o.value) } : undefined;
+  }
+  opPut(opId: string, result: { version: number; value: unknown }, now: number) {
+    this.ops.set(opId, { ...clone(result), at: now });
+  }
+  putThread(b: MemoryThreadBinding) {
+    this.threads.set(b.threadId, { ...b });
+  }
+  getThread(threadId: string) {
+    const b = this.threads.get(threadId);
+    return b ? { ...b } : undefined;
+  }
+  sweep(now: number, opsBefore: number) {
+    let n = 0;
+    for (const r of [...this.rows.values()]) if (!live(r, now)) { this.remove(r.id); n += 1; }
+    for (const [id, o] of [...this.ops.entries()]) if (o.at < opsBefore) this.ops.delete(id);
+    return n;
+  }
+}
+
+/** Create a non-durable, process-local memory backend. */
+export function createInMemoryMemoryBackend(): EngineMemoryBackend {
+  return new EngineMemoryBackend("memory", false, new InMemoryTable(), (fn) => fn());
+}

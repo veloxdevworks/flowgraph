@@ -42,7 +42,7 @@ async function hasStore(s: GraphSpec, opts: Parameters<typeof compileGraph>[1] =
 describe("resolveStore honesty", () => {
   it("throws when YAML asks for a sqlite store without an instance", async () => {
     await expect(compileGraph(spec({ enabled: true, backend: "sqlite" }), {})).rejects.toThrow(
-      /store\.backend "sqlite".*store instance.*Silent InMemoryStore fallback is not allowed/s,
+      /MEMORY_BACKEND_UNAVAILABLE: runtime\.store\.backend "sqlite" needs a durable checkpointer.*Silent in-memory fallback is not allowed/s,
     );
   });
 
