@@ -14,6 +14,7 @@ import {
   type MemorySweeper,
   type RunIssue,
   type RunResult,
+  MEMORY_SWEEP_MAX_INTERVAL_MS,
 } from "@flowgraph/core";
 import { createPostgresCheckpointer, maybeSweepPostgres, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
 import type { GraphSpec } from "@flowgraph/spec";
@@ -79,6 +80,10 @@ export class RunService {
       ...(config.awsRegion ? { awsRegion: config.awsRegion } : {}),
     });
     const memBackend = config.memory?.backend ?? "memory";
+    const sweepMs = config.memory?.sweepIntervalMs;
+    if (sweepMs !== undefined && !(Number.isInteger(sweepMs) && sweepMs >= 1_000 && sweepMs <= MEMORY_SWEEP_MAX_INTERVAL_MS)) {
+      throw new Error(`memory.sweepIntervalMs must be a whole number of milliseconds from 1000 to ${MEMORY_SWEEP_MAX_INTERVAL_MS} (got ${sweepMs})`);
+    }
     if (memBackend !== "memory" && !config.memory?.identity?.org?.trim()) {
       throw new Error(
         `FLOWGRAPH_MEMORY_BACKEND=${memBackend} needs FLOWGRAPH_ORG: durable memory on the server is owned by one org ` +

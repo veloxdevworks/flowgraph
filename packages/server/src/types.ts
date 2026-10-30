@@ -165,11 +165,14 @@ export interface ServerMemoryConfig {
    * `FLOWGRAPH_PROJECT` (default `local`), `FLOWGRAPH_USER`.
    */
   identity?: { org: string; project: string; user?: string };
-  /** How often to delete expired memory and old op records. Env: `FLOWGRAPH_MEMORY_SWEEP_MS`. Default 1h. */
+  /** How often to delete expired memory and old op records, 1000 to 2^31-1 ms. Env: `FLOWGRAPH_MEMORY_SWEEP_MS`. Default 1h. */
   sweepIntervalMs?: number;
 }
 
 const MEMORY_BACKENDS: readonly ServerMemoryBackend[] = ["memory", "postgres", "sqlite"];
+
+/** Largest delay a Node timer honors; longer ones fire after 1 ms. Matches MEMORY_SWEEP_MAX_INTERVAL_MS. */
+const MAX_SWEEP_MS = 2_147_483_647;
 
 export interface VoiceConfig {
   /**
@@ -226,8 +229,11 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
   const sweepRaw = env.FLOWGRAPH_MEMORY_SWEEP_MS?.trim();
   if (sweepRaw) {
     const sweepMs = Number(sweepRaw);
-    if (!/^\d+$/.test(sweepRaw) || !Number.isSafeInteger(sweepMs) || sweepMs < 1_000) {
-      throw new Error(`FLOWGRAPH_MEMORY_SWEEP_MS must be a whole number of milliseconds, at least 1000 (got "${env.FLOWGRAPH_MEMORY_SWEEP_MS}")`);
+    if (!/^\d+$/.test(sweepRaw) || sweepMs < 1_000 || sweepMs > MAX_SWEEP_MS) {
+      throw new Error(
+        `FLOWGRAPH_MEMORY_SWEEP_MS must be a whole number of milliseconds from 1000 to ${MAX_SWEEP_MS} (about 24.8 days) ` +
+          `(got "${env.FLOWGRAPH_MEMORY_SWEEP_MS}")`,
+      );
     }
     config.memory.sweepIntervalMs = sweepMs;
   }

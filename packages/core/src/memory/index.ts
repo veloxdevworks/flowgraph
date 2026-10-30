@@ -15,6 +15,7 @@ export {
   EngineMemoryBackend,
   AsyncEngineMemoryBackend,
   startMemorySweeper,
+  MEMORY_SWEEP_MAX_INTERVAL_MS,
   containsSecret,
   matchesAttrs,
   normalizeSimilarQuery,

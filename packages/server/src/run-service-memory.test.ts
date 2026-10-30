@@ -102,6 +102,14 @@ describe("RunService durable memory", () => {
     await expect(s.init()).rejects.toThrow(/needs DATABASE_URL/);
   });
 
+  it("refuses a programmatic sweep interval a timer cannot honor", () => {
+    for (const sweepIntervalMs of [2_147_483_648, 500, 1.5, Number.NaN]) {
+      expect(
+        () => new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: "/tmp", eventBufferSize: 10, memory: { backend: "sqlite", identity, sweepIntervalMs } }),
+      ).toThrow(/memory.sweepIntervalMs must be a whole number of milliseconds from 1000 to 2147483647/);
+    }
+  });
+
   it("durable memory refuses to start without FLOWGRAPH_ORG", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-srvmem-"));
     dirs.push(dir);
@@ -172,8 +180,9 @@ describe("defaultServerConfig memory", () => {
     // FLOWGRAPH_PROJECT alone sets no identity; the org is what durable memory needs.
     expect(defaultServerConfig({ FLOWGRAPH_MEMORY_BACKEND: "postgres", FLOWGRAPH_PROJECT: "acme/web" }).memory).toEqual({ backend: "postgres" });
     expect(defaultServerConfig({ FLOWGRAPH_ORG: "acme" }).memory).toEqual({ backend: "memory", identity: { org: "acme", project: "local" } });
-    for (const bad of ["abc", "-5", "0", "999", "1.5", "1e9", "60s"]) {
-      expect(() => defaultServerConfig({ FLOWGRAPH_MEMORY_SWEEP_MS: bad }), bad).toThrow(/FLOWGRAPH_MEMORY_SWEEP_MS must be a whole number/);
+    expect(defaultServerConfig({ FLOWGRAPH_MEMORY_SWEEP_MS: "2147483647" }).memory?.sweepIntervalMs).toBe(2_147_483_647);
+    for (const bad of ["abc", "-5", "0", "999", "1.5", "1e9", "60s", "2147483648", "99999999999999999999"]) {
+      expect(() => defaultServerConfig({ FLOWGRAPH_MEMORY_SWEEP_MS: bad }), bad).toThrow(/FLOWGRAPH_MEMORY_SWEEP_MS must be a whole number of milliseconds from 1000 to 2147483647/);
     }
     expect(defaultServerConfig({ FLOWGRAPH_MEMORY_SWEEP_MS: " " }).memory).toEqual({ backend: "memory" });
     expect(() => defaultServerConfig({ FLOWGRAPH_MEMORY_BACKEND: "redis" })).toThrow(/FLOWGRAPH_MEMORY_BACKEND must be one of/);

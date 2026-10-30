@@ -642,8 +642,11 @@ export class AsyncEngineMemoryBackend implements MemoryBackend {
   }
 }
 
+/** Longest sweeper interval: the largest delay a Node timer honors (2^31-1 ms, about 24.8 days). */
+export const MEMORY_SWEEP_MAX_INTERVAL_MS = 2_147_483_647;
+
 export interface MemorySweeperOptions extends MemorySweepOptions {
-  /** Time between sweeps. Default 1h. */
+  /** Time between sweeps. Default 1h; at least 1s; above MEMORY_SWEEP_MAX_INTERVAL_MS throws. */
   intervalMs?: number | undefined;
   /** Called with each sweep's removed-row count. */
   onSweep?: ((removed: number) => void) | undefined;
@@ -668,7 +671,15 @@ export interface MemorySweeper {
  * are skipped.
  */
 export function startMemorySweeper(backend: MemoryBackend, opts: MemorySweeperOptions = {}): MemorySweeper {
-  const intervalMs = Math.max(1_000, opts.intervalMs ?? 3_600_000);
+  const requested = opts.intervalMs ?? 3_600_000;
+  // Node runs a timer whose delay is above 2^31-1 ms (or not a number) after 1 ms,
+  // which would turn an hourly sweep into a busy loop.
+  if (!Number.isFinite(requested) || requested > MEMORY_SWEEP_MAX_INTERVAL_MS) {
+    throw new RangeError(
+      `startMemorySweeper: intervalMs must be a finite number of milliseconds up to ${MEMORY_SWEEP_MAX_INTERVAL_MS} (about 24.8 days), got ${requested}`,
+    );
+  }
+  const intervalMs = Math.max(1_000, requested);
   let running: Promise<number> | undefined;
   const sweepNow = (): Promise<number> => {
     if (running) return running;

@@ -328,6 +328,21 @@ describe("startMemorySweeper", () => {
     expect((await b.write({ kind: "put", tuple: t, key: "op", value: 1, opId: "o-1", limits })).deduped).toBe(false);
   });
 
+  it("refuses intervals a Node timer cannot honor, so a sweep never busy-loops", async () => {
+    const { createInMemoryMemoryBackend, startMemorySweeper, MEMORY_SWEEP_MAX_INTERVAL_MS } = await import("../index.js");
+    expect(MEMORY_SWEEP_MAX_INTERVAL_MS).toBe(2 ** 31 - 1);
+    const b = createInMemoryMemoryBackend();
+    for (const intervalMs of [2 ** 31, 1e12, Number.POSITIVE_INFINITY, Number.NaN]) {
+      expect(() => startMemorySweeper(b, { intervalMs }), String(intervalMs)).toThrow(/intervalMs must be a finite number of milliseconds up to 2147483647/);
+    }
+    // The maximum is accepted and does not fire early.
+    let calls = 0;
+    const s = startMemorySweeper(b, { intervalMs: MEMORY_SWEEP_MAX_INTERVAL_MS, sweep: async () => (calls++, 0) });
+    await new Promise((r) => setTimeout(r, 50));
+    s.stop();
+    expect(calls).toBe(0);
+  });
+
   it("a custom sweep replaces backend.sweep", async () => {
     const { createInMemoryMemoryBackend, startMemorySweeper } = await import("../index.js");
     const b = createInMemoryMemoryBackend();
