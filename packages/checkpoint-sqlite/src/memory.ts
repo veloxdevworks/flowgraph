@@ -191,9 +191,10 @@ class SqliteMemoryTable implements MemoryTable {
         AND (? IS NULL OR substr(key, 1, length(?)) = ?) ORDER BY updated_at DESC, id DESC LIMIT ?`),
       touchSubject: p(`UPDATE fg_memory_items SET expires_at = ?
         WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ? AND subject_key = ?`),
-      subjectsByAge: p(`SELECT subject_key AS k, MAX(updated_at) AS last FROM fg_memory_items
-        WHERE org = ? AND project = ? AND subject_type = ? AND ${LIVE}
-        GROUP BY subject_key ORDER BY last ASC`),
+      oldestSubjects: p(`SELECT subject_key AS k, MAX(updated_at) AS last FROM fg_memory_items
+        WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ? AND subject_type <> ''
+          AND subject_key <> ? AND ${LIVE}
+        GROUP BY subject_key ORDER BY last DESC, k DESC LIMIT -1 OFFSET ?`),
       removeSubject: p(`DELETE FROM fg_memory_items
         WHERE org = ? AND project = ? AND graph = '' AND usr = '' AND subject_type = ? AND subject_key = ?`),
       opGet: p(`SELECT version, value, fingerprint FROM fg_memory_ops WHERE op_id = ?`),
@@ -287,8 +288,9 @@ class SqliteMemoryTable implements MemoryTable {
   touchSubject(org: string, project: string, type: string, key: string, expiresAt: number) {
     this.s["touchSubject"]!.run(expiresAt, org, project, type, key);
   }
-  subjectsByAge(org: string, project: string, type: string, now: number) {
-    return (this.s["subjectsByAge"]!.all(org, project, type, now) as Array<{ k: string }>).map((r) => r.k);
+  oldestSubjects(org: string, project: string, type: string, now: number, excludeKey: string, keepNewest: number) {
+    const rows = this.s["oldestSubjects"]!.all(org, project, type, excludeKey, now, keepNewest) as Array<{ k: string }>;
+    return rows.map((r) => r.k).reverse();
   }
   removeSubject(org: string, project: string, type: string, key: string) {
     return this.s["removeSubject"]!.run(org, project, type, key).changes;

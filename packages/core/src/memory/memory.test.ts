@@ -309,3 +309,22 @@ describe("memory validation", () => {
     expect(memoryHostDiagnostics(fnGraph("v", "mtExpose"), { memoryBackends: ["sqlite"], hostName: "x" })).toEqual([]);
   });
 });
+
+describe("startMemorySweeper", () => {
+  it("sweeps on demand with the op retention it was given, and never overlaps", async () => {
+    const { createInMemoryMemoryBackend, startMemorySweeper, MEMORY_DEFAULT_LIMITS: limits } = await import("../index.js");
+    const b = createInMemoryMemoryBackend();
+    const t = { org: "acme", project: "p", graph: "g", usr: "", subjectType: "", subjectKey: "" };
+    await b.write({ kind: "put", tuple: t, key: "gone", value: 1, ttlMs: 1, limits, now: 0 });
+    await b.write({ kind: "put", tuple: t, key: "op", value: 1, opId: "o-1", limits, now: 0 });
+    const counts: number[] = [];
+    const s = startMemorySweeper(b, { intervalMs: 60_000, opsRetentionMs: 0, onSweep: (n) => counts.push(n) });
+    const [a, c] = [s.sweepNow(), s.sweepNow()];
+    expect(a).toBe(c);
+    expect(await a).toBe(1);
+    s.stop();
+    expect(counts).toEqual([1]);
+    // The op record was swept (retention 0), so the same op id applies again.
+    expect((await b.write({ kind: "put", tuple: t, key: "op", value: 1, opId: "o-1", limits })).deduped).toBe(false);
+  });
+});

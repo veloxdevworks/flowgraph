@@ -229,6 +229,48 @@ export function describeMemoryBackendConformance(
       expect(await b.get(s("b3"), "x", 5)).not.toBeNull();
     }));
 
+    it("a new subject evicts every subject past a lowered cap, oldest first", withBackend(async (b) => {
+      const s = (k: string) => T({ project: "github.com/acme/web", subjectType: "build", subjectKey: k });
+      for (const [i, k] of ["b1", "b2", "b3", "b4"].entries()) {
+        await b.write(op({ kind: "put", tuple: s(k), key: "x", value: i, limits: limits({ subjectsPerType: 10 }), now: 10 + i }));
+      }
+      // Writing to an existing subject never evicts.
+      const keep = await b.write(op({ kind: "put", tuple: s("b1"), key: "y", value: 1, limits: limits({ subjectsPerType: 2 }), now: 20 }));
+      expect(keep.evicted).toBe(0);
+      const r = await b.write(op({ kind: "put", tuple: s("b5"), key: "x", value: 1, limits: limits({ subjectsPerType: 2 }), now: 21 }));
+      // b1 (refreshed at 20) and the new b5 remain; b2, b3, b4 go.
+      expect(r.evicted).toBe(3);
+      for (const k of ["b2", "b3", "b4"]) expect(await b.get(s(k), "x", 22)).toBeNull();
+      expect(await b.get(s("b1"), "y", 22)).not.toBeNull();
+      expect(await b.get(s("b5"), "x", 22)).not.toBeNull();
+    }));
+
+    it("concurrent writes to many keys and subjects all land", withBackend(async (b) => {
+      const s = (k: string) => T({ project: "github.com/acme/web", subjectType: "job", subjectKey: k });
+      await Promise.all([
+        ...Array.from({ length: 20 }, (_, i) => b.write(op({ kind: "append", tuple: tu.graphA, key: "log", value: i, max: 100 }))),
+        ...Array.from({ length: 20 }, (_, i) => b.write(op({ kind: "put", tuple: tu.graphA, key: `k${i}`, value: i }))),
+        ...Array.from({ length: 10 }, (_, i) => b.write(op({ kind: "increment", tuple: s(`j${i % 3}`), key: "n", field: "" }))),
+      ]);
+      expect(((await b.get(tu.graphA, "log"))?.value as number[]).slice().sort((x, y) => x - y)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+      expect(await b.list(tu.graphA, { prefix: "k" })).toHaveLength(20);
+      const counts = await Promise.all([0, 1, 2].map(async (i) => (await b.get(s(`j${i}`), "n"))?.value));
+      expect(counts).toEqual([4, 3, 3]);
+    }));
+
+    it("sweep drops expired items everywhere and op records past retention", withBackend(async (b) => {
+      await b.write(op({ kind: "put", tuple: tu.graphA, key: "t", value: 1, ttlMs: 10, now: 0 }));
+      await b.write(op({ kind: "put", tuple: tu.userA1, key: "t", value: 1, ttlMs: 10, now: 0 }));
+      await b.write(op({ kind: "put", tuple: tu.graphA, key: "keep", value: 1, now: 0 }));
+      await b.write(op({ kind: "put", tuple: tu.graphA, key: "o", value: 1, opId: "sweep-1", now: 0 }));
+      // Default retention keeps a fresh op record.
+      expect(await b.sweep(100)).toBe(2);
+      expect((await b.write(op({ kind: "put", tuple: tu.graphA, key: "o", value: 1, opId: "sweep-1", now: 100 }))).deduped).toBe(true);
+      expect(await b.sweep(200, { opsRetentionMs: 50 })).toBe(0);
+      expect((await b.write(op({ kind: "put", tuple: tu.graphA, key: "o", value: 1, opId: "sweep-1", now: 200 }))).deduped).toBe(false);
+      expect(await b.get(tu.graphA, "keep", 200)).not.toBeNull();
+    }));
+
     it("lists by prefix and attrs, newest first, with limit", withBackend(async (b) => {
       await b.write(op({ kind: "put", tuple: tu.graphA, key: "fix/1", value: 1, attrs: { kind: "fix" }, now: 1 }));
       await b.write(op({ kind: "put", tuple: tu.graphA, key: "fix/2", value: 2, attrs: { kind: "fix" }, now: 2 }));
@@ -276,6 +318,18 @@ export function describeMemoryBackendConformance(
       const wide = await similar(b, { limit: 10_000, perSubject: 10_000 });
       expect(wide.length).toBe(4);
       expect(Math.max(...wide.map((g) => g.items.length))).toBeLessThanOrEqual(10);
+    }));
+
+    it("similarSubjects without attrs: prefix, limit and per-subject order", withBackend(async (b) => {
+      await b.write(op({ kind: "put", tuple: subj("s1"), key: "note/a", value: 1, now: 1 }));
+      await b.write(op({ kind: "put", tuple: subj("s1"), key: "other", value: 1, now: 9 }));
+      await b.write(op({ kind: "put", tuple: subj("s2"), key: "note/a", value: 1, now: 3 }));
+      await b.write(op({ kind: "put", tuple: subj("s2"), key: "note/b", value: 1, now: 4 }));
+      await b.write(op({ kind: "put", tuple: subj("s3"), key: "note/a", value: 1, now: 4 }));
+      // s1's newest note is older than its newest item: only matching rows rank a subject.
+      expect(keys(await similar(b, { prefix: "note/" }))).toEqual(["s2:note/b,note/a", "s3:note/a", "s1:note/a"]);
+      expect(keys(await similar(b, {}))).toEqual(["s1:other,note/a", "s2:note/b,note/a", "s3:note/a"]);
+      expect(keys(await similar(b, { limit: 2, perSubject: 1, excludeSubjectKey: "s1" }))).toEqual(["s2:note/b", "s3:note/a"]);
     }));
 
     it("similarSubjects: exact attr match by type, prefix filter, and scope isolation", withBackend(async (b) => {

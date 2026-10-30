@@ -221,7 +221,15 @@ export const MEMORY_RECALL_DEFAULT_ITEMS = 20;
 export const MEMORY_RECALL_ITEM_TOKENS = 400;
 export const MEMORY_AGENT_WRITES_DEFAULT = 5;
 
-/** Binding of a thread to its scope tuple, persisted in fg_threads. */
+export interface MemorySweepOptions {
+  /**
+   * Keep op-id records (replay dedupe) this long. Default 30 days; a resume
+   * after the window may re-apply a write.
+   */
+  opsRetentionMs?: number | undefined;
+}
+
+/** Binding of a thread to its scope tuple, persisted with the memory tables. */
 export interface MemoryThreadBinding {
   threadId: string;
   org: string;
@@ -236,7 +244,7 @@ export interface MemoryThreadBinding {
 
 /**
  * Storage backend for scoped memory. Implementations: in-memory (tests),
- * sqlite (`@flowgraph/checkpoint-sqlite`), postgres (not yet available).
+ * sqlite (`@flowgraph/checkpoint-sqlite`), postgres (`@flowgraph/checkpoint-postgres`).
  */
 export interface MemoryBackend {
   readonly kind: string;
@@ -256,8 +264,8 @@ export interface MemoryBackend {
    */
   bindThread(binding: MemoryThreadBinding): Promise<void>;
   getThread(threadId: string): Promise<MemoryThreadBinding | null>;
-  /** Delete expired rows and old op ids; returns rows removed. */
-  sweep(now?: number): Promise<number>;
+  /** Delete expired rows and old op ids; returns item rows removed. */
+  sweep(now?: number, opts?: MemorySweepOptions): Promise<number>;
   close?(): void | Promise<void>;
 }
 
