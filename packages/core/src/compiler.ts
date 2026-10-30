@@ -74,6 +74,11 @@ export interface CompileOptions {
   hooks?: Hook[];
   /** MCP hub for mcp nodes and intelligent MCP tools (built from mcpServers by CLI). */
   mcp?: McpHub;
+  /**
+   * Called with the result of a background resume fired by a `wait` timeout
+   * (onInterrupt "fail"/"webhook" runs). Errors are also emitted as `run.error`.
+   */
+  onWaitTimeout?: (result: RunResult) => void;
 }
 
 export interface InterruptInfo {
@@ -221,6 +226,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     defaultPolicy,
   } = assembled;
 
+  // Per compiled graph: two graphs that reuse a thread id must not cancel each other's timers.
+  const waitTimers: WaitTimerMap = new Map();
+
   const executeInvoke = async (
     payload: Record<string, unknown> | Command | null,
     runOpts: RunOptions | ResumeOptions | ContinueOptions,
@@ -229,7 +237,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   ): Promise<RunResult> => {
     const startMs = Date.now();
     const threadId = runOpts.threadId ?? `thread-${runId}`;
-    clearWaitTimeoutTimer(threadId);
+    clearWaitTimeoutTimer(waitTimers, threadId);
     const startedAt = new Date().toISOString();
     const runMeta: RunMeta = { runId, graph: graphSpec.metadata.name, startedAt, threadId };
 
@@ -387,11 +395,38 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         events.emit("interrupt.raised", { interrupts });
 
         if (policy === "fail" || policy === "webhook") {
-          scheduleWaitTimeoutTimer(threadId, interrupts, () => {
-            void executeInvoke(
+          scheduleWaitTimeoutTimer(waitTimers, threadId, interrupts, () => {
+            executeInvoke(
               new Command({ resume: { timedOut: true } }),
               { threadId, resume: { timedOut: true }, onInterrupt: "fail" },
               "resume",
+            ).then(
+              (timedOutResult) => {
+                try {
+                  opts.onWaitTimeout?.(timedOutResult);
+                } catch (cbErr) {
+                  const m = cbErr instanceof Error ? cbErr.message : String(cbErr);
+                  events.emit("run.error", { message: `onWaitTimeout callback failed: ${m}`, error: m, threadId });
+                }
+              },
+              (err: unknown) => {
+                // executeInvoke normally returns status "error"; this catches anything that escaped it
+                // so a background timer can never become an unhandled rejection.
+                const m = err instanceof Error ? err.message : String(err);
+                events.emit("run.error", { message: `wait timeout resume failed: ${m}`, error: m, threadId });
+                try {
+                  opts.onWaitTimeout?.({
+                    status: "error",
+                    state: {},
+                    runId,
+                    threadId,
+                    error: err instanceof Error ? err : new Error(m),
+                    durationMs: 0,
+                  });
+                } catch {
+                  /* already reported */
+                }
+              },
             );
           });
           const clean = stripReserved(result);
@@ -964,9 +999,9 @@ function earliestDeadlineMs(interrupts: InterruptInfo[]): number | undefined {
   return earliest;
 }
 
-const waitTimeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
+type WaitTimerMap = Map<string, ReturnType<typeof setTimeout>>;
 
-function clearWaitTimeoutTimer(threadId: string): void {
+function clearWaitTimeoutTimer(waitTimeoutTimers: WaitTimerMap, threadId: string): void {
   const timer = waitTimeoutTimers.get(threadId);
   if (timer) {
     clearTimeout(timer);
@@ -975,11 +1010,12 @@ function clearWaitTimeoutTimer(threadId: string): void {
 }
 
 function scheduleWaitTimeoutTimer(
+  waitTimeoutTimers: WaitTimerMap,
   threadId: string,
   interrupts: InterruptInfo[],
   onFire: () => void,
 ): void {
-  clearWaitTimeoutTimer(threadId);
+  clearWaitTimeoutTimer(waitTimeoutTimers, threadId);
   const deadline = earliestDeadlineMs(interrupts);
   if (deadline === undefined) return;
   const delay = Math.max(0, deadline - Date.now());

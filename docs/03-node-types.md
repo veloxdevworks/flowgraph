@@ -684,7 +684,7 @@ When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTT
 
 ### `timeout` (informational only)
 
-`timeout` on `until`/`signal`/`webhook` is **surfaced as metadata** on the interrupt payload but is **not enforced** by the runtime today. A durable, cross-restart deadline would require an external scheduler to resume or fail the run after the deadline (same class of feature as cron-driven resume). Until that exists, treat `timeout` as documentation for operators and external tooling.
+`timeout` on `until`/`signal`/`webhook` sets `deadlineAt` on the interrupt. It is enforced two ways, both best-effort and in-process: (1) when a run returns `interrupted` under `onInterrupt: fail` or `webhook`, the compiled graph arms a timer that resumes the thread with `{ timedOut: true }` at the deadline (pass `onWaitTimeout(result)` to `compileGraph` to receive that background run's result; failures are also emitted as `run.error`); (2) any later resume after the deadline receives `{ timedOut: true }`. Timers do not survive a process restart, so a durable cross-restart deadline still needs an external scheduler (same class of feature as cron-driven resume).
 
 `wait` for external signals/conditions/webhooks uses interrupt/resume so the pause survives restarts (the HTTP listener itself does not).
 
