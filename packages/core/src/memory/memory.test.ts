@@ -327,4 +327,17 @@ describe("startMemorySweeper", () => {
     // The op record was swept (retention 0), so the same op id applies again.
     expect((await b.write({ kind: "put", tuple: t, key: "op", value: 1, opId: "o-1", limits })).deduped).toBe(false);
   });
+
+  it("a custom sweep replaces backend.sweep", async () => {
+    const { createInMemoryMemoryBackend, startMemorySweeper } = await import("../index.js");
+    const b = createInMemoryMemoryBackend();
+    const calls: number[] = [];
+    b.sweep = async () => {
+      throw new Error("backend.sweep should not run");
+    };
+    const s = startMemorySweeper(b, { intervalMs: 60_000, sweep: async (now) => (calls.push(now), 7) });
+    expect(await s.sweepNow()).toBe(7);
+    s.stop();
+    expect(calls).toHaveLength(1);
+  });
 });

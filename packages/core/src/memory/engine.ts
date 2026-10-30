@@ -649,6 +649,11 @@ export interface MemorySweeperOptions extends MemorySweepOptions {
   onSweep?: ((removed: number) => void) | undefined;
   /** Called when a sweep fails; the sweeper keeps running. Default: ignore. */
   onError?: ((err: unknown) => void) | undefined;
+  /**
+   * Replaces `backend.sweep` for each tick, e.g. so one replica of a fleet
+   * claims each interval (`maybeSweepPostgres`). Returns rows removed.
+   */
+  sweep?: ((now: number) => Promise<number>) | undefined;
 }
 
 export interface MemorySweeper {
@@ -669,7 +674,10 @@ export function startMemorySweeper(backend: MemoryBackend, opts: MemorySweeperOp
     if (running) return running;
     running = (async () => {
       try {
-        const n = await backend.sweep(Date.now(), opts.opsRetentionMs !== undefined ? { opsRetentionMs: opts.opsRetentionMs } : undefined);
+        const now = Date.now();
+        const n = opts.sweep
+          ? await opts.sweep(now)
+          : await backend.sweep(now, opts.opsRetentionMs !== undefined ? { opsRetentionMs: opts.opsRetentionMs } : undefined);
         opts.onSweep?.(n);
         return n;
       } catch (err) {

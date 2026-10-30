@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { registerFunction } from "@flowgraph/core";
+import { MEMORY_DEFAULT_LIMITS, registerFunction, type MemoryBackend } from "@flowgraph/core";
 import { RunService } from "./run-service.js";
 import { defaultServerConfig, type ServerConfig, type ServerMemoryConfig } from "./types.js";
 
@@ -128,6 +128,31 @@ describe("RunService durable memory", () => {
     const b = await service(dir, { backend: "postgres", identity: id }, PG_URL);
     expect(await runToEnd(b, `pg-${randomUUID()}`)).toBe("completed");
     expect((seen.at(-1) as { value: unknown }).value).toEqual({ n: 2 });
+  });
+
+  it.skipIf(!PG_URL)("on postgres, one replica sweeps each interval", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-srvmem-"));
+    dirs.push(dir);
+    const id = { ...identity, project: `acme/sweep-${randomUUID()}` };
+    const a = await service(dir, { backend: "postgres", identity: id }, PG_URL);
+    const b = await service(dir, { backend: "postgres", identity: id }, PG_URL);
+    type Internals = { durableMemory: { backend: MemoryBackend }; sweeper: { sweepNow(): Promise<number> } };
+    const ia = a as unknown as Internals;
+    const ib = b as unknown as Internals;
+    const tuple = { org: id.org, project: id.project, graph: "g", usr: "", subjectType: "", subjectKey: "" };
+    await ia.durableMemory.backend.write({ kind: "put", tuple, key: "old", value: 1, ttlMs: 1, now: Date.now() - 60_000, limits: MEMORY_DEFAULT_LIMITS });
+    const db = (ia.durableMemory.backend as unknown as { pool: { query(sql: string, args?: unknown[]): Promise<{ rows: unknown[] }> } }).pool;
+    // Pretend the last claimed sweep was long ago.
+    await db.query(`UPDATE public.fg_memory_meta SET value = '0' WHERE key = 'memory.last_sweep'`);
+    const removed = await Promise.all([ia.sweeper.sweepNow(), ib.sweeper.sweepNow()]);
+    expect(removed.filter((n) => n > 0)).toHaveLength(1);
+    const count = async () =>
+      (await db.query(`SELECT COUNT(*)::int AS n FROM public.fg_memory_items WHERE project = $1`, [id.project])).rows[0];
+    expect(await count()).toEqual({ n: 0 });
+    // This interval is claimed: neither replica sweeps again until it passes.
+    await ia.durableMemory.backend.write({ kind: "put", tuple, key: "old2", value: 1, ttlMs: 1, now: Date.now() - 60_000, limits: MEMORY_DEFAULT_LIMITS });
+    expect(await Promise.all([ia.sweeper.sweepNow(), ib.sweeper.sweepNow()])).toEqual([0, 0]);
+    expect(await count()).toEqual({ n: 1 });
   });
 });
 

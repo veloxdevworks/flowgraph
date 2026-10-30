@@ -15,7 +15,7 @@ import {
   type RunIssue,
   type RunResult,
 } from "@flowgraph/core";
-import { createPostgresCheckpointer, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
+import { createPostgresCheckpointer, maybeSweepPostgres, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
 import type { GraphSpec } from "@flowgraph/spec";
 import { rejectClientSecrets, applyServerCredentials } from "./credentials.js";
 import { parseGraphYaml, persistGraph, loadPersistedGraph, updateGraphMeta, listPersistedGraphs, appendEventJournal, loadEventJournal } from "./graph-source.js";
@@ -110,10 +110,12 @@ export class RunService {
     return { org: id.org, project: id.project, ...(id.user ? { user: id.user } : {}) };
   }
 
-  private useDurableMemory(backend: MemoryBackend): void {
+  private useDurableMemory(backend: MemoryBackend, sweep?: (intervalMs: number, now: number) => Promise<number>): void {
     this.durableMemory = { backend, identity: this.memoryIdentity() };
+    const intervalMs = this.config.memory?.sweepIntervalMs ?? 3_600_000;
     this.sweeper = startMemorySweeper(backend, {
-      intervalMs: this.config.memory?.sweepIntervalMs ?? 3_600_000,
+      intervalMs,
+      ...(sweep ? { sweep: (now: number) => sweep(intervalMs, now) } : {}),
       onError: (err) => log("warn", "memory sweep failed", errorFields(err)),
     });
   }
@@ -140,7 +142,9 @@ export class RunService {
               onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
             });
             this.closers.push(() => pg.close());
-            this.useDurableMemory(pg.memory);
+            // Replicas share the database: each interval is claimed by one of
+            // them (a little early, so timer drift never skips an interval).
+            this.useDurableMemory(pg.memory, (intervalMs, now) => maybeSweepPostgres(pg.memory, intervalMs * 0.9, now));
             this.checkpointer = pg.checkpointer;
             return pg.checkpointer;
           }
