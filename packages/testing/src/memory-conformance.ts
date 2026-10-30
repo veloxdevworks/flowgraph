@@ -164,6 +164,27 @@ export function describeMemoryBackendConformance(
       await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "a", value: 1, attrs: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, i])) })), "MEMORY_ATTRS_INVALID");
     }));
 
+    it("rejects lone surrogates in keys, values, attrs, scopes and queries", withBackend(async (b) => {
+      const LONE = "MEMORY_LONE_SURROGATE";
+      for (const bad of ["a\uD83Db", "a\uDE00", "\uD83D"]) {
+        await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: bad, value: 1 })), LONE);
+        await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: { deep: [bad] } })), LONE);
+        await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: { [bad]: 1 } })), LONE);
+        await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: 1, attrs: { tag: bad } })), LONE);
+        await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: 1, opId: bad })), LONE);
+        await expectCode(b.write(op({ kind: "put", tuple: { ...tu.subject1, subjectKey: bad }, key: "k", value: 1 })), LONE);
+        await expectCode(b.get(tu.graphA, bad), LONE);
+        await expectCode(b.list(tu.graphA, { attrs: { tag: bad } }), LONE);
+      }
+      expect(await b.list(tu.graphA)).toEqual([]);
+      // Whole surrogate pairs (astral characters) are ordinary text.
+      await b.write(op({ kind: "put", tuple: tu.graphA, key: "emoji-😀", value: { s: "😀 ok" }, attrs: { t: "𝄞" } }));
+      const row = await b.get(tu.graphA, "emoji-😀");
+      expect(row?.value).toEqual({ s: "😀 ok" });
+      expect(row?.attrs).toEqual({ t: "𝄞" });
+      expect(await b.list(tu.graphA, { attrs: { t: "𝄞" } })).toHaveLength(1);
+    }));
+
     it("rejects NUL characters in keys, values, attrs, scopes and queries", withBackend(async (b) => {
       const nul = "a\u0000b";
       const NUL = "MEMORY_NUL_CHARACTER";

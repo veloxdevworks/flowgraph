@@ -109,13 +109,18 @@ function isExpired(row: { expiresAt: number | null }, now: number): boolean {
   return row.expiresAt !== null && row.expiresAt <= now;
 }
 
+/** A high surrogate not followed by a low one, or a low one not preceded by a high one. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /**
- * Refuse NUL (U+0000) anywhere in a string that reaches a backend: scope
- * tuple, key, prefix, thread id, value (strings and object keys, at any depth)
- * and attrs. Postgres text and jsonb cannot hold it, so every backend rejects
- * it the same way instead of only some failing.
+ * Refuse text that some backend cannot store, anywhere in a string that
+ * reaches one: scope tuple, key, prefix, thread id, op id, writer, value
+ * (strings and object keys, at any depth) and attrs. NUL (U+0000) fails with
+ * MEMORY_NUL_CHARACTER and a lone UTF-16 surrogate with MEMORY_LONE_SURROGATE.
+ * Postgres text and jsonb hold neither, so every backend rejects them the same
+ * way instead of only some failing.
  */
-export function assertNoNul(what: string, value: unknown): void {
+export function assertStorableText(what: string, value: unknown): void {
   const seen = new Set<object>();
   const stack: unknown[] = [value];
   while (stack.length > 0) {
@@ -123,6 +128,12 @@ export function assertNoNul(what: string, value: unknown): void {
     if (typeof v === "string") {
       if (v.includes("\u0000")) {
         throw new MemoryError("MEMORY_NUL_CHARACTER", `${what} contains a NUL character (U+0000), which memory cannot store`);
+      }
+      if (LONE_SURROGATE.test(v)) {
+        throw new MemoryError(
+          "MEMORY_LONE_SURROGATE",
+          `${what} contains a lone UTF-16 surrogate (half of an emoji or other astral character), which memory cannot store`,
+        );
       }
     } else if (typeof v === "object" && v !== null && !seen.has(v)) {
       seen.add(v);
@@ -277,15 +288,15 @@ export function applyMemoryWriteAsync(table: AsyncMemoryTable, op: MemoryWriteOp
   return runAsync(writeProgram(op), table);
 }
 
-/** Every string a write sends to a backend must be storable everywhere (see {@link assertNoNul}). */
+/** Every string a write sends to a backend must be storable everywhere (see {@link assertStorableText}). */
 function assertWriteStorable(op: MemoryWriteOp): void {
-  assertNoNul("memory scope", op.tuple);
-  assertNoNul("memory key", op.key);
-  assertNoNul(`value for "${op.key}"`, op.value);
-  assertNoNul(`attrs for "${op.key}"`, op.attrs);
-  assertNoNul(`field for "${op.key}"`, op.field);
-  assertNoNul(`op id for "${op.key}"`, op.opId);
-  assertNoNul(`writer for "${op.key}"`, [op.writtenBy, op.writtenByRun]);
+  assertStorableText("memory scope", op.tuple);
+  assertStorableText("memory key", op.key);
+  assertStorableText(`value for "${op.key}"`, op.value);
+  assertStorableText(`attrs for "${op.key}"`, op.attrs);
+  assertStorableText(`field for "${op.key}"`, op.field);
+  assertStorableText(`op id for "${op.key}"`, op.opId);
+  assertStorableText(`writer for "${op.key}"`, [op.writtenBy, op.writtenByRun]);
 }
 
 function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
@@ -459,7 +470,7 @@ export function matchesAttrs(row: MemoryRow, attrs: Record<string, unknown> | un
  * nothing (non-scalar attr value, no subject type).
  */
 export function normalizeSimilarQuery(q: MemorySimilarQuery): (MemorySimilarQuery & { now: number }) | null {
-  assertNoNul("similar-subjects query", [q.org, q.project, q.subjectType, q.excludeSubjectKey, q.prefix, q.attrs]);
+  assertStorableText("similar-subjects query", [q.org, q.project, q.subjectType, q.excludeSubjectKey, q.prefix, q.attrs]);
   if (!q.org || !q.project || !q.subjectType) return null;
   const attrs: Record<string, string | number | boolean | null> = {};
   for (const [k, v] of Object.entries(q.attrs ?? {})) {
@@ -515,16 +526,16 @@ export class EngineMemoryBackend implements MemoryBackend {
 
   async get(tuple: MemoryTuple, key: string, now = Date.now()): Promise<MemoryRow | null> {
     scopeOfTuple(tuple);
-    assertNoNul("memory scope", tuple);
-    assertNoNul("memory key", key);
+    assertStorableText("memory scope", tuple);
+    assertStorableText("memory key", key);
     const row = this.table.find(tuple, key);
     return row && !isExpired(row, now) ? row : null;
   }
 
   async list(tuple: MemoryTuple, opts: MemoryListOptions = {}): Promise<MemoryRow[]> {
     scopeOfTuple(tuple);
-    assertNoNul("memory scope", tuple);
-    assertNoNul("search prefix and attrs", [opts.prefix, opts.attrs]);
+    assertStorableText("memory scope", tuple);
+    assertStorableText("search prefix and attrs", [opts.prefix, opts.attrs]);
     const now = opts.now ?? Date.now();
     const limit = opts.limit !== undefined ? Math.max(0, opts.limit) : undefined;
     if (!opts.attrs || Object.keys(opts.attrs).length === 0) return this.table.list(tuple, opts.prefix, now, limit);
@@ -544,12 +555,12 @@ export class EngineMemoryBackend implements MemoryBackend {
   }
 
   async bindThread(binding: MemoryThreadBinding): Promise<void> {
-    assertNoNul("thread binding", binding);
+    assertStorableText("thread binding", binding);
     this.transaction(() => this.table.putThread({ ...binding, createdAt: binding.createdAt ?? Date.now() }));
   }
 
   async getThread(threadId: string): Promise<MemoryThreadBinding | null> {
-    assertNoNul("thread id", threadId);
+    assertStorableText("thread id", threadId);
     return this.table.getThread(threadId) ?? null;
   }
 
@@ -582,16 +593,16 @@ export class AsyncEngineMemoryBackend implements MemoryBackend {
 
   async get(tuple: MemoryTuple, key: string, now = Date.now()): Promise<MemoryRow | null> {
     scopeOfTuple(tuple);
-    assertNoNul("memory scope", tuple);
-    assertNoNul("memory key", key);
+    assertStorableText("memory scope", tuple);
+    assertStorableText("memory key", key);
     const row = await this.reader.find(tuple, key);
     return row && !isExpired(row, now) ? row : null;
   }
 
   async list(tuple: MemoryTuple, opts: MemoryListOptions = {}): Promise<MemoryRow[]> {
     scopeOfTuple(tuple);
-    assertNoNul("memory scope", tuple);
-    assertNoNul("search prefix and attrs", [opts.prefix, opts.attrs]);
+    assertStorableText("memory scope", tuple);
+    assertStorableText("search prefix and attrs", [opts.prefix, opts.attrs]);
     const now = opts.now ?? Date.now();
     const limit = opts.limit !== undefined ? Math.max(0, opts.limit) : undefined;
     if (!opts.attrs || Object.keys(opts.attrs).length === 0) return this.reader.list(tuple, opts.prefix, now, limit);
@@ -617,12 +628,12 @@ export class AsyncEngineMemoryBackend implements MemoryBackend {
   }
 
   async bindThread(binding: MemoryThreadBinding): Promise<void> {
-    assertNoNul("thread binding", binding);
+    assertStorableText("thread binding", binding);
     await this.reader.putThread({ ...binding, createdAt: binding.createdAt ?? Date.now() });
   }
 
   async getThread(threadId: string): Promise<MemoryThreadBinding | null> {
-    assertNoNul("thread id", threadId);
+    assertStorableText("thread id", threadId);
     return (await this.reader.getThread(threadId)) ?? null;
   }
 

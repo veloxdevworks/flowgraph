@@ -20,7 +20,7 @@ export {
   normalizeSimilarQuery,
   groupSimilar,
   validateMemoryKey,
-  assertNoNul,
+  assertStorableText,
   MEMORY_OP_RETENTION_MS,
   type MemoryTable,
   type AsyncMemoryTable,
