@@ -19,6 +19,11 @@ export async function collectGitDiff(opts: {
   base?: string;
   paths?: string[];
 }): Promise<GitDiffResult> {
+  // `base` and `paths` are often rendered from state; refuse option-looking
+  // revisions so a value like `--output=/some/file` cannot become a git flag.
+  if (opts.base && opts.base.startsWith("-")) {
+    throw new Error(`Invalid diff base "${opts.base}": revisions must not start with "-".`);
+  }
   const args = ["diff", "--no-color"];
   if (opts.base) args.push(opts.base);
   if (opts.paths && opts.paths.length > 0) {
