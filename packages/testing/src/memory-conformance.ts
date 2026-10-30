@@ -176,6 +176,9 @@ export function describeMemoryBackendConformance(
       await expectCode(b.write(op({ kind: "append", tuple: tu.graphA, key: "log", value: nul, max: 10 })), NUL);
       await expectCode(b.write(op({ kind: "patch", tuple: tu.graphA, key: "obj", value: { a: nul } })), NUL);
       await expectCode(b.write(op({ kind: "put", tuple: { ...tu.subject1, subjectKey: nul }, key: "k", value: 1 })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: 1, opId: nul })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: 1, writtenBy: nul })), NUL);
+      await expectCode(b.write(op({ kind: "put", tuple: tu.graphA, key: "k", value: 1, writtenByRun: nul })), NUL);
       await expectCode(b.get(tu.graphA, nul), NUL);
       await expectCode(b.list(tu.graphA, { prefix: nul }), NUL);
       await expectCode(b.list(tu.graphA, { attrs: { tag: nul } }), NUL);

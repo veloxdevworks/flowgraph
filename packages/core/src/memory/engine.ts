@@ -277,16 +277,23 @@ export function applyMemoryWriteAsync(table: AsyncMemoryTable, op: MemoryWriteOp
   return runAsync(writeProgram(op), table);
 }
 
+/** Every string a write sends to a backend must be storable everywhere (see {@link assertNoNul}). */
+function assertWriteStorable(op: MemoryWriteOp): void {
+  assertNoNul("memory scope", op.tuple);
+  assertNoNul("memory key", op.key);
+  assertNoNul(`value for "${op.key}"`, op.value);
+  assertNoNul(`attrs for "${op.key}"`, op.attrs);
+  assertNoNul(`field for "${op.key}"`, op.field);
+  assertNoNul(`op id for "${op.key}"`, op.opId);
+  assertNoNul(`writer for "${op.key}"`, [op.writtenBy, op.writtenByRun]);
+}
+
 function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
   const now = op.now ?? Date.now();
   const t = op.tuple;
   const scope = scopeOfTuple(t);
   const limits = op.limits;
-  assertNoNul("memory scope", t);
-  assertNoNul("memory key", op.key);
-  assertNoNul(`value for "${op.key}"`, op.value);
-  assertNoNul(`attrs for "${op.key}"`, op.attrs);
-  assertNoNul(`field for "${op.key}"`, op.field);
+  assertWriteStorable(op);
   validateMemoryKey(op.key, limits.keyChars);
 
   const fingerprint = op.opId ? (op.fingerprint ?? writeFingerprint(op)) : null;
@@ -600,8 +607,9 @@ export class AsyncEngineMemoryBackend implements MemoryBackend {
   }
 
   async write(op: MemoryWriteOp): Promise<MemoryWriteResult> {
-    // Validate the tuple before taking any lock.
+    // Validate the tuple and the strings that key the locks before taking any lock.
     scopeOfTuple(op.tuple);
+    assertWriteStorable(op);
     return this.transaction(async (table) => {
       await table.lockForWrite?.(op.tuple, op.opId);
       return applyMemoryWriteAsync(table, op);
