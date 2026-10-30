@@ -1152,18 +1152,27 @@ function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpo
 }
 
 function resolveStore(spec: GraphSpec, opts: CompileOptions): BaseStore | undefined {
+  // Explicit object instance wins (CLI/server/programmatic hosts, and subgraphs sharing the parent store).
   if (opts.store && typeof opts.store === "object") {
     return opts.store;
   }
   const enabled = spec.runtime?.store?.enabled !== false;
   if (!enabled) return undefined;
   if (opts.store === "none") return undefined;
+  // An explicit caller choice of "memory" (tests, ephemeral runs) is not a silent fallback.
+  if (opts.store === "memory") return new InMemoryStore();
 
-  const backend = spec.runtime?.store?.backend ?? (opts.store as string) ?? "memory";
+  const backend: string = spec.runtime?.store?.backend ?? "memory";
   if (backend === "none") return undefined;
   if (backend === "memory") return new InMemoryStore();
-  // Durable backends are provided by external packages and passed as instances.
-  return new InMemoryStore();
+  if (backend === "sqlite" || backend === "postgres") {
+    throw new Error(
+      `runtime.store.backend "${backend}" requires passing a store instance to compileGraph ` +
+        `(CompileOptions.store). Durable store wiring for the CLI and server is not available yet. ` +
+        `Silent InMemoryStore fallback is not allowed — use backend: memory for an ephemeral store.`,
+    );
+  }
+  throw new Error(`Unknown store backend "${backend}". Expected memory | none | sqlite | postgres.`);
 }
 
 function resultToUpdate(result: NodeResult): Record<string, unknown> {

@@ -930,18 +930,28 @@ export const ProvidersSchema = z.record(ProviderConfigSchema);
 // Runtime block
 // ---------------------------------------------------------------------------
 
-export const CheckpointBackendSchema = z.union([
-  z.literal("memory"),
-  z.literal("sqlite"),
-  z.literal("postgres"),
-  z.string(),
-]);
+/**
+ * Checkpoint backends. `memory` is process-local; `sqlite` / `postgres` need the host
+ * (CLI, server, or a programmatic caller) to inject a saver instance.
+ */
+export const CheckpointBackendSchema = z.enum(["memory", "sqlite", "postgres"], {
+  errorMap: (issue, ctx) =>
+    issue.code === "invalid_enum_value"
+      ? { message: `must be one of memory | sqlite | postgres (got "${String(issue.received)}")` }
+      : { message: ctx.defaultError },
+});
 
-export const StoreBackendSchema = z.union([
-  z.literal("memory"),
-  z.literal("none"),
-  z.string(),
-]);
+/**
+ * Long-term store backends. `memory` is process-local and ephemeral; `none` disables
+ * `ctx.store`. `sqlite` / `postgres` are reserved for the durable store and fail at
+ * compile time until a store instance is injected — there is no silent in-memory fallback.
+ */
+export const StoreBackendSchema = z.enum(["memory", "none", "sqlite", "postgres"], {
+  errorMap: (issue, ctx) =>
+    issue.code === "invalid_enum_value"
+      ? { message: `must be one of memory | none | sqlite | postgres (got "${String(issue.received)}")` }
+      : { message: ctx.defaultError },
+});
 
 export const HitlPolicySchema = z.union([
   z.literal("prompt"),
