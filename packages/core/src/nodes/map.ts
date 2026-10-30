@@ -95,6 +95,8 @@ export async function runMapItem(
   return unwrapUpdate(res);
 }
 
+const RESERVED_CHANNEL_SET: ReadonlySet<string> = new Set<string>(RESERVED_STATE_CHANNELS);
+
 /**
  * Reduce a NodeResult to a single collectable value.
  * Prefers an explicit `to`/`map` channel over the reserved `outputs` slug.
@@ -102,8 +104,7 @@ export async function runMapItem(
 export function unwrapUpdate(res: NodeResult): unknown {
   const raw = "update" in res ? res.update : "command" in res ? (res.command.update ?? {}) : {};
   // Reserved bookkeeping channels (e.g. the agent's __agentReplay clear) are not results.
-  const reserved = new Set<string>(RESERVED_STATE_CHANNELS);
-  const update = Object.fromEntries(Object.entries(raw).filter(([k]) => !reserved.has(k)));
+  const update = Object.fromEntries(Object.entries(raw).filter(([k]) => !RESERVED_CHANNEL_SET.has(k)));
   const keys = Object.keys(update);
 
   const nonOutputs = keys.filter((k) => k !== "outputs");

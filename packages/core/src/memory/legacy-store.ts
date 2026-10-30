@@ -29,7 +29,12 @@ function encodeKey(namespace: string[], key: string): string {
 
 function decodeKey(k: string): { namespace: string[]; key: string } | undefined {
   if (!k.startsWith(PREFIX)) return undefined;
-  const parts = k.slice(PREFIX.length).split("/").map((s) => decodeURIComponent(s));
+  let parts: string[];
+  try {
+    parts = k.slice(PREFIX.length).split("/").map((s) => decodeURIComponent(s));
+  } catch {
+    return undefined; // not written by this adapter (e.g. a ctx.memory key "legacy/%zz"): skip it
+  }
   const key = parts.pop();
   if (key === undefined) return undefined;
   return { namespace: parts, key };

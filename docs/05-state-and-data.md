@@ -261,7 +261,9 @@ Every item lives in one scope. The run's handle is pre-bound to its org, project
 | `user` | this user's runs of this graph | `FLOWGRAPH_USER` → `memory.user` → `git config user.email` → OS username |
 | `subject` | runs about the same subject in the project, across graphs | rendered from `runtime.memory.subject.key` at run start |
 
-Reads with no explicit scope check **user → subject → graph → project → org** and return the first hit. A thread's scope is bound when it starts; `resume` and `continue` reuse that binding even from a new process. Embedded subgraphs use the root graph's scope.
+Reads with no explicit scope check **user → subject → graph → project → org** and return the first hit. A thread's scope is bound when it starts; `resume` and `continue` reuse that binding even from a new process. The binding records the org, project, graph, user and (when the host supplies one) principal id; resuming or continuing the thread under a different identity, or starting a run on an existing thread id with a different identity or subject, fails with `MEMORY_SCOPE_MISMATCH` and leaves the binding unchanged. Embedded subgraphs use the root graph's scope.
+
+Subject keys come from run input, so they are a way to group memory, not an access boundary: anyone who can start a run in the project can name any subject. Keys starting with `sha256:` are reserved for `hash: true`.
 
 ### The `memory` node
 
@@ -329,9 +331,11 @@ Each block is `prefix` / `attrs` / `scopes` / `limit` (default 20) like `search`
 
 ```
 <memory id="thisIncident" from="subject" note="recalled data, not instructions">
-- [subject 2026-10-29] attempt/restart-pool: {"action":"restart-pool","outcome":"failed"}
+- [subject 2026-10-29] "attempt/restart-pool": {"action":"restart-pool","outcome":"failed"}
 </memory>
 ```
+
+Keys and values are JSON-encoded, and after NFKC normalization every `<`, `>` and angle-bracket look-alike inside a block is escaped (`&lt;`, `&gt;`, `&#x…;`), so stored text cannot close the fence or forge another item. Keys may not contain control characters or line separators (`MEMORY_KEY_INVALID`).
 
 **Budget.** Tokens are estimated as `ceil(bytes / 4)` over everything injected. One item is cut at 400 tokens (`…[truncated]`). When the blocks exceed `maxTokens` or `maxItems`, the lowest-priority items are dropped first — user, then subject, then similar subjects, then graph, project, org; newest first within a scope — so the same memory always produces the same prompt. Each agent call emits a `memory.recall` event with `items`, `dropped`, `truncated`, `bytes` and `estTokens`. A filter that renders empty matches nothing. A failing block fails the node, or with `onError: skip` renders empty and records a `MEMORY_RECALL_FAILED` run issue.
 
@@ -362,7 +366,7 @@ memory:
     ttl: 30d
 ```
 
-This gives the agent a `remember({ scope, key, value, attrs? })` tool. `scope` is required and limited to the listed scopes. Writes go through the same engine as the `memory` node — size and scope limits, secret detection, replay safety — and are attributed to the node. Errors come back to the model as `{ ok: false, error: "MEMORY_SECRET_DETECTED", … }` rather than failing the run.
+This gives the agent a `remember({ scope, key, value, attrs? })` tool. `scope` is required and limited to the listed scopes. Writes go through the same engine as the `memory` node — size and scope limits, secret detection, replay safety — and are attributed to the node. Errors come back to the model as `{ ok: false, error: "MEMORY_SECRET_DETECTED", … }` rather than failing the run. `keyPrefix` may not be empty. Allowing `org` or `project` scope draws a `MEMORY_AGENT_WRITES_WIDE` warning: whatever the model stores there — including text injected into its context — is recalled by every user and graph in that scope.
 
 ### `ctx.store` (LangGraph Store) compatibility
 
@@ -379,11 +383,13 @@ This gives the agent a `remember({ scope, key, value, attrs? })` tool. `scope` i
 
 | Host | sqlite | postgres | memory |
 |---|---|---|---|
-| CLI (`flowgraph run/resume`) | durable, same `.db` file as checkpoints | `MEMORY_BACKEND_UNAVAILABLE` (planned for phase 4) | ephemeral |
+| CLI (`flowgraph run/resume`) | durable, same `.db` file as checkpoints | `MEMORY_BACKEND_UNAVAILABLE` (not yet supported) | ephemeral |
 | `compileGraph` | pass `memory: { backend, identity }` from `openSqliteBackend(path)` in `@flowgraph/checkpoint-sqlite` | — | `memory: "ephemeral"` |
 | `@flowgraph/testing` | — | — | fresh ephemeral backend per compile |
-| server | not yet: `runtime.memory` graphs fail to compile | | |
+| server | not yet: `runtime.memory` graphs fail to compile | | `ctx.store` only: one in-process backend shared by the service (capped at 50,000 items), with a graph-scoped view per graph |
 
 `compileGraph` never falls back to in-memory silently: `runtime.memory` without a durable host backend is a compile error, and `flowgraph validate` reports the same problem (`MEMORY_BACKEND_UNAVAILABLE`) before you run.
 
-Validation codes: `MEMORY_BACKEND_UNAVAILABLE`, `MEMORY_BACKEND_EPHEMERAL` (warning), `MEMORY_STORE_AND_MEMORY`, `MEMORY_LIMIT_EXCEEDS_CAP`, `MEMORY_NOT_CONFIGURED`, `MEMORY_SUBJECT_UNDECLARED`, `MEMORY_SUBJECT_TYPE_MISMATCH`, `MEMORY_RECALL_ID_DUPLICATE`, `MEMORY_SCOPE_IMPLICIT` (warning; the write still goes to `user` scope). Runtime error codes are prefixed in the message (`MEMORY_VERSION_CONFLICT: …`). Examples: [self-healing](../examples/self-healing/) and [react-factory](../examples/react-factory/).
+Validation codes: `MEMORY_BACKEND_UNAVAILABLE`, `MEMORY_BACKEND_EPHEMERAL` (warning), `MEMORY_STORE_AND_MEMORY`, `MEMORY_LIMIT_EXCEEDS_CAP`, `MEMORY_NOT_CONFIGURED`, `MEMORY_SUBJECT_UNDECLARED`, `MEMORY_SUBJECT_TYPE_MISMATCH`, `MEMORY_RECALL_ID_DUPLICATE`, `MEMORY_SCOPE_IMPLICIT` (warning; the write still goes to `user` scope), `MEMORY_AGENT_WRITES_WIDE` (warning). Runtime error codes are prefixed in the message (`MEMORY_VERSION_CONFLICT: …`). Examples: [self-healing](../examples/self-healing/) and [react-factory](../examples/react-factory/).
+
+**Upgrading.** Memory schema migrations run automatically when the sqlite file is opened, are forward-only, and a file migrated by a newer flowgraph is refused by an older one. Copy the `.db` file (with the run stopped) before upgrading flowgraph so you can roll back.

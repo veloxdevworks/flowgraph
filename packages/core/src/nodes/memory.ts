@@ -50,7 +50,15 @@ export const memoryNode = defineNode<Config>({
           run: ctx.meta,
         };
         const r = <T>(v: T): unknown => (v === undefined ? undefined : renderDeep(v as never, scope));
-        const key = config.key !== undefined ? String(r(config.key)) : "";
+        const renderedKey = config.key !== undefined ? r(config.key) : undefined;
+        if (config.op !== "search" && (renderedKey === undefined || renderedKey === null || renderedKey === "")) {
+          throw new MemoryError(
+            "MEMORY_KEY_INVALID",
+            `memory node "${nodeId}": op "${config.op}" needs a key` +
+              (config.key !== undefined ? ` (${JSON.stringify(config.key)} rendered empty)` : ""),
+          );
+        }
+        const key = renderedKey === undefined || renderedKey === null ? "" : String(renderedKey);
         const readScopes: MemoryScopeName[] | undefined = config.scopes ?? (config.scope ? [config.scope] : undefined);
         const writeScope: MemoryScopeName = config.scope ?? (mem.scope.user ? "user" : "graph");
         const attrs = r(config.attrs) as Record<string, unknown> | undefined;

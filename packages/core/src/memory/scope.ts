@@ -102,6 +102,12 @@ export function normalizeSubjectKey(raw: unknown, opts: { hash?: boolean } = {})
   const s = String(raw).trim();
   if (s === "" || s === "null" || s === "undefined") return undefined;
   if (opts.hash) return `sha256:${createHash("sha256").update(s).digest("hex")}`;
+  if (s.toLowerCase().startsWith("sha256:")) {
+    throw new MemoryError(
+      "MEMORY_SUBJECT_UNRESOLVED",
+      `subject key "${s.slice(0, 40)}…" uses the reserved "sha256:" prefix (hashed keys); remove it or use hash: true`,
+    );
+  }
   if (s.length > 128) {
     throw new MemoryError("MEMORY_SUBJECT_UNRESOLVED", `subject key is longer than 128 characters (use hash: true)`);
   }

@@ -186,15 +186,27 @@ function agentMemoryDiagnostics(spec: GraphSpec, node: Record<string, unknown>, 
     }
   });
   const writes = am["agentWrites"] as Record<string, unknown> | undefined;
-  if (writes && Array.isArray(writes["scopes"]) && (writes["scopes"] as unknown[]).includes("subject")) {
+  const writeScopes = writes && Array.isArray(writes["scopes"]) ? (writes["scopes"] as unknown[]) : [];
+  if (writeScopes.includes("subject")) {
     subjectUndeclared("lets the remember tool write scope subject", `${base}.agentWrites.scopes`);
+  }
+  const wide = writeScopes.filter((s) => s === "org" || s === "project");
+  if (wide.length > 0) {
+    out.push({
+      severity: "warning",
+      code: "MEMORY_AGENT_WRITES_WIDE",
+      message:
+        `agent node "${id}" lets the model write ${wide.join(" and ")} scope; anything it stores (including prompt-injected text) ` +
+        `is recalled by every user and graph in that ${wide.includes("org") ? "org" : "project"}. Prefer user, subject or graph scope.`,
+      path: `${base}.agentWrites.scopes`,
+    });
   }
   return out;
 }
 
 /**
  * Host-specific checks: which durable checkpoint backends this host can put
- * memory in. The CLI supports sqlite today; postgres memory lands with the server work.
+ * memory in. The CLI supports sqlite; postgres memory is not available yet.
  */
 export function memoryHostDiagnostics(
   spec: GraphSpec,

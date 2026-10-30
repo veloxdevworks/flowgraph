@@ -292,7 +292,7 @@ export const AgentMemoryWritesSchema = z
     /** Max remember calls per run of this node (default 5, max 50). */
     maxPerRun: z.number().int().min(1).max(50).optional(),
     /** Prefix added to every key the model chooses (default "agent/"). */
-    keyPrefix: z.string().optional(),
+    keyPrefix: z.string().min(1).optional(),
     /** Attrs added to every write (templates ok); they override the model's attrs. */
     attrs: z.record(z.unknown()).optional(),
     /** Per-item TTL for non-subject writes, e.g. 90d. */
