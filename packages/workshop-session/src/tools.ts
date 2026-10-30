@@ -40,18 +40,6 @@ export const FACILITATOR_TOOLS = [
   },
   {
     type: "function",
-    name: "read_artifact",
-    description: "Read a workshop artifact path via the governed host (sidecar or server).",
-    parameters: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-      },
-      required: ["path"],
-    },
-  },
-  {
-    type: "function",
     name: "finish",
     description: "End the workshop. Call only when the output schema is satisfied or the human asks to stop.",
     parameters: {
@@ -63,7 +51,27 @@ export const FACILITATOR_TOOLS = [
   },
 ] as const;
 
-export type FacilitatorToolName = (typeof FACILITATOR_TOOLS)[number]["name"];
+/**
+ * Optional tool: only advertise it when the client actually serves artifact reads
+ * (pass `tools: [...FACILITATOR_TOOLS, READ_ARTIFACT_TOOL]` to `WorkshopSession.start`
+ * and answer `read_artifact` in `onToolCall`). `applyFacilitatorTool` does not handle it.
+ */
+export const READ_ARTIFACT_TOOL = {
+  type: "function",
+  name: "read_artifact",
+  description: "Read a workshop artifact path via the governed host (sidecar or server).",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string" },
+    },
+    required: ["path"],
+  },
+} as const;
+
+export type FacilitatorTool = (typeof FACILITATOR_TOOLS)[number] | typeof READ_ARTIFACT_TOOL;
+
+export type FacilitatorToolName = FacilitatorTool["name"];
 
 export type FacilitatorToolCall = {
   name: FacilitatorToolName | string;

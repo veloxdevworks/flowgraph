@@ -689,6 +689,10 @@ A specialized HITL node for a **bounded conversation** that produces a structure
     output: { to: brief }
 ```
 
+The interrupt payload (`payload.data`) is typed as `WorkshopContract` in `@flowgraph/spec` (re-exported by `@flowgraph/workshop-session`): `mode`, `agenda`, `fallback`, optional `schema` / `context` / `facilitator` / `voice` / `limits`, `artifactRefs` (rendered `with.artifacts`), and `diff` / `diffStat`. A git diff failure is reported on `diff.error` (no `diffStat`); patches over 256 KiB are cut and marked `diff.truncated: true`.
+
+`limits` are enforced by the client, not the engine (the node is a single interrupt): `WorkshopSession` closes the session and fires `onTimeLimit` after `limits.maxMinutes` (default 30). `maxTurns` is advisory. The facilitator tools are `update_draft`, `cover_agenda_item`, `add_risk`, and `finish`; `read_artifact` is only advertised when the client opts in with `READ_ARTIFACT_TOOL` and serves it in `onToolCall`.
+
 The node is **interrupt-and-map only** — no side effects. Research belongs in a prior `prepare` agent node; writing plans/tickets belongs in a later `post` node. Headless: `--on-interrupt fail` then `flowgraph resume` with the output JSON, or paste the output object at the CLI prompt.
 
 `voice` is a hint for the client. When a client asks `@flowgraph/server` for a voice token (`POST /voice/client-secrets`), the server only mints for models in its allowlist (`FLOWGRAPH_VOICE_ALLOWED_MODELS`, default each provider's default model) and refuses while REST auth is off unless `FLOWGRAPH_VOICE_ALLOW_UNAUTHENTICATED=1` is set. See the [server README](../packages/server/README.md#voice-tokens-post-voiceclient-secrets).

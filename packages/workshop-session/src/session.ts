@@ -1,6 +1,11 @@
-import { FACILITATOR_TOOLS, type FacilitatorToolCall } from "./tools.js";
+import { FACILITATOR_TOOLS, type FacilitatorTool, type FacilitatorToolCall } from "./tools.js";
 import { voiceProvider } from "./providers.js";
-import type { MintedVoiceToken, WorkshopContract, WorkshopTranscriptTurn } from "./types.js";
+import {
+  WORKSHOP_SESSION_MAX_MS,
+  type MintedVoiceToken,
+  type WorkshopContract,
+  type WorkshopTranscriptTurn,
+} from "./types.js";
 
 export type WorkshopSessionEvents = {
   onTranscript?: (turn: WorkshopTranscriptTurn) => void;
@@ -10,6 +15,11 @@ export type WorkshopSessionEvents = {
   onToolCall?: (call: FacilitatorToolCall) => Promise<unknown> | unknown;
   onError?: (err: Error) => void;
   onExpired?: () => void;
+  /**
+   * Wall-clock limit reached (`contract.limits.maxMinutes`, else 30 min). The session
+   * closes right after; resume with `endedReason: "timeout"` and the current draft.
+   */
+  onTimeLimit?: () => void;
   onOpen?: () => void;
   onClose?: () => void;
 };
@@ -24,6 +34,7 @@ function browserWebSocket(url: string, token: string, providerId: string): WebSo
 export class WorkshopSession {
   private ws: WebSocket | null = null;
   private closed = false;
+  private limitTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly token: MintedVoiceToken,
@@ -37,7 +48,14 @@ export class WorkshopSession {
   }
 
   async start(
-    opts: { instructions?: string; voice?: string; seedTranscript?: string; vad?: boolean } = {},
+    opts: {
+      instructions?: string;
+      voice?: string;
+      seedTranscript?: string;
+      vad?: boolean;
+      /** Tools advertised to the model. Default FACILITATOR_TOOLS (no read_artifact). */
+      tools?: readonly FacilitatorTool[];
+    } = {},
   ): Promise<void> {
     const voice = opts.voice ?? this.contract.voice?.voice ?? this.provider.defaultVoice;
     const instructions = opts.instructions ?? this.buildInstructions(opts.seedTranscript);
@@ -53,10 +71,11 @@ export class WorkshopSession {
           instructions,
           turn_detection: vad ? { type: "server_vad", silence_duration_ms: 600 } : null,
           input_audio_transcription: { model: "whisper-1" },
-          tools: FACILITATOR_TOOLS,
+          tools: opts.tools ?? FACILITATOR_TOOLS,
         },
       });
     });
+    this.startLimitTimer();
     this.ws.addEventListener("message", (ev) => {
       void this.handleMessage(ev.data);
     });
@@ -94,8 +113,18 @@ export class WorkshopSession {
     this.send({ type: "response.cancel" });
   }
 
+  /** Session wall-clock budget in ms (`limits.maxMinutes`, else WORKSHOP_SESSION_MAX_MS). */
+  get timeLimitMs(): number {
+    const minutes = this.contract.limits?.maxMinutes;
+    return typeof minutes === "number" && minutes > 0 ? minutes * 60_000 : WORKSHOP_SESSION_MAX_MS;
+  }
+
   close(): void {
     this.closed = true;
+    if (this.limitTimer) {
+      clearTimeout(this.limitTimer);
+      this.limitTimer = null;
+    }
     this.ws?.close();
     this.ws = null;
   }
@@ -122,6 +151,16 @@ export class WorkshopSession {
     ]
       .filter(Boolean)
       .join("\n\n");
+  }
+
+  private startLimitTimer(): void {
+    if (this.limitTimer) clearTimeout(this.limitTimer);
+    this.limitTimer = setTimeout(() => {
+      this.limitTimer = null;
+      if (this.closed) return;
+      this.events.onTimeLimit?.();
+      this.close();
+    }, this.timeLimitMs);
   }
 
   private send(payload: unknown): void {
