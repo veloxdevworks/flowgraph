@@ -18,6 +18,7 @@ import {
   type MemoryRecord,
   type MemoryRow,
   type MemoryScopeName,
+  type MemoryTuple,
   type MemoryWriteKind,
   type MemoryWriteOp,
 } from "./types.js";
@@ -160,9 +161,14 @@ export function memoryPositionalOpId(source: MemoryOpSource, index: number): str
   return replayHash([source.threadId, source.checkpointNs ?? "", source.taskId, source.nodeId ?? "", String(index)]);
 }
 
-/** Fingerprint of a caller idempotency key. It does not include the payload. */
-function idempotencyFingerprint(key: string): string {
-  return replayHash(["idem", key]);
+/**
+ * Fingerprint of an idempotency key bound to one operation: the key, the kind,
+ * the scope tuple and the memory key. The payload is not part of it, so a
+ * retry of the same operation keeps the first value. A different kind, scope
+ * or memory key is a different fingerprint.
+ */
+function idempotencyFingerprint(key: string, kind: string, tuple: MemoryTuple, memoryKey: string): string {
+  return replayHash(["idem", key, kind, tupleKey(tuple), memoryKey]);
 }
 
 const IDEMPOTENCY_KEY_MAX = 1024;
@@ -181,6 +187,9 @@ interface ReplayAssignment {
   legacyMatchIndex?: number | undefined;
   legacyOpIdAt?: ((index: number) => string) | undefined;
   legacySentinelId?: string | undefined;
+  rejectFingerprintMismatch?: boolean | undefined;
+  /** Recorded only after the write commits, so a rejected reuse does not burn the slot. */
+  commitIdem?: { key: string; fingerprint: string } | undefined;
 }
 
 export function rowToRecord(row: MemoryRow, scope: MemoryScopeName): MemoryRecord {
@@ -220,11 +229,32 @@ export function createScopedMemory(
   // older builds are read back through legacyOpIdAt.
   const canDedupe = !!(source.threadId && source.taskId);
   const occurrences = new Map<string, number>();
+  /** Idempotency key → fingerprint of the operation it was bound to in this attempt. */
+  const idemBound = new Map<string, string>();
+  let skipLegacy = false;
   const sourceParts = [source.threadId ?? "", source.checkpointNs ?? "", source.taskId ?? "", source.nodeId ?? ""];
   const legacyOpIdAt = canDedupe ? (index: number) => replayHash([...sourceParts, String(index)]) : undefined;
   const legacySentinelId = canDedupe ? replayHash([...sourceParts, "v2-nolegacy"]) : undefined;
 
-  const assignReplay = (fingerprint: string, mode: "content" | "idem"): ReplayAssignment => {
+  const assignReplay = (fingerprint: string, mode: "content" | "idem", idemKey?: string): ReplayAssignment => {
+    if (mode === "idem" && idemKey !== undefined) {
+      const bound = idemBound.get(idemKey);
+      if (bound !== undefined && bound !== fingerprint) {
+        throw new MemoryError(
+          "MEMORY_IDEMPOTENCY_CONFLICT",
+          `idempotency key ${JSON.stringify(idemKey)} was already used for a different operation (kind, scope, or key)`,
+        );
+      }
+      const occKey = `idem\0${idemKey}`;
+      const n = occurrences.get(occKey) ?? 0;
+      if (!canDedupe) return { fingerprint, commitIdem: { key: idemKey, fingerprint } };
+      return {
+        fingerprint,
+        opId: replayHash([...sourceParts, "v2", "idem", idemKey, String(n)]),
+        rejectFingerprintMismatch: true,
+        commitIdem: { key: idemKey, fingerprint },
+      };
+    }
     const n = occurrences.get(fingerprint) ?? 0;
     occurrences.set(fingerprint, n + 1);
     if (!canDedupe || !legacyOpIdAt || !legacySentinelId) return { fingerprint };
@@ -232,8 +262,8 @@ export function createScopedMemory(
       fingerprint,
       opId: replayHash([...sourceParts, "v2", fingerprint, String(n)]),
     };
-    // Idempotency keys have no older positional rows; only content-derived writes consult them.
-    if (mode === "content") {
+    // Once this attempt has seen no positional rows, later writes skip that read.
+    if (mode === "content" && !skipLegacy) {
       assigned.legacyMatchIndex = n;
       assigned.legacyOpIdAt = legacyOpIdAt;
       assigned.legacySentinelId = legacySentinelId;
@@ -258,7 +288,7 @@ export function createScopedMemory(
     if (!assigned) {
       const idem = opts?.idempotencyKey !== undefined ? validateIdempotencyKey(opts.idempotencyKey) : undefined;
       const fingerprint = idem
-        ? idempotencyFingerprint(idem)
+        ? idempotencyFingerprint(idem, kind, tuple, key)
         : (extra.fingerprint ??
           writeFingerprint({
             kind,
@@ -272,7 +302,7 @@ export function createScopedMemory(
             ifVersion: opts?.ifVersion,
             ttlMs: toTtlMs(opts?.ttl),
           }));
-      assigned = assignReplay(fingerprint, idem ? "idem" : "content");
+      assigned = assignReplay(fingerprint, idem ? "idem" : "content", idem);
     }
     const op: MemoryWriteOp = {
       kind,
@@ -288,11 +318,22 @@ export function createScopedMemory(
       legacyMatchIndex: assigned.legacyMatchIndex,
       legacyOpIdAt: assigned.legacyOpIdAt,
       legacySentinelId: assigned.legacySentinelId,
+      rejectFingerprintMismatch: assigned.rejectFingerprintMismatch,
       limits: s === "subject" ? policy.subjectLimits : policy.limits,
       writtenBy: binding.user || undefined,
       writtenByRun: source.runId,
     };
     const r = await backend.write(op);
+    if (r.legacyAbsent) {
+      skipLegacy = true;
+      assigned.legacyMatchIndex = undefined;
+      assigned.legacyOpIdAt = undefined;
+      assigned.legacySentinelId = undefined;
+    }
+    if (assigned.commitIdem) {
+      occurrences.set(`idem\0${assigned.commitIdem.key}`, (occurrences.get(`idem\0${assigned.commitIdem.key}`) ?? 0) + 1);
+      idemBound.set(assigned.commitIdem.key, assigned.commitIdem.fingerprint);
+    }
     return { version: r.version, value: r.value, deduped: r.deduped };
   };
 
@@ -395,8 +436,8 @@ export function createScopedMemory(
       // value). Without an idempotency key, dedupe on the target alone so the
       // CAS loop still counts once. The id is assigned once for every attempt
       // of this call, including version-conflict retries.
-      const fingerprint = idem ? idempotencyFingerprint(idem) : replayHash([tupleKey(tuple), key, "update"]);
-      const assigned = assignReplay(fingerprint, idem ? "idem" : "content");
+      const fingerprint = idem ? idempotencyFingerprint(idem, "update", tuple, key) : replayHash([tupleKey(tuple), key, "update"]);
+      const assigned = assignReplay(fingerprint, idem ? "idem" : "content", idem);
       for (let attempt = 0; ; attempt++) {
         const row = await backend.get(tuple, key);
         const version = row?.version ?? 0;

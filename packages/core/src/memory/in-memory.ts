@@ -128,6 +128,14 @@ class InMemoryTable implements MemoryTable {
     const o = this.ops.get(opId);
     return o ? { version: o.version, value: clone(o.value), fingerprint: o.fingerprint } : undefined;
   }
+  opGetMany(opIds: readonly string[]) {
+    const out = new Map<string, { version: number; value: unknown; fingerprint: string | null }>();
+    for (const id of opIds) {
+      const got = this.opGet(id);
+      if (got) out.set(id, got);
+    }
+    return out;
+  }
   opPut(opId: string, result: { version: number; value: unknown }, now: number, fingerprint: string | null) {
     this.ops.set(opId, { ...clone(result), at: now, fingerprint });
   }

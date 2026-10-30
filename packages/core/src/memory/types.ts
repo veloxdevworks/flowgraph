@@ -74,7 +74,8 @@ export type MemoryErrorCode =
   | "MEMORY_NOT_CONFIGURED"
   | "MEMORY_SUBJECT_TYPE_MISMATCH"
   | "MEMORY_SUBJECT_UNDECLARED"
-  | "MEMORY_WRITE_LIMIT";
+  | "MEMORY_WRITE_LIMIT"
+  | "MEMORY_IDEMPOTENCY_CONFLICT";
 
 export class MemoryError extends Error {
   readonly code: MemoryErrorCode;
@@ -166,10 +167,17 @@ export interface MemoryWriteOp {
   /**
    * Identity of the write for op-id dedupe. Defaults to a hash of the tuple,
    * key, kind and arguments. `update()` passes tuple + key so a CAS loop whose
-   * computed value changes on retry still dedupes. An idempotency key passes
-   * a hash of the key, so a different payload does not write again.
+   * computed value changes on retry still dedupes. An idempotency key hashes
+   * the key together with the kind, scope tuple and memory key (not the
+   * payload). A different payload for that same operation does not write again.
    */
   fingerprint?: string | undefined;
+  /**
+   * When set, a stored row for `opId` whose fingerprint differs is
+   * `MEMORY_IDEMPOTENCY_CONFLICT` instead of a second write. Set for
+   * idempotency keys.
+   */
+  rejectFingerprintMismatch?: boolean | undefined;
   /**
    * Which older positional record with this fingerprint to adopt (0 is the
    * first). Set with {@link legacyOpIdAt}. Absent means positional records
@@ -198,6 +206,11 @@ export interface MemoryWriteResult {
   deduped: boolean;
   /** Items evicted to make room. */
   evicted: number;
+  /**
+   * This attempt has no positional op rows to adopt. The handle stops asking
+   * for that scan.
+   */
+  legacyAbsent?: boolean | undefined;
 }
 
 export interface MemoryListOptions {

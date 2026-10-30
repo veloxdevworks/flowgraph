@@ -328,6 +328,22 @@ class SqliteMemoryTable implements MemoryTable {
       ? { version: r.version, value: r.value === null ? null : (JSON.parse(r.value) as unknown), fingerprint: r.fingerprint }
       : undefined;
   }
+  opGetMany(opIds: readonly string[]) {
+    const out = new Map<string, { version: number; value: unknown; fingerprint: string | null }>();
+    if (opIds.length === 0) return out;
+    const ph = opIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT op_id, version, value, fingerprint FROM fg_memory_ops WHERE op_id IN (${ph})`,
+    ).all(...opIds) as Array<{ op_id: string; version: number; value: string | null; fingerprint: string | null }>;
+    for (const r of rows) {
+      out.set(r.op_id, {
+        version: r.version,
+        value: r.value === null ? null : (JSON.parse(r.value) as unknown),
+        fingerprint: r.fingerprint,
+      });
+    }
+    return out;
+  }
   opPut(opId: string, result: { version: number; value: unknown }, now: number, fingerprint: string | null) {
     this.s["opPut"]!.run(opId, result.version, JSON.stringify(result.value ?? null), now, fingerprint);
   }

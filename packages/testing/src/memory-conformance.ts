@@ -567,6 +567,32 @@ export function describeMemoryBackendConformance(
       expect((await b.get(tu.graphA, "c"))?.value).toEqual({ n: 6 });
     }));
 
+    it("reusing an idempotency key for a different kind, scope or key is an error", withBackend(async (b) => {
+      const first = attempt(b, "task-idem-mismatch").memory;
+      await first.increment("graph", "x", "n", 1, { idempotencyKey: "k" });
+      await first.update("graph", "counter", (cur) => ((cur as number | undefined) ?? 0) + 1, { idempotencyKey: "u" });
+      // Same attempt: the key is already bound, so the other write is refused before it lands.
+      await expect(first.put("graph", "y", 1, { idempotencyKey: "k" })).rejects.toMatchObject({ code: "MEMORY_IDEMPOTENCY_CONFLICT" });
+      await expect(first.increment("user", "x", "n", 1, { idempotencyKey: "k" })).rejects.toMatchObject({ code: "MEMORY_IDEMPOTENCY_CONFLICT" });
+      await expect(first.update("graph", "other", () => 1, { idempotencyKey: "u" })).rejects.toMatchObject({ code: "MEMORY_IDEMPOTENCY_CONFLICT" });
+
+      const retry = attempt(b, "task-idem-mismatch").memory;
+      await expect(retry.increment("graph", "y", "n", 1, { idempotencyKey: "k" })).rejects.toMatchObject({ code: "MEMORY_IDEMPOTENCY_CONFLICT" });
+      await expect(retry.put("user", "x", 1, { idempotencyKey: "k" })).rejects.toMatchObject({ code: "MEMORY_IDEMPOTENCY_CONFLICT" });
+      await expect(retry.append("graph", "x", "z", { idempotencyKey: "k" })).rejects.toMatchObject({ code: "MEMORY_IDEMPOTENCY_CONFLICT" });
+      await expect(retry.increment("graph", "counter", "n", 1, { idempotencyKey: "u" })).rejects.toMatchObject({ code: "MEMORY_IDEMPOTENCY_CONFLICT" });
+      await expect(retry.update("user", "counter", () => 5, { idempotencyKey: "u" })).rejects.toMatchObject({ code: "MEMORY_IDEMPOTENCY_CONFLICT" });
+
+      // The original operation still dedupes, payload included.
+      expect(await retry.increment("graph", "x", "n", 9, { idempotencyKey: "k" })).toMatchObject({ deduped: true, value: { n: 1 } });
+      expect(await retry.update("graph", "counter", () => 99, { idempotencyKey: "u" })).toMatchObject({ deduped: true, value: 1 });
+      expect(await b.get(tu.graphA, "y")).toBeNull();
+      expect(await b.get(tu.userA1, "x")).toBeNull();
+      expect(await b.get(tu.graphA, "other")).toBeNull();
+      expect((await b.get(tu.graphA, "x"))?.value).toEqual({ n: 1 });
+      expect((await b.get(tu.graphA, "counter"))?.value).toBe(1);
+    }));
+
     it("concurrent retries of the same writes apply once", withBackend(async (b) => {
       await Promise.all(
         Array.from({ length: 8 }, () => {

@@ -39,6 +39,8 @@ export const MEMORY_OP_RETENTION_MS = 30 * 86_400_000;
 const LEGACY_OP_GAP = 8;
 /** Positional indexes read at most, so a scan cannot walk forever. */
 const LEGACY_OP_SCAN_MAX = 1024;
+/** Positional ids fetched per query. One round trip covers the empty-attempt gap. */
+const LEGACY_OP_BATCH = 128;
 
 export interface MemoryTable {
   find(t: MemoryTuple, key: string): MemoryRow | undefined;
@@ -69,6 +71,8 @@ export interface MemoryTable {
   oldestSubjects(org: string, project: string, type: string, now: number, excludeKey: string, keepNewest: number): string[];
   removeSubject(org: string, project: string, type: string, key: string): number;
   opGet(opId: string): { version: number; value: unknown; fingerprint: string | null } | undefined;
+  /** Batch {@link opGet}. Missing ids are omitted. */
+  opGetMany(opIds: readonly string[]): Map<string, { version: number; value: unknown; fingerprint: string | null }>;
   /** Insert or replace the op record. */
   opPut(opId: string, result: { version: number; value: unknown }, now: number, fingerprint: string | null): void;
   /** Insert the binding unless the thread already has one (never overwrites). */
@@ -322,28 +326,39 @@ function* lookupLegacy(fingerprint: string, matchIndex: number, opIdAt: (index: 
   let seen = 0;
   let misses = 0;
   let seenAny = false;
-  for (let i = 0; i < LEGACY_OP_SCAN_MAX; i++) {
-    const id = opIdAt(i);
-    const row = yield* call("opGet", id);
-    let hit: OpRecord | undefined;
-    if (row?.fingerprint === fingerprint) hit = row;
-    else if (row) {
-      const alt = yield* call("opGet", `${id}~${fingerprint}`);
-      if (alt?.fingerprint === fingerprint) hit = alt;
+  for (let start = 0; start < LEGACY_OP_SCAN_MAX; start += LEGACY_OP_BATCH) {
+    const end = Math.min(start + LEGACY_OP_BATCH, LEGACY_OP_SCAN_MAX);
+    const ids: string[] = [];
+    for (let i = start; i < end; i++) ids.push(opIdAt(i));
+    const rows = yield* call("opGetMany", ids);
+    const altIds: string[] = [];
+    for (const id of ids) {
+      const row = rows.get(id);
+      if (row && row.fingerprint !== fingerprint) altIds.push(`${id}~${fingerprint}`);
     }
-    if (hit) {
-      if (seen === matchIndex) return { kind: "hit", row: hit };
-      seen += 1;
-      seenAny = true;
-      misses = 0;
-      continue;
-    }
-    if (!row) {
-      misses += 1;
-      if (misses >= LEGACY_OP_GAP) return seenAny ? { kind: "miss" } : { kind: "none" };
-    } else {
-      seenAny = true;
-      misses = 0;
+    const alts = altIds.length > 0 ? yield* call("opGetMany", altIds) : undefined;
+    for (const id of ids) {
+      const row = rows.get(id);
+      let hit: OpRecord | undefined;
+      if (row?.fingerprint === fingerprint) hit = row;
+      else if (row && alts) {
+        const alt = alts.get(`${id}~${fingerprint}`);
+        if (alt?.fingerprint === fingerprint) hit = alt;
+      }
+      if (hit) {
+        if (seen === matchIndex) return { kind: "hit", row: hit };
+        seen += 1;
+        seenAny = true;
+        misses = 0;
+        continue;
+      }
+      if (!row) {
+        misses += 1;
+        if (misses >= LEGACY_OP_GAP) return seenAny ? { kind: "miss" } : { kind: "none" };
+      } else {
+        seenAny = true;
+        misses = 0;
+      }
     }
   }
   return seenAny ? { kind: "miss" } : { kind: "none" };
@@ -370,6 +385,16 @@ function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
       return { version: prior.version, value: prior.value, deduped: true, evicted: 0 };
     }
     if (prior) {
+      // An idempotency key names one operation. A different kind, scope or
+      // memory key under that key is an error, not a second write and not a
+      // silent replay.
+      if (op.rejectFingerprintMismatch) {
+        throw new MemoryError(
+          "MEMORY_IDEMPOTENCY_CONFLICT",
+          `idempotency key for "${op.key}" was already used for a different operation (kind, scope, or key)`,
+          { key: op.key, kind: op.kind },
+        );
+      }
       opKey = `${op.opId}~${fingerprint}`;
       const alt = yield* call("opGet", opKey);
       if (alt?.fingerprint === fingerprint) {
@@ -382,22 +407,27 @@ function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
 
   // Older builds keyed the id by call order. On a miss, adopt the Nth positional
   // row with this fingerprint (a reordered or repeated write still matches) and
-  // copy it under the new id. A null fingerprint does not match.
+  // copy it under the new id. A null fingerprint does not match. The empty
+  // prefix of an attempt is one batched read.
+  let reportLegacyAbsent = false;
   if (primaryAbsent && op.opId && fingerprint !== null && op.legacyOpIdAt && op.legacyMatchIndex !== undefined) {
-    let scan = true;
-    if (op.legacySentinelId) {
-      const marker = yield* call("opGet", op.legacySentinelId);
-      if (marker) scan = false;
-    }
-    if (scan) {
+    const gapIds = Array.from({ length: LEGACY_OP_GAP }, (_, i) => op.legacyOpIdAt!(i));
+    const probeIds = op.legacySentinelId ? [...gapIds, op.legacySentinelId] : gapIds;
+    const probed = yield* call("opGetMany", probeIds);
+    const sentinelHit = op.legacySentinelId !== undefined && probed.has(op.legacySentinelId);
+    const gapEmpty = gapIds.every((id) => !probed.has(id));
+    if (sentinelHit || gapEmpty) {
+      reportLegacyAbsent = true;
+      if (gapEmpty && !sentinelHit && op.legacySentinelId) {
+        yield* call("opPut", op.legacySentinelId, { version: 0, value: null }, now, "nolegacy");
+      }
+    } else {
       const found = yield* lookupLegacy(fingerprint, op.legacyMatchIndex, op.legacyOpIdAt);
       if (found.kind === "hit") {
         yield* call("opPut", op.opId, { version: found.row.version, value: found.row.value }, now, fingerprint);
         return { version: found.row.version, value: found.row.value, deduped: true, evicted: 0 };
       }
-      if (found.kind === "none" && op.legacySentinelId) {
-        yield* call("opPut", op.legacySentinelId, { version: 0, value: null }, now, "nolegacy");
-      }
+      if (found.kind === "none") reportLegacyAbsent = true;
     }
   }
 
@@ -423,7 +453,7 @@ function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
     if (existing) yield* call("remove", existing.id);
     const result = { version: 0, value: null };
     if (opKey) yield* call("opPut", opKey, result, now, fingerprint);
-    return { ...result, deduped: false, evicted: 0 };
+    return { ...result, deduped: false, evicted: 0, ...(reportLegacyAbsent ? { legacyAbsent: true } : {}) };
   }
 
   const value = nextValue(op, existing?.value, existing !== undefined);
@@ -529,7 +559,7 @@ function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
 
   const result = { version, value };
   if (opKey) yield* call("opPut", opKey, result, now, fingerprint);
-  return { ...result, deduped: false, evicted };
+  return { ...result, deduped: false, evicted, ...(reportLegacyAbsent ? { legacyAbsent: true } : {}) };
 }
 
 /** Filter rows by attrs equality; shared by backends. */
