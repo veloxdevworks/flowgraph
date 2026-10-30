@@ -10,6 +10,7 @@ import { WebhookWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
 
 const configSchema = WebhookWithSchema;
@@ -34,6 +35,7 @@ export const webhookNode = defineNode<Config>({
           run: ctx.meta,
           secret: new Proxy({} as Record<string, string>, {
             get: (_t, prop) => {
+              if (typeof prop === "string") assertSecretAllowed(nodePolicyOf(ctx), prop, `webhook node "${ctx.nodeId}"`);
               const val = process.env[String(prop)];
               return val ?? "";
             },

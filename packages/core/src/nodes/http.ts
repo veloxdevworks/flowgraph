@@ -9,6 +9,7 @@ import { HttpWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
 import type { NodeResult } from "../registry.js";
 import { applyOutput } from "./output.js";
 import { performHttpRequest, redactHeaders } from "./http-request.js";
@@ -37,6 +38,7 @@ export const httpNode = defineNode<Config>({
           run: ctx.meta,
           secret: new Proxy({} as Record<string, string>, {
             get: (_t, prop) => {
+              if (typeof prop === "string") assertSecretAllowed(nodePolicyOf(ctx), prop, `http node "${ctx.nodeId}"`);
               const val = process.env[String(prop)];
               return val ?? "";
             },

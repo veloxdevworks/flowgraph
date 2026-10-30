@@ -21,6 +21,16 @@ export {
   InputValidationError,
 } from "./inputs.js";
 export { compileGraph, ResumeAttemptsExhaustedError } from "./compiler.js";
+export {
+  NODE_POLICY,
+  NodePolicyError,
+  assertNodeTypeAllowed,
+  assertSubgraphFileAllowed,
+  assertSecretAllowed,
+  nodePolicyOf,
+  type NodePolicy,
+  type NodePolicyErrorCode,
+} from "./node-policy.js";
 export type { MemoryHostOptions } from "./compiler.js";
 export * from "./memory/index.js";
 export { memoryNode } from "./nodes/memory.js";

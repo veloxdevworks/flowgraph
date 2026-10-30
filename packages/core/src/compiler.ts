@@ -58,6 +58,7 @@ import { hooksFromSpec, defaultGuardrailHooks } from "./hooks/builtin.js";
 import "./nodes/index.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
+import { NODE_POLICY, assertNodeTypeAllowed, type NodePolicy } from "./node-policy.js";
 
 export type InterruptPolicy = "prompt" | "fail" | "approve" | "webhook";
 
@@ -95,6 +96,12 @@ export interface CompileOptions {
    * orgs never share `ctx.store` keys. Default: { org: "local", project: "local" }.
    */
   memoryIdentity?: MemoryIdentity;
+  /**
+   * Limits on what this graph may run (blocked node types, file subgraphs,
+   * host secrets). Checked as nodes are built, including map inners, agent
+   * skill tools and embedded subgraphs at run time. Unset: no limits.
+   */
+  nodePolicy?: NodePolicy;
   /**
    * How to get durable memory on this host, shown in the
    * MEMORY_BACKEND_UNAVAILABLE error instead of the CLI/library advice when a
@@ -775,6 +782,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     store,
   };
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
+  if (opts.nodePolicy) (baseCtx as Record<symbol, unknown>)[NODE_POLICY] = opts.nodePolicy;
 
   const defaultRetry = spec.runtime?.retry;
   const defaultTimeout = spec.runtime?.timeoutDefault;
@@ -782,6 +790,11 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const mapJoinById = new Map<string, string>();
 
   for (const nodeSpec of spec.nodes) {
+    assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
+    if (nodeSpec.type === "map") {
+      const innerType = (nodeSpec.with as { node?: { type?: unknown } } | undefined)?.node?.type;
+      if (typeof innerType === "string") assertNodeTypeAllowed(opts.nodePolicy, innerType, `map node "${nodeSpec.id}" inner node`);
+    }
     const factory = registry.get(nodeSpec.type);
     if (!factory) throw new Error(`Node type "${nodeSpec.type}" is not registered.`);
 

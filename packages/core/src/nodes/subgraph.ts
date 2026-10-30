@@ -19,6 +19,7 @@ import { defineNode, type CompiledNode, type BuildContext, type NodeResult } fro
 import type { BaseStore } from "@langchain/langgraph";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import type { NodeRunContext } from "../context.js";
+import { assertSubgraphFileAllowed, nodePolicyOf } from "../node-policy.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
 import { applyOutput, isOutputNone } from "./output.js";
@@ -137,6 +138,7 @@ async function loadChild(
   if (inlineSpec) {
     spec = inlineSpec;
   } else {
+    assertSubgraphFileAllowed(nodePolicyOf(ctx), uses, `subgraph node "${parentNodeId}"`);
     const { loadGraph } = await import("../loader.js");
     const aliases =
       (ctx.config as { subgraphs?: Record<string, string> }).subgraphs ?? {};
@@ -162,6 +164,7 @@ async function loadChild(
     cwd: ctx.workspace,
     sinks: [forwardSink],
     store: childStore(spec, ctx),
+    ...(nodePolicyOf(ctx) ? { nodePolicy: nodePolicyOf(ctx)! } : {}),
     ...(parentMemoryRuntime(ctx) ? { memory: parentMemoryRuntime(ctx)! } : { memory: "ephemeral" as const }),
   });
 
