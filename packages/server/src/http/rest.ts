@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ClientSecretsRejectedError, credentialStatus } from "../credentials.js";
 import { processIdentity } from "../diagnostics.js";
+import { authModeOf } from "../identity.js";
 import { TooManyRunsError } from "../errors.js";
 import type { RunService } from "../run-service.js";
 import { attachSse } from "./sse.js";
@@ -24,7 +25,8 @@ export async function handleRest(
       metrics: service.metrics.snapshot(),
       database: service.config.databaseUrl ? "postgres" : "memory",
       credentials: credentialStatus(),
-      authRequired: !service.config.authDisabled && Boolean(service.config.authToken),
+      authRequired: authModeOf(service.config) !== "none",
+      authMode: authModeOf(service.config),
       identity: processIdentity(service.config),
     });
     return true;

@@ -36,6 +36,7 @@ import type {
 } from "./types.js";
 
 import { TooManyRunsError } from "./errors.js";
+import { createAuthenticator, type Authenticator } from "./identity.js";
 
 /** sqlite memory is optional: the package is loaded only when configured. */
 async function loadSqlite(): Promise<typeof import("@flowgraph/checkpoint-sqlite")> {
@@ -68,6 +69,13 @@ export class RunService {
   private durableMemory: { backend: MemoryBackend; identity: MemoryIdentity } | undefined;
   private sweeper: MemorySweeper | undefined;
   private closers: Array<() => Promise<void> | void> = [];
+  private auth: Authenticator | undefined;
+
+  /** Resolves callers to principals (OIDC, the legacy token, or none), built from config.auth. */
+  get authenticator(): Authenticator {
+    this.auth ??= createAuthenticator(this.config);
+    return this.auth;
+  }
 
   constructor(readonly config: ServerConfig) {
     this.registry = new SessionRegistry(config.eventBufferSize, {

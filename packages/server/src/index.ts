@@ -21,7 +21,24 @@ export { checkBearerAuth, isAgentCorePath, AUTH_REQUIRED_MESSAGE } from "./auth.
 export { createHttpServer, listen } from "./http/app.js";
 export { createMetrics, errorFields, log } from "./metrics.js";
 export { processIdentity, isEphemeralGraphStore } from "./diagnostics.js";
-export { defaultServerConfig } from "./types.js";
+export { authConfigFromEnv, defaultServerConfig } from "./types.js";
+export {
+  authModeOf,
+  checkStartupAuth,
+  createAuthenticator,
+  OidcAuthenticator,
+  principalFromClaims,
+  singleUserPrincipal,
+  DEFAULT_OIDC_ALGORITHMS,
+  type AuthMode,
+  type AuthOutcome,
+  type Authenticator,
+  type OidcAuthConfig,
+  type OidcClaimMapping,
+  type Principal,
+  type ServerAuthConfig,
+  type TrustRule,
+} from "./identity.js";
 export { ConnectClient, startConnectClient } from "./connect/client.js";
 export { CONNECT_PROTOCOL_VERSION } from "./connect/protocol.js";
 export type {
