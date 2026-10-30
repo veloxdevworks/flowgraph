@@ -10,6 +10,9 @@ import {
   scopeOfTuple,
   type AsyncMemoryWriteTable,
   checkGraphNameArgs,
+  checkThreadOwnerArgs,
+  type ThreadOwnerRecord,
+  type ThreadOwnerRegistry,
   type GraphNameRecord,
   type GraphNameRegistry,
   type MemoryRow,
@@ -120,6 +123,20 @@ CREATE TABLE {s}.fg_graph_names (
   owner      TEXT   COLLATE "C" NOT NULL,
   created_at BIGINT NOT NULL,
   PRIMARY KEY (org, name)
+);
+`,
+  },
+  {
+    // Thread ownership for multi-user servers: the principal that started a
+    // thread id first owns it. Lives next to the checkpoint tables so every
+    // replica that can load a thread's checkpoints sees its owner.
+    version: 5,
+    sql: `
+CREATE TABLE {s}.fg_thread_owners (
+  thread_id  TEXT   COLLATE "C" NOT NULL PRIMARY KEY,
+  owner      TEXT   COLLATE "C" NOT NULL,
+  org        TEXT   COLLATE "C" NOT NULL,
+  created_at BIGINT NOT NULL
 );
 `,
   },
@@ -558,6 +575,39 @@ export async function createPostgresGraphNameRegistry(pool: Pool, opts: Postgres
     async get(org, name) {
       checkGraphNameArgs(org, name);
       const r = await pool.query<Raw>(select, [org, name]);
+      return r.rows[0] ? rec(r.rows[0]) : undefined;
+    },
+  };
+}
+
+/**
+ * Thread-owner registry in the memory schema (table fg_thread_owners, memory
+ * schema 5). A claim is one INSERT ... ON CONFLICT DO NOTHING followed by a
+ * read of the winning row, so concurrent hosts agree on the owner.
+ */
+export async function createPostgresThreadOwnerRegistry(pool: Pool, opts: PostgresMemoryOptions = {}): Promise<ThreadOwnerRegistry> {
+  const schema = opts.schema ?? "public";
+  const s = quoteSchema(schema);
+  if (opts.migrate !== false) await migratePostgresMemorySchema(pool, schema);
+  type Raw = { thread_id: string; owner: string; org: string; created_at: string | number };
+  const rec = (r: Raw): ThreadOwnerRecord => ({ threadId: r.thread_id, owner: r.owner, org: r.org, createdAt: Number(r.created_at) });
+  const select = `SELECT thread_id, owner, org, created_at FROM ${s}.fg_thread_owners WHERE thread_id = $1`;
+  return {
+    async claim(threadId, owner, org, now = Date.now()) {
+      checkThreadOwnerArgs(threadId, owner, org);
+      const ins = await pool.query<Raw>(
+        `INSERT INTO ${s}.fg_thread_owners (thread_id, owner, org, created_at) VALUES ($1, $2, $3, $4)
+          ON CONFLICT (thread_id) DO NOTHING RETURNING thread_id, owner, org, created_at`,
+        [threadId, owner, org, now],
+      );
+      if (ins.rows[0]) return { ...rec(ins.rows[0]), created: true };
+      // The conflicting row is committed (ON CONFLICT waited for it), so a plain read sees it.
+      const r = await pool.query<Raw>(select, [threadId]);
+      return { ...rec(r.rows[0]!), created: false };
+    },
+    async get(threadId) {
+      checkThreadOwnerArgs(threadId);
+      const r = await pool.query<Raw>(select, [threadId]);
       return r.rows[0] ? rec(r.rows[0]) : undefined;
     },
   };

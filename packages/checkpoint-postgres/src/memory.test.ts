@@ -98,7 +98,7 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
         expect.arrayContaining(["fg_memory_items", "fg_memory_ops", "fg_memory_threads", "fg_memory_meta", "fg_schema_migrations", "checkpoints"]),
       );
       const n = await b.pool.query(`SELECT COUNT(*)::int AS n FROM "${schema}".fg_schema_migrations WHERE component = 'memory'`);
-      expect(n.rows[0]).toEqual({ n: 4 });
+      expect(n.rows[0]).toEqual({ n: 5 });
       expect(b.memory.durable).toBe(true);
       expect(b.memory.kind).toBe("postgres");
     } finally {
@@ -111,8 +111,8 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
     const pools = Array.from({ length: 6 }, () => new pg.Pool({ connectionString: DB, max: 1 }));
     try {
       const applied = await Promise.all(pools.map((p) => migratePostgresMemorySchema(p, schema)));
-      expect(applied.reduce((a, b) => a + b, 0)).toBe(4);
-      expect(applied.filter((n) => n === 4)).toHaveLength(1);
+      expect(applied.reduce((a, b) => a + b, 0)).toBe(5);
+      expect(applied.filter((n) => n === 5)).toHaveLength(1);
     } finally {
       await Promise.all(pools.map((p) => p.end()));
     }
@@ -281,7 +281,7 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
       `CREATE INDEX fg_memory_subject_recent ON "${old}".fg_memory_items (org, project, subject_type, updated_at DESC) WHERE subject_type <> ''`,
     );
     await admin!.query(`INSERT INTO "${old}".fg_schema_migrations VALUES ('memory', 1, 0)`);
-    expect(await migratePostgresMemorySchema(admin!, old)).toBe(3);
+    expect(await migratePostgresMemorySchema(admin!, old)).toBe(POSTGRES_MEMORY_MIGRATIONS.length - 1);
     expect(await indexes(old)).toContain("fg_memory_subject_keys");
     expect(await indexes(old)).not.toContain("fg_memory_subject_recent");
   });

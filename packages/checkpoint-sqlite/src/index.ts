@@ -14,10 +14,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
-import type { GraphNameRegistry } from "@flowgraph/core";
+import type { GraphNameRegistry, ThreadOwnerRegistry } from "@flowgraph/core";
 import {
   createSqliteMemoryBackend,
   createSqliteGraphNameRegistry,
+  createSqliteThreadOwnerRegistry,
   maybeSweep,
   openDatabase,
   type SqliteDatabase,
@@ -62,6 +63,8 @@ export interface SqliteBackend {
   memory: SqliteMemoryBackend;
   /** Graph-name ownership (first registrant owns a name within an org), in the same file. */
   graphNames: GraphNameRegistry;
+  /** Thread ownership (who started each thread id), in the same file. */
+  threadOwners: ThreadOwnerRegistry;
   close(): void;
 }
 
@@ -81,6 +84,7 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
   const db = openDatabase(dbPath, opts.busyTimeoutMs);
   const memory = createSqliteMemoryBackend(db);
   const graphNames = createSqliteGraphNameRegistry(db);
+  const threadOwners = createSqliteThreadOwnerRegistry(db);
   await maybeSweep(memory, opts.sweepIntervalMs ?? 3_600_000);
   const checkpointer = new SqliteSaver(db as never) as unknown as BaseCheckpointSaver;
   return {
@@ -88,6 +92,7 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
     checkpointer,
     memory,
     graphNames,
+    threadOwners,
     close() {
       if (db.open) db.close();
     },
@@ -98,6 +103,7 @@ export { SqliteSaver };
 export {
   createSqliteMemoryBackend,
   createSqliteGraphNameRegistry,
+  createSqliteThreadOwnerRegistry,
   migrateMemorySchema,
   maybeSweep,
   MEMORY_MIGRATIONS,

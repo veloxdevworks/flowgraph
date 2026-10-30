@@ -77,3 +77,10 @@ export {
   type GraphNameRecord,
   type GraphNameClaim,
 } from "./graph-names.js";
+export {
+  createInMemoryThreadOwnerRegistry,
+  checkThreadOwnerArgs,
+  type ThreadOwnerRegistry,
+  type ThreadOwnerRecord,
+  type ThreadOwnerClaim,
+} from "./thread-owners.js";
