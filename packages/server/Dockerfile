@@ -1,6 +1,8 @@
 # ARM64 image for ECS/Fargate and Amazon Bedrock AgentCore Runtime.
 # Build: docker build --platform linux/arm64 -t flowgraph-server -f packages/server/Dockerfile .
 # Run:   docker run --rm -p 8080:8080 -e FLOWGRAPH_AUTH_TOKEN=dev flowgraph-server
+#        (single-user dev; a shared server sets FLOWGRAPH_OIDC_ISSUER and FLOWGRAPH_OIDC_AUDIENCE,
+#        see packages/server/README.md#auth)
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /src
