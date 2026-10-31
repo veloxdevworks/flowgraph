@@ -145,6 +145,12 @@ export interface MemoryOpSource {
   taskId?: string | undefined;
   nodeId?: string | undefined;
   runId?: string | undefined;
+  /**
+   * Namespace and node id an older build used for this attempt's positional
+   * ids. A tool call was stored on the calling agent's namespace and node id.
+   */
+  legacyCheckpointNs?: string | undefined;
+  legacyNodeId?: string | undefined;
 }
 
 function replayHash(parts: readonly string[]): string {
@@ -233,7 +239,16 @@ export function createScopedMemory(
   const idemBound = new Map<string, string>();
   let skipLegacy = false;
   const sourceParts = [source.threadId ?? "", source.checkpointNs ?? "", source.taskId ?? "", source.nodeId ?? ""];
-  const legacyOpIdAt = canDedupe ? (index: number) => replayHash([...sourceParts, String(index)]) : undefined;
+  // Positional ids use the namespace and node id an older build wrote. The
+  // sentinel stays on the current identity, so one attempt skipping the scan
+  // does not hide another node's older rows.
+  const legacySource: MemoryOpSource = {
+    threadId: source.threadId,
+    checkpointNs: source.legacyCheckpointNs ?? source.checkpointNs,
+    taskId: source.taskId,
+    nodeId: source.legacyNodeId ?? source.nodeId,
+  };
+  const legacyOpIdAt = canDedupe ? (index: number) => memoryPositionalOpId(legacySource, index)! : undefined;
   const legacySentinelId = canDedupe ? replayHash([...sourceParts, "v2-nolegacy"]) : undefined;
 
   const assignReplay = (fingerprint: string, mode: "content" | "idem", idemKey?: string): ReplayAssignment => {

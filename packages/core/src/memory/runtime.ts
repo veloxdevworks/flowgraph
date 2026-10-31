@@ -213,14 +213,19 @@ export class MemoryRuntime {
   /**
    * Replay identity for one node attempt. A top-level node keeps its id, so
    * records written by older builds still match. A node below another node
-   * includes the path. A tool call's path already ends in `tool:<n>`, and that
-   * path is the identity: the call is cached or retried as a whole, and two
-   * calls must not share an occurrence count.
+   * includes the path. A tool call's path already ends in `tool:<n>`; with the
+   * tool name and argument hash, that call is the identity, so two calls do
+   * not share an occurrence count and a different call at the same index does
+   * not reuse an earlier write.
    */
-  static nodeIdForScope(path: readonly string[] | undefined, nodeId: string): string {
+  static nodeIdForScope(
+    path: readonly string[] | undefined,
+    nodeId: string,
+    tool?: { name: string; argsHash: string },
+  ): string {
     const p = path ?? [];
     if (p.length === 0) return nodeId;
-    if (p[p.length - 1]?.startsWith("tool:")) return JSON.stringify(p);
+    if (p[p.length - 1]?.startsWith("tool:")) return JSON.stringify(tool ? [...p, tool.name, tool.argsHash] : [...p]);
     return replayNodeKey(p, nodeId);
   }
 
@@ -233,12 +238,16 @@ export class MemoryRuntime {
   /**
    * `ctx.memory` for the node or tool call described by a LangGraph config.
    * `nodeId` is the node being built; a config whose path already ends in
-   * `tool:<n>` names that tool call instead.
+   * `tool:<n>` names that tool call instead. Positional ids from an older
+   * build use `legacy` when the call's namespace or node id has changed, and
+   * otherwise the node's own id with the config's namespace.
    */
   memoryForConfig(
     lgConfig: { configurable?: Record<string, unknown> } | undefined,
     nodeId: string,
     meta?: { runId?: string | undefined; threadId?: string | undefined },
+    legacy?: { checkpointNs?: string | undefined; nodeId: string },
+    tool?: { name: string; argsHash: string },
   ): ScopedMemory | undefined {
     const conf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
     const scope = runScopeOf(lgConfig);
@@ -246,8 +255,10 @@ export class MemoryRuntime {
     return this.memoryFor(threadId, {
       checkpointNs: typeof conf["checkpoint_ns"] === "string" ? conf["checkpoint_ns"] : undefined,
       taskId: typeof conf["__pregel_task_id"] === "string" ? conf["__pregel_task_id"] : undefined,
-      nodeId: MemoryRuntime.nodeIdForScope(scope?.path, nodeId),
+      nodeId: MemoryRuntime.nodeIdForScope(scope?.path, nodeId, tool),
       runId: meta?.runId,
+      legacyCheckpointNs: legacy ? legacy.checkpointNs : undefined,
+      legacyNodeId: legacy?.nodeId ?? nodeId,
     });
   }
 

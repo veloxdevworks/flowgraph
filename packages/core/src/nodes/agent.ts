@@ -19,7 +19,7 @@ import { loadResolvedAgent } from "./agent-runner.js";
 import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
-import { childRunConfig, isGraphInterrupt, recordedToolResult, ReplayMismatchError, ReplayStore, replayNodeKey, replayedToolResult, runScopeOf } from "../providers/replay-cache.js";
+import { childRunConfig, isGraphInterrupt, recordedToolResult, ReplayMismatchError, ReplayStore, replayNodeKey, replayedToolResult, runScopeOf, toolArgsHash } from "../providers/replay-cache.js";
 import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
 import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
@@ -168,14 +168,27 @@ export const agentNode = defineNode<Config>({
             const lgConfig = lgConfigOf(ctx);
             const toolLg = lgConfig ? toolCallConfig(lgConfig, ctx.nodeId, toolIndex) : undefined;
             const toolCtx = toolLg ? { ...ctx, _lgConfig: toolLg } : ctx;
-            // This call is cached or retried as a whole. Its memory writes use
-            // the call's path, not the agent's, so a resume that skips an
-            // earlier cached call still matches this call's writes.
+            // This call is cached or retried as a whole. Its memory id is the
+            // call's path plus the tool and its arguments, so a resume that
+            // skips an earlier cached call still matches this call, and a
+            // different call at the same index does not. Older builds recorded
+            // the write on the agent's attempt, so the positional id uses that
+            // namespace and node id.
             const memoryRuntime = (ctx as unknown as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
-            const toolMemory = memoryRuntime?.memoryForConfig(toolLg, ctx.nodeId, {
-              runId: ctx.meta?.runId,
-              threadId: ctx.meta?.threadId,
-            });
+            const parentConf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
+            const toolMemory = memoryRuntime?.memoryForConfig(
+              toolLg,
+              ctx.nodeId,
+              {
+                runId: ctx.meta?.runId,
+                threadId: ctx.meta?.threadId,
+              },
+              {
+                checkpointNs: typeof parentConf["checkpoint_ns"] === "string" ? parentConf["checkpoint_ns"] : "",
+                nodeId: ctx.nodeId,
+              },
+              { name, argsHash: toolArgsHash(callArgs) },
+            );
             if (toolMemory) toolCtx.memory = toolMemory;
             let result = await exec(callArgs, toolCtx, state);
             ctx.emit("agent.tool.result", { tool: name, result });
