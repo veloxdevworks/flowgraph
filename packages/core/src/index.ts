@@ -43,6 +43,7 @@ export {
   reservedStateMapRefs,
   reservedInputRefs,
   reservedTemplateRefs,
+  templateRefs,
   RESERVED_CHANNEL_PREFIX,
   hostExecAllowed,
   registeredToolNamesOf,
@@ -50,6 +51,7 @@ export {
   nodePolicyOf,
   type NodePolicy,
   type NodePolicyErrorCode,
+  type TemplateRefs,
 } from "./node-policy.js";
 export {
   classifyAddress,

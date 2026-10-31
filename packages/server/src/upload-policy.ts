@@ -18,6 +18,7 @@ import {
   reservedInputRefs,
   reservedStateMapRefs,
   reservedTemplateRefs,
+  templateRefs,
   walkNodes,
   type NodePolicy,
 } from "@flowgraph/core";
@@ -135,8 +136,35 @@ export interface UntrustedUploadOptions {
   allowFunctions?: readonly string[] | undefined;
 }
 
-const ENV_PLACEHOLDER = /\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}/;
-const SECRET_REFERENCE = /\{\{[^}]*\bsecrets?\s*(?:\.|\[)/;
+const IDENT_START = /[A-Za-z_]/;
+const IDENT_PART = /[A-Za-z0-9_]/;
+
+/**
+ * The first `${NAME}` or `${NAME:-default}` in a line of raw YAML, or
+ * undefined. Matches what `/\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}/` finds,
+ * in time linear in the line's length (that expression restarts at every
+ * `${` and can take quadratic time on a line of unclosed `${a:-`).
+ */
+export function findEnvPlaceholder(line: string): string | undefined {
+  let from = 0;
+  for (;;) {
+    const start = line.indexOf("${", from);
+    if (start < 0) return undefined;
+    let i = start + 2;
+    if (i < line.length && IDENT_START.test(line[i]!)) {
+      i++;
+      while (i < line.length && IDENT_PART.test(line[i]!)) i++;
+      if (line[i] === "}") return line.slice(start, i + 1);
+      if (line.startsWith(":-", i)) {
+        const close = line.indexOf("}", i + 2);
+        // No `}` after this point means no later `${` can be closed either.
+        if (close < 0) return undefined;
+        return line.slice(start, close + 1);
+      }
+    }
+    from = start + 2;
+  }
+}
 
 /** Check an untrusted upload. `raw` is the YAML text as sent; `spec` its parse without env expansion. */
 export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: UntrustedUploadOptions = {}): UploadViolation[] {
@@ -147,18 +175,18 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
   const allowedFunctions = policy.allowedFunctions ?? [];
 
   raw.split("\n").forEach((line, i) => {
-    const m = ENV_PLACEHOLDER.exec(line);
-    if (m) {
+    const m = findEnvPlaceholder(line);
+    if (m !== undefined) {
       add(
         "UPLOAD_ENV_PLACEHOLDER_BLOCKED",
         `line ${i + 1}`,
-        `${m[0]} would read the server's environment; pass the value as run input instead`,
+        `${m} would read the server's environment; pass the value as run input instead`,
       );
     }
   });
 
   walkStrings(spec, "", (value, path) => {
-    if (SECRET_REFERENCE.test(value)) {
+    if (templateRefs(value).secret) {
       add("UPLOAD_SECRET_REFERENCE_BLOCKED", path, "secret.* templates read the server's environment; pass the value as run input instead");
     }
   });

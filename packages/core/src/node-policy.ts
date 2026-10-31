@@ -7,7 +7,7 @@
  * that skipped the host's upload check still cannot run a blocked node.
  */
 
-import { evalExpr, parseExpr, type Expr } from "@flowgraph/expr";
+import { evalExpr, parseExpr, scanTemplate, type Expr } from "@flowgraph/expr";
 import type { NodeRunContext } from "./context.js";
 import type { OutboundHttpPolicy } from "./outbound-http.js";
 
@@ -314,9 +314,6 @@ export function isReservedChannel(name: string): boolean {
 const RESERVED_REF_RE = /(?:^|[^A-Za-z0-9_$])__[A-Za-z0-9_$]/;
 const RESERVED_REF = { test: (text: string): boolean => RESERVED_REF_RE.test(foldLookalikes(text)) };
 
-/** `{{ ... }}` expressions inside a template string. */
-const TEMPLATE_EXPR = /\{\{([\s\S]*?)\}\}/g;
-
 /** `\uXXXX` sequences as the characters they spell. */
 function decodeUnicodeEscapes(text: string): string {
   return text.replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
@@ -386,12 +383,30 @@ function hasReservedConstantIndex(expr: Expr, depth = 0): boolean {
 }
 
 /**
+ * How many blocks of one template string are parsed to look for constant
+ * indexes. Parsing costs a few microseconds a block, so without a limit a
+ * string of many short `{{ ['' }}` blocks could still take seconds; a real
+ * template has far fewer blocks with both brackets and quotes. Blocks past
+ * the limit that would need parsing count as reserved.
+ */
+const MAX_PARSED_BLOCKS = 1000;
+
+interface ParseBudget {
+  left: number;
+}
+
+/**
  * Whether a template expression names a `__` channel: as written, with
  * look-alike characters or `\uXXXX` sequences, or through a constant index
  * built from pieces (`state['_' + '_x']`, `state['\_\_x']`).
  */
-function refersToReservedInExpr(text: string): boolean {
+function refersToReservedInExpr(text: string, budget: ParseBudget): boolean {
   if (RESERVED_REF.test(text) || RESERVED_REF.test(decodeUnicodeEscapes(text))) return true;
+  // A constant index needs brackets and a string literal; skip parsing
+  // anything else, which keeps the check cheap on text with many blocks.
+  if (!text.includes("[") || (!text.includes("'") && !text.includes('"'))) return false;
+  // Past the budget, count the block as reserved rather than parse it.
+  if (budget.left-- <= 0) return true;
   let expr: Expr;
   try {
     expr = parseExpr(text.trim());
@@ -399,6 +414,41 @@ function refersToReservedInExpr(text: string): boolean {
     return false;
   }
   return hasReservedConstantIndex(expr);
+}
+
+/** `secret.X` or `secrets[...]` inside an expression. */
+const SECRET_REF_RE = /\bsecrets?\s*(?:\.|\[)/;
+
+/** What the `{{ }}` expressions of a template string refer to. */
+export interface TemplateRefs {
+  /** Some expression names a `__` channel (as {@link reservedTemplateRefs} checks). */
+  reserved: boolean;
+  /**
+   * Some expression reads `secret.*` / `secrets[...]`. Text after a `{{`
+   * that is never closed counts too, so a check on raw text cannot be
+   * dodged by leaving the block open.
+   */
+  secret: boolean;
+}
+
+/**
+ * Scan a template once (with `scanTemplate`, in time linear in its length)
+ * and run the reserved-channel and secret checks on each `{{ }}` block.
+ * Used by the node policy and by upload checks on untrusted graphs, so text
+ * such as `"{{ ".repeat(n)` cannot make either check slow.
+ */
+export function templateRefs(text: string): TemplateRefs {
+  const out: TemplateRefs = { reserved: false, secret: false };
+  if (!text.includes("{{")) return out;
+  const { spans, unclosedAt } = scanTemplate(text);
+  const budget: ParseBudget = { left: MAX_PARSED_BLOCKS };
+  for (const span of spans) {
+    if (!out.secret && SECRET_REF_RE.test(span.expr)) out.secret = true;
+    if (!out.reserved && refersToReservedInExpr(span.expr, budget)) out.reserved = true;
+    if (out.secret && out.reserved) return out;
+  }
+  if (!out.secret && unclosedAt >= 0 && SECRET_REF_RE.test(text.slice(unclosedAt + 2))) out.secret = true;
+  return out;
 }
 
 /**
@@ -418,12 +468,7 @@ export function reservedTemplateRefs(node: { with?: unknown }): string[] {
   const visit = (value: unknown, at: string, depth: number): void => {
     if (depth > 32) return;
     if (typeof value === "string") {
-      for (const m of value.matchAll(TEMPLATE_EXPR)) {
-        if (refersToReservedInExpr(m[1] ?? "")) {
-          out.push(at);
-          return;
-        }
-      }
+      if (templateRefs(value).reserved) out.push(at);
       return;
     }
     if (Array.isArray(value)) {
