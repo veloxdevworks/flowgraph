@@ -183,6 +183,18 @@ describe("agents sharing a history channel", () => {
     }
   });
 
+  it("budget mismatch lint: not for summarizers of the same size", () => {
+    const codes = (nodes: Array<ReturnType<typeof agent>>) =>
+      validateSpec(graph("sh-peers", nodes, true))
+        .filter((d) => d.code === "CONTEXT_HISTORY_BUDGET_MISMATCH")
+        .map((d) => d.path);
+    const peer = (id: string, max: number, smax: number) =>
+      agent(id, "x", { maxTokens: max, strategy: "summarize", summarize: { mode: "extract", maxTokens: smax } });
+    expect(codes([peer("a", 2000, 800), peer("b", 2000, 800)])).toEqual([]);
+    expect(codes([peer("a", 2000, 800), peer("b", 4000, 800)])).toEqual(["nodes.a.with.context.maxTokens"]);
+    expect(codes([peer("a", 2000, 800), agent("t", "x", { maxTokens: 2000, strategy: "trim" })])).toEqual(["nodes.t.with.context.maxTokens"]);
+  });
+
   it("other agents' summaries are left out rather than overflow", async () => {
     const reqs: AgentRequest[] = [];
     const other = new HumanMessage({

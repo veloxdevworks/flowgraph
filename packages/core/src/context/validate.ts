@@ -94,7 +94,17 @@ function sharedHistoryDiagnostics(spec: GraphSpec, defaults: ContextConfigInput 
   for (const a of agents) {
     const room = Math.floor(Math.max(0, a.p.policy.maxTokens - a.p.policy.reserveTokens) * SHARED_SUMMARY_SHARE);
     const big = agents.filter(
-      (b) => b !== a && b.p.history === a.p.history && b.p.policy.strategy === "summarize" && b.p.policy.summarize.maxTokens > room,
+      (b) =>
+        b !== a &&
+        b.p.history === a.p.history &&
+        b.p.policy.strategy === "summarize" &&
+        b.p.policy.summarize.maxTokens > room &&
+        // a summarizer at least as large on both counts is a peer, not a mismatch
+        !(
+          a.p.policy.strategy === "summarize" &&
+          a.p.policy.maxTokens >= b.p.policy.maxTokens &&
+          a.p.policy.summarize.maxTokens >= b.p.policy.summarize.maxTokens
+        ),
     );
     if (big.length === 0) continue;
     out.push({
@@ -102,7 +112,7 @@ function sharedHistoryDiagnostics(spec: GraphSpec, defaults: ContextConfigInput 
       code: "CONTEXT_HISTORY_BUDGET_MISMATCH",
       message:
         `${big.map((b) => `"${b.id}" keeps a summary of up to ${b.p.policy.summarize.maxTokens} tokens`).join(", ")} in "${a.p.history}", ` +
-        `more than the ~${room} tokens this agent (maxTokens ${a.p.policy.maxTokens}) leaves for other agents' summaries, ` +
+        `more than the ~${room} tokens at most this agent (maxTokens ${a.p.policy.maxTokens}) leaves for other agents' summaries, ` +
         `so it is shortened or left out of this agent's calls. Give agents that share a history channel similar budgets, ` +
         `or lower summarize.maxTokens on the larger one.`,
       path: `nodes.${a.id}.with.context.maxTokens`,
