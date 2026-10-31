@@ -55,7 +55,7 @@ afterAll(() => {
 
 const dirs: string[] = [];
 afterEach(async () => {
-  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   finished = 0;
   unhandled.length = 0;
 });

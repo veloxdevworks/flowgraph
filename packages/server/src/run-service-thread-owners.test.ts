@@ -56,7 +56,7 @@ const services: RunService[] = [];
 const dirs: string[] = [];
 afterEach(async () => {
   for (const s of services.splice(0)) await s.close();
-  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 async function tmp(): Promise<string> {
