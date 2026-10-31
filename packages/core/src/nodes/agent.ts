@@ -18,13 +18,8 @@ import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
 import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
-import {
-  hydrateReplay,
-  isGraphInterrupt,
-  memoryReplayCache,
-  replayCacheKey,
-} from "../providers/replay-cache.js";
-import { REPLAY_CHANNEL, ISSUES_CHANNEL } from "../runtime/state-annotation.js";
+import { isGraphInterrupt, ReplayStore, replayNodeKey, runScopeOf } from "../providers/replay-cache.js";
+import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
 import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
 import type { AgentMemoryConfig } from "../memory/recall.js";
@@ -127,11 +122,11 @@ export const agentNode = defineNode<Config>({
           permission: req.permission ?? "auto",
         };
 
-        const cacheKey = replayCacheKey(ctx.meta.threadId ?? ctx.meta.runId, ctx.nodeId);
-        const persisted = (state[REPLAY_CHANNEL] as Record<string, unknown> | undefined)?.[cacheKey];
-        if (persisted && typeof persisted === "object" && !Array.isArray(persisted)) {
-          hydrateReplay(cacheKey, persisted as Record<string, unknown>);
-        }
+        // Replay entries belong to this execution of the graph (see RunScope);
+        // outside one (a node run directly), nothing is replayed across calls.
+        const runScope = runScopeOf((ctx as { _lgConfig?: unknown })._lgConfig);
+        const replayStore = runScope?.replay ?? new ReplayStore();
+        const cacheKey = replayNodeKey(runScope?.path ?? [], ctx.nodeId);
         let toolSeq = 0;
 
         const providerCtx: ProviderRunContext = {
@@ -139,8 +134,8 @@ export const agentNode = defineNode<Config>({
           signal: ctx.signal,
           emit: (type, data) => ctx.emit(`agent.${type}` as import("../events.js").EventType, data),
           replay: {
-            get: (index) => memoryReplayCache.get(cacheKey, index),
-            set: (index, value) => memoryReplayCache.set(cacheKey, index, value),
+            get: (index) => replayStore.get(cacheKey, index),
+            set: (index, value) => replayStore.set(cacheKey, index, value),
           },
           checkToolCall: (name, args) => checkToolCall(governance, name, args),
           reportToolResult: (name, args, result) => reportToolResult(governance, name, args, result),
@@ -151,7 +146,7 @@ export const agentNode = defineNode<Config>({
             // Always run permission/HITL so LangGraph interrupt indices stay aligned on replay.
             const callArgs = await checkToolCall(governance, name, args);
             const toolIndex = `tool:${toolSeq++}`;
-            const cached = memoryReplayCache.get(cacheKey, toolIndex);
+            const cached = replayStore.get(cacheKey, toolIndex);
             if (cached !== undefined) return cached;
 
             ctx.emit("agent.tool.call", { tool: name, args: callArgs });
@@ -159,7 +154,7 @@ export const agentNode = defineNode<Config>({
             ctx.emit("agent.tool.result", { tool: name, result });
 
             result = await reportToolResult(governance, name, callArgs, result);
-            memoryReplayCache.set(cacheKey, toolIndex, result);
+            replayStore.set(cacheKey, toolIndex, result);
             return result;
           },
         };
@@ -190,7 +185,7 @@ export const agentNode = defineNode<Config>({
             enforceBudget(ctx, result.usage);
           }
 
-          memoryReplayCache.clear(cacheKey);
+          replayStore.clear(cacheKey);
 
           return {
             update: {
@@ -198,11 +193,10 @@ export const agentNode = defineNode<Config>({
                 nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
                 scope,
               }),
-              [REPLAY_CHANNEL]: { [cacheKey]: null },
             },
           };
         } catch (err) {
-          if (!isGraphInterrupt(err)) memoryReplayCache.clear(cacheKey);
+          if (!isGraphInterrupt(err)) replayStore.clear(cacheKey);
           throw err;
         }
       },

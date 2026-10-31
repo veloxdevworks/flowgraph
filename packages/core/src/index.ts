@@ -35,11 +35,13 @@ export {
   assertGraphRuntimeAllowed,
   assertNoReservedChannels,
   assertNoReservedInput,
+  withoutReservedKeys,
   assertAgentRefAllowed,
   assertImportsAllowed,
   assertInboundWebhookAllowed,
   isReservedChannel,
   reservedStateMapRefs,
+  reservedInputRefs,
   RESERVED_CHANNEL_PREFIX,
   hostExecAllowed,
   registeredToolNamesOf,
@@ -91,16 +93,7 @@ export {
   ISSUES_CHANNEL,
   RESERVED_STATE_CHANNELS,
 } from "./runtime/state-annotation.js";
-export {
-  clearAllReplayCaches,
-  clearThreadReplayCache,
-  hydrateReplay,
-  hydrateReplayFromInterruptPayload,
-  hydrateThreadReplay,
-  replayKeyBelongsTo,
-  snapshotReplay,
-  replayCacheKey,
-} from "./providers/replay-cache.js";
+export { ReplayStore, replayNodeKey, runScopeOf, type RunScope } from "./providers/replay-cache.js";
 export { parseDuration, sleep } from "./runtime/duration.js";
 export { runWithPolicy, isTimeoutError } from "./runtime/retry.js";
 export type { RetryConfig } from "./runtime/retry.js";

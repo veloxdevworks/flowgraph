@@ -1,62 +1,96 @@
 import { describe, expect, it } from "vitest";
 import { AIMessage } from "@langchain/core/messages";
 import {
-  clearAllReplayCaches,
-  clearThreadReplayCache,
+  ReplayStore,
+  RUN_SCOPE_KEY,
+  childRunConfig,
   deserializeReplayValue,
-  hydrateReplayFromInterruptPayload,
-  hydrateThreadReplay,
-  replayKeyBelongsTo,
   isGraphInterrupt,
-  memoryReplayCache,
-  replayCacheKey,
+  replayNodeKey,
+  replayStoreFromInterrupts,
+  runScopeOf,
   serializeReplayValue,
-  snapshotReplay,
 } from "./replay-cache.js";
 
-describe("memoryReplayCache", () => {
-  it("stores and retrieves values by key and index", () => {
-    clearAllReplayCaches();
-    const key = replayCacheKey("thread-1", "agent");
-    expect(memoryReplayCache.get(key, "llm:0")).toBeUndefined();
-    memoryReplayCache.set(key, "llm:0", { text: "hi" });
-    expect(memoryReplayCache.get(key, "llm:0")).toEqual({ text: "hi" });
-    memoryReplayCache.clear(key);
-    expect(memoryReplayCache.get(key, "llm:0")).toBeUndefined();
+describe("ReplayStore", () => {
+  it("stores, reads and clears one node's entries", () => {
+    const store = new ReplayStore();
+    const key = replayNodeKey([], "agent");
+    expect(store.get(key, "llm:0")).toBeUndefined();
+    store.set(key, "llm:0", { text: "hi" });
+    expect(store.get(key, "llm:0")).toEqual({ text: "hi" });
+    store.clear(key);
+    expect(store.get(key, "llm:0")).toBeUndefined();
   });
 
-  it("isolates keys from each other", () => {
-    clearAllReplayCaches();
-    memoryReplayCache.set("a", "0", 1);
-    memoryReplayCache.set("b", "0", 2);
-    expect(memoryReplayCache.get("a", "0")).toBe(1);
-    expect(memoryReplayCache.get("b", "0")).toBe(2);
-    memoryReplayCache.clear("a");
-    expect(memoryReplayCache.get("a", "0")).toBeUndefined();
-    expect(memoryReplayCache.get("b", "0")).toBe(2);
-    clearAllReplayCaches();
+  it("two stores never share entries", () => {
+    const a = new ReplayStore();
+    const b = new ReplayStore();
+    const key = replayNodeKey([], "agent");
+    a.set(key, "llm:0", "a");
+    expect(b.get(key, "llm:0")).toBeUndefined();
   });
 
-  it("clearThreadReplayCache drops every node key for the thread only", () => {
-    clearAllReplayCaches();
-    memoryReplayCache.set(replayCacheKey("t1", "agentA"), "tool:0", "a");
-    memoryReplayCache.set(replayCacheKey("t1", "agentB"), "llm:0", "b");
-    memoryReplayCache.set(replayCacheKey("t2", "agentA"), "tool:0", "c");
-    clearThreadReplayCache("t1");
-    expect(memoryReplayCache.get(replayCacheKey("t1", "agentA"), "tool:0")).toBeUndefined();
-    expect(memoryReplayCache.get(replayCacheKey("t1", "agentB"), "llm:0")).toBeUndefined();
-    expect(memoryReplayCache.get(replayCacheKey("t2", "agentA"), "tool:0")).toBe("c");
-    clearAllReplayCaches();
+  it("snapshot and load round-trip an AIMessage", () => {
+    const store = new ReplayStore();
+    const key = replayNodeKey(["sg"], "a");
+    store.set(key, "llm:0", new AIMessage({ content: "x", tool_calls: [{ name: "t", args: {}, id: "1" }] }));
+    const copy = new ReplayStore();
+    copy.load(key, store.snapshot(key));
+    expect(copy.get(key, "llm:0")).toBeInstanceOf(AIMessage);
+  });
+});
+
+describe("replayNodeKey", () => {
+  it("keeps a child node apart from a parent node of the same id", () => {
+    expect(replayNodeKey([], "a")).not.toBe(replayNodeKey(["sg"], "a"));
+    expect(replayNodeKey(["sg"], "a")).not.toBe(replayNodeKey(["s"], "ga"));
   });
 
-  it("clearThreadReplayCache for thread t leaves thread t:x alone", () => {
-    clearAllReplayCaches();
-    memoryReplayCache.set(replayCacheKey("t", "a"), "tool:0", "mine");
-    memoryReplayCache.set(replayCacheKey("t:x", "a"), "tool:0", "other");
-    clearThreadReplayCache("t");
-    expect(memoryReplayCache.get(replayCacheKey("t", "a"), "tool:0")).toBeUndefined();
-    expect(memoryReplayCache.get(replayCacheKey("t:x", "a"), "tool:0")).toBe("other");
-    clearAllReplayCaches();
+  it("requires a node id", () => {
+    expect(() => replayNodeKey([], "")).toThrow(/node id/);
+  });
+});
+
+describe("run scope in the invoke config", () => {
+  it("is read back from configurable and nests under a subgraph node", () => {
+    const replay = new ReplayStore();
+    const config = { configurable: { thread_id: "t", [RUN_SCOPE_KEY]: { replay, path: [] } } };
+    expect(runScopeOf(config)?.replay).toBe(replay);
+    const child = childRunConfig(config, "sg");
+    expect(runScopeOf(child)?.path).toEqual(["sg"]);
+    expect(runScopeOf(child)?.replay).toBe(replay);
+    expect(runScopeOf(config)?.path).toEqual([]);
+    expect(child.configurable.thread_id).toBe("t");
+  });
+
+  it("ignores a value that is not a run scope", () => {
+    expect(runScopeOf({ configurable: { [RUN_SCOPE_KEY]: { replay: {}, path: [] } } })).toBeUndefined();
+    expect(runScopeOf(undefined)).toBeUndefined();
+  });
+});
+
+describe("replayStoreFromInterrupts", () => {
+  const entries = { "llm:0": { text: "cached" } };
+
+  it("loads the snapshot of the interrupting node", () => {
+    const node = replayNodeKey(["sg"], "a");
+    const store = replayStoreFromInterrupts([{ reason: "ok?", data: { __nodeId: "a", __agentReplay: { node, entries } } }]);
+    expect(store.get(node, "llm:0")).toEqual({ text: "cached" });
+  });
+
+  it("ignores snapshots that name another node or are malformed", () => {
+    const store = replayStoreFromInterrupts([
+      { data: { __nodeId: "gate", __agentReplay: { node: replayNodeKey([], "a"), entries } } },
+      { data: { __agentReplay: { node: replayNodeKey([], "a"), entries } } },
+      { data: { __nodeId: "a", __agentReplay: { node: "t:a", entries } } },
+      { data: { __nodeId: "a", __agentReplay: { node: "[]", entries } } },
+      { data: { __nodeId: "a", __agentReplay: { node: replayNodeKey([], "a"), entries: "x" } } },
+      { __nodeId: "a", __agentReplay: { node: replayNodeKey([], "a"), entries } },
+      null,
+    ]);
+    expect(store.has(replayNodeKey([], "a"))).toBe(false);
+    expect(store.has("t:a")).toBe(false);
   });
 });
 
@@ -75,68 +109,5 @@ describe("serializeReplayValue", () => {
     const back = deserializeReplayValue(ser);
     expect(back).toBeInstanceOf(AIMessage);
     expect((back as AIMessage).content).toBe("hi");
-  });
-});
-
-describe("hydrateReplayFromInterruptPayload", () => {
-  it("loads dump attached to interrupt data", () => {
-    clearAllReplayCaches();
-    const key = replayCacheKey("t", "agent");
-    memoryReplayCache.set(key, "llm:0", { text: "cached" });
-    const dump = snapshotReplay(key);
-    clearAllReplayCaches();
-    hydrateReplayFromInterruptPayload(
-      {
-        reason: "ask",
-        data: { __nodeId: "agent", __agentReplay: { key, entries: dump } },
-      },
-      "t",
-    );
-    expect(memoryReplayCache.get(key, "llm:0")).toEqual({ text: "cached" });
-    clearAllReplayCaches();
-  });
-
-  it("ignores a key for another thread or another node", () => {
-    clearAllReplayCaches();
-    const entries = { "llm:0": { text: "forged" } };
-    // Key of a different thread, though __nodeId matches its node part.
-    hydrateReplayFromInterruptPayload({ data: { __nodeId: "agent", __agentReplay: { key: "victim:agent", entries } } }, "attacker");
-    // Own thread, but not the node that raised the interrupt.
-    hydrateReplayFromInterruptPayload({ data: { __nodeId: "gate", __agentReplay: { key: "attacker:agent", entries } } }, "attacker");
-    // No engine node id at all.
-    hydrateReplayFromInterruptPayload({ data: { __agentReplay: { key: "attacker:agent", entries } } }, "attacker");
-    expect(memoryReplayCache.get("victim:agent", "llm:0")).toBeUndefined();
-    expect(memoryReplayCache.get("attacker:agent", "llm:0")).toBeUndefined();
-    clearAllReplayCaches();
-  });
-});
-
-describe("hydrateThreadReplay", () => {
-  it("loads only keys of the thread being loaded", () => {
-    clearAllReplayCaches();
-    const e = { "llm:0": { text: "x" } };
-    hydrateThreadReplay("t1", {
-      "t1:a": e,
-      "t2:a": e,
-      "t1:a:b": e, // thread "t1:a", not t1
-      "t1": e,
-      "t1:": e,
-      "xt1:a": e,
-    });
-    expect(memoryReplayCache.get("t1:a", "llm:0")).toEqual({ text: "x" });
-    for (const k of ["t2:a", "t1:a:b", "t1", "t1:", "xt1:a"]) expect(memoryReplayCache.get(k, "llm:0")).toBeUndefined();
-    // A thread id containing ":" still owns exactly its own keys.
-    hydrateThreadReplay("org:t9", { "org:t9:a": e, "org:a": e });
-    expect(memoryReplayCache.get("org:t9:a", "llm:0")).toEqual({ text: "x" });
-    expect(memoryReplayCache.get("org:a", "llm:0")).toBeUndefined();
-    clearAllReplayCaches();
-  });
-
-  it("replayKeyBelongsTo splits at the last colon", () => {
-    expect(replayKeyBelongsTo("a:b", "a")).toBe(true);
-    expect(replayKeyBelongsTo("a:b:c", "a:b")).toBe(true);
-    expect(replayKeyBelongsTo("a:b:c", "a")).toBe(false);
-    expect(replayKeyBelongsTo("a:", "a")).toBe(false);
-    expect(replayKeyBelongsTo(":b", "")).toBe(false);
   });
 });

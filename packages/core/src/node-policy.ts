@@ -199,7 +199,7 @@ export const BUILTIN_TOOL_TARGETS: Readonly<Record<string, string>> = {
  * workshop git diff against `blockHostExec`. Used by the compiler for every
  * node and map inner node, and by map at run time.
  */
-export function assertNodeSpecAllowed(policy: NodePolicy | undefined, node: { type?: unknown; with?: unknown }, where: string): void {
+export function assertNodeSpecAllowed(policy: NodePolicy | undefined, node: { type?: unknown; with?: unknown; input?: unknown }, where: string): void {
   if (!policy) return;
   const type = String(node.type ?? "");
   const w = (node.with ?? {}) as Record<string, unknown>;
@@ -208,7 +208,7 @@ export function assertNodeSpecAllowed(policy: NodePolicy | undefined, node: { ty
     if (w.agent !== undefined) assertAgentRefAllowed(policy, where);
   }
   if (type === "wait" && w.webhook) assertInboundWebhookAllowed(policy, `${where} with.webhook`);
-  const reservedRefs = reservedStateMapRefs(node);
+  const reservedRefs = [...reservedInputRefs(node), ...reservedStateMapRefs(node)];
   if (reservedRefs.length > 0) {
     throw new NodePolicyError(
       "RESERVED_CHANNEL_BLOCKED",
@@ -319,6 +319,47 @@ export function reservedStateMapRefs(node: { with?: unknown }): string[] {
     }
   }
   return out;
+}
+
+/**
+ * A copy of `value` without its `__` keys (or `value` itself when it has
+ * none). Every place that turns caller, author, hook or model data into a
+ * node's input, a subgraph's input state, an interrupt payload or a map
+ * result goes through this, for trusted graphs too: `__` names are the
+ * engine's, and nothing outside the engine may put a value there.
+ */
+export function withoutReservedKeys<T extends Record<string, unknown>>(value: T): T {
+  let out: Record<string, unknown> | undefined;
+  for (const k of Object.keys(value)) {
+    if (!isReservedChannel(k)) continue;
+    out ??= { ...value };
+    delete out[k];
+  }
+  return (out ?? value) as T;
+}
+
+/**
+ * `__` keys a node's `input` block sets and `__` names its values refer to,
+ * as `input.<key>` paths. `input` becomes the node's input and, for a
+ * subgraph without `stateMap.in`, part of the child's input state.
+ */
+export function reservedInputRefs(node: { input?: unknown }): string[] {
+  const input = node.input;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (isReservedChannel(key.trim()) || refersToReserved(value)) out.push(`input.${key}`);
+  }
+  return out;
+}
+
+function refersToReserved(value: unknown): boolean {
+  if (typeof value === "string") return RESERVED_REF.test(value.trim());
+  if (Array.isArray(value)) return value.some(refersToReserved);
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).some(([k, v]) => isReservedChannel(k) || refersToReserved(v));
+  }
+  return false;
 }
 
 /** Throws AGENT_REF_BLOCKED for `with.agent` under a policy that blocks it. */

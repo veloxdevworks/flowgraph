@@ -20,7 +20,8 @@ import type { BaseStore } from "@langchain/langgraph";
 import { graphProviderList } from "../providers/registry.js";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import type { NodeRunContext } from "../context.js";
-import { assertSubgraphFileAllowed, isReservedChannel, nodePolicyOf } from "../node-policy.js";
+import { assertSubgraphFileAllowed, isReservedChannel, nodePolicyOf, withoutReservedKeys } from "../node-policy.js";
+import { childRunConfig } from "../providers/replay-cache.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
 import { applyOutput, isOutputNone } from "./output.js";
@@ -89,7 +90,9 @@ export const subgraphNode = defineNode<Config>({
 
         ctx.emit("node.output", { subgraph: label, input: Object.keys(childInput) });
 
-        const childState = await child.invoke(childInput, lgConfig);
+        // The child starts from its own engine channels (none of the parent's,
+        // none from `input`), and its run scope sits under this node.
+        const childState = await child.invoke(withoutReservedKeys(childInput), childRunConfig(lgConfig, ctx.nodeId));
         const clean = stripSubgraphState(childState);
 
         if (config.stateMap?.out) {

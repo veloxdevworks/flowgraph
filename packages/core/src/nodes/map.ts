@@ -11,7 +11,7 @@ import { MapWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { registry, defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import { assertNodeSpecAllowed, assertNodeTypeAllowed, isReservedChannel, nodePolicyOf } from "../node-policy.js";
+import { assertNodeSpecAllowed, assertNodeTypeAllowed, isReservedChannel, nodePolicyOf, withoutReservedKeys } from "../node-policy.js";
 import { applyOutput } from "./output.js";
 
 const configSchema = MapWithSchema;
@@ -77,9 +77,9 @@ export async function runMapItem(
     );
   }
   const renderedWith = renderDeep(originalWith, itemScope) as Record<string, unknown>;
-  const renderedInput = innerSpec["input"]
-    ? (renderDeep(innerSpec["input"], itemScope) as Record<string, unknown>)
-    : {};
+  const renderedInput = withoutReservedKeys(
+    innerSpec["input"] ? (renderDeep(innerSpec["input"], itemScope) as Record<string, unknown>) : {},
+  );
   const mergedConfig = { ...(parsed.data as Record<string, unknown>), ...renderedWith };
   const innerNodeSpec = { ...innerSpec, with: mergedConfig };
   const compiledInner = factory.build(buildCtx, innerNodeSpec, mergedConfig);
@@ -103,7 +103,7 @@ export async function runMapItem(
  */
 export function unwrapUpdate(res: NodeResult): unknown {
   const raw = "update" in res ? res.update : "command" in res ? (res.command.update ?? {}) : {};
-  // `__` bookkeeping channels (e.g. the agent's __agentReplay clear) are not results.
+  // `__` bookkeeping channels are not results.
   const update = Object.fromEntries(Object.entries(raw).filter(([k]) => !isReservedChannel(k)));
   const keys = Object.keys(update);
 
@@ -124,7 +124,21 @@ export function unwrapUpdate(res: NodeResult): unknown {
   return update;
 }
 
+/**
+ * The join's state update. `collect.to` / `collect.map` are author-chosen
+ * channel names, so `__` names are dropped here for every graph: the map
+ * node owns no engine channel.
+ */
 export function collectMapResults(
+  config: Config,
+  bag: Array<{ i: number; v: unknown }>,
+  nodeId: string,
+  baseScope: Record<string, unknown>,
+): Record<string, unknown> {
+  return withoutReservedKeys(collectMapUpdate(config, bag, nodeId, baseScope));
+}
+
+function collectMapUpdate(
   config: Config,
   bag: Array<{ i: number; v: unknown }>,
   nodeId: string,

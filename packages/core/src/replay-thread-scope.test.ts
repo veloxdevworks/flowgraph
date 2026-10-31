@@ -1,8 +1,8 @@
 /**
- * Agent replay entries are keyed `${threadId}:${nodeId}` in a process-wide
- * cache. Saved state from one thread must never fill another thread's
- * entries, and graphs must not be able to write the reserved channels that
- * carry them.
+ * Agent replay entries live in a store owned by one execution and are
+ * rebuilt on resume only from the thread's own interrupts. Saved state from
+ * one thread must never fill another thread's entries, and graphs must not be
+ * able to write the reserved channels.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -12,10 +12,9 @@ import { MemorySaver } from "@langchain/langgraph";
 import { AIMessage } from "@langchain/core/messages";
 import { afterEach, describe, expect, it } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
-import { compileGraph, hydrateDurableRuntime } from "./compiler.js";
+import { compileGraph } from "./compiler.js";
 import { createLangChainProvider } from "./index.js";
 import type { NodePolicy } from "./node-policy.js";
-import { clearAllReplayCaches, memoryReplayCache } from "./providers/replay-cache.js";
 import { resetServiceManager } from "./runtime/service-manager.js";
 import "./nodes/index.js";
 
@@ -69,7 +68,6 @@ function forgedStart(victimThread: string, marker: string): Record<string, unkno
 
 const markers: string[] = [];
 afterEach(async () => {
-  clearAllReplayCaches();
   await resetServiceManager();
   for (const m of markers.splice(0)) fs.rmSync(m, { force: true });
 });
@@ -105,28 +103,6 @@ describe("agent replay is scoped to its thread", () => {
     expect(Object.keys((values.__agentReplay as object | undefined) ?? {})).toEqual([]);
     expect(Object.keys((values.__services as object | undefined) ?? {})).toEqual([]);
     expect((values.__worktrees as unknown[] | undefined) ?? []).toEqual([]);
-  });
-
-  it("loading one thread's checkpoint never fills another thread's replay cache", async () => {
-    const marker = newMarker();
-    const entries = forgedStart("victim", marker)["victim:a"] as Record<string, unknown>;
-    const spec = plantSpec({});
-    await hydrateDurableRuntime(
-      {
-        values: { __agentReplay: { "victim:a": entries, "plant:x:a": entries } },
-        tasks: [
-          { interrupts: [{ id: "i1", value: { reason: "ok?", data: { __nodeId: "a", __agentReplay: { key: "victim:a", entries } } } }] },
-          { interrupts: [{ id: "i2", value: { reason: "ok?", data: { __nodeId: "gate", __agentReplay: { key: "plant:a", entries } } } }] },
-        ],
-      },
-      "plant",
-      spec,
-      { executeInvoke: async () => ({ status: "completed" }) as never, rehydrateWebhooks: false },
-    );
-    expect(memoryReplayCache.get("victim:a", "llm:0")).toBeUndefined();
-    expect(memoryReplayCache.get("plant:x:a", "llm:0")).toBeUndefined();
-    // A key that names this thread but a node other than the interrupting one is ignored too.
-    expect(memoryReplayCache.get("plant:a", "llm:0")).toBeUndefined();
   });
 
   it("a plant on another thread cannot make a trusted thread's agent start a service", async () => {

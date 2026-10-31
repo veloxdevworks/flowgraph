@@ -9,7 +9,7 @@ import { registry } from "../registry.js";
 import { ISSUES_CHANNEL_CAP, issueDedupeKey, type RunIssue } from "./run-issues.js";
 
 export const ONCE_CHANNEL = "__once";
-/** Serialized agent replay dumps keyed by `threadId:nodeId`. */
+/** Declared so checkpoints written by older versions still load; the engine no longer reads or writes it. */
 export const REPLAY_CHANNEL = "__agentReplay";
 /** Fan-in bag for checkpointed map workers: `{ [mapId]: Array<{ i, v }> }`. */
 export const MAP_COLLECT_CHANNEL = "__mapCollect";
