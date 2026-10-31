@@ -360,12 +360,15 @@ export class RunService {
    * shared thread-owner registry, so other replicas serve those threads to
    * their owners. Idempotent: threads that already have an owner are left
    * alone, and a meta owner that disagrees with the registry is logged, not
-   * changed. Runs from init() on multi-user servers.
+   * changed. Runs from init() on multi-user servers. A meta file that cannot
+   * be read is counted as `unreadable`, not as a thread without an owner;
+   * access to that thread is refused until the file can be read.
    */
-  async backfillThreadOwners(): Promise<{ claimed: number; existing: number; conflicts: number; skipped: number }> {
-    const counts = { claimed: 0, existing: 0, conflicts: 0, skipped: 0 };
+  async backfillThreadOwners(): Promise<{ claimed: number; existing: number; conflicts: number; skipped: number; unreadable: number }> {
+    const counts = { claimed: 0, existing: 0, conflicts: 0, skipped: 0, unreadable: 0 };
     const registry = await this.threadOwnerRegistry();
-    for (const meta of await listPersistedGraphs(this.config.graphStoreDir)) {
+    const onUnreadable = () => void counts.unreadable++;
+    for (const meta of await listPersistedGraphs(this.config.graphStoreDir, { onUnreadable })) {
       const owner = meta.owner;
       if (!meta.threadId || !owner?.id) {
         counts.skipped++;
@@ -379,7 +382,7 @@ export class RunService {
         log("warn", "thread-owners.backfill.conflict", { threadId: meta.threadId });
       }
     }
-    if (counts.claimed > 0 || counts.conflicts > 0) log("info", "thread-owners.backfill", counts);
+    if (counts.claimed > 0 || counts.conflicts > 0 || counts.unreadable > 0) log("info", "thread-owners.backfill", counts);
     return counts;
   }
 
