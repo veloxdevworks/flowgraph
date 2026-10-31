@@ -46,7 +46,7 @@ Each run on the same thread sees the earlier turns as real chat messages, the hi
 | `lastN` | `20` | For `strategy: last`: how many history and tool-loop messages to keep, besides the prompt. |
 | `toolResultMaxTokens` | none | Cut every tool result to this many tokens, with a `…[truncated: n of total tokens kept]` marker. |
 | `summarize.mode` | `model` | `model`: a model writes the summary. `extract`: a deterministic list of excerpts, with no model call. |
-| `summarize.provider` / `summarize.model` | the agent's own | Provider and model that write summaries. With neither set, the agent's own provider and model are used; a `model` alone runs on the agent's provider. Point these at a cheaper model to save cost. |
+| `summarize.provider` / `summarize.model` | the agent's own | Provider and model that write summaries. With neither set, the agent's own provider and model are used; a `model` alone runs on the agent's provider. Point these at a cheaper model to save cost. The provider is looked up like the agent's own, so a graph compiled with a node policy can only use the providers it was given. |
 | `summarize.maxTokens` | `500` | Size of the running summary. |
 | `summarize.instructions` | none | Extra instructions for the summary model. |
 | `issuesMaxTokens` | `min(1000, ¼ of maxTokens − reserveTokens)` | Cap on the "Known issues so far" section of the system text. The newest issues are kept; a line counts the ones left out. |
@@ -145,7 +145,7 @@ Only text is counted and sent: image and other non-text message parts in a histo
 
 ## 8. Interrupt, resume and replay
 
-Fitting is deterministic: each call depends only on the history channel, the prompt and the tool loop so far. On resume the agent refits every replayed step the same way, and summaries made by a model are kept in the agent's replay cache, so a run interrupted at every tool call sends the same inputs as a straight run and does not pay for a summary twice. This also holds when the process restarts between interrupt and resume.
+Fitting is deterministic: each call depends only on the history channel, the prompt and the tool loop so far. On resume the agent refits every replayed step the same way, and summaries made by a model are kept in the run's replay store under the agent's replay key, next to its cached model turns and tool results, so they are saved with an interrupt and reused on resume. A run interrupted at every tool call sends the same inputs as a straight run and does not pay for a summary twice. This also holds when the process restarts between interrupt and resume, and for an agent inside a subgraph or node called as another agent's tool.
 
 ## 9. Providers
 
