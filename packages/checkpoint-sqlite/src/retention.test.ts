@@ -95,6 +95,12 @@ describe("sqlite checkpoint retention", () => {
          VALUES ('short-1', 'o', 'p', 'g', '', '', '', 1)`,
       )
       .run();
+    backend.db
+      .prepare(`INSERT INTO fg_thread_owners (thread_id, owner, org, created_at) VALUES ('short-1', 'iss|alice', 'acme', 1)`)
+      .run();
+    backend.db
+      .prepare(`INSERT INTO fg_memory_ops (op_id, version, value, applied_at) VALUES ('op-short-1', 1, '{"ok":true}', 1)`)
+      .run();
     const before = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_items`).get() as { n: number };
     expect(before.n).toBe(1);
 
@@ -119,6 +125,10 @@ describe("sqlite checkpoint retention", () => {
     expect(got?.value).toEqual({ v: 1 });
     const binding = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_threads`).get() as { n: number };
     expect(binding.n).toBe(0);
+    const owner = backend.db.prepare(`SELECT owner FROM fg_thread_owners WHERE thread_id = 'short-1'`).get() as { owner: string } | undefined;
+    expect(owner?.owner).toBe("iss|alice");
+    const ops = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_ops WHERE op_id = 'op-short-1'`).get() as { n: number };
+    expect(ops.n).toBe(1);
   });
 
   it("keeps a single blob for a channel version that does not change", async () => {
@@ -309,6 +319,39 @@ describe("sqlite checkpoint retention", () => {
     );
     const tuple = await put.getTuple({ configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "future" } });
     expect(tuple?.pendingWrites?.some((write) => write[1] === "__interrupt__")).toBe(true);
+    db.close();
+  });
+
+  it("keeps an interrupt's replay snapshot after a successor checkpoint is stored", async () => {
+    const dbPath = tmpDb();
+    const saver = createSqliteCheckpointer({ path: dbPath });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const put = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+      getTuple(config: unknown): Promise<{ pendingWrites?: [string, string, unknown][] } | undefined>;
+    };
+    const replay = { node: '["gate"]', entries: { "0": { answer: "keep" } } };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    await put.put(
+      { configurable: { thread_id: "replay", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: 1 } },
+      { source: "loop", step: 1, parents: {} },
+    );
+    await put.putWrites(
+      { configurable: { thread_id: "replay", checkpoint_ns: "", checkpoint_id: "1" } },
+      [["__interrupt__", { value: { data: { __agentReplay: replay } } }]],
+      "task",
+    );
+    await put.put(
+      { configurable: { thread_id: "replay", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "2", channel_values: { n: 2 }, channel_versions: { n: 2 } },
+      { source: "loop", step: 2, parents: {} },
+    );
+    const tuple = await put.getTuple({ configurable: { thread_id: "replay", checkpoint_ns: "", checkpoint_id: "1" } });
+    const interrupt = tuple?.pendingWrites?.find((write) => write[1] === "__interrupt__");
+    const data = (interrupt?.[2] as { value?: { data?: { __agentReplay?: unknown } } } | undefined)?.value?.data;
+    expect(data?.__agentReplay).toEqual(replay);
     db.close();
   });
 

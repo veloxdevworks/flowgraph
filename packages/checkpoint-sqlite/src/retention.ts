@@ -411,6 +411,10 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
       this.sqlite.prepare(`DELETE FROM fg_checkpoint_blobs WHERE thread_id = ?`).run(threadId);
       this.sqlite.prepare(`DELETE FROM fg_checkpoint_pins WHERE thread_id = ?`).run(threadId);
       this.sqlite.prepare(`DELETE FROM fg_checkpoint_threads WHERE thread_id = ?`).run(threadId);
+      // The scope binding is only meaningful while this thread's checkpoints
+      // exist. Thread ownership and memory replay records are not checkpoint
+      // history: fg_thread_owners stays so another caller cannot claim the id,
+      // and fg_memory_ops stays for the memory sweeper.
       const memoryThreads = this.sqlite
         .prepare(`SELECT 1 AS n FROM sqlite_master WHERE type = 'table' AND name = 'fg_memory_threads'`)
         .get();

@@ -6,9 +6,7 @@
 
 import { parseExpr } from "./parser.js";
 import { evalExpr, type EvalScope } from "./evaluator.js";
-
-const TEMPLATE_RE = /\{\{(.*?)\}\}/gs;
-const SOLE_EXPR_RE = /^\s*\{\{(.*?)\}\}\s*$/s;
+import { scanTemplate, soleTemplateExpr } from "./scan.js";
 
 /**
  * Render a template string, interpolating {{ expr }} blocks.
@@ -17,17 +15,23 @@ const SOLE_EXPR_RE = /^\s*\{\{(.*?)\}\}\s*$/s;
  * returns the typed result value. Otherwise returns an interpolated string.
  */
 export function renderTemplate(template: string, scope: EvalScope, strict = false): unknown {
-  const soleMatch = SOLE_EXPR_RE.exec(template);
-  if (soleMatch?.[1] != null) {
-    const ast = parseExpr(soleMatch[1].trim());
+  const sole = soleTemplateExpr(template);
+  if (sole !== undefined) {
+    const ast = parseExpr(sole.trim());
     return evalExpr(ast, scope, strict);
   }
 
-  return template.replace(TEMPLATE_RE, (_, expr: string) => {
-    const ast = parseExpr(expr.trim());
+  const { spans } = scanTemplate(template);
+  if (spans.length === 0) return template;
+  let out = "";
+  let at = 0;
+  for (const span of spans) {
+    const ast = parseExpr(span.expr.trim());
     const result = evalExpr(ast, scope, strict);
-    return stringifyInterpolated(result);
-  });
+    out += template.slice(at, span.start) + stringifyInterpolated(result);
+    at = span.end;
+  }
+  return out + template.slice(at);
 }
 
 /**
@@ -107,11 +111,9 @@ export function collectRefs(template: string): Set<string> {
     else if (node.kind === "Object") node.entries.forEach((e) => walk(e.value));
   }
 
-  let m: RegExpExecArray | null;
-  const re = /\{\{(.*?)\}\}/gs;
-  while ((m = re.exec(template)) !== null) {
+  for (const span of scanTemplate(template).spans) {
     try {
-      walk(parseExpr(m[1]!.trim()));
+      walk(parseExpr(span.expr.trim()));
     } catch {
       // ignore parse errors in static analysis
     }

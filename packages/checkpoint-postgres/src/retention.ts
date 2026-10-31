@@ -187,6 +187,8 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     await pool.query(`DELETE FROM ${this.q}.fg_memory_threads WHERE thread_id = $1`).catch((err: { code?: string }) => {
       if (err.code !== "42P01") throw err;
     });
+    // fg_thread_owners and fg_memory_ops are left in place. Ownership outlives
+    // the checkpoints, and memory replay records belong to the memory sweeper.
     await this.maybeVacuum(Number(counted.rows[0]?.n ?? 0), this.retention);
   }
 

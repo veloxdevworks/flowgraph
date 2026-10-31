@@ -274,8 +274,8 @@ describe("LangChain provider (built into @flowgraph/core)", () => {
     expect(first.status).toBe("interrupted");
     expect(invokes).toBe(1);
 
-    const { clearAllReplayCaches } = await import("../replay-cache.js");
-    clearAllReplayCaches();
+    // Each resume is a new execution with an empty replay store (as after a
+    // restart): entries come back only from the interrupt in the checkpoint.
 
     const resumed = await compiled.resume({ threadId, resume: true, onInterrupt: "fail" });
     expect(resumed.status).toBe("completed");

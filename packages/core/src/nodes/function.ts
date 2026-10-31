@@ -10,6 +10,7 @@ import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { applyOutput } from "./output.js";
+import { assertFunctionAllowed, nodePolicyOf } from "../node-policy.js";
 
 // Function registry separate from the node registry
 const fnRegistry = new Map<string, (input: unknown, ctx: NodeRunContext) => Promise<unknown> | unknown>();
@@ -40,6 +41,7 @@ export const functionNode = defineNode<Config>({
       capabilities: {},
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
+        assertFunctionAllowed(nodePolicyOf(ctx), config.fn, `function node "${ctx.nodeId}"`);
         const fn = fnRegistry.get(config.fn);
         if (!fn) {
           throw new Error(

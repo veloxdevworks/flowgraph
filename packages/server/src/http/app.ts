@@ -1,5 +1,6 @@
 import * as http from "node:http";
-import { checkBearerAuth, isAgentCorePath, writeUnauthorized } from "../auth.js";
+import { isAgentCorePath } from "../auth.js";
+import { checkStartupAuth, OidcAuthenticator, type AuthOutcome, type Principal } from "../identity.js";
 import { credentialStatus } from "../credentials.js";
 import { isEphemeralGraphStore, processIdentity } from "../diagnostics.js";
 import { errorFields, log } from "../metrics.js";
@@ -57,19 +58,22 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
     }
 
     try {
+      const authenticator = service.authenticator;
       if (isAgentCorePath(url.pathname)) {
-        const handled = await handleAgentCore(req, res, service, url.pathname);
+        // Outside OIDC mode AgentCore authenticates at the edge (SigV4); with
+        // OIDC, /invocations carries the caller's bearer JWT like REST does.
+        let principal: Principal | undefined;
+        if (url.pathname === "/invocations" && authenticator.mode === "oidc") {
+          const auth = await authenticator.authenticate(req.headers.authorization);
+          if (!auth.ok) return writeAuthFailure(res, auth);
+          principal = auth.principal;
+        }
+        const handled = await handleAgentCore(req, res, service, url.pathname, principal);
         if (handled) return;
       } else {
-        const auth = checkBearerAuth(req, {
-          authToken: config.authToken,
-          authDisabled: config.authDisabled,
-        });
-        if (!auth.ok) {
-          writeUnauthorized(res, auth.message);
-          return;
-        }
-        const handled = await handleRest(req, res, service, url);
+        const auth = await authenticator.authenticate(req.headers.authorization);
+        if (!auth.ok) return writeAuthFailure(res, auth);
+        const handled = await handleRest(req, res, service, url, auth.principal);
         if (handled) return;
       }
 
@@ -118,11 +122,29 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
   });
 }
 
+function writeAuthFailure(res: http.ServerResponse, auth: Extract<AuthOutcome, { ok: false }>): void {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (auth.status === 401) headers["WWW-Authenticate"] = 'Bearer realm="flowgraph"';
+  res.writeHead(auth.status, headers);
+  res.end(JSON.stringify({ error: auth.message, code: auth.code }));
+}
+
 export async function listen(
   service: RunService,
   config: ServerConfig,
 ): Promise<http.Server> {
+  for (const message of checkStartupAuth(config)) log("warn", "auth.legacy", { message });
   await service.init();
+  const authenticator = service.authenticator;
+  if (authenticator instanceof OidcAuthenticator) {
+    try {
+      await authenticator.warmUp();
+      log("info", "auth.oidc.ready", { issuer: authenticator.config.issuer });
+    } catch (err) {
+      // Requests retry discovery; a down issuer at boot should not crash-loop the task.
+      log("warn", "auth.oidc.discovery-failed", { issuer: authenticator.config.issuer, ...errorFields(err) });
+    }
+  }
   const server = createHttpServer(service, config);
   await new Promise<void>((resolve, reject) => {
     server.listen(config.port, config.host, () => resolve());
@@ -131,8 +153,7 @@ export async function listen(
   log("info", "server listening", {
     host: config.host,
     port: config.port,
-    auth: Boolean(config.authToken),
-    authDisabled: Boolean(config.authDisabled),
+    auth: service.authenticator.mode,
   });
   if (isEphemeralGraphStore(config.graphStoreDir)) {
     log("warn", "graph-store.tmp", {
@@ -142,10 +163,10 @@ export async function listen(
     });
   }
   logVoicePolicy(config);
-  if (!config.authToken && !config.authDisabled) {
+  if (service.authenticator.mode === "token" && !config.authToken) {
     log("warn", "auth.required", {
       message:
-        "REST requires FLOWGRAPH_AUTH_TOKEN (or set FLOWGRAPH_AUTH_DISABLED=1 for local/dev).",
+        "REST refuses every request: set FLOWGRAPH_OIDC_ISSUER and FLOWGRAPH_OIDC_AUDIENCE (or FLOWGRAPH_AUTH_TOKEN for a single-user server, or FLOWGRAPH_AUTH_DISABLED=1 for local/dev).",
     });
   }
 

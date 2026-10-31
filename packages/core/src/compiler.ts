@@ -7,7 +7,8 @@ import { START, END, StateGraph, Command, Send, type BaseCheckpointSaver, type B
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
-import type { GraphSpec } from "@flowgraph/spec";
+import type { GraphSpec, NodeSpec } from "@flowgraph/spec";
+import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
@@ -21,7 +22,7 @@ import {
   type RunMeta,
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
-import { buildStateAnnotation, ONCE_CHANNEL, REPLAY_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import { buildStateAnnotation, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
 import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 import {
   isRetentionSaver,
@@ -39,7 +40,7 @@ import {
   type RunIssue,
 } from "./runtime/run-issues.js";
 import { OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
-import { ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
+import { collectNodeWriteChannels, ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
@@ -54,7 +55,8 @@ import {
 import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
 import { cleanupWorktrees } from "./nodes/worktree.js";
 import { registerProvider, type ProviderAdapter } from "./providers/index.js";
-import { clearThreadReplayCache, hydrateReplay, hydrateReplayFromInterruptPayload, replayCacheKey, snapshotReplay } from "./providers/replay-cache.js";
+import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
+import { ReplayStore, RUN_SCOPE_KEY, replayNodeKey, replayStoreFromInterrupts, runScopeOf, type RunScope } from "./providers/replay-cache.js";
 import { collectMapResults, mapSyntheticIds, runMapItem, type MapTask } from "./nodes/map.js";
 import type { ToolWiring } from "./providers/tools.js";
 import type { BudgetState } from "./context.js";
@@ -65,6 +67,22 @@ import { hooksFromSpec, defaultGuardrailHooks } from "./hooks/builtin.js";
 import "./nodes/index.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
+import {
+  NODE_POLICY,
+  assertGraphRuntimeAllowed,
+  assertGraphToolsAllowed,
+  assertHostExecAllowed,
+  assertHostProbeAllowed,
+  assertNoReservedChannels,
+  assertImportsAllowed,
+  isReservedChannel,
+  withoutReservedKeys,
+  assertNoReservedInput,
+  hostExecAllowed,
+  assertNodeSpecAllowed,
+  assertNodeTypeAllowed,
+  type NodePolicy,
+} from "./node-policy.js";
 
 export type InterruptPolicy = "prompt" | "fail" | "approve" | "webhook";
 
@@ -102,6 +120,19 @@ export interface CompileOptions {
    * graph still sees only its own keys. Does not enable `ctx.memory`.
    */
   legacyStoreBackend?: MemoryBackend;
+  /**
+   * Identity for memory runtimes this compile builds without a host identity:
+   * the `legacyStoreBackend` runtime and in-process ones. A multi-user host
+   * passes the caller's org/project so graphs with the same name in different
+   * orgs never share `ctx.store` keys. Default: { org: "local", project: "local" }.
+   */
+  memoryIdentity?: MemoryIdentity;
+  /**
+   * Limits on what this graph may run (blocked node types, file subgraphs,
+   * host secrets). Checked as nodes are built, including map inners, agent
+   * skill tools and embedded subgraphs at run time. Unset: no limits.
+   */
+  nodePolicy?: NodePolicy;
   /**
    * How to get durable memory on this host, shown in the
    * MEMORY_BACKEND_UNAVAILABLE error instead of the CLI/library advice when a
@@ -165,9 +196,12 @@ export interface RunOptions {
   threadId?: string;
   signal?: AbortSignal;
   /**
-   * Graceful pause: after the current node completes, stop and return
-   * `status: "paused"` so the thread can later be resumed via `continueRun`.
-   * Distinct from `signal`, which hard-cancels (not resumable).
+   * Graceful pause: stop before the next node of the top-level graph starts
+   * and return `status: "paused"` so the thread can later be resumed via
+   * `continueRun`. Nodes already running finish first, with everything they
+   * run: the nodes of an embedded subgraph, the items of a map, and nodes
+   * or subgraphs an agent calls as tools. Distinct from `signal`, which
+   * hard-cancels (not resumable).
    */
   pauseSignal?: AbortSignal;
   sinks?: EventSink[];
@@ -355,14 +389,25 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       unregisterWebhookRoute(threadId);
     }
 
-    // A fresh start must not replay agent LLM/tool results left behind by an
-    // interrupted run on the same thread that was never resumed.
-    if (mode === "start") {
-      clearThreadReplayCache(threadId);
-    } else if (checkpointer) {
+    // Reserved channels are the engine's own bookkeeping; callers never set them.
+    if (mode === "start" && payload != null && !(payload instanceof Command)) {
+      assertNoReservedInput(payload, `graph "${graphSpec.metadata.name}" run`);
+    }
+
+    // Agent replay entries belong to this execution only. A fresh start begins
+    // empty; resume/continue load the snapshots the engine attached to this
+    // thread's pending interrupts. Nodes (and embedded subgraphs) reach the
+    // store through the invoke config, never through a process-wide cache.
+    let replay = new ReplayStore();
+    if (mode !== "start" && checkpointer) {
       const snap = await compiledLg.getState(cfg);
+      // `threadId` lets interrupts saved by earlier releases (keyed
+      // `<threadId>:<nodeId>`) resume without re-running approved tools.
+      const pending = pendingInterrupts(snap);
+      replay = replayStoreFromInterrupts(pending.values, { threadId, taskRoots: pending.taskRoots });
       await hydrateDurableRuntime(snap, threadId, graphSpec, {
         executeInvoke,
+        nodePolicy: opts.nodePolicy,
         rehydrateWebhooks: mode !== "resume",
         ...(runOpts.signal ? { signal: runOpts.signal } : {}),
         ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
@@ -373,6 +418,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         mode = "resume";
       }
     }
+
+    const runScope: RunScope = { replay, path: [], meta: runMeta };
+    (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
 
     const startEvent =
       mode === "resume" ? "interrupt.resumed" : mode === "continue" ? "run.continued" : "run.start";
@@ -390,6 +438,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           payload: { input: current as Record<string, unknown> },
         });
         if (r.payload.input) current = r.payload.input;
+        // A run:before hook's replacement input is run input too.
+        assertNoReservedInput(current, `graph "${graphSpec.metadata.name}" run (after run:before hooks)`);
       }
 
       // Bind this thread's memory scope (subject rendered from input/run at start;
@@ -483,7 +533,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             await hooks.run("run:after", { state: clean, run: runMeta, payload: { update: clean } });
           }
           events.emit("run.end", { state: clean, durationMs: Date.now() - startMs });
-          await maybeTerminateServices(graphSpec, threadId, result);
+          await maybeTerminateServices(graphSpec, threadId, result, opts.nodePolicy);
           return finish({ status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs });
         }
 
@@ -519,6 +569,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           threadId,
           graphSpec,
           executeInvoke,
+          nodePolicy: opts.nodePolicy,
           ...(runOpts.signal ? { signal: runOpts.signal } : {}),
           ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
         });
@@ -598,14 +649,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const error = err instanceof Error ? err : new Error(String(err));
       if (isAbortFailure(err, runOpts.signal)) {
         events.emit("run.aborted", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
-        await maybeTerminateServices(graphSpec, threadId);
+        await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
         return finish({ status: "aborted", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
       }
       if (hooks.has("run:error")) {
         try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
       }
       events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
-      await maybeTerminateServices(graphSpec, threadId);
+      await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
       return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
     } finally {
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
@@ -696,7 +747,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     getState: async (threadId: string) => {
       if (!checkpointer) return null;
       let snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
-      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, rehydrateWebhooks: true });
+      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, nodePolicy: opts.nodePolicy, rehydrateWebhooks: true });
       const expired = expiredWaitResume(snap);
       if (expired) {
         await executeInvoke(new Command({ resume: expired }), { threadId, resume: expired, onInterrupt: "fail" }, "resume");
@@ -751,8 +802,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   for (const extra of opts.extraFactories ?? []) {
     if (!registry.has(extra.type)) registry.register(extra);
   }
-  for (const provider of opts.providers ?? []) registerProvider(provider);
+  // Providers stay with this graph (see GRAPH_PROVIDERS below). Without a
+  // policy they are also registered process-wide, as before, for code that
+  // looks them up by name outside a run.
+  if (!opts.nodePolicy) for (const provider of opts.providers ?? []) registerProvider(provider);
 
+  // Refused before anything is loaded: imports register modules for the whole process.
+  assertImportsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
   const imported = await loadGraphImports(spec, { cwd: graphDir });
   const skillAliases: Record<string, string> = { ...(opts.runConfig?.skills ?? {}), ...imported.skillAliases };
   const agentAliases: Record<string, string> = { ...(opts.runConfig?.agents ?? {}), ...imported.agentAliases };
@@ -772,7 +828,23 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     };
   }
 
-  const toolWiring: ToolWiring = { mcp: opts.mcp };
+  assertGraphToolsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
+  assertGraphRuntimeAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
+  {
+    // Every node, map inner and inline subgraph (and its declared channels) at any depth.
+    const channels = [...Object.keys(spec.state?.channels ?? {})];
+    walkNodes(spec, (n) => {
+      channels.push(...collectNodeWriteChannels(n as NodeSpec));
+      const inline = (n as { spec?: GraphSpec }).spec;
+      if (inline && typeof inline === "object") channels.push(...Object.keys(inline.state?.channels ?? {}));
+      assertReplaySafeNodeId((n as { id?: unknown }).id);
+      assertNodeSpecAllowed(opts.nodePolicy, n as { type?: unknown; with?: unknown }, `node "${String((n as { id?: unknown }).id ?? "?")}"`);
+    });
+    assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
+  }
+  // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
+  const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
+  const toolWiring: ToolWiring = { mcp: mcpHub };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();
 
   const hooks: HookBus = createHookBus(events);
@@ -796,10 +868,19 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     workspace: graphWorkspace,
     budget,
     hooks,
-    mcp: opts.mcp,
+    mcp: mcpHub,
     store,
   };
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
+  if (opts.nodePolicy) (baseCtx as Record<symbol, unknown>)[NODE_POLICY] = opts.nodePolicy;
+  if (opts.providers?.length || opts.nodePolicy) {
+    const graphProviders: GraphProviders = {
+      byName: new Map((opts.providers ?? []).map((p) => [p.name, p])),
+      // Under a policy, nothing outside what the graph was compiled with.
+      exclusive: !!opts.nodePolicy,
+    };
+    (baseCtx as Record<symbol, unknown>)[GRAPH_PROVIDERS] = graphProviders;
+  }
 
   const defaultRetry = spec.runtime?.retry;
   const defaultTimeout = spec.runtime?.timeoutDefault;
@@ -807,6 +888,15 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const mapJoinById = new Map<string, string>();
 
   for (const nodeSpec of spec.nodes) {
+    assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
+    assertHostProbeAllowed(opts.nodePolicy, (nodeSpec.with as { requires?: unknown[] } | undefined)?.requires, `node "${nodeSpec.id}"`);
+    assertNodeSpecAllowed(opts.nodePolicy, nodeSpec, `node "${nodeSpec.id}"`);
+    if (nodeSpec.type === "map") {
+      const inner = (nodeSpec.with as { node?: { type?: unknown; with?: { requires?: unknown[] } } } | undefined)?.node;
+      if (typeof inner?.type === "string") assertNodeTypeAllowed(opts.nodePolicy, inner.type, `map node "${nodeSpec.id}" inner node`);
+      assertHostProbeAllowed(opts.nodePolicy, inner?.with?.requires, `map node "${nodeSpec.id}" inner node`);
+      if (inner) assertNodeSpecAllowed(opts.nodePolicy, inner, `map node "${nodeSpec.id}" inner node`);
+    }
     const factory = registry.get(nodeSpec.type);
     if (!factory) throw new Error(`Node type "${nodeSpec.type}" is not registered.`);
 
@@ -875,13 +965,16 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
         },
       );
 
-    const finalizeUpdate = (run: NodeRun): Record<string, unknown> => {
-      const update = resultToUpdate(run.res);
-      const onceUpdates = run.ctx._onceUpdates;
-      if (Object.keys(onceUpdates).length > 0) update[ONCE_CHANNEL] = onceUpdates;
-      if (run.ctx._issueUpdates.length > 0) update[ISSUES_CHANNEL] = run.ctx._issueUpdates;
-      return update;
+    // A node's update loses reserved channels its type does not own; engine
+    // bookkeeping (`__once`, `__issues`) is added afterwards. Also applied to
+    // what node:after / state:beforeUpdate hooks hand back.
+    const sealUpdate = (update: Record<string, unknown>, run: NodeRun): Record<string, unknown> => {
+      const sealed = { ...dropUnownedReserved(update, nodeSpec.type, opts.nodePolicy) };
+      if (Object.keys(run.ctx._onceUpdates).length > 0) sealed[ONCE_CHANNEL] = run.ctx._onceUpdates;
+      if (run.ctx._issueUpdates.length > 0) sealed[ISSUES_CHANNEL] = run.ctx._issueUpdates;
+      return sealed;
     };
+    const finalizeUpdate = (run: NodeRun): Record<string, unknown> => sealUpdate(resultToUpdate(run.res), run);
 
     // Routers (and any routing-capable node) declare Command.goto destinations via
     // `ends` so LangGraph accepts goto without requiring a duplicate branch edge.
@@ -889,12 +982,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
 
     graph.addNode(nodeSpec.id, async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
-      const runMeta = (baseCtx.meta ?? { runId, graph: spec.metadata.name, startedAt: "" }) as RunMeta;
+      const runMeta = (runScopeOf(lgConfig)?.meta ?? baseCtx.meta ?? { runId, graph: spec.metadata.name, startedAt: "" }) as RunMeta;
 
       // Graceful pause: park before this node so continueRun can resume it.
       const pauseSignal = (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       if (pauseSignal?.aborted) {
-        lgInterrupt({ reason: "paused", __flowgraphPause: true });
+        const data = withReplayData(undefined, runScopeOf(lgConfig), nodeSpec.id);
+        lgInterrupt({ reason: "paused", __flowgraphPause: true, ...(data !== undefined ? { data } : {}) });
       }
 
       // `when` guard
@@ -920,7 +1014,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
           return {};
         }
         if (c?.kind === "route") return new Command({ goto: c.to }) as unknown as Record<string, unknown>;
-        if (c?.kind === "interrupt") lgInterrupt({ reason: c.reason, data: c.payload });
+        if (c?.kind === "interrupt") {
+          // Interrupt data carries the engine's `__nodeId` / `__agentReplay`; a hook supplies none.
+          const data = c.payload && typeof c.payload === "object" && !Array.isArray(c.payload)
+            ? withoutReservedKeys(c.payload as Record<string, unknown>)
+            : c.payload;
+          lgInterrupt({ reason: c.reason, data: withReplayData(data, runScopeOf(lgConfig), nodeSpec.id) });
+        }
         inputOverride = r.payload.input as Record<string, unknown> | undefined;
       }
 
@@ -944,13 +1044,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
             events.emit("node.end", { nodeId: nodeSpec.id, update, routed: c.to }, scope);
             return new Command({ goto: c.to, update }) as unknown as Record<string, unknown>;
           }
-          update = (r.payload.update as Record<string, unknown> | undefined) ?? update;
+          update = sealUpdate((r.payload.update as Record<string, unknown> | undefined) ?? update, run);
         }
 
         // state:beforeUpdate — redact / transform the delta before commit
         if (hooks.has("state:beforeUpdate")) {
           const r = await hooks.run("state:beforeUpdate", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, update } });
-          update = (r.payload.update as Record<string, unknown> | undefined) ?? update;
+          update = sealUpdate((r.payload.update as Record<string, unknown> | undefined) ?? update, run);
         }
 
         if (nodeGoto != null) {
@@ -1011,15 +1111,20 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   // its input against the calling agent's state snapshot. Returns the node's
   // raw result (the outputs slug) so the LLM sees clean data, not the update envelope.
   toolWiring.invokeNode = async (id, args, ctx, state = {}) => {
+    if (spec.nodes.find((n) => n.id === id)?.type === "map") {
+      throw new Error(`node-as-tool: map node "${id}" cannot be called as a tool; put it in a subgraph and call that instead.`);
+    }
     const target = compiledNodes.get(id);
     if (!target) throw new Error(`node-as-tool: no node "${id}" in this graph.`);
+    // Model-chosen arguments become the node's input (and a subgraph's input state).
+    const toolArgs = withoutReservedKeys(args ?? {});
     const childCtx = {
       ...ctx,
       nodeId: id,
-      _input: args,
+      _input: toolArgs,
       render(template: string, extra: Record<string, unknown> = {}) {
         const issues = (state[ISSUES_CHANNEL] as RunIssue[] | undefined) ?? [];
-        return renderDeep(template, { state, input: args, config: ctx.config, run: ctx.meta, issues, ...extra });
+        return renderDeep(template, { state, input: toolArgs, config: ctx.config, run: ctx.meta, issues, ...extra });
       },
       issue(input: IssueInput) {
         const targetType = spec.nodes.find((n) => n.id === id)?.type;
@@ -1309,7 +1414,9 @@ function resolveMemory(
       m && typeof m === "object" ? ("backend" in m ? (m as MemoryHostOptions) : { backend: m as MemoryBackend }) : undefined;
     const graph = spec.metadata.name;
     const wantsDurable = memCfg ? (memCfg.backend ?? "checkpoint") === "checkpoint" : storeAlias;
-    const ephemeral = () => createEphemeralMemoryRuntime(graph, { config: memCfg, exposeMemory, identity: host?.identity });
+    const fallbackIdentity = opts.memoryIdentity ?? LOCAL_MEMORY_IDENTITY;
+    const ephemeral = () =>
+      createEphemeralMemoryRuntime(graph, { config: memCfg, exposeMemory, identity: host?.identity ?? fallbackIdentity });
     if (memCfg?.backend === "memory") {
       runtime = ephemeral();
     } else if (host && exposeMemory) {
@@ -1318,7 +1425,7 @@ function resolveMemory(
       // plain graph keeps its process-local ctx.store as before.
       runtime = new MemoryRuntime({
         backend: host.backend,
-        identity: host.identity ?? LOCAL_MEMORY_IDENTITY,
+        identity: host.identity ?? fallbackIdentity,
         graph,
         config: memCfg,
         exposeMemory,
@@ -1335,7 +1442,7 @@ function resolveMemory(
     } else if (opts.legacyStoreBackend && !exposeMemory) {
       runtime = new MemoryRuntime({
         backend: opts.legacyStoreBackend,
-        identity: host?.identity ?? LOCAL_MEMORY_IDENTITY,
+        identity: host?.identity ?? fallbackIdentity,
         graph,
         config: memCfg,
         exposeMemory: false,
@@ -1350,6 +1457,37 @@ function resolveMemory(
   else if (!storeEnabled || opts.store === "none" || storeBackend === "none") store = undefined;
   else store = runtime?.legacyStore();
   return { runtime, store };
+}
+
+/** Reserved channels each node type writes itself; every other node's write to them is dropped. */
+const OWNED_RESERVED: Readonly<Record<string, readonly string[]>> = {
+  service: [SERVICES_CHANNEL],
+  worktree: [WORKTREES_CHANNEL],
+};
+const ENGINE_CHANNELS: ReadonlySet<string> = new Set([...RESERVED_STATE_CHANNELS, "__interrupt__"]);
+
+/**
+ * Drop reserved channels from a node's update unless its type owns them
+ * (service → `__services`, worktree → `__worktrees`).
+ * Engine channels are always dropped otherwise, so a function, router,
+ * subgraph merge or output mapping can never plant service commands,
+ * worktree paths or replayed tool results. Under a policy, every other `__`
+ * name is dropped too.
+ */
+function dropUnownedReserved(
+  update: Record<string, unknown>,
+  nodeType: string,
+  policy: NodePolicy | undefined,
+): Record<string, unknown> {
+  const owned = OWNED_RESERVED[nodeType] ?? [];
+  let out: Record<string, unknown> | undefined;
+  for (const k of Object.keys(update)) {
+    if (!isReservedChannel(k) || owned.includes(k)) continue;
+    if (!ENGINE_CHANNELS.has(k) && !policy) continue;
+    out ??= { ...update };
+    delete out[k];
+  }
+  return out ?? update;
 }
 
 function resultToUpdate(result: NodeResult): Record<string, unknown> {
@@ -1475,8 +1613,11 @@ async function attachWebhookUrls(
     ) => Promise<RunResult>;
     signal?: AbortSignal;
     sinks?: EventSink[];
+    nodePolicy?: NodePolicy | undefined;
   },
 ): Promise<void> {
+  // Never listen on a host port for a graph whose policy refuses inbound webhooks.
+  if (opts.nodePolicy?.blockInboundWebhooks) return;
   const webhookInterrupts = interrupts.filter(isWebhookInterrupt);
   if (webhookInterrupts.length === 0) return;
 
@@ -1525,17 +1666,22 @@ async function attachWebhookUrls(
 }
 
 function stripReserved(state: Record<string, unknown>): Record<string, unknown> {
-  const reserved = new Set<string>([...RESERVED_STATE_CHANNELS, "__interrupt__"]);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(state)) {
-    if (reserved.has(k)) continue;
+    if (isReservedChannel(k)) continue;
     out[k] = v;
   }
   return out;
 }
 
 /** Tear down non-keepAlive services (and optional worktrees) when a run reaches completed/error. */
-async function maybeTerminateServices(spec: GraphSpec, threadId: string, state?: Record<string, unknown>): Promise<void> {
+/** @internal Exported for tests. */
+export async function maybeTerminateServices(
+  spec: GraphSpec,
+  threadId: string,
+  state?: Record<string, unknown>,
+  policy?: NodePolicy,
+): Promise<void> {
   const terminate = spec.runtime?.services?.terminateOnEnd ?? true;
   if (terminate) {
     try {
@@ -1544,7 +1690,8 @@ async function maybeTerminateServices(spec: GraphSpec, threadId: string, state?:
       /* best-effort cleanup — do not fail the run result */
     }
   }
-  if (spec.runtime?.worktrees?.cleanupOnEnd) {
+  // `git worktree remove` on paths from state only where worktree nodes could have made them.
+  if (spec.runtime?.worktrees?.cleanupOnEnd && hostExecAllowed(policy, "worktree")) {
     const entries = (state?.[WORKTREES_CHANNEL] as Array<{ path?: unknown; repo?: unknown }>) ?? [];
     await cleanupWorktrees(entries);
   }
@@ -1560,11 +1707,18 @@ function buildNodeCtx(
   inputOverride?: Record<string, unknown>,
   lgConfig?: LangGraphRunnableConfig,
 ) {
-  const scope = { state, config: base.config ?? {}, run: base.meta ?? {} };
-  const _input = inputOverride
-    ?? (nodeSpec["input"]
-      ? (renderDeep(nodeSpec["input"] as Record<string, string>, scope) as Record<string, unknown>)
-      : {});
+  // Embedded subgraphs have no run of their own: their nodes report the
+  // top graph's run and thread (from the run scope in the invoke config).
+  const runScope = runScopeOf(lgConfig);
+  const meta = (runScope?.meta ?? base.meta) as RunMeta | undefined;
+  const scope = { state, config: base.config ?? {}, run: meta ?? {} };
+  // Rendered `input` and node:before replacements alike lose `__` keys.
+  const _input = withoutReservedKeys(
+    inputOverride
+      ?? (nodeSpec["input"]
+        ? (renderDeep(nodeSpec["input"] as Record<string, string>, scope) as Record<string, unknown>)
+        : {}),
+  );
 
   const nodeId = String(nodeSpec["id"]);
   const nodeType = String(nodeSpec["type"]);
@@ -1591,7 +1745,7 @@ function buildNodeCtx(
     _lgConfig?: LangGraphRunnableConfig;
   } = {
     ...(base as RunContext),
-    meta: (base.meta ?? { runId: "", graph: "", startedAt: "" }) as RunContext["meta"],
+    meta: (meta ?? { runId: "", graph: "", startedAt: "" }) as RunContext["meta"],
     secrets: base.secrets!,
     events,
     logger,
@@ -1608,25 +1762,21 @@ function buildNodeCtx(
         state,
         input: _input,
         config: base.config,
-        run: base.meta,
+        run: meta,
         issues,
         ...extra,
       });
     },
     emit(type, data) { events.emit(type, data, { nodeId, nodeType, ...(parentSpanId ? { parentSpanId } : {}) }); },
     interrupt<T = unknown>(payload: { reason: string; data?: unknown; kind?: import("./context.js").InterruptKind }): T {
+      // `__` keys in interrupt data are the engine's (`__nodeId`, `__agentReplay`);
+      // drop any the node or graph author put there before adding ours.
       const data =
         payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
-          ? { ...(payload.data as Record<string, unknown>), __nodeId: nodeId }
+          ? { ...withoutReservedKeys(payload.data as Record<string, unknown>), __nodeId: nodeId }
           : { ...(payload.data !== undefined ? { value: payload.data } : {}), __nodeId: nodeId };
-      const threadId = (base.meta as RunMeta | undefined)?.threadId ?? (base.meta as RunMeta | undefined)?.runId;
-      if (threadId) {
-        const key = replayCacheKey(threadId, nodeId);
-        const dump = snapshotReplay(key);
-        if (Object.keys(dump).length > 0) {
-          (data as Record<string, unknown>)["__agentReplay"] = { key, entries: dump };
-        }
-      }
+      const replay = replayAttachment(runScope, nodeId);
+      if (replay) (data as Record<string, unknown>)["__agentReplay"] = replay;
       const tagged = { ...payload, data };
       events.emit("interrupt.raised", { reason: tagged.reason, data: tagged.data }, { nodeId, nodeType });
       return lgInterrupt(tagged) as T;
@@ -1649,8 +1799,8 @@ function buildNodeCtx(
         appendRunIssue(
           resolvedWorkspace,
           runIssuesKey({
-            ...(base.meta?.threadId ? { threadId: base.meta.threadId } : {}),
-            ...(base.meta?.runId ? { runId: base.meta.runId } : {}),
+            ...(meta?.threadId ? { threadId: meta.threadId } : {}),
+            ...(meta?.runId ? { runId: meta.runId } : {}),
           }),
           stamped,
         );
@@ -1665,12 +1815,12 @@ function buildNodeCtx(
   const memoryRuntime = (base as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
   if (memoryRuntime?.exposeMemory) {
     const conf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
-    const threadId = typeof conf["thread_id"] === "string" ? conf["thread_id"] : base.meta?.threadId;
+    const threadId = typeof conf["thread_id"] === "string" ? conf["thread_id"] : meta?.threadId;
     const memory = memoryRuntime.memoryFor(threadId, {
       checkpointNs: typeof conf["checkpoint_ns"] === "string" ? conf["checkpoint_ns"] : undefined,
       taskId: typeof conf["__pregel_task_id"] === "string" ? conf["__pregel_task_id"] : undefined,
       nodeId,
-      runId: base.meta?.runId,
+      runId: meta?.runId,
     });
     if (memory) ctx.memory = memory;
   }
@@ -1699,7 +1849,114 @@ function expiredWaitResume(snap: {
   return undefined;
 }
 
-async function hydrateDurableRuntime(
+/** Values of the pending interrupts in a thread snapshot (engine-written payloads). */
+/**
+ * The replay entries to attach to an interrupt raised by node `nodeId` in
+ * the current execution: everything under the top-level node whose task is
+ * running (the scope's root, or the node itself at the top level), since a
+ * resume re-runs that whole task. That covers the node, the nodes it called
+ * as tools, and the agents above it when it runs inside a node tool (a
+ * subgraph, map item or hitl node reached through tool calls, at any depth).
+ */
+function replayAttachment(runScope: RunScope | undefined, nodeId: string): Record<string, unknown> | undefined {
+  if (!runScope) return undefined;
+  const at = replayNodeKey(runScope.path, nodeId);
+  const root = runScope.root ?? at;
+  const saved = runScope.replay.snapshotUnder(root);
+  if (saved.length === 0) return undefined;
+  const own = saved.find((s) => s.node === root);
+  const nested = saved.filter((s) => s.node !== root);
+  return {
+    node: root,
+    ...(at !== root ? { at } : {}),
+    entries: own?.entries ?? {},
+    ...(nested.length > 0 ? { nested } : {}),
+  };
+}
+
+/**
+ * Interrupt data for an interrupt the engine raises around a node (pause,
+ * `node:before` hook): `data` unchanged unless entries must be saved (the
+ * node runs below a top-level node, e.g. inside a subgraph called as an
+ * agent tool), in which case they are attached as for `ctx.interrupt`.
+ */
+function withReplayData(data: unknown, runScope: RunScope | undefined, nodeId: string): unknown {
+  const replay = replayAttachment(runScope, nodeId);
+  if (!replay) return data;
+  const base = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : data === undefined ? {} : { value: data };
+  return { ...base, __nodeId: nodeId, __agentReplay: replay };
+}
+
+/**
+ * Refuse a node id the engine's own keys could not tell apart from another
+ * node: an id shaped like a map item (`m[0]`), or one with a comma, colon or
+ * control character (replay keys, checkpoint namespaces and the keys saved by
+ * earlier releases are built from ids with these). Specs loaded from YAML
+ * already allow only letters, digits, `_` and `-`; this covers graphs built
+ * in code.
+ */
+function assertReplaySafeNodeId(id: unknown): void {
+  if (id === undefined) return;
+  if (typeof id !== "string" || id === "") throw new Error(`Node id ${JSON.stringify(id)} must be a non-empty string.`);
+  // eslint-disable-next-line no-control-regex
+  if (/[,:\u0000-\u001f\u007f-\u009f]/.test(id) || /\[[0-9]+\]$/.test(id)) {
+    throw new Error(
+      `Node id ${JSON.stringify(id)} cannot contain ",", ":" or control characters or end in "[<number>]" (the form of a map item); use letters, digits, "_" and "-".`,
+    );
+  }
+}
+
+/** The Send index of a task LangGraph runs for a `Send` (`path` `["__pregel_push", n]`), or undefined. */
+function pushIndexOf(task: { path?: ReadonlyArray<unknown> }): number | undefined {
+  const path = task.path;
+  if (!Array.isArray(path) || path.length !== 2 || path[0] !== "__pregel_push") return undefined;
+  const index = path[1];
+  return typeof index === "number" && Number.isInteger(index) && index >= 0 ? index : undefined;
+}
+
+/**
+ * Pending interrupt values of a thread snapshot, with, per value, a check
+ * that a node id is the top-level node of the task holding it: the task's
+ * own node, or, for a map worker task, that task's own item. A map sends
+ * all its items from one node in item order, so they are consecutive
+ * `Send`s and an item's index is its task's Send index less the smallest
+ * Send index of the same worker (other nodes' Sends in the same step come
+ * before or after them). The snapshot lists every task of the step,
+ * finished ones too, so that smallest index is the map's item 0.
+ *
+ * @internal Exported for tests.
+ */
+export function pendingInterrupts(snap: {
+  tasks?: ReadonlyArray<{ name?: string; path?: ReadonlyArray<unknown>; interrupts?: ReadonlyArray<{ value?: unknown }> }>;
+} | null | undefined): { values: unknown[]; taskRoots: Array<((nodeId: string) => boolean) | undefined> } {
+  const values: unknown[] = [];
+  const taskRoots: Array<((nodeId: string) => boolean) | undefined> = [];
+  const firstSend = new Map<string, number>();
+  for (const task of snap?.tasks ?? []) {
+    const index = pushIndexOf(task);
+    if (task.name && index !== undefined) firstSend.set(task.name, Math.min(firstSend.get(task.name) ?? index, index));
+  }
+  for (const task of snap?.tasks ?? []) {
+    const name = task.name;
+    const sendIndex = pushIndexOf(task);
+    const itemIndex = name && sendIndex !== undefined ? sendIndex - firstSend.get(name)! : undefined;
+    const isRoot = name
+      ? (nodeId: string) => {
+          if (nodeId === name) return true;
+          const item = /^(.+)\[([0-9]+)\]$/.exec(nodeId);
+          return item !== null && itemIndex !== undefined && item[2] === String(itemIndex) && mapSyntheticIds(item[1]!).workerId === name;
+        }
+      : undefined;
+    for (const it of task.interrupts ?? []) {
+      values.push(it.value);
+      taskRoots.push(isRoot);
+    }
+  }
+  return { values, taskRoots };
+}
+
+/** @internal Exported for tests. */
+export async function hydrateDurableRuntime(
   snap: {
     values?: Record<string, unknown>;
     tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }>;
@@ -1715,23 +1972,10 @@ async function hydrateDurableRuntime(
     signal?: AbortSignal;
     sinks?: EventSink[];
     rehydrateWebhooks?: boolean;
+    nodePolicy?: NodePolicy | undefined;
   },
 ): Promise<void> {
   if (!snap) return;
-  for (const task of snap.tasks ?? []) {
-    for (const it of task.interrupts ?? []) {
-      hydrateReplayFromInterruptPayload(it.value);
-    }
-  }
-  const replayState = snap.values?.[REPLAY_CHANNEL];
-  if (replayState && typeof replayState === "object" && !Array.isArray(replayState)) {
-    for (const [key, entries] of Object.entries(replayState as Record<string, unknown>)) {
-      if (entries && typeof entries === "object" && !Array.isArray(entries)) {
-        hydrateReplay(key, entries as Record<string, unknown>);
-      }
-    }
-  }
-
   const interrupts: InterruptInfo[] = [];
   for (const task of snap.tasks ?? []) {
     for (const it of task.interrupts ?? []) interrupts.push(toInterruptInfo(it));
@@ -1741,6 +1985,7 @@ async function hydrateDurableRuntime(
       threadId,
       graphSpec,
       executeInvoke: opts.executeInvoke,
+      nodePolicy: opts.nodePolicy,
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.sinks ? { sinks: opts.sinks } : {}),
     });
@@ -1755,6 +2000,10 @@ async function hydrateDurableRuntime(
         if (current.status === "running") continue;
         const spec = raw as ServiceStartSpec;
         try {
+          // Saved state is not proof the graph may start programs: refuse
+          // under a policy that blocks service nodes or host programs.
+          assertNodeTypeAllowed(opts.nodePolicy, "service", `rehydrating service "${name}"`);
+          assertHostExecAllowed(opts.nodePolicy, `service "${name}"`, `rehydrating service "${name}"`);
           await startService(threadId, { ...spec, name });
         } catch (err) {
           (raw as Record<string, unknown>)["needsRestart"] = true;

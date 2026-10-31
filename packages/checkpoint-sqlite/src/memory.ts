@@ -7,6 +7,14 @@ import Database from "better-sqlite3";
 import type { Database as DB, Statement } from "better-sqlite3";
 import {
   EngineMemoryBackend,
+  checkGraphNameArgs,
+  checkThreadOwnerArgs,
+  type ThreadOwnerClaim,
+  type ThreadOwnerRecord,
+  type ThreadOwnerRegistry,
+  type GraphNameClaim,
+  type GraphNameRecord,
+  type GraphNameRegistry,
   type MemoryRow,
   type MemorySimilarQuery,
   type MemoryTable,
@@ -97,6 +105,33 @@ CREATE INDEX fg_memory_subject_keys
 DROP INDEX IF EXISTS fg_memory_subject_recent;
 ALTER TABLE fg_threads RENAME TO fg_memory_threads;
 ALTER TABLE fg_meta RENAME TO fg_memory_meta;
+`,
+  },
+  {
+    // Graph-name ownership for multi-user servers: the first registrant of a
+    // name within an org owns it.
+    version: 4,
+    sql: `
+CREATE TABLE fg_graph_names (
+  org        TEXT    NOT NULL,
+  name       TEXT    NOT NULL,
+  owner      TEXT    NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (org, name)
+) WITHOUT ROWID;
+`,
+  },
+  {
+    // Thread ownership for multi-user servers: the principal that started a
+    // thread id first owns it.
+    version: 5,
+    sql: `
+CREATE TABLE fg_thread_owners (
+  thread_id  TEXT    NOT NULL PRIMARY KEY,
+  owner      TEXT    NOT NULL,
+  org        TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
 `,
   },
 ];
@@ -408,4 +443,60 @@ export function openDatabase(dbPath: string, busyTimeoutMs = 5_000): SqliteDatab
   db.pragma(`busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))}`);
   if (dbPath !== ":memory:") db.pragma("journal_mode = WAL");
   return db;
+}
+
+/**
+ * Graph-name registry in the memory database (table fg_graph_names, memory
+ * schema 4). Runs migrations. A claim is one INSERT OR IGNORE plus a read, in
+ * one IMMEDIATE transaction, so processes sharing the file agree on the owner.
+ */
+export function createSqliteGraphNameRegistry(db: SqliteDatabase): GraphNameRegistry {
+  migrateMemorySchema(db);
+  const insert = db.prepare(`INSERT OR IGNORE INTO fg_graph_names (org, name, owner, created_at) VALUES (?, ?, ?, ?)`);
+  const select = db.prepare(`SELECT org, name, owner, created_at FROM fg_graph_names WHERE org = ? AND name = ?`);
+  type Raw = { org: string; name: string; owner: string; created_at: number };
+  const rec = (r: Raw): GraphNameRecord => ({ org: r.org, name: r.name, owner: r.owner, createdAt: Number(r.created_at) });
+  const claim = db.transaction((org: string, name: string, owner: string, now: number): GraphNameClaim => {
+    const created = insert.run(org, name, owner, now).changes === 1;
+    return { ...rec(select.get(org, name) as Raw), created };
+  });
+  return {
+    async claim(org, name, owner, now = Date.now()) {
+      checkGraphNameArgs(org, name, owner);
+      return claim.immediate(org, name, owner, now);
+    },
+    async get(org, name) {
+      checkGraphNameArgs(org, name);
+      const r = select.get(org, name) as Raw | undefined;
+      return r ? rec(r) : undefined;
+    },
+  };
+}
+
+/**
+ * Thread-owner registry in the memory database (table fg_thread_owners, memory
+ * schema 5). Runs migrations. A claim is one INSERT OR IGNORE plus a read, in
+ * one IMMEDIATE transaction, so processes sharing the file agree on the owner.
+ */
+export function createSqliteThreadOwnerRegistry(db: SqliteDatabase): ThreadOwnerRegistry {
+  migrateMemorySchema(db);
+  const insert = db.prepare(`INSERT OR IGNORE INTO fg_thread_owners (thread_id, owner, org, created_at) VALUES (?, ?, ?, ?)`);
+  const select = db.prepare(`SELECT thread_id, owner, org, created_at FROM fg_thread_owners WHERE thread_id = ?`);
+  type Raw = { thread_id: string; owner: string; org: string; created_at: number };
+  const rec = (r: Raw): ThreadOwnerRecord => ({ threadId: r.thread_id, owner: r.owner, org: r.org, createdAt: Number(r.created_at) });
+  const claim = db.transaction((threadId: string, owner: string, org: string, now: number): ThreadOwnerClaim => {
+    const created = insert.run(threadId, owner, org, now).changes === 1;
+    return { ...rec(select.get(threadId) as Raw), created };
+  });
+  return {
+    async claim(threadId, owner, org, now = Date.now()) {
+      checkThreadOwnerArgs(threadId, owner, org);
+      return claim.immediate(threadId, owner, org, now);
+    },
+    async get(threadId) {
+      checkThreadOwnerArgs(threadId);
+      const r = select.get(threadId) as Raw | undefined;
+      return r ? rec(r) : undefined;
+    },
+  };
 }

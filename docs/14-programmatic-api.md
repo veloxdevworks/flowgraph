@@ -198,6 +198,8 @@ await compiled.resumeFrom({ threadId, checkpointId, resume: true }); // re-run f
 
 `step()` runs one LangGraph superstep (all tasks scheduled together, e.g. a `map` fan-out, count as one step) using a per-invocation `interruptAfter: "*"`. It does not touch the compiled graph or `spec.runtime`, so it is safe alongside concurrent `run()` calls on the same `CompiledGraph`. If the step raises a HITL interrupt the result is `interrupted` as usual; answer it with `resume()`.
 
+A `pauseSignal` takes effect before the next node of the top-level graph starts. Nodes already running when it fires finish first, along with everything they run: the nodes of an embedded subgraph, the items of a `map`, and nodes or subgraphs an agent calls as tools (an agent's tool loop is not cut short between turns). `continueRun()` then starts from the node that was about to run.
+
 ## Planned API (not yet shipped)
 
 - `flowgraph dev --step` — CLI front-end for `CompiledGraph.step()`

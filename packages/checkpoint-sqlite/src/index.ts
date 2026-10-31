@@ -14,9 +14,16 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
-import { resolveCheckpointRetention, type CheckpointRetentionInput } from "@flowgraph/core";
+import {
+  resolveCheckpointRetention,
+  type CheckpointRetentionInput,
+  type GraphNameRegistry,
+  type ThreadOwnerRegistry,
+} from "@flowgraph/core";
 import {
   createSqliteMemoryBackend,
+  createSqliteGraphNameRegistry,
+  createSqliteThreadOwnerRegistry,
   maybeSweep,
   openDatabase,
   type SqliteDatabase,
@@ -67,6 +74,10 @@ export interface SqliteBackend {
   db: SqliteDatabase;
   checkpointer: BaseCheckpointSaver;
   memory: SqliteMemoryBackend;
+  /** Graph-name ownership (first registrant owns a name within an org), in the same file. */
+  graphNames: GraphNameRegistry;
+  /** Thread ownership (who started each thread id), in the same file. */
+  threadOwners: ThreadOwnerRegistry;
   close(): void;
 }
 
@@ -85,6 +96,8 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
   if (dbPath !== ":memory:") fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = openDatabase(dbPath, opts.busyTimeoutMs);
   const memory = createSqliteMemoryBackend(db);
+  const graphNames = createSqliteGraphNameRegistry(db);
+  const threadOwners = createSqliteThreadOwnerRegistry(db);
   await maybeSweep(memory, opts.sweepIntervalMs ?? 3_600_000);
   const saver = new FlowgraphSqliteSaver(db, resolveCheckpointRetention(opts.retention));
   saver.prepare();
@@ -93,6 +106,8 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
     db,
     checkpointer,
     memory,
+    graphNames,
+    threadOwners,
     close() {
       if (db.open) db.close();
     },
@@ -109,6 +124,8 @@ export {
 } from "./retention.js";
 export {
   createSqliteMemoryBackend,
+  createSqliteGraphNameRegistry,
+  createSqliteThreadOwnerRegistry,
   migrateMemorySchema,
   maybeSweep,
   MEMORY_MIGRATIONS,

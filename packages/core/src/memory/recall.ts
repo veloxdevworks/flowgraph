@@ -11,7 +11,7 @@
  *    graph > project > org), then newest first, then block order, then key.
  *  - if block wrappers alone are over budget, trailing blocks are emptied.
  */
-import { renderDeep, stringifyRendered } from "@flowgraph/expr";
+import { renderDeep, scanTemplate, stringifyRendered } from "@flowgraph/expr";
 import type { MemoryRecord } from "./types.js";
 import {
   MEMORY_READ_PRECEDENCE,
@@ -237,8 +237,8 @@ export function referencedRecallIds(templates: Array<string | undefined>): Set<s
   const out = new Set<string>();
   for (const t of templates) {
     if (!t) continue;
-    for (const expr of t.matchAll(/\{\{([\s\S]*?)\}\}/g)) {
-      for (const m of expr[1]!.matchAll(/\bmemory\.([A-Za-z_][A-Za-z0-9_]*)/g)) out.add(m[1]!);
+    for (const span of scanTemplate(t).spans) {
+      for (const m of span.expr.matchAll(/\bmemory\.([A-Za-z_][A-Za-z0-9_]*)/g)) out.add(m[1]!);
     }
   }
   return out;

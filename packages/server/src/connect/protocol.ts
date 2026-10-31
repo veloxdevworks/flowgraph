@@ -26,6 +26,8 @@ export type ConnectCommandResult = {
   ok: boolean;
   result?: unknown;
   error?: string;
+  /** Machine-readable error code when the server refused the command (e.g. THREAD_NOT_OWNED). */
+  code?: string;
 };
 
 export type ConnectEventBatch = {

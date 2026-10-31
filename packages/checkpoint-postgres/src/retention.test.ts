@@ -104,8 +104,17 @@ describe.skipIf(!DB)("postgres checkpoint retention", () => {
         { from: "a", to: "END" },
       ],
     } as unknown as GraphSpec;
+    const threadId = `done-${schema}`;
+    await backend.pool.query(
+      `INSERT INTO "${schema}".fg_thread_owners (thread_id, owner, org, created_at) VALUES ($1, 'iss|alice', 'acme', 1)`,
+      [threadId],
+    );
+    await backend.pool.query(
+      `INSERT INTO "${schema}".fg_memory_ops (op_id, version, value, applied_at) VALUES ($1, 1, '{"ok":true}'::json, 1)`,
+      [`op-${threadId}`],
+    );
     const compiled = await compileGraph(spec, { checkpointer: backend.checkpointer });
-    const result = await compiled.run({ threadId: `done-${schema}`, onInterrupt: "fail" });
+    const result = await compiled.run({ threadId, onInterrupt: "fail" });
     expect(result.status).toBe("completed");
     const checkpoints = await backend.pool.query<{ n: string }>(
       `SELECT COUNT(*) AS n FROM "${schema}".checkpoints`,
@@ -115,6 +124,16 @@ describe.skipIf(!DB)("postgres checkpoint retention", () => {
       `SELECT COUNT(*) AS n FROM "${schema}".fg_memory_items`,
     );
     expect(Number(memory.rows[0]?.n)).toBe(1);
+    const owner = await backend.pool.query<{ owner: string }>(
+      `SELECT owner FROM "${schema}".fg_thread_owners WHERE thread_id = $1`,
+      [threadId],
+    );
+    expect(owner.rows[0]?.owner).toBe("iss|alice");
+    const ops = await backend.pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM "${schema}".fg_memory_ops WHERE op_id = $1`,
+      [`op-${threadId}`],
+    );
+    expect(Number(ops.rows[0]?.n)).toBe(1);
   });
 
   it("drops channel blob versions no remaining checkpoint references", async () => {
