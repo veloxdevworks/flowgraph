@@ -15,6 +15,7 @@ import {
   validateSpec,
 } from "@flowgraph/core";
 import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
+import { ServerRequestError } from "./errors.js";
 import { errorFields, log } from "./metrics.js";
 import type { GraphMeta, PersistedGraph, RunStatus, ServerEvent, ThreadOwner } from "./types.js";
 
@@ -163,6 +164,19 @@ async function withMetaLock<T>(metaPath: string, fn: () => Promise<T>): Promise<
   return run;
 }
 
+/**
+ * A thread's meta file exists but cannot be read or parsed. Access checks
+ * refuse the thread rather than treat it as never stored, which would skip
+ * its owner check.
+ */
+export class GraphMetaUnreadableError extends ServerRequestError {
+  constructor(readonly threadId: string, cause: unknown) {
+    super(503, "THREAD_META_UNREADABLE", `The stored record for thread "${threadId}" cannot be read, so access is refused; try again, or ask an operator to repair it`);
+    this.name = "GraphMetaUnreadableError";
+    this.cause = cause;
+  }
+}
+
 export function safeThreadId(threadId: string): string {
   return threadId.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
@@ -227,9 +241,10 @@ async function persistGraphLocked(
   extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" },
 ): Promise<PersistedGraph> {
   const filePath = graphPathFor(dir, threadId);
+  // Read first: an unreadable meta file must not be replaced (and its owner lost) by a new upload.
+  const existing = await readGraphMeta(dir, threadId);
   await writeFileAtomic(filePath, yaml);
   const now = new Date().toISOString();
-  const existing = await readGraphMeta(dir, threadId);
   const storedAt = existing?.storedAt ?? now;
   const meta: GraphMeta = {
     threadId,
@@ -268,27 +283,37 @@ function isThreadOwner(v: unknown): v is ThreadOwner {
   return Boolean(v && typeof v === "object" && typeof (v as ThreadOwner).id === "string" && typeof (v as ThreadOwner).org === "string");
 }
 
+/**
+ * A thread's stored meta, or null when it has none (no meta file). A meta
+ * file that exists but cannot be read, is not JSON, or has no thread id
+ * throws {@link GraphMetaUnreadableError}: callers deciding access must not
+ * take it for a thread that was never stored.
+ */
 export async function readGraphMeta(dir: string, threadId: string): Promise<GraphMeta | null> {
+  const metaPath = metaPathFor(dir, threadId);
+  let parsed: Partial<GraphMeta> | null;
   try {
-    const raw = await fs.readFile(metaPathFor(dir, threadId), "utf-8");
-    const parsed = JSON.parse(raw) as Partial<GraphMeta>;
-    if (!parsed || typeof parsed.threadId !== "string") {
-      return { threadId, storedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-    }
-    const storedAt = typeof parsed.storedAt === "string" ? parsed.storedAt : new Date().toISOString();
-    return {
-      threadId: parsed.threadId,
-      storedAt,
-      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : storedAt,
-      ...(typeof parsed.label === "string" ? { label: parsed.label } : {}),
-      ...(typeof parsed.graphName === "string" ? { graphName: parsed.graphName } : {}),
-      ...(typeof parsed.status === "string" ? { status: parsed.status as RunStatus } : {}),
-      ...(isThreadOwner(parsed.owner) ? { owner: { id: parsed.owner.id, org: parsed.owner.org } } : {}),
-      ...(parsed.yamlFormat === "raw" ? { yamlFormat: "raw" as const } : {}),
-    };
-  } catch {
-    return null;
+    parsed = JSON.parse(await fs.readFile(metaPath, "utf-8")) as Partial<GraphMeta> | null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    log("error", "graph meta unreadable", { threadId, path: metaPath, ...errorFields(err) });
+    throw new GraphMetaUnreadableError(threadId, err);
   }
+  if (!parsed || typeof parsed !== "object" || typeof parsed.threadId !== "string") {
+    log("error", "graph meta unreadable", { threadId, path: metaPath, message: "no thread id" });
+    throw new GraphMetaUnreadableError(threadId, new Error("meta file has no thread id"));
+  }
+  const storedAt = typeof parsed.storedAt === "string" ? parsed.storedAt : new Date().toISOString();
+  return {
+    threadId: parsed.threadId,
+    storedAt,
+    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : storedAt,
+    ...(typeof parsed.label === "string" ? { label: parsed.label } : {}),
+    ...(typeof parsed.graphName === "string" ? { graphName: parsed.graphName } : {}),
+    ...(typeof parsed.status === "string" ? { status: parsed.status as RunStatus } : {}),
+    ...(isThreadOwner(parsed.owner) ? { owner: { id: parsed.owner.id, org: parsed.owner.org } } : {}),
+    ...(parsed.yamlFormat === "raw" ? { yamlFormat: "raw" as const } : {}),
+  };
 }
 
 export async function updateGraphMeta(
@@ -329,23 +354,37 @@ export async function loadPersistedGraph(
     const parsed = parseGraphYaml(stored.yaml, { expandEnv: raw && opts.expandEnv === true });
     if (!parsed.spec) return null;
     return { yaml: raw ? stored.yaml : parsed.yaml, spec: parsed.spec, meta: stored.meta };
-  } catch {
+  } catch (err) {
+    if (err instanceof GraphMetaUnreadableError) throw err;
     return null;
   }
 }
 
-/** The stored graph text and meta, without parsing or expanding it. */
+/**
+ * The stored graph text and meta, without parsing or expanding it, or null
+ * when no graph is stored. An unreadable meta file throws
+ * {@link GraphMetaUnreadableError}.
+ */
 export async function readPersistedGraphYaml(dir: string, threadId: string): Promise<{ yaml: string; meta: GraphMeta | null } | null> {
+  let yaml: string;
   try {
-    const yaml = await fs.readFile(graphPathFor(dir, threadId), "utf-8");
-    return { yaml, meta: await readGraphMeta(dir, threadId) };
+    yaml = await fs.readFile(graphPathFor(dir, threadId), "utf-8");
   } catch {
     return null;
   }
+  return { yaml, meta: await readGraphMeta(dir, threadId) };
 }
 
-/** List persisted run metadata (graph store + `.meta.json` files). */
-export async function listPersistedGraphs(dir: string): Promise<GraphMeta[]> {
+/**
+ * List persisted run metadata (graph store + `.meta.json` files). Meta files
+ * that cannot be read are left out and passed to `onUnreadable` (with the
+ * thread id as spelled in the file name), so a caller can tell them from
+ * threads without an owner.
+ */
+export async function listPersistedGraphs(
+  dir: string,
+  opts: { onUnreadable?: (fileThreadId: string, err: GraphMetaUnreadableError) => void } = {},
+): Promise<GraphMeta[]> {
   try {
     await ensureGraphStoreDir(dir);
     const names = await fs.readdir(dir);
@@ -353,7 +392,14 @@ export async function listPersistedGraphs(dir: string): Promise<GraphMeta[]> {
     for (const name of names) {
       if (!name.endsWith(".graph.yaml.meta.json")) continue;
       const threadId = name.slice(0, -".graph.yaml.meta.json".length);
-      const meta = await readGraphMeta(dir, threadId);
+      let meta: GraphMeta | null;
+      try {
+        meta = await readGraphMeta(dir, threadId);
+      } catch (err) {
+        if (!(err instanceof GraphMetaUnreadableError)) throw err;
+        opts.onUnreadable?.(threadId, err);
+        continue;
+      }
       if (meta) metas.push(meta);
     }
     metas.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));

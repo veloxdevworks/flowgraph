@@ -3,6 +3,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  GraphMetaUnreadableError,
+  listPersistedGraphs,
   parseGraphYaml,
   persistGraph,
   readGraphMeta,
@@ -80,6 +82,8 @@ const emptyOwners = {
   claim: async (_threadId: string, ownerId: string) => ({ owner: ownerId, created: true }),
 };
 
+const metaFile = (dir: string, fileThreadId: string) => path.join(dir, `${fileThreadId}.graph.yaml.meta.json`);
+
 describe("meta writes and concurrent readers", () => {
   it("readers never see a missing meta file or skip the owner check while it is rewritten", async () => {
     const dir = await storeDir();
@@ -154,5 +158,62 @@ describe("meta writes and concurrent readers", () => {
     await fs.writeFile(path.join(dir, "d.json", "keep"), "");
     await expect(writeFileAtomic(path.join(dir, "d.json"), "four")).rejects.toThrow();
     expect((await fs.readdir(dir)).sort()).toEqual(["d.json", "x.json"]);
+  });
+});
+
+describe("unreadable meta files", () => {
+  const corruptions: Array<[string, (file: string) => Promise<void>]> = [
+    ["cut short", (file) => fs.writeFile(file, '{"threadId":"t","owner":{"id":"')],
+    ["empty", (file) => fs.writeFile(file, "")],
+    ["JSON without a thread id", (file) => fs.writeFile(file, '{"owner":null}')],
+    ["JSON null", (file) => fs.writeFile(file, "null")],
+    ["a directory", async (file) => {
+      await fs.rm(file);
+      await fs.mkdir(file);
+    }],
+  ];
+
+  for (const [what, corrupt] of corruptions) {
+    it(`refuses every caller when the meta file is ${what}`, async () => {
+      const dir = await storeDir();
+      await persistGraph(dir, "t", YAML, spec(), { owner: { id: owner.id, org: owner.org } });
+      await corrupt(metaFile(dir, "t"));
+      await expect(readGraphMeta(dir, "t")).rejects.toBeInstanceOf(GraphMetaUnreadableError);
+      const s = await startService(dir, emptyOwners);
+      const refused = { status: 503, code: "THREAD_META_UNREADABLE" };
+      for (const who of [other, owner]) {
+        await expect(s.getRun("t", who)).rejects.toMatchObject(refused);
+        await expect(s.getState("t", undefined, who)).rejects.toMatchObject(refused);
+        await expect(s.startRun({ threadId: "t", yaml: YAML, input: {} }, who)).rejects.toMatchObject(refused);
+      }
+      // Nothing replaced the file, and listing leaves the thread out.
+      await expect(readGraphMeta(dir, "t")).rejects.toBeInstanceOf(GraphMetaUnreadableError);
+      expect(await s.listRuns(other)).toEqual([]);
+      await expect(updateGraphMeta(dir, "t", { status: "running" })).rejects.toBeInstanceOf(GraphMetaUnreadableError);
+    });
+  }
+
+  it("treats only a missing file as no stored thread", async () => {
+    const dir = await storeDir();
+    expect(await readGraphMeta(dir, "never")).toBeNull();
+    expect(await updateGraphMeta(dir, "never", { status: "running" })).toBeNull();
+  });
+
+  it("backfill counts an unreadable meta file apart from threads without an owner and claims nothing for it", async () => {
+    const dir = await storeDir();
+    await persistGraph(dir, "good", YAML, spec(), { owner: { id: owner.id, org: owner.org } });
+    await persistGraph(dir, "bad", YAML, spec(), { owner: { id: owner.id, org: owner.org } });
+    await persistGraph(dir, "none", YAML, spec());
+    await fs.writeFile(metaFile(dir, "bad"), '{"threadId":"bad","ow');
+    const claims: string[] = [];
+    const owners = { get: async () => null, claim: async (t: string, o: string) => (claims.push(t), { owner: o, created: true }) };
+    const s = await startService(dir);
+    (s as unknown as { threadOwners: unknown }).threadOwners = owners;
+    expect(await s.backfillThreadOwners()).toEqual({ claimed: 1, existing: 0, conflicts: 0, skipped: 1, unreadable: 1 });
+    expect(claims).toEqual(["good"]);
+    const unreadable: string[] = [];
+    const listed = await listPersistedGraphs(dir, { onUnreadable: (t) => unreadable.push(t) });
+    expect(listed.map((m) => m.threadId).sort()).toEqual(["good", "none"]);
+    expect(unreadable).toEqual(["bad"]);
   });
 });
