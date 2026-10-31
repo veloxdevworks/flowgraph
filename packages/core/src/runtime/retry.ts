@@ -54,7 +54,22 @@ function computeDelay(attempt: number, cfg: Required<Pick<RetryConfig, "backoff"
   return Math.round(delay);
 }
 
+/**
+ * Errors that mark themselves `retryable: false` (directly or through
+ * `cause`) fail the same way on every attempt, e.g. a context budget
+ * overflow, so they are never retried.
+ */
+export function isNonRetryable(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; depth < 5 && cur && typeof cur === "object"; depth++) {
+    if ((cur as { retryable?: unknown }).retryable === false) return true;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 function shouldRetry(err: unknown, retryOn?: Array<number | string>): boolean {
+  if (isNonRetryable(err)) return false;
   if (!retryOn || retryOn.length === 0) return true; // retry all by default
   const message = err instanceof Error ? err.message : String(err);
   for (const matcher of retryOn) {

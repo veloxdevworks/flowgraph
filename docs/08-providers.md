@@ -27,6 +27,7 @@ interface ProviderAdapter {
 
 interface ProviderCapabilities {
   toolCalling: boolean;
+  contextMessages?: boolean;       // sends AgentRequest.messages as chat turns (see 17-context.md)
   structuredOutput: boolean;       // native schema-constrained output
   streaming: boolean;
   builtinTools?: string[];         // e.g. ["Read","Edit","Bash","Glob","Grep","WebSearch"]

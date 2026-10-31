@@ -27,6 +27,7 @@ export type EventType =
   | "agent.token"
   | "agent.usage"
   | "memory.recall"
+  | "agent.context"
   | "skill.preflight"
   | "skill.start"
   | "skill.end"
