@@ -1,6 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
-import { resolveCheckpointRetention, type CheckpointRetentionInput } from "@flowgraph/core";
+import {
+  compileGraph,
+  registerFunction,
+  resolveCheckpointRetention,
+  type CheckpointRetentionInput,
+} from "@flowgraph/core";
+import { openPostgresBackend } from "./index.js";
 import { FlowgraphPostgresSaver, activeMarkLockKey } from "./retention.js";
 
 const DB = process.env["FLOWGRAPH_TEST_POSTGRES_URL"];
@@ -33,8 +39,8 @@ function schemaName(): string {
   return schema;
 }
 
-async function saverAt(retention: CheckpointRetentionInput, schema: string, setup = true) {
-  const pool = new pg.Pool({ connectionString: DB!, max: 4 });
+async function saverAt(retention: CheckpointRetentionInput, schema: string, setup = true, poolConfig: pg.PoolConfig = {}) {
+  const pool = new pg.Pool({ connectionString: DB!, max: 4, ...poolConfig });
   pools.push(pool);
   const clock = { now: T0 };
   const saver = new FlowgraphPostgresSaver(pool, resolveCheckpointRetention(retention), { schema, clock: () => clock.now });
@@ -78,6 +84,11 @@ describe.skipIf(!DB)("postgres abandoned active threads", () => {
       [schema],
     );
     expect(col.rowCount).toBe(1);
+    const index = await pool.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = 'fg_checkpoint_threads_active'`,
+      [schema],
+    );
+    expect(index.rows[0]?.indexdef).toMatch(/WHERE \(status = 'active'::text\)/);
   });
 
   it("sweeps an active row whose run stopped past the limit", async () => {
@@ -199,43 +210,130 @@ describe.skipIf(!DB)("postgres abandoned active threads", () => {
     const right = schemaName();
     const a = await saverAt(retention, left);
     const b = await saverAt(retention, right);
+    // Same schema as `a`, but a lock wait fails fast instead of blocking.
+    const impatient = await saverAt(retention, left, false, { options: "-c lock_timeout=100" });
     const holder = await a.pool.connect();
-    const watcher = await a.pool.connect();
-    let marking: Promise<unknown> | undefined;
     try {
       await holder.query("BEGIN");
       await holder.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [activeMarkLockKey(left, "shared")]);
       // Another schema's saver takes its own lock and does not wait.
       const other = await b.saver.markThreadActive("shared");
       expect(other?.mark).toBeTruthy();
-      // The same schema's saver waits on the held key until it is released.
-      let settled = false;
-      marking = a.saver.markThreadActive("shared").finally(() => {
-        settled = true;
-      });
-      let waiting = 0;
-      for (let i = 0; i < 2000 && waiting === 0; i++) {
-        const r = await watcher.query<{ n: string }>(
-          `WITH k AS (SELECT hashtextextended($1, 0) AS h)
-           SELECT COUNT(*) AS n FROM pg_locks, k
-           WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1
-             AND classid::bigint = ((k.h >> 32) & 4294967295) AND objid::bigint = (k.h & 4294967295)`,
-          [activeMarkLockKey(left, "shared")],
-        );
-        waiting = Number(r.rows[0]?.n ?? 0);
-      }
-      expect(waiting).toBe(1);
-      expect(settled).toBe(false);
+      // The same schema's saver has to wait on the held key.
+      await expect(impatient.saver.markThreadActive("shared")).rejects.toMatchObject({ code: "55P03" });
+      expect(await a.saver.savedThreadStatus("shared")).toBeUndefined();
       await holder.query("COMMIT");
-      const same = (await marking) as { mark: string } | undefined;
-      expect(same?.mark).toBeTruthy();
     } finally {
       await holder.query("ROLLBACK").catch(() => undefined);
       holder.release();
-      watcher.release();
-      await marking?.catch(() => undefined);
     }
+    const same = await impatient.saver.markThreadActive("shared");
+    expect(same?.mark).toBeTruthy();
     expect((await a.saver.savedThreadStatus("shared"))?.status).toBe("active");
     expect((await b.saver.savedThreadStatus("shared"))?.status).toBe("active");
   });
+
+  it("a restore given the mark time leaves a row written after the mark", async () => {
+    const schema = schemaName();
+    const { saver, clock } = await saverAt({ finishedTtl: "1h", activeTtl: "1d" }, schema);
+    const marked = (await saver.markThreadActive("written"))!;
+    expect(marked.markedAt).toBe(T0);
+    clock.now = T0 + 5;
+    await write(saver, "written", 1);
+    await saver.restoreThreadStatus("written", { status: "finished", updatedAt: T0 - DAY }, marked.mark, marked.markedAt);
+    expect(await saver.savedThreadStatus("written")).toEqual({ status: "active", updatedAt: T0 + 5 });
+    await saver.restoreThreadStatus("written", undefined, marked.mark, marked.markedAt);
+    expect((await saver.savedThreadStatus("written"))?.status).toBe("active");
+
+    const other = (await saver.markThreadActive("untouched"))!;
+    await saver.restoreThreadStatus("untouched", { status: "paused", updatedAt: T0 - DAY }, other.mark, other.markedAt);
+    expect(await saver.savedThreadStatus("untouched")).toEqual({ status: "paused", updatedAt: T0 - DAY });
+  });
+
+  it("openPostgresBackend passes its clock to the saver", async () => {
+    const schema = schemaName();
+    const backend = await openPostgresBackend({
+      connectionString: DB!,
+      schema,
+      retention: { finishedTtl: "1h" },
+      clock: () => T0 + 42,
+    });
+    try {
+      const saver = backend.checkpointer as unknown as FlowgraphPostgresSaver;
+      expect((await saver.markThreadActive("clocked"))?.markedAt).toBe(T0 + 42);
+      expect(await saver.savedThreadStatus("clocked")).toEqual({ status: "active", updatedAt: T0 + 42 });
+    } finally {
+      await backend.close();
+    }
+  });
+});
+
+/** pre -> gate -> post. `gate` is a human approval, or a breakpoint before `post`. */
+function gatedSpec(gate: "approval" | "breakpoint"): Parameters<typeof compileGraph>[0] {
+  const nodes: unknown[] = [{ id: "pre", type: "function", with: { fn: "pgWaitPre", output: { to: "a" } } }];
+  const edges: unknown[] = [{ from: "START", to: "pre" }];
+  if (gate === "approval") {
+    nodes.push({ id: "gate", type: "hitl", with: { mode: "approve", message: "ok?", output: { to: "approval" } } });
+    edges.push({ from: "pre", to: "gate" }, { from: "gate", to: "post" });
+  } else {
+    edges.push({ from: "pre", to: "post" });
+  }
+  nodes.push({ id: "post", type: "function", with: { fn: "pgWaitPost", output: { to: "b" } } });
+  edges.push({ from: "post", to: "END" });
+  return {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: `pg-wait-${gate}` },
+    state: { channels: { a: { type: "string" }, b: { type: "string" }, approval: { type: "object" } } },
+    nodes,
+    edges,
+    ...(gate === "breakpoint" ? { runtime: { hitl: { breakpoints: { before: ["post"] } } } } : {}),
+  } as unknown as Parameters<typeof compileGraph>[0];
+}
+
+describe.skipIf(!DB)("postgres run waiting for an answer", () => {
+  const seenInPost: Array<string | undefined> = [];
+  let observe: (() => Promise<string | undefined>) | undefined;
+  beforeAll(() => {
+    registerFunction("pgWaitPre", () => "pre");
+    registerFunction("pgWaitPost", async () => {
+      seenInPost.push(await observe?.());
+      return "post";
+    });
+  });
+
+  for (const gate of ["approval", "breakpoint"] as const) {
+    it(`another host past activeTtl does not reclaim a run waiting at ${gate === "approval" ? "an approval" : "a breakpoint"}`, async () => {
+      const schema = schemaName();
+      const retention = { finishedTtl: "1h" } as const;
+      const a = await saverAt(retention, schema);
+      const b = await saverAt(retention, schema);
+      b.clock.now = T0 + 8 * DAY;
+      const threadId = `waiting-${gate}`;
+      observe = async () => (await b.saver.savedThreadStatus(threadId))?.status;
+      seenInPost.length = 0;
+      const graph = await compileGraph(gatedSpec(gate), { checkpointer: a.saver as never });
+      let whileWaiting: string | undefined;
+      let afterSweep: string | undefined;
+      const result = await graph.run({
+        threadId,
+        input: {},
+        onInterrupt: "prompt",
+        resolveInterrupt: async () => {
+          whileWaiting = (await b.saver.savedThreadStatus(threadId))?.status;
+          await b.saver.sweep();
+          afterSweep = (await b.saver.savedThreadStatus(threadId))?.status;
+          return { approved: true };
+        },
+      });
+      expect(whileWaiting).toBe("paused");
+      expect(afterSweep).toBe("paused");
+      expect(seenInPost).toEqual(["active"]);
+      expect(result.status).toBe("completed");
+      expect(result.state["a"]).toBe("pre");
+      expect(result.state["b"]).toBe("post");
+      expect(await checkpointCount(a.pool, schema, threadId)).toBeGreaterThan(0);
+      expect((await b.saver.savedThreadStatus(threadId))?.status).toBe("finished");
+    });
+  }
 });

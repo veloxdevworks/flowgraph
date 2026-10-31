@@ -23,6 +23,7 @@ import {
   selectRetainedCheckpointIds,
   resolveCheckpointRetention,
   threadDeletionRequested,
+  type ActiveThreadMark,
   type CheckpointRetentionInput,
   type CheckpointThreadStatus,
   type ResolvedCheckpointRetention,
@@ -155,14 +156,15 @@ export class FlowgraphMemorySaver extends MemorySaver {
     this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, hit[0], this.clock());
   }
 
-  markThreadActive(threadId: string): { mark: string; prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined } | undefined {
+  markThreadActive(threadId: string): ActiveThreadMark | undefined {
     const policy = this.policyFor(threadId);
     if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
     const row = this.threads.get(threadId);
     const prior = row ? { status: row.status, updatedAt: row.updatedAt } : undefined;
     const mark = crypto.randomUUID();
-    this.touch(threadId, "active", this.clock(), policy, mark);
-    return { mark, prior };
+    const markedAt = this.clock();
+    this.touch(threadId, "active", markedAt, policy, mark);
+    return { mark, prior, markedAt };
   }
 
   savedThreadStatus(threadId: string): { status: CheckpointThreadStatus; updatedAt: number } | undefined {
@@ -175,15 +177,33 @@ export class FlowgraphMemorySaver extends MemorySaver {
     threadId: string,
     prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined,
     activeMark: string,
+    markedAt?: number,
   ): void {
     if (prior?.status === "active") return;
     const row = this.threads.get(threadId);
     if (!row || row.status !== "active" || row.activeMark !== activeMark) return;
+    if (markedAt !== undefined && row.updatedAt !== markedAt) return;
     if (!prior) {
       this.threads.delete(threadId);
       return;
     }
     this.touch(threadId, prior.status, prior.updatedAt, this.policyFor(threadId));
+  }
+
+  noteThreadWaiting(threadId: string, activeMark: string): boolean {
+    const row = this.threads.get(threadId);
+    if (!row || row.status !== "active" || row.activeMark !== activeMark) return false;
+    const now = this.clock();
+    this.pinHead(threadId, now);
+    this.touch(threadId, "paused", now, this.policyFor(threadId), activeMark);
+    return true;
+  }
+
+  noteThreadAnswered(threadId: string, activeMark: string): boolean {
+    const row = this.threads.get(threadId);
+    if (!row || row.status !== "paused" || row.activeMark !== activeMark) return false;
+    this.touch(threadId, "active", this.clock(), this.policyFor(threadId), activeMark);
+    return true;
   }
 
   beginThreadRun(threadId: string): number {

@@ -1,8 +1,14 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveCheckpointRetention, type CheckpointRetentionInput } from "@flowgraph/core";
+import {
+  compileGraph,
+  registerFunction,
+  resolveCheckpointRetention,
+  type CheckpointRetentionInput,
+} from "@flowgraph/core";
+import { openSqliteBackend } from "./index.js";
 import { openDatabase } from "./memory.js";
 import { FlowgraphSqliteSaver } from "./retention.js";
 
@@ -61,6 +67,10 @@ describe("sqlite abandoned active threads", () => {
     expect(v.v).toBe(4);
     const cols = (db.prepare(`PRAGMA table_info(fg_checkpoint_threads)`).all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols).toContain("active_ttl_ms");
+    const index = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'fg_checkpoint_threads_active'`)
+      .get() as { sql: string } | undefined;
+    expect(index?.sql).toMatch(/WHERE status = 'active'/);
   });
 
   it("sweeps an active row whose run stopped past the limit", async () => {
@@ -173,4 +183,99 @@ describe("sqlite abandoned active threads", () => {
     saver.restoreThreadStatus("woken", fresh.prior, fresh.mark);
     expect(saver.savedThreadStatus("woken")).toEqual({ status: "finished", updatedAt: T0 });
   });
+
+  it("a restore given the mark time leaves a row written after the mark", async () => {
+    const { saver, clock } = saverAt({ finishedTtl: "1h", activeTtl: "1d" });
+    const marked = saver.markThreadActive("written")!;
+    expect(marked.markedAt).toBe(T0);
+    clock.now = T0 + 5;
+    await write(saver, "written", 1);
+    saver.restoreThreadStatus("written", { status: "finished", updatedAt: T0 - DAY }, marked.mark, marked.markedAt);
+    expect(saver.savedThreadStatus("written")).toEqual({ status: "active", updatedAt: T0 + 5 });
+    saver.restoreThreadStatus("written", undefined, marked.mark, marked.markedAt);
+    expect(saver.savedThreadStatus("written")?.status).toBe("active");
+
+    const other = saver.markThreadActive("untouched")!;
+    saver.restoreThreadStatus("untouched", { status: "paused", updatedAt: T0 - DAY }, other.mark, other.markedAt);
+    expect(saver.savedThreadStatus("untouched")).toEqual({ status: "paused", updatedAt: T0 - DAY });
+  });
+
+  it("openSqliteBackend passes its clock to the saver", async () => {
+    const dbPath = path.join(os.tmpdir(), `fg-stale-${process.pid}-${Math.random().toString(36).slice(2)}.db`);
+    tmpFiles.push(dbPath);
+    const backend = await openSqliteBackend({ path: dbPath, retention: { finishedTtl: "1h" }, clock: () => T0 + 42 });
+    dbs.push(backend.db);
+    const saver = backend.checkpointer as unknown as FlowgraphSqliteSaver;
+    expect(saver.markThreadActive("clocked")?.markedAt).toBe(T0 + 42);
+    expect(saver.savedThreadStatus("clocked")).toEqual({ status: "active", updatedAt: T0 + 42 });
+  });
+});
+
+/** pre -> gate -> post. `gate` is a human approval, or a breakpoint before `post`. */
+function gatedSpec(gate: "approval" | "breakpoint"): Parameters<typeof compileGraph>[0] {
+  const nodes: unknown[] = [{ id: "pre", type: "function", with: { fn: "sqliteWaitPre", output: { to: "a" } } }];
+  const edges: unknown[] = [{ from: "START", to: "pre" }];
+  if (gate === "approval") {
+    nodes.push({ id: "gate", type: "hitl", with: { mode: "approve", message: "ok?", output: { to: "approval" } } });
+    edges.push({ from: "pre", to: "gate" }, { from: "gate", to: "post" });
+  } else {
+    edges.push({ from: "pre", to: "post" });
+  }
+  nodes.push({ id: "post", type: "function", with: { fn: "sqliteWaitPost", output: { to: "b" } } });
+  edges.push({ from: "post", to: "END" });
+  return {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: `sqlite-wait-${gate}` },
+    state: { channels: { a: { type: "string" }, b: { type: "string" }, approval: { type: "object" } } },
+    nodes,
+    edges,
+    ...(gate === "breakpoint" ? { runtime: { hitl: { breakpoints: { before: ["post"] } } } } : {}),
+  } as unknown as Parameters<typeof compileGraph>[0];
+}
+
+describe("sqlite run waiting for an answer", () => {
+  const seenInPost: Array<string | undefined> = [];
+  let observe: (() => string | undefined) | undefined;
+  beforeAll(() => {
+    registerFunction("sqliteWaitPre", () => "pre");
+    registerFunction("sqliteWaitPost", () => {
+      seenInPost.push(observe?.());
+      return "post";
+    });
+  });
+
+  for (const gate of ["approval", "breakpoint"] as const) {
+    it(`another saver past activeTtl does not reclaim a run waiting at ${gate === "approval" ? "an approval" : "a breakpoint"}`, async () => {
+      const retention = { finishedTtl: "1h" } as const;
+      const a = saverAt(retention);
+      const b = saverAt(retention, a.dbPath);
+      b.clock.now = T0 + 8 * 24 * HOUR;
+      const threadId = `waiting-${gate}`;
+      observe = () => b.saver.savedThreadStatus(threadId)?.status;
+      seenInPost.length = 0;
+      const graph = await compileGraph(gatedSpec(gate), { checkpointer: a.saver as never });
+      let whileWaiting: string | undefined;
+      let afterSweep: string | undefined;
+      const result = await graph.run({
+        threadId,
+        input: {},
+        onInterrupt: "prompt",
+        resolveInterrupt: async () => {
+          whileWaiting = b.saver.savedThreadStatus(threadId)?.status;
+          b.saver.sweep();
+          afterSweep = b.saver.savedThreadStatus(threadId)?.status;
+          return { approved: true };
+        },
+      });
+      expect(whileWaiting).toBe("paused");
+      expect(afterSweep).toBe("paused");
+      expect(seenInPost).toEqual(["active"]);
+      expect(result.status).toBe("completed");
+      expect(result.state["a"]).toBe("pre");
+      expect(result.state["b"]).toBe("post");
+      expect(checkpointCount(a.saver, threadId)).toBeGreaterThan(0);
+      expect(b.saver.savedThreadStatus(threadId)?.status).toBe("finished");
+    });
+  }
 });

@@ -416,6 +416,17 @@ export function abandonedActivePolicy(args: {
   return policy;
 }
 
+/**
+ * Lower bound for a sweep's scan of active rows stamped before `activeTtl`
+ * existed: they fall back to the sweeping saver's policy, so only rows at or
+ * before this time can be abandoned. Matches nothing when that policy does
+ * not reclaim. The scan narrows; {@link abandonedActivePolicy} decides.
+ */
+export function abandonedFallbackCutoff(fallback: ResolvedCheckpointRetention, now: number): number {
+  if (!threadDeletionRequested(fallback) || fallback.activeTtlMs === null) return Number.MIN_SAFE_INTEGER;
+  return now - fallback.activeTtlMs;
+}
+
 /** Status row seen in the same step that marks the thread active. */
 export interface SavedThreadStatus {
   status: CheckpointThreadStatus;
@@ -426,6 +437,8 @@ export interface SavedThreadStatus {
 export interface ActiveThreadMark {
   mark: string;
   prior: SavedThreadStatus | undefined;
+  /** `updated_at` written with the mark. A restore also matches it. */
+  markedAt?: number;
 }
 
 export interface CheckpointRetentionSaver {
@@ -447,14 +460,30 @@ export interface CheckpointRetentionSaver {
   savedThreadStatus?(threadId: string): SavedThreadStatus | undefined | Promise<SavedThreadStatus | undefined>;
   /**
    * Put back the status from before {@link markThreadActive}, only when the
-   * row is still this call's active mark. `undefined` removes that row.
-   * A newer status from another run is left alone. Checkpoints stay.
+   * row is still this call's active mark. When `markedAt` is given the row
+   * must also still carry that timestamp, so a row written since the mark
+   * (a checkpoint, another writer) is not rolled back. `undefined` removes
+   * that row. A newer status from another run is left alone. Checkpoints stay.
    */
   restoreThreadStatus?(
     threadId: string,
     prior: SavedThreadStatus | undefined,
     activeMark: string,
+    markedAt?: number,
   ): void | Promise<void>;
+  /**
+   * A run is about to wait in-process for an answer (`resolveInterrupt`).
+   * Store its row as `paused`, keeping `activeMark`, so a sweep on another
+   * host does not treat the quiet row as abandoned. Only applies while the
+   * row is still active under `activeMark`. Returns whether it did.
+   */
+  noteThreadWaiting?(threadId: string, activeMark: string): boolean | Promise<boolean>;
+  /**
+   * The answer arrived. Set the row back to `active` as fresh activity, only
+   * while it is still the paused row {@link noteThreadWaiting} left under
+   * `activeMark`. Returns whether it did.
+   */
+  noteThreadAnswered?(threadId: string, activeMark: string): boolean | Promise<boolean>;
   /** Mark a thread in use. Returns a token for {@link endThreadRun}. */
   beginThreadRun?(threadId: string): number;
   /**

@@ -420,6 +420,31 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     let priorRead = false;
     let priorStatus: { status: "active" | "paused" | "finished"; updatedAt: number } | undefined;
     let activeMark: string | undefined;
+    let markedAt: number | undefined;
+    // While this run waits in-process for an answer it writes nothing, so its
+    // row would look abandoned to a sweep on another host. Store it as paused
+    // for the wait and set it back to active under the same mark afterwards.
+    const awaitAnswer = async <T>(wait: () => Promise<T> | T): Promise<T> => {
+      let waiting = false;
+      if (activeMark && retention?.noteThreadWaiting) {
+        try {
+          waiting = await retention.noteThreadWaiting(threadId, activeMark);
+        } catch {
+          // Missing this only leaves the row active, as before.
+        }
+      }
+      try {
+        return await wait();
+      } finally {
+        if (waiting && activeMark) {
+          try {
+            await retention?.noteThreadAnswered?.(threadId, activeMark);
+          } catch {
+            // The run's next checkpoint write refreshes the row as active.
+          }
+        }
+      }
+    };
     try {
       runToken = retention?.beginThreadRun?.(threadId) ?? 0;
       retentionOpen = !!retention;
@@ -427,6 +452,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         const marked = await retention?.markThreadActive?.(threadId);
         if (marked && typeof marked.mark === "string") {
           activeMark = marked.mark;
+          markedAt = marked.markedAt;
           priorStatus = marked.prior;
           // An already-active row belongs to another run. Leave it alone.
           priorRead = marked.prior?.status !== "active";
@@ -582,8 +608,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
               if (policy === "fail" || policy === "webhook" || !runOpts.resolveInterrupt) {
                 return finish({ status: "interrupted", state: clean, runId, threadId, interrupts: bp, durationMs: Date.now() - startMs });
               }
-              await runOpts.resolveInterrupt(bp);
-              current = new Command({ resume: null });
+              const resolveBreakpoint = runOpts.resolveInterrupt;
+              await awaitAnswer(() => resolveBreakpoint(bp));
+              // Continue past a static breakpoint with no input; an empty Command is rejected.
+              current = null;
               continue;
             }
           }
@@ -686,7 +714,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
         let resumeValue: unknown;
         if (runOpts.resolveInterrupt) {
-          resumeValue = await runOpts.resolveInterrupt(interrupts);
+          const resolve = runOpts.resolveInterrupt;
+          resumeValue = await awaitAnswer(() => resolve(interrupts));
         } else if (policy === "approve") {
           resumeValue = true;
         } else {
@@ -733,7 +762,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         }
         if (priorRead && activeMark) {
           try {
-            await retention?.restoreThreadStatus?.(threadId, priorStatus, activeMark);
+            await retention?.restoreThreadStatus?.(threadId, priorStatus, activeMark, markedAt);
           } catch {
             /* restoring status must not hide the original error */
           }

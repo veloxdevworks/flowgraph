@@ -43,6 +43,11 @@ export interface PostgresCheckpointerOptions {
    * keeps every checkpoint.
    */
   retention?: boolean | CheckpointRetentionInput | null;
+  /**
+   * Milliseconds since the epoch, used for retention timestamps and sweeps.
+   * Defaults to `Date.now`. Meant for tests.
+   */
+  clock?: () => number;
 }
 
 /**
@@ -67,7 +72,8 @@ export async function createPostgresCheckpointer(
     typeof connStringOrOptions === "string" ? undefined : connStringOrOptions.retention,
   );
   const pool = new pg.Pool({ connectionString });
-  const saver = new FlowgraphPostgresSaver(pool, retention);
+  const clock = typeof connStringOrOptions === "string" ? undefined : connStringOrOptions.clock;
+  const saver = new FlowgraphPostgresSaver(pool, retention, clock ? { clock } : undefined);
   if (doSetup) {
     const timeoutMs = typeof connStringOrOptions === "string" ? undefined : connStringOrOptions.setupLockTimeoutMs;
     try {
@@ -108,6 +114,11 @@ export interface PostgresBackendOptions {
    * {@link PostgresCheckpointerOptions.retention}. Default is bounded.
    */
   retention?: boolean | CheckpointRetentionInput | null;
+  /**
+   * Milliseconds since the epoch, used for retention timestamps and sweeps.
+   * Defaults to `Date.now`. Meant for tests.
+   */
+  clock?: () => number;
   /** Extra pg.Pool settings when this call creates the pool (e.g. max, allowExitOnIdle). */
   poolConfig?: Omit<pg.PoolConfig, "connectionString">;
   /**
@@ -164,7 +175,10 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
     );
   }
   try {
-    const saver = new FlowgraphPostgresSaver(pool, resolveCheckpointRetention(opts.retention), { schema });
+    const saver = new FlowgraphPostgresSaver(pool, resolveCheckpointRetention(opts.retention), {
+      schema,
+      ...(opts.clock ? { clock: opts.clock } : {}),
+    });
     const setup = opts.setup !== false;
     const memory = setup
       ? await withSetupLock(

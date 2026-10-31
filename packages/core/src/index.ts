@@ -74,6 +74,7 @@ export {
   DEFAULT_CHECKPOINT_RETENTION,
   ThreadRunGuard,
   abandonedActivePolicy,
+  abandonedFallbackCutoff,
   checkpointPrunedError,
   isRetentionSaver,
   resolveCheckpointRetention,

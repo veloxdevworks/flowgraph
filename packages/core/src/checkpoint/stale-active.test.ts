@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph";
+import type { GraphSpec } from "@flowgraph/spec";
+import { compileGraph } from "../compiler.js";
+import { registerFunction } from "../nodes/function.js";
 import { FlowgraphMemorySaver } from "./memory-saver.js";
 import {
   DEFAULT_ACTIVE_TTL_MS,
@@ -157,5 +160,99 @@ describe("FlowgraphMemorySaver abandoned active threads", () => {
     // The newer run's own restore still matches its mark.
     saver.restoreThreadStatus("woken", fresh.prior, fresh.mark);
     expect(saver.savedThreadStatus("woken")).toEqual({ status: "finished", updatedAt: T0 });
+  });
+});
+
+/** pre -> gate -> post. `gate` is a human approval, or a breakpoint before `post`. */
+function gatedSpec(gate: "approval" | "breakpoint"): GraphSpec {
+  const nodes: unknown[] = [{ id: "pre", type: "function", with: { fn: "staleWaitPre", output: { to: "a" } } }];
+  const edges: unknown[] = [{ from: "START", to: "pre" }];
+  if (gate === "approval") {
+    nodes.push({ id: "gate", type: "hitl", with: { mode: "approve", message: "ok?", output: { to: "approval" } } });
+    edges.push({ from: "pre", to: "gate" }, { from: "gate", to: "post" });
+  } else {
+    edges.push({ from: "pre", to: "post" });
+  }
+  nodes.push({ id: "post", type: "function", with: { fn: "staleWaitPost", output: { to: "b" } } });
+  edges.push({ from: "post", to: "END" });
+  return {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: `stale-wait-${gate}` },
+    state: { channels: { a: { type: "string" }, b: { type: "string" }, approval: { type: "object" } } },
+    nodes,
+    edges,
+    ...(gate === "breakpoint" ? { runtime: { hitl: { breakpoints: { before: ["post"] } } } } : {}),
+  } as unknown as GraphSpec;
+}
+
+describe("FlowgraphMemorySaver run waiting for an answer", () => {
+  const seenInPost: Array<string | undefined> = [];
+  let postSaver: FlowgraphMemorySaver | undefined;
+  let postThread = "";
+  beforeAll(() => {
+    registerFunction("staleWaitPre", () => "pre");
+    registerFunction("staleWaitPost", () => {
+      seenInPost.push(postSaver?.savedThreadStatus(postThread)?.status);
+      return "post";
+    });
+  });
+
+  for (const gate of ["approval", "breakpoint"] as const) {
+    it(`stores the row as paused while waiting at ${gate === "approval" ? "an approval" : "a breakpoint"}, then active again under the same mark`, async () => {
+      const { saver, clock } = saverAt({ finishedTtl: "1h", activeTtl: "1d" });
+      postSaver = saver;
+      postThread = `waiting-${gate}`;
+      seenInPost.length = 0;
+      const graph = await compileGraph(gatedSpec(gate), { checkpointer: saver });
+      let whileWaiting: ReturnType<FlowgraphMemorySaver["savedThreadStatus"]>;
+      const result = await graph.run({
+        threadId: postThread,
+        input: {},
+        onInterrupt: "prompt",
+        resolveInterrupt: async () => {
+          whileWaiting = saver.savedThreadStatus(postThread);
+          // The answer takes longer than activeTtl. A sweep in the meantime leaves the row.
+          clock.now = T0 + 8 * DAY;
+          await saver.sweep();
+          expect(saver.savedThreadStatus(postThread)?.status).toBe("paused");
+          return { approved: true };
+        },
+      });
+      expect(whileWaiting).toEqual({ status: "paused", updatedAt: T0 });
+      expect(seenInPost).toEqual(["active"]);
+      expect(result.status).toBe("completed");
+      expect(result.state["a"]).toBe("pre");
+      expect(result.state["b"]).toBe("post");
+    });
+  }
+
+  it("waiting and answering only apply to the row under the run's own mark", () => {
+    const { saver, clock } = saverAt({ finishedTtl: "1h", activeTtl: "1d" });
+    const first = saver.markThreadActive("guarded")!;
+    expect(saver.noteThreadWaiting("guarded", "someone-else")).toBe(false);
+    expect(saver.noteThreadWaiting("guarded", first.mark)).toBe(true);
+    expect(saver.noteThreadWaiting("guarded", first.mark)).toBe(false);
+    // Another run takes the thread over while the first one waits.
+    clock.now = T0 + 1;
+    const second = saver.markThreadActive("guarded")!;
+    expect(second.prior?.status).toBe("paused");
+    expect(saver.noteThreadAnswered("guarded", first.mark)).toBe(false);
+    expect(saver.savedThreadStatus("guarded")).toEqual({ status: "active", updatedAt: T0 + 1 });
+    expect(saver.noteThreadAnswered("missing", first.mark)).toBe(false);
+  });
+
+  it("a restore given the mark time leaves a row written after the mark", async () => {
+    const { saver, clock } = saverAt({ finishedTtl: "1h", activeTtl: "1d" });
+    const marked = saver.markThreadActive("written")!;
+    expect(marked.markedAt).toBe(T0);
+    clock.now = T0 + 5;
+    await write(saver, "written", 1);
+    saver.restoreThreadStatus("written", undefined, marked.mark, marked.markedAt);
+    expect(saver.savedThreadStatus("written")).toEqual({ status: "active", updatedAt: T0 + 5 });
+
+    const other = saver.markThreadActive("untouched")!;
+    saver.restoreThreadStatus("untouched", undefined, other.mark, other.markedAt);
+    expect(saver.savedThreadStatus("untouched")).toBeUndefined();
   });
 });

@@ -14,8 +14,10 @@ import {
   CHECKPOINT_PIN_CHANNELS,
   ThreadRunGuard,
   abandonedActivePolicy,
+  abandonedFallbackCutoff,
   selectRetainedCheckpointIds,
   threadDeletionRequested,
+  type ActiveThreadMark,
   type CheckpointThreadStatus,
   type ResolvedCheckpointRetention,
 } from "@flowgraph/core";
@@ -113,6 +115,11 @@ export async function migratePostgresCheckpointRetention(pool: pg.Pool, schema: 
       // active_ttl_ms (0 = never) plus the finished TTL and cap. NULL marks a
       // row stamped before this column existed.
       await client.query(`ALTER TABLE ${s}.fg_checkpoint_threads ADD COLUMN IF NOT EXISTS active_ttl_ms BIGINT`);
+      // Keeps the sweep's scan of active rows off finished and paused ones.
+      await client.query(
+        `CREATE INDEX IF NOT EXISTS fg_checkpoint_threads_active
+           ON ${s}.fg_checkpoint_threads (updated_at) WHERE status = 'active'`,
+      );
       await client.query(
         `INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 4, $1)`,
         [Date.now()],
@@ -301,12 +308,11 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
-  async markThreadActive(
-    threadId: string,
-  ): Promise<{ mark: string; prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined } | undefined> {
+  async markThreadActive(threadId: string): Promise<ActiveThreadMark | undefined> {
     const policy = this.policyFor(threadId);
     if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
     const mark = crypto.randomUUID();
+    const markedAt = this.clock();
     const client = await this.db().connect();
     try {
       await client.query("BEGIN");
@@ -321,9 +327,9 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
       );
       const row = found.rows[0];
       const prior = row ? { status: row.status, updatedAt: Number(row.updated_at) } : undefined;
-      await this.touch(threadId, "active", this.clock(), policy, mark, client);
+      await this.touch(threadId, "active", markedAt, policy, mark, client);
       await client.query("COMMIT");
-      return { mark, prior };
+      return { mark, prior, markedAt };
     } catch (err) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw err;
@@ -346,12 +352,16 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     threadId: string,
     prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined,
     activeMark: string,
+    markedAt?: number,
   ): Promise<void> {
     if (prior?.status === "active") return;
+    // A row written since the mark carries a newer timestamp and stays.
+    const at = markedAt ?? null;
     if (!prior) {
       await this.db().query(
-        `DELETE FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1 AND status = 'active' AND active_mark = $2`,
-        [threadId, activeMark],
+        `DELETE FROM ${this.q}.fg_checkpoint_threads
+         WHERE thread_id = $1 AND status = 'active' AND active_mark = $2 AND ($3::bigint IS NULL OR updated_at = $3::bigint)`,
+        [threadId, activeMark, at],
       );
       return;
     }
@@ -361,7 +371,8 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
       `UPDATE ${this.q}.fg_checkpoint_threads
        SET status = $2, updated_at = $3, deletable = $4, finished_ttl_ms = $5, max_finished = $6,
            active_mark = NULL, active_ttl_ms = NULL
-       WHERE thread_id = $1 AND status = 'active' AND active_mark = $7`,
+       WHERE thread_id = $1 AND status = 'active' AND active_mark = $7
+         AND ($8::bigint IS NULL OR updated_at = $8::bigint)`,
       [
         threadId,
         prior.status,
@@ -370,8 +381,35 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
         deletable ? policy.finishedTtlMs : null,
         deletable ? policy.maxFinishedThreads : null,
         activeMark,
+        at,
       ],
     );
+  }
+
+  async noteThreadWaiting(threadId: string, activeMark: string): Promise<boolean> {
+    const now = this.clock();
+    const result = await this.db().query(
+      `UPDATE ${this.q}.fg_checkpoint_threads
+       SET status = 'paused', updated_at = $1, deletable = 0, finished_ttl_ms = NULL, max_finished = NULL,
+           active_ttl_ms = NULL
+       WHERE thread_id = $2 AND status = 'active' AND active_mark = $3`,
+      [now, threadId, activeMark],
+    );
+    if ((result.rowCount ?? 0) === 0) return false;
+    await this.pinHead(threadId, now);
+    return true;
+  }
+
+  async noteThreadAnswered(threadId: string, activeMark: string): Promise<boolean> {
+    const policy = this.policyFor(threadId);
+    const result = await this.db().query(
+      `UPDATE ${this.q}.fg_checkpoint_threads
+       SET status = 'active', updated_at = $1, deletable = 0, finished_ttl_ms = $2, max_finished = $3,
+           active_ttl_ms = $4
+       WHERE thread_id = $5 AND status = 'paused' AND active_mark = $6`,
+      [this.clock(), policy.finishedTtlMs, policy.maxFinishedThreads, policy.activeTtlMs ?? 0, threadId, activeMark],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   beginThreadRun(threadId: string): number {
@@ -455,7 +493,11 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
   private async reclaimAbandoned(now: number): Promise<void> {
     const rows = await this.db().query<ActiveRow>(
       `SELECT thread_id, updated_at, active_mark, active_ttl_ms, finished_ttl_ms, max_finished
-       FROM ${this.q}.fg_checkpoint_threads WHERE status = 'active'`,
+       FROM ${this.q}.fg_checkpoint_threads
+       WHERE status = 'active'
+         AND ((active_ttl_ms > 0 AND updated_at <= $1::bigint - active_ttl_ms)
+           OR (active_ttl_ms IS NULL AND updated_at <= $2::bigint))`,
+      [now, abandonedFallbackCutoff(this.retention, now)],
     );
     const num = (v: string | number | null): number | null => (v === null ? null : Number(v));
     for (const row of rows.rows) {
