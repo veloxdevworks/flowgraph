@@ -19,6 +19,7 @@ import {
   CHECKPOINT_INLINE_MAX_BYTES,
   CHECKPOINT_PIN_CHANNELS,
   ThreadRunGuard,
+  abandonedActivePolicy,
   selectRetainedCheckpointIds,
   resolveCheckpointRetention,
   threadDeletionRequested,
@@ -46,6 +47,13 @@ interface ThreadRec {
   finishedTtlMs: number | null;
   maxFinished: number | null;
   activeMark: string | null;
+  /** Set on active rows: the policy's `activeTtl` (0 when it has none). */
+  activeTtlMs: number | null;
+}
+
+export interface FlowgraphMemorySaverOptions {
+  /** Milliseconds since the epoch. Defaults to `Date.now`. */
+  clock?: () => number;
 }
 
 function writeKey(threadId: string, ns: string, checkpointId: string): string {
@@ -68,13 +76,16 @@ export class FlowgraphMemorySaver extends MemorySaver {
   private readonly threadPolicy = new Map<string, ResolvedCheckpointRetention>();
   private readonly runs = new ThreadRunGuard();
   private lastSweepAt = 0;
+  private readonly clock: () => number;
 
   constructor(
     retention?: boolean | CheckpointRetentionInput | ResolvedCheckpointRetention | null,
     serde?: ConstructorParameters<typeof MemorySaver>[0],
+    options?: FlowgraphMemorySaverOptions,
   ) {
     super(serde);
     this.retention = isResolved(retention) ? retention : resolveCheckpointRetention(retention ?? undefined);
+    this.clock = options?.clock ?? Date.now;
   }
 
   override async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
@@ -112,7 +123,9 @@ export class FlowgraphMemorySaver extends MemorySaver {
     const policy = typeof threadId === "string" ? this.policyFor(threadId) : this.retention;
     let stored: Checkpoint = checkpoint;
     if (policy.enabled && typeof threadId === "string" && threadDeletionRequested(policy)) {
-      this.touch(threadId, "active", Date.now(), policy);
+      // Each checkpoint is activity. Keep the run's mark so a restore still matches it.
+      const row = this.threads.get(threadId);
+      this.touch(threadId, "active", this.clock(), policy, row?.status === "active" ? row.activeMark : null);
     }
     if (policy.enabled && policy.dedupeChannels && typeof threadId === "string") {
       stored = copyCheckpoint(checkpoint);
@@ -139,7 +152,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
     const threadId = config.configurable?.thread_id;
     const checkpointId = config.configurable?.checkpoint_id;
     if (!hit || typeof threadId !== "string" || typeof checkpointId !== "string") return;
-    this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, hit[0], Date.now());
+    this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, hit[0], this.clock());
   }
 
   markThreadActive(threadId: string): { mark: string; prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined } | undefined {
@@ -148,7 +161,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
     const row = this.threads.get(threadId);
     const prior = row ? { status: row.status, updatedAt: row.updatedAt } : undefined;
     const mark = crypto.randomUUID();
-    this.touch(threadId, "active", Date.now(), policy, mark);
+    this.touch(threadId, "active", this.clock(), policy, mark);
     return { mark, prior };
   }
 
@@ -192,7 +205,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
     this.threadPolicy.set(threadId, policy);
   }
 
-  async noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = Date.now()): Promise<void> {
+  async noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = this.clock()): Promise<void> {
     const policy = this.policyFor(threadId);
     if (!policy.enabled) return;
     if (status === "paused") this.pinHead(threadId, now);
@@ -208,8 +221,9 @@ export class FlowgraphMemorySaver extends MemorySaver {
     }
   }
 
-  async sweep(now = Date.now()): Promise<void> {
+  async sweep(now = this.clock()): Promise<void> {
     this.lastSweepAt = now;
+    this.reclaimAbandoned(now);
     const stillFinished = (threadId: string, seenUpdatedAt: number): boolean => {
       if (this.runs.held(threadId)) return false;
       const live = this.threads.get(threadId);
@@ -238,6 +252,38 @@ export class FlowgraphMemorySaver extends MemorySaver {
         if (!next) break;
         await this.deleteThread(next[0]);
       }
+    }
+  }
+
+  /**
+   * An active row with no activity for its `activeTtl` belongs to a run that
+   * stopped without recording a status. Turn it into a finished row as of
+   * its last activity, so the finished-thread rules below apply. Threads
+   * this process is running or parking are skipped.
+   */
+  private reclaimAbandoned(now: number): void {
+    for (const [threadId, row] of [...this.threads]) {
+      if (row.status !== "active") continue;
+      const policy = abandonedActivePolicy({
+        updatedAt: row.updatedAt,
+        now,
+        held: this.runs.held(threadId),
+        recorded:
+          row.activeTtlMs === null
+            ? undefined
+            : { activeTtlMs: row.activeTtlMs, finishedTtlMs: row.finishedTtlMs, maxFinishedThreads: row.maxFinished },
+        fallback: this.retention,
+      });
+      if (!policy) continue;
+      this.threads.set(threadId, {
+        status: "finished",
+        updatedAt: row.updatedAt,
+        deletable: true,
+        finishedTtlMs: policy.finishedTtlMs,
+        maxFinished: policy.maxFinishedThreads,
+        activeMark: null,
+        activeTtlMs: null,
+      });
     }
   }
 
@@ -285,13 +331,16 @@ export class FlowgraphMemorySaver extends MemorySaver {
     activeMark: string | null = null,
   ): void {
     const deletable = status === "finished" && threadDeletionRequested(policy);
+    // An active row carries the policy a sweep applies if its run is abandoned.
+    const keepsPolicy = deletable || status === "active";
     this.threads.set(threadId, {
       status,
       updatedAt,
       deletable,
-      finishedTtlMs: deletable ? policy.finishedTtlMs : null,
-      maxFinished: deletable ? policy.maxFinishedThreads : null,
+      finishedTtlMs: keepsPolicy ? policy.finishedTtlMs : null,
+      maxFinished: keepsPolicy ? policy.maxFinishedThreads : null,
       activeMark,
+      activeTtlMs: status === "active" ? (policy.activeTtlMs ?? 0) : null,
     });
   }
 

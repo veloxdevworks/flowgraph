@@ -1225,6 +1225,13 @@ export const CheckpointRetentionSchema = z.union([
        * not cap them. `0` deletes a completed thread when the run finishes.
        */
       maxFinishedThreads: z.number().int().nonnegative().nullable().optional(),
+      /**
+       * When thread deletion is on, an active thread with no checkpoint or
+       * run start for this long (`7d`, `12h`) is treated as abandoned and
+       * then follows `finishedTtl` and `maxFinishedThreads`. Default `7d`.
+       * `null` keeps such threads until a later run or `deleteThread`.
+       */
+      activeTtl: z.union([DurationSchema.refine((d) => !/^0+(\.0+)?(ms|s|m|h|d)$/.test(d), "activeTtl must be positive"), z.null()]).optional(),
       /** Store each channel version once. Default true. */
       dedupeChannels: z.boolean().optional(),
       /** `auto` VACUUMs sqlite when free pages exceed live data. Default auto. */

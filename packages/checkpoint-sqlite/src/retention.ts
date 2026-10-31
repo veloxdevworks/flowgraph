@@ -13,6 +13,7 @@ import {
   CHECKPOINT_INLINE_MAX_BYTES,
   CHECKPOINT_PIN_CHANNELS,
   ThreadRunGuard,
+  abandonedActivePolicy,
   selectRetainedCheckpointIds,
   threadDeletionRequested,
   type CheckpointThreadStatus,
@@ -64,6 +65,15 @@ const MIGRATION_V3 = `
 ALTER TABLE fg_checkpoint_threads ADD COLUMN active_mark TEXT;
 `;
 
+/**
+ * Active rows record the policy a sweep applies if their run is abandoned:
+ * `active_ttl_ms` (0 = never), and the finished TTL and cap in the existing
+ * columns. NULL marks a row stamped before this column existed.
+ */
+const MIGRATION_V4 = `
+ALTER TABLE fg_checkpoint_threads ADD COLUMN active_ttl_ms INTEGER;
+`;
+
 interface IdRow {
   checkpoint_id: string;
 }
@@ -83,6 +93,19 @@ interface ThreadRow {
   finished_ttl_ms: number | null;
   max_finished: number | null;
   deletable: number;
+}
+interface ActiveRow {
+  thread_id: string;
+  updated_at: number;
+  active_mark: string | null;
+  active_ttl_ms: number | null;
+  finished_ttl_ms: number | null;
+  max_finished: number | null;
+}
+
+export interface FlowgraphSqliteSaverOptions {
+  /** Milliseconds since the epoch. Defaults to `Date.now`. */
+  clock?: () => number;
 }
 
 function asRows<T>(rows: unknown[]): T[] {
@@ -116,6 +139,7 @@ export function migrateSqliteCheckpointRetention(db: SqliteDatabase): number {
       { version: 1, sql: MIGRATION_V1 },
       { version: 2, sql: MIGRATION_V2 },
       { version: 3, sql: MIGRATION_V3 },
+      { version: 4, sql: MIGRATION_V4 },
     ];
     const latest = steps[steps.length - 1]?.version ?? 0;
     if (current > latest) {
@@ -180,11 +204,13 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
   private readonly runs = new ThreadRunGuard();
   private schemaReady = false;
   private lastSweepAt = 0;
+  private readonly clock: () => number;
 
-  constructor(db: SqliteDatabase, retention: ResolvedCheckpointRetention) {
+  constructor(db: SqliteDatabase, retention: ResolvedCheckpointRetention, options?: FlowgraphSqliteSaverOptions) {
     super(db as never);
     this.sqlite = db;
     this.retention = retention;
+    this.clock = options?.clock ?? Date.now;
     const inner = this.serde;
     // Stock SqliteSaver rejects this type. Our reads treat it as json and
     // fill channel values from fg_checkpoint_blobs, whatever the current flags are.
@@ -223,7 +249,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
       const row = this.sqlite
         .prepare(`SELECT status, updated_at FROM fg_checkpoint_threads WHERE thread_id = ?`)
         .get(threadId) as { status: CheckpointThreadStatus; updated_at: number } | undefined;
-      this.touch(threadId, "active", Date.now(), policy, mark);
+      this.touch(threadId, "active", this.clock(), policy, mark);
       if (!row) return undefined;
       return { status: row.status, updatedAt: Number(row.updated_at) };
     }).immediate();
@@ -257,7 +283,8 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.sqlite
       .prepare(
         `UPDATE fg_checkpoint_threads
-         SET status = ?, updated_at = ?, deletable = ?, finished_ttl_ms = ?, max_finished = ?, active_mark = NULL
+         SET status = ?, updated_at = ?, deletable = ?, finished_ttl_ms = ?, max_finished = ?,
+             active_mark = NULL, active_ttl_ms = NULL
          WHERE thread_id = ? AND status = 'active' AND active_mark = ?`,
       )
       .run(
@@ -309,7 +336,8 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     let deduped = false;
     if (policy.enabled && typeof threadId === "string" && threadDeletionRequested(policy)) {
       this.setup();
-      this.touch(threadId, "active", Date.now(), policy);
+      // Each checkpoint is activity. The run's mark stays so a restore still matches it.
+      this.touch(threadId, "active", this.clock(), policy, null, true);
     }
     if (policy.enabled && policy.dedupeChannels && typeof threadId === "string") {
       this.setup();
@@ -345,7 +373,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     const threadId = config.configurable?.thread_id;
     const checkpointId = config.configurable?.checkpoint_id;
     if (channel === undefined || typeof threadId !== "string" || typeof checkpointId !== "string") return;
-    this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, String(channel), Date.now());
+    this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, String(channel), this.clock());
   }
 
   override async deleteThread(threadId: string): Promise<void> {
@@ -354,7 +382,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.maybeVacuum(deleted, this.retention);
   }
 
-  noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = Date.now()): void {
+  noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = this.clock()): void {
     const policy = this.policyFor(threadId);
     if (!policy.enabled) return;
     this.setup();
@@ -382,9 +410,10 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     return Number(n?.n ?? 0) > cap;
   }
 
-  sweep(now = Date.now()): void {
+  sweep(now = this.clock()): void {
     this.setup();
     this.lastSweepAt = now;
+    this.reclaimAbandoned(now);
     let deleted = 0;
     const aged = asRows<ThreadRow>(
       this.sqlite
@@ -431,6 +460,48 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.maybeVacuum(deleted, this.retention);
   }
 
+  /**
+   * An active row with no activity for its `activeTtl` belongs to a run that
+   * stopped without recording a status. Turn it into a finished row as of its
+   * last activity so the finished-thread rules apply. The update matches the
+   * row as listed (status, timestamp, mark), so a run that marked or
+   * checkpointed in between keeps it. Threads this process holds are skipped.
+   */
+  private reclaimAbandoned(now: number): void {
+    const rows = asRows<ActiveRow>(
+      this.sqlite
+        .prepare(
+          `SELECT thread_id, updated_at, active_mark, active_ttl_ms, finished_ttl_ms, max_finished
+           FROM fg_checkpoint_threads WHERE status = 'active'`,
+        )
+        .all(),
+    );
+    const reclaim = this.sqlite.prepare(
+      `UPDATE fg_checkpoint_threads
+       SET status = 'finished', deletable = 1, finished_ttl_ms = ?, max_finished = ?,
+           active_mark = NULL, active_ttl_ms = NULL
+       WHERE thread_id = ? AND status = 'active' AND updated_at = ? AND active_mark IS ?`,
+    );
+    for (const row of rows) {
+      const policy = abandonedActivePolicy({
+        updatedAt: Number(row.updated_at),
+        now,
+        held: this.runs.held(row.thread_id),
+        recorded:
+          row.active_ttl_ms === null
+            ? undefined
+            : {
+                activeTtlMs: Number(row.active_ttl_ms),
+                finishedTtlMs: row.finished_ttl_ms === null ? null : Number(row.finished_ttl_ms),
+                maxFinishedThreads: row.max_finished === null ? null : Number(row.max_finished),
+              },
+        fallback: this.retention,
+      });
+      if (!policy) continue;
+      reclaim.run(policy.finishedTtlMs, policy.maxFinishedThreads, row.thread_id, row.updated_at, row.active_mark);
+    }
+  }
+
   private policyFor(threadId: string): ResolvedCheckpointRetention {
     return this.threadPolicy.get(threadId) ?? this.retention;
   }
@@ -441,24 +512,32 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     now: number,
     policy: ResolvedCheckpointRetention,
     activeMark: string | null = null,
+    keepActiveMark = false,
   ): void {
     const deletable = status === "finished" && threadDeletionRequested(policy) ? 1 : 0;
-    const ttl = deletable ? policy.finishedTtlMs : null;
-    const cap = deletable ? policy.maxFinishedThreads : null;
+    // An active row carries the policy a sweep applies if its run is abandoned.
+    const active = status === "active";
+    const ttl = deletable || active ? policy.finishedTtlMs : null;
+    const cap = deletable || active ? policy.maxFinishedThreads : null;
+    const activeTtl = active ? (policy.activeTtlMs ?? 0) : null;
     this.sqlite
       .prepare(
         `INSERT INTO fg_checkpoint_threads
-           (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished, active_mark)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished, active_mark, active_ttl_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (thread_id) DO UPDATE SET
            status = excluded.status,
            updated_at = excluded.updated_at,
            deletable = excluded.deletable,
            finished_ttl_ms = excluded.finished_ttl_ms,
            max_finished = excluded.max_finished,
-           active_mark = excluded.active_mark`,
+           active_mark = CASE
+             WHEN ? = 1 AND fg_checkpoint_threads.status = 'active' THEN fg_checkpoint_threads.active_mark
+             ELSE excluded.active_mark
+           END,
+           active_ttl_ms = excluded.active_ttl_ms`,
       )
-      .run(threadId, status, now, deletable, ttl, cap, activeMark);
+      .run(threadId, status, now, deletable, ttl, cap, activeMark, activeTtl, keepActiveMark ? 1 : 0);
   }
 
   private addPin(threadId: string, ns: string, checkpointId: string, reason: string, now: number): void {

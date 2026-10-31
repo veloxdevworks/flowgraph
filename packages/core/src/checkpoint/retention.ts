@@ -65,6 +65,18 @@ export interface CheckpointRetentionInput {
    */
   maxFinishedThreads?: number | null | undefined;
   /**
+   * How long an `active` thread row may go without activity before a sweep
+   * treats its run as abandoned (the process stopped without recording a
+   * status). A duration string (`7d`, `12h`) or milliseconds. Default `7d`.
+   * Activity is the active mark at run start and every checkpoint the run
+   * writes, so a run that keeps checkpointing is never abandoned. An
+   * abandoned row becomes a finished thread as of its last activity, and
+   * `finishedTtl` and `maxFinishedThreads` then decide when it is deleted.
+   * Only applies when thread deletion is on. `null` keeps active rows until
+   * a later run or `deleteThread`. Must be positive.
+   */
+  activeTtl?: string | number | null | undefined;
+  /**
    * Store each channel version once (sqlite and in-memory). Postgres already
    * versions blobs; unreferenced versions are deleted on prune either way.
    * Default true.
@@ -86,9 +98,14 @@ export interface ResolvedCheckpointRetention {
   finishedTtlMs: number | null;
   /** `null` disables the count cap. */
   maxFinishedThreads: number | null;
+  /** `null` never treats an active row as abandoned. */
+  activeTtlMs: number | null;
   dedupeChannels: boolean;
   vacuum: CheckpointVacuum;
 }
+
+/** Default {@link CheckpointRetentionInput.activeTtl}: 7 days. */
+export const DEFAULT_ACTIVE_TTL_MS = 7 * 86_400_000;
 
 export const DEFAULT_CHECKPOINT_RETENTION: ResolvedCheckpointRetention = {
   enabled: true,
@@ -97,6 +114,8 @@ export const DEFAULT_CHECKPOINT_RETENTION: ResolvedCheckpointRetention = {
   /** Thread deletion is opt-in. */
   finishedTtlMs: null,
   maxFinishedThreads: null,
+  /** Well above any single checkpoint gap a live run should have. */
+  activeTtlMs: DEFAULT_ACTIVE_TTL_MS,
   dedupeChannels: true,
   vacuum: "auto",
 };
@@ -240,6 +259,7 @@ export function resolveCheckpointRetention(
     if (src.maxInterruptPoints !== undefined) merged.maxInterruptPoints = src.maxInterruptPoints;
     if (src.finishedTtl !== undefined) merged.finishedTtl = src.finishedTtl;
     if (src.maxFinishedThreads !== undefined) merged.maxFinishedThreads = src.maxFinishedThreads;
+    if (src.activeTtl !== undefined) merged.activeTtl = src.activeTtl;
     if (src.dedupeChannels !== undefined) merged.dedupeChannels = src.dedupeChannels;
     if (src.vacuum !== undefined) merged.vacuum = src.vacuum;
   }
@@ -256,6 +276,14 @@ export function resolveCheckpointRetention(
       : merged.maxFinishedThreads === null
         ? null
         : countInt(merged.maxFinishedThreads, "maxFinishedThreads", 0);
+  let activeTtlMs = DEFAULT_CHECKPOINT_RETENTION.activeTtlMs;
+  if (merged.activeTtl === null) activeTtlMs = null;
+  else if (merged.activeTtl !== undefined) {
+    activeTtlMs = retentionDurationMs(merged.activeTtl);
+    if (activeTtlMs <= 0) {
+      throw new Error(`Invalid activeTtl: ${JSON.stringify(merged.activeTtl)}. Expected a positive duration or null.`);
+    }
+  }
 
   return {
     enabled,
@@ -271,6 +299,7 @@ export function resolveCheckpointRetention(
     ),
     finishedTtlMs,
     maxFinishedThreads,
+    activeTtlMs,
     dedupeChannels: merged.dedupeChannels ?? DEFAULT_CHECKPOINT_RETENTION.dedupeChannels,
     vacuum: merged.vacuum ?? DEFAULT_CHECKPOINT_RETENTION.vacuum,
   };
@@ -352,6 +381,41 @@ export function retentionStatusForRun(
   return status === "completed" ? "finished" : "paused";
 }
 
+/** Policy recorded on an active row, applied if a sweep finds the run abandoned. */
+export interface ActiveRowPolicy {
+  /** `0` means the row's policy never treats it as abandoned. */
+  activeTtlMs: number;
+  finishedTtlMs: number | null;
+  maxFinishedThreads: number | null;
+}
+
+/**
+ * Whether a sweep at `now` treats an active row as abandoned, and the
+ * finished-thread policy to give it. A row stamped by this build carries its
+ * own policy. A row stamped before `activeTtl` existed (`recorded` undefined)
+ * uses the sweeping saver's policy, when that policy deletes threads.
+ * `held` is true while this process is running or parking the thread; such a
+ * row is never abandoned, however old.
+ */
+export function abandonedActivePolicy(args: {
+  updatedAt: number;
+  now: number;
+  held: boolean;
+  recorded: ActiveRowPolicy | undefined;
+  fallback: ResolvedCheckpointRetention;
+}): ActiveRowPolicy | undefined {
+  if (args.held) return undefined;
+  let policy = args.recorded;
+  if (!policy) {
+    const host = args.fallback;
+    if (!threadDeletionRequested(host) || host.activeTtlMs === null) return undefined;
+    policy = { activeTtlMs: host.activeTtlMs, finishedTtlMs: host.finishedTtlMs, maxFinishedThreads: host.maxFinishedThreads };
+  }
+  if (!Number.isFinite(policy.activeTtlMs) || policy.activeTtlMs <= 0) return undefined;
+  if (args.now - args.updatedAt < policy.activeTtlMs) return undefined;
+  return policy;
+}
+
 /** Status row seen in the same step that marks the thread active. */
 export interface SavedThreadStatus {
   status: CheckpointThreadStatus;
@@ -374,8 +438,9 @@ export interface CheckpointRetentionSaver {
    * is on. `prior` is that row (`undefined` when there was none). `mark` is
    * the token stored on the new row. A later restore matches the token.
    * If `prior.status` is `active`, the row is already held and must not be
-   * written back. A crash after this and before the checkpoint row is written
-   * leaves the thread active until a later run or `deleteThread`.
+   * written back. If the process stops while the row is active, a sweep
+   * treats it as abandoned once its last activity (this mark or a checkpoint
+   * write) is older than `activeTtl`.
    */
   markThreadActive?(threadId: string): ActiveThreadMark | undefined | Promise<ActiveThreadMark | undefined>;
   /** Status row for this thread, if this saver has recorded one. */

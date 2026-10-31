@@ -118,6 +118,7 @@ export { SqliteSaver };
 export {
   FG_CHECKPOINT_TYPE,
   FlowgraphSqliteSaver,
+  type FlowgraphSqliteSaverOptions,
   migrateSqliteCheckpointRetention,
   sqliteCheckpointStats,
   type SqliteCheckpointStats,

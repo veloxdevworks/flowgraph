@@ -65,13 +65,15 @@ export {
   type OutboundResolver,
 } from "./outbound-http.js";
 export type { MemoryHostOptions } from "./compiler.js";
-export { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
+export { FlowgraphMemorySaver, type FlowgraphMemorySaverOptions } from "./checkpoint/memory-saver.js";
 export {
   CHECKPOINT_INLINE_MAX_BYTES,
   CHECKPOINT_PIN_CHANNELS,
   CHECKPOINT_PRUNED,
+  DEFAULT_ACTIVE_TTL_MS,
   DEFAULT_CHECKPOINT_RETENTION,
   ThreadRunGuard,
+  abandonedActivePolicy,
   checkpointPrunedError,
   isRetentionSaver,
   resolveCheckpointRetention,
@@ -81,6 +83,7 @@ export {
   threadDeletionRequested,
 } from "./checkpoint/retention.js";
 export type {
+  ActiveRowPolicy,
   ActiveThreadMark,
   CheckpointRetentionInput,
   CheckpointRetentionSaver,

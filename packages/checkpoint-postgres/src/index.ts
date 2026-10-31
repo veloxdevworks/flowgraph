@@ -201,7 +201,12 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
 }
 
 export { PostgresSaver, DEFAULT_SETUP_LOCK_TIMEOUT_MS };
-export { FlowgraphPostgresSaver, migratePostgresCheckpointRetention } from "./retention.js";
+export {
+  FlowgraphPostgresSaver,
+  activeMarkLockKey,
+  migratePostgresCheckpointRetention,
+  type FlowgraphPostgresSaverOptions,
+} from "./retention.js";
 export {
   createPostgresMemoryBackend,
   createPostgresGraphNameRegistry,
