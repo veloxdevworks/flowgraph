@@ -69,7 +69,10 @@ export { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 export {
   CHECKPOINT_INLINE_MAX_BYTES,
   CHECKPOINT_PIN_CHANNELS,
+  CHECKPOINT_PRUNED,
   DEFAULT_CHECKPOINT_RETENTION,
+  ThreadRunGuard,
+  checkpointPrunedError,
   isRetentionSaver,
   resolveCheckpointRetention,
   retentionDurationMs,

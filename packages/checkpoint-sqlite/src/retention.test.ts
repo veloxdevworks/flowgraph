@@ -7,6 +7,17 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { createSqliteCheckpointer, FG_CHECKPOINT_TYPE, openSqliteBackend, sqliteCheckpointStats, type SqliteBackend } from "./index.js";
 
 registerFunction("sqlRet", () => "done");
+registerFunction("sqlBump", (input) => {
+  const raw = (input as { n?: unknown } | undefined)?.n;
+  const n = typeof raw === "number" ? raw : Number(raw ?? 0);
+  return Number.isFinite(n) ? n + 1 : 1;
+});
+registerFunction("sqlFan", () => ({}));
+const sqlSideHits: string[] = [];
+registerFunction("sqlSide", () => {
+  sqlSideHits.push("S");
+  return "S";
+});
 
 const tmpFiles: string[] = [];
 const open: SqliteBackend[] = [];
@@ -19,6 +30,99 @@ function tmpDb(): string {
   const file = path.join(os.tmpdir(), `fg-ret-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   tmpFiles.push(file);
   return file;
+}
+
+function parallelSpec(warm: number): GraphSpec {
+  return {
+    metadata: { name: "sqlite-parallel-side" },
+    state: { channels: { n: { type: "number" }, sideOut: { type: "string" }, gate: { type: "object" } } },
+    nodes: [
+      { id: "bump", type: "function", with: { fn: "sqlBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } },
+      { id: "fan", type: "function", with: { fn: "sqlFan" } },
+      { id: "effect", type: "function", with: { fn: "sqlSide", output: { to: "sideOut" } } },
+      { id: "ask", type: "hitl", with: { mode: "approve", message: "approve the side effect?", output: { to: "gate" } } },
+    ],
+    edges: [
+      { from: "START", to: "bump" },
+      {
+        from: "bump",
+        branch: [
+          { when: `{{ state.n < ${warm} }}`, to: "bump" },
+          { default: true, to: "fan" },
+        ],
+      },
+      { from: "fan", to: ["effect", "ask"] },
+      { from: "effect", to: "END" },
+      { from: "ask", to: "END" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+function mapSpec(warm: number): GraphSpec {
+  const bump = warm > 0
+    ? [{ id: "bump", type: "function", with: { fn: "sqlBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } }]
+    : [];
+  return {
+    metadata: { name: "sqlite-map-items" },
+    state: { channels: { n: { type: "number" }, numbers: { type: "array" }, out: { type: "array" } } },
+    nodes: [
+      ...bump,
+      {
+        id: "map-items",
+        type: "map",
+        with: {
+          over: "{{ state.numbers }}",
+          as: "n",
+          concurrency: 2,
+          node: {
+            type: "hitl",
+            with: { mode: "approve", message: "Approve {{ item.n }}", output: { to: "itemResult" } },
+          },
+          collect: { to: "out" },
+        },
+      },
+    ],
+    edges: warm > 0
+      ? [
+          { from: "START", to: "bump" },
+          {
+            from: "bump",
+            branch: [
+              { when: `{{ state.n < ${warm} }}`, to: "bump" },
+              { default: true, to: "map-items" },
+            ],
+          },
+          { from: "map-items", to: "END" },
+        ]
+      : [
+          { from: "START", to: "map-items" },
+          { from: "map-items", to: "END" },
+        ],
+  } as unknown as GraphSpec;
+}
+
+async function drive(
+  checkpointer: ReturnType<typeof createSqliteCheckpointer>,
+  spec: GraphSpec,
+  input: Record<string, unknown>,
+) {
+  sqlSideHits.length = 0;
+  const compiled = await compileGraph(spec, { checkpointer });
+  const threadId = `live-${Math.random().toString(36).slice(2)}`;
+  let result = await compiled.run({ threadId, input, onInterrupt: "fail" });
+  let resumes = 0;
+  while (result.status === "interrupted" && resumes < 8) {
+    resumes += 1;
+    result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
+  }
+  return {
+    status: result.status,
+    resumes,
+    hits: [...sqlSideHits],
+    out: result.state["out"],
+    gate: result.state["gate"],
+    side: result.state["sideOut"],
+  };
 }
 
 const interruptSpec = {
@@ -355,6 +459,37 @@ describe("sqlite checkpoint retention", () => {
     db.close();
   });
 
+  it("keeps pending writes that were stored before their checkpoint once the window is exceeded", async () => {
+    const dbPath = tmpDb();
+    const saver = createSqliteCheckpointer({
+      path: dbPath,
+      retention: { maxCheckpoints: 1, maxInterruptPoints: 0, finishedTtl: null },
+    });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const put = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    const cp = (id: string, parent?: string) =>
+      put.put(
+        { configurable: { thread_id: "gap", checkpoint_ns: "", ...(parent ? { checkpoint_id: parent } : {}) } },
+        { ...base, id, channel_values: { n: id }, channel_versions: { n: id } },
+        { source: "loop", step: 1, parents: {} },
+      );
+    await cp("1");
+    await cp("2", "1");
+    await put.putWrites(
+      { configurable: { thread_id: "gap", checkpoint_ns: "", checkpoint_id: "future" } },
+      [["side", "S"], ["__interrupt__", { reason: "wait" }]],
+      "task",
+    );
+    await cp("3", "2");
+    const writes = db.prepare(`SELECT channel FROM writes WHERE thread_id = 'gap' AND checkpoint_id = 'future'`).all() as { channel: string }[];
+    expect(writes.map((row) => row.channel).sort()).toEqual(["__interrupt__", "side"]);
+    db.close();
+  });
+
   it("refuses a checkpoint schema newer than this build", () => {
     const dbPath = tmpDb();
     const first = createSqliteCheckpointer({ path: dbPath, retention: false });
@@ -362,5 +497,84 @@ describe("sqlite checkpoint retention", () => {
     db.prepare(`INSERT INTO fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 99, 1)`).run();
     db.close();
     expect(() => createSqliteCheckpointer({ path: dbPath })).toThrow(/newer than this flowgraph/);
+  });
+
+  it("a thread past the window still runs a parallel interrupt and its side effect once", async () => {
+    const off = createSqliteCheckpointer({ path: tmpDb(), retention: false });
+    const on = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { maxCheckpoints: 3, maxInterruptPoints: 8, finishedTtl: null },
+    });
+    const spec = parallelSpec(8);
+    const plain = await drive(off, spec, { n: 0 });
+    const kept = await drive(on, spec, { n: 0 });
+    expect(kept).toEqual(plain);
+    expect(plain.hits).toEqual(["S"]);
+    expect(plain.status).toBe("completed");
+    (off as unknown as { db: { close(): void } }).db.close();
+    (on as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("a thread past the window resumes a map interrupt the same way as retention off", async () => {
+    const off = createSqliteCheckpointer({ path: tmpDb(), retention: false });
+    const on = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { maxCheckpoints: 3, maxInterruptPoints: 8, finishedTtl: null },
+    });
+    const spec = mapSpec(8);
+    const plain = await drive(off, spec, { n: 0, numbers: [1, 2] });
+    const kept = await drive(on, spec, { n: 0, numbers: [1, 2] });
+    expect(kept).toEqual(plain);
+    expect(plain.status).toBe("completed");
+    expect(plain.out).toHaveLength(2);
+    (off as unknown as { db: { close(): void } }).db.close();
+    (on as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("map interrupts with maxCheckpoints 1 match retention off", async () => {
+    const off = createSqliteCheckpointer({ path: tmpDb(), retention: false });
+    const on = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { maxCheckpoints: 1, maxInterruptPoints: 8, finishedTtl: null },
+    });
+    const spec = mapSpec(0);
+    const plain = await drive(off, spec, { numbers: [1, 2] });
+    const kept = await drive(on, spec, { numbers: [1, 2] });
+    expect(kept).toEqual(plain);
+    expect(plain.status).toBe("completed");
+    (off as unknown as { db: { close(): void } }).db.close();
+    (on as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("does not delete a thread another run has left waiting at an interrupt", () => {
+    const saver = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { maxFinishedThreads: 0, finishedTtl: null },
+    });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const api = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      beginThreadRun(threadId: string): void;
+      endThreadRun(threadId: string, status: "paused" | "finished"): void;
+      noteThreadStatus(threadId: string, status: "paused" | "finished"): void;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    const put = (threadId: string) =>
+      api.put(
+        { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+        { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: 1 } },
+        { source: "loop", step: 1, parents: {} },
+      );
+    return put("waiting").then(async () => {
+      api.beginThreadRun("waiting");
+      api.noteThreadStatus("waiting", "finished");
+      expect((db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'waiting'`).get() as { n: number }).n).toBeGreaterThan(0);
+      api.endThreadRun("waiting", "paused");
+      await put("other");
+      api.noteThreadStatus("other", "finished");
+      expect((db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'waiting'`).get() as { n: number }).n).toBeGreaterThan(0);
+      expect((db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'other'`).get() as { n: number }).n).toBe(0);
+      db.close();
+    });
   });
 });

@@ -93,8 +93,14 @@ describe("resolveCheckpointRetention", () => {
     expect(r.maxFinishedThreads).toBeNull();
   });
 
-  it("rejects a non-positive checkpoint window by clamping to 1", () => {
-    expect(resolveCheckpointRetention({ maxCheckpoints: 0.2 }).maxCheckpoints).toBe(1);
+  it("rejects out-of-range checkpoint and interrupt windows", () => {
+    expect(() => resolveCheckpointRetention({ maxCheckpoints: 0 })).toThrow(/maxCheckpoints/);
+    expect(() => resolveCheckpointRetention({ maxCheckpoints: 0.2 })).toThrow(/maxCheckpoints/);
+    expect(() => resolveCheckpointRetention({ maxCheckpoints: -3 })).toThrow(/maxCheckpoints/);
+    expect(() => resolveCheckpointRetention({ maxInterruptPoints: -1 })).toThrow(/maxInterruptPoints/);
+    expect(() => resolveCheckpointRetention({ maxInterruptPoints: 1.5 })).toThrow(/maxInterruptPoints/);
+    expect(resolveCheckpointRetention({ maxInterruptPoints: 0 }).maxInterruptPoints).toBe(0);
+    expect(resolveCheckpointRetention({ maxCheckpoints: 1 }).maxCheckpoints).toBe(1);
   });
 });
 

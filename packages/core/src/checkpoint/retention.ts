@@ -39,12 +39,16 @@ export type CheckpointVacuum = "auto" | "always" | "never";
  */
 export interface CheckpointRetentionInput {
   enabled?: boolean | undefined;
-  /** Newest checkpoints kept per (thread, namespace). Minimum 1. Default 40. */
+  /**
+   * Newest checkpoints kept per (thread, namespace). A positive integer.
+   * Default 40. `0`, fractions, and negatives are rejected.
+   */
   maxCheckpoints?: number | undefined;
   /**
    * Interrupt, resume, and error checkpoints kept in addition to the newest
    * window, most recent first. Default 8. `0` keeps none outside the window.
-   * The newest checkpoint is always kept either way.
+   * The newest checkpoint is always kept either way. Fractions and negatives
+   * are rejected.
    */
   maxInterruptPoints?: number | undefined;
   /**
@@ -128,16 +132,54 @@ export function retentionDurationMs(value: string | number): number {
   }
 }
 
-function clampInt(n: number, min: number): number {
-  if (!Number.isFinite(n)) throw new Error(`Invalid retention count: ${n}`);
-  return Math.max(min, Math.floor(n));
-}
-
 function nonNegativeInt(n: number, name: string): number {
   if (!Number.isInteger(n) || n < 0) {
     throw new Error(`Invalid ${name}: ${n}. Expected a non-negative integer or null.`);
   }
   return n;
+}
+
+function positiveInt(n: number, name: string): number {
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`Invalid ${name}: ${n}. Expected a positive integer.`);
+  }
+  return n;
+}
+
+/** `error.code` when resume names a checkpoint retention has already dropped. */
+export const CHECKPOINT_PRUNED = "CHECKPOINT_PRUNED";
+
+export function checkpointPrunedError(threadId: string, checkpointId: string): Error & { code: typeof CHECKPOINT_PRUNED } {
+  const err = new Error(
+    `Checkpoint "${checkpointId}" for thread "${threadId}" is not available. Retention may have pruned it; resume from a checkpoint that is still kept.`,
+  ) as Error & { code: typeof CHECKPOINT_PRUNED };
+  err.code = CHECKPOINT_PRUNED;
+  return err;
+}
+
+/**
+ * In-process guard so a run that finishes cannot delete a thread another run
+ * is still executing or has left waiting at an interrupt.
+ */
+export class ThreadRunGuard {
+  private readonly inFlight = new Map<string, number>();
+  private readonly parked = new Set<string>();
+
+  begin(threadId: string): void {
+    this.inFlight.set(threadId, (this.inFlight.get(threadId) ?? 0) + 1);
+  }
+
+  end(threadId: string, status: CheckpointThreadStatus): void {
+    const next = (this.inFlight.get(threadId) ?? 0) - 1;
+    if (next <= 0) this.inFlight.delete(threadId);
+    else this.inFlight.set(threadId, next);
+    if (status === "paused") this.parked.add(threadId);
+    else if (status === "finished") this.parked.delete(threadId);
+  }
+
+  held(threadId: string): boolean {
+    return this.parked.has(threadId) || (this.inFlight.get(threadId) ?? 0) > 0;
+  }
 }
 
 /**
@@ -186,10 +228,13 @@ export function resolveCheckpointRetention(
 
   return {
     enabled,
-    maxCheckpoints: clampInt(merged.maxCheckpoints ?? DEFAULT_CHECKPOINT_RETENTION.maxCheckpoints, 1),
-    maxInterruptPoints: clampInt(
+    maxCheckpoints: positiveInt(
+      merged.maxCheckpoints ?? DEFAULT_CHECKPOINT_RETENTION.maxCheckpoints,
+      "maxCheckpoints",
+    ),
+    maxInterruptPoints: nonNegativeInt(
       merged.maxInterruptPoints ?? DEFAULT_CHECKPOINT_RETENTION.maxInterruptPoints,
-      0,
+      "maxInterruptPoints",
     ),
     finishedTtlMs,
     maxFinishedThreads,
@@ -279,6 +324,10 @@ export interface CheckpointRetentionSaver {
   sweep(now?: number): Promise<void> | void;
   /** Remember this thread's graph policy. Graph fields override the host saver. */
   noteThreadPolicy?(threadId: string, policy: ResolvedCheckpointRetention): void;
+  /** Mark a thread in use so a finishing run cannot delete it. */
+  beginThreadRun?(threadId: string): void;
+  /** Pair with {@link beginThreadRun}. `paused` parks the thread at an interrupt. */
+  endThreadRun?(threadId: string, status: CheckpointThreadStatus): void;
 }
 
 export function isRetentionSaver(saver: unknown): saver is CheckpointRetentionSaver {

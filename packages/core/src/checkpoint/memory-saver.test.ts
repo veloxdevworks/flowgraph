@@ -4,7 +4,7 @@ import type { GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import { registerFunction } from "../nodes/function.js";
 import { FlowgraphMemorySaver } from "./memory-saver.js";
-import { resolveCheckpointRetention, retentionStatusForRun } from "./retention.js";
+import { CHECKPOINT_PRUNED, resolveCheckpointRetention, retentionStatusForRun } from "./retention.js";
 
 registerFunction("retTag", (input) => {
   const raw = (input as { n?: unknown } | undefined)?.n;
@@ -180,5 +180,51 @@ describe("resume after checkpoint pruning", () => {
     });
     expect(again.status).toBe("completed");
     expect(again.state["tag"]).toBe(6);
+  });
+
+  it("returns CHECKPOINT_PRUNED when the requested checkpoint was dropped", async () => {
+    const saver = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ maxCheckpoints: 1, maxInterruptPoints: 0, finishedTtl: null }),
+    );
+    const spec = {
+      metadata: { name: "pruned-id" },
+      state: { channels: { n: { type: "number" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "retTag", output: { to: "n" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(spec, { checkpointer: saver });
+    const threadId = "pruned-id";
+    await compiled.run({ threadId, input: { n: 1 }, onInterrupt: "fail" });
+    const first = (await compiled.getState(threadId))?.checkpointId;
+    expect(first).toBeTruthy();
+    await compiled.run({ threadId, input: { n: 2 }, onInterrupt: "fail" });
+    const again = await compiled.resumeFrom({
+      threadId,
+      checkpointId: first!,
+      resume: true,
+      onInterrupt: "fail",
+    });
+    expect(again.status).toBe("error");
+    expect((again.error as { code?: string } | undefined)?.code).toBe(CHECKPOINT_PRUNED);
+  });
+});
+
+describe("thread run guard", () => {
+  it("a finishing run does not delete a thread that is waiting at an interrupt", async () => {
+    const saver = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ maxFinishedThreads: 0, finishedTtl: null }),
+    );
+    await saver.put(config("waiting"), checkpoint("1", { n: 1 }, { n: 1 }), meta(1));
+    saver.beginThreadRun("waiting");
+    await saver.noteThreadStatus("waiting", "finished");
+    expect(saver.storage["waiting"]).toBeDefined();
+    saver.endThreadRun("waiting", "paused");
+    await saver.put(config("other"), checkpoint("1", { n: 1 }, { n: 1 }), meta(1));
+    await saver.noteThreadStatus("other", "finished");
+    expect(saver.storage["waiting"]).toBeDefined();
+    expect(saver.storage["other"]).toBeUndefined();
   });
 });

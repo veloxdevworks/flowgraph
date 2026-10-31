@@ -5,6 +5,17 @@ import { openPostgresBackend, type PostgresBackend } from "./index.js";
 const DB = process.env["FLOWGRAPH_TEST_POSTGRES_URL"];
 
 registerFunction("pgRet", () => "done");
+registerFunction("pgBump", (input) => {
+  const raw = (input as { n?: unknown } | undefined)?.n;
+  const n = typeof raw === "number" ? raw : Number(raw ?? 0);
+  return Number.isFinite(n) ? n + 1 : 1;
+});
+registerFunction("pgFan", () => ({}));
+const pgSideHits: string[] = [];
+registerFunction("pgSide", () => {
+  pgSideHits.push("S");
+  return "S";
+});
 
 const open: PostgresBackend[] = [];
 const schemas: string[] = [];
@@ -175,4 +186,154 @@ describe.skipIf(!DB)("postgres checkpoint retention", () => {
     );
     expect(Number(checkpoints.rows[0]?.n)).toBe(1);
   });
+
+  it("keeps pending writes stored before their checkpoint once the window is exceeded", async () => {
+    const schema = schemaName();
+    const backend = await openPostgresBackend({
+      connectionString: DB!,
+      schema,
+      retention: { maxCheckpoints: 1, maxInterruptPoints: 0, finishedTtl: null },
+    });
+    open.push(backend);
+    schemas.push(schema);
+    const put = backend.checkpointer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown, versions: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    const cp = (id: string, parent?: string) =>
+      put.put(
+        { configurable: { thread_id: "gap", checkpoint_ns: "", ...(parent ? { checkpoint_id: parent } : {}) } },
+        { ...base, id, channel_values: { n: id }, channel_versions: { n: id } },
+        { source: "loop", step: 1, parents: {} },
+        { n: id },
+      );
+    await cp("1");
+    await cp("2", "1");
+    await put.putWrites(
+      { configurable: { thread_id: "gap", checkpoint_ns: "", checkpoint_id: "future" } },
+      [["side", "S"], ["__interrupt__", { reason: "wait" }]],
+      "task",
+    );
+    await cp("3", "2");
+    const writes = await backend.pool.query<{ channel: string }>(
+      `SELECT channel FROM "${schema}".checkpoint_writes WHERE thread_id = 'gap' AND checkpoint_id = 'future' ORDER BY channel`,
+    );
+    expect(writes.rows.map((row) => row.channel)).toEqual(["__interrupt__", "side"]);
+  });
+
+  it("a thread past the window still runs a parallel interrupt and its side effect once", async () => {
+    const plain = await pgDrive(false, pgParallel(8), { n: 0 });
+    const kept = await pgDrive({ maxCheckpoints: 3, maxInterruptPoints: 8, finishedTtl: null }, pgParallel(8), { n: 0 });
+    expect(kept).toEqual(plain);
+    expect(plain.hits).toEqual(["S"]);
+    expect(plain.status).toBe("completed");
+  });
+
+  it("a thread past the window resumes a map interrupt the same way as retention off", async () => {
+    const input = { n: 0, numbers: [1, 2] };
+    const plain = await pgDrive(false, pgMap(8), input);
+    const kept = await pgDrive({ maxCheckpoints: 3, maxInterruptPoints: 8, finishedTtl: null }, pgMap(8), input);
+    expect(kept).toEqual(plain);
+    expect(plain.status).toBe("completed");
+    expect(plain.out).toHaveLength(2);
+  });
+
+  it("map interrupts with maxCheckpoints 1 match retention off", async () => {
+    const input = { numbers: [1, 2] };
+    const plain = await pgDrive(false, pgMap(0), input);
+    const kept = await pgDrive({ maxCheckpoints: 1, maxInterruptPoints: 8, finishedTtl: null }, pgMap(0), input);
+    expect(kept).toEqual(plain);
+    expect(plain.status).toBe("completed");
+  });
 });
+
+function pgParallel(warm: number): GraphSpec {
+  return {
+    metadata: { name: "pg-parallel-side" },
+    state: { channels: { n: { type: "number" }, sideOut: { type: "string" }, gate: { type: "object" } } },
+    nodes: [
+      { id: "bump", type: "function", with: { fn: "pgBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } },
+      { id: "fan", type: "function", with: { fn: "pgFan" } },
+      { id: "effect", type: "function", with: { fn: "pgSide", output: { to: "sideOut" } } },
+      { id: "ask", type: "hitl", with: { mode: "approve", message: "approve the side effect?", output: { to: "gate" } } },
+    ],
+    edges: [
+      { from: "START", to: "bump" },
+      {
+        from: "bump",
+        branch: [
+          { when: `{{ state.n < ${warm} }}`, to: "bump" },
+          { default: true, to: "fan" },
+        ],
+      },
+      { from: "fan", to: ["effect", "ask"] },
+      { from: "effect", to: "END" },
+      { from: "ask", to: "END" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+function pgMap(warm: number): GraphSpec {
+  const bump = warm > 0
+    ? [{ id: "bump", type: "function", with: { fn: "pgBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } }]
+    : [];
+  return {
+    metadata: { name: "pg-map-items" },
+    state: { channels: { n: { type: "number" }, numbers: { type: "array" }, out: { type: "array" } } },
+    nodes: [
+      ...bump,
+      {
+        id: "map-items",
+        type: "map",
+        with: {
+          over: "{{ state.numbers }}",
+          as: "n",
+          concurrency: 2,
+          node: {
+            type: "hitl",
+            with: { mode: "approve", message: "Approve {{ item.n }}", output: { to: "itemResult" } },
+          },
+          collect: { to: "out" },
+        },
+      },
+    ],
+    edges: warm > 0
+      ? [
+          { from: "START", to: "bump" },
+          {
+            from: "bump",
+            branch: [
+              { when: `{{ state.n < ${warm} }}`, to: "bump" },
+              { default: true, to: "map-items" },
+            ],
+          },
+          { from: "map-items", to: "END" },
+        ]
+      : [
+          { from: "START", to: "map-items" },
+          { from: "map-items", to: "END" },
+        ],
+  } as unknown as GraphSpec;
+}
+
+async function pgDrive(
+  retention: false | { maxCheckpoints: number; maxInterruptPoints: number; finishedTtl: null },
+  spec: GraphSpec,
+  input: Record<string, unknown>,
+) {
+  const schema = schemaName();
+  const backend = await openPostgresBackend({ connectionString: DB!, schema, retention });
+  open.push(backend);
+  schemas.push(schema);
+  pgSideHits.length = 0;
+  const compiled = await compileGraph(spec, { checkpointer: backend.checkpointer });
+  const threadId = `live-${schema}`;
+  let result = await compiled.run({ threadId, input, onInterrupt: "fail" });
+  let resumes = 0;
+  while (result.status === "interrupted" && resumes < 8) {
+    resumes += 1;
+    result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
+  }
+  return { status: result.status, resumes, hits: [...pgSideHits], out: result.state["out"], gate: result.state["gate"], side: result.state["sideOut"] };
+}

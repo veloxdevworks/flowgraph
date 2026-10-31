@@ -18,6 +18,7 @@ type ChannelVersions = Record<string, string | number>;
 import {
   CHECKPOINT_INLINE_MAX_BYTES,
   CHECKPOINT_PIN_CHANNELS,
+  ThreadRunGuard,
   selectRetainedCheckpointIds,
   resolveCheckpointRetention,
   threadDeletionRequested,
@@ -64,6 +65,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
   private readonly threads = new Map<string, ThreadRec>();
   private readonly pins = new Map<string, PinRec[]>();
   private readonly threadPolicy = new Map<string, ResolvedCheckpointRetention>();
+  private readonly runs = new ThreadRunGuard();
   private lastSweepAt = 0;
 
   constructor(
@@ -137,7 +139,16 @@ export class FlowgraphMemorySaver extends MemorySaver {
     this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, hit[0], Date.now());
   }
 
+  beginThreadRun(threadId: string): void {
+    this.runs.begin(threadId);
+  }
+
+  endThreadRun(threadId: string, status: CheckpointThreadStatus): void {
+    this.runs.end(threadId, status);
+  }
+
   override async deleteThread(threadId: string): Promise<void> {
+    if (this.runs.held(threadId)) return;
     delete this.blobs[threadId];
     this.threads.delete(threadId);
     this.pins.delete(threadId);
@@ -182,7 +193,9 @@ export class FlowgraphMemorySaver extends MemorySaver {
     for (const [cap, rows] of groups) {
       rows.sort((a, b) => a[1].updatedAt - b[1].updatedAt || (a[0] < b[0] ? -1 : 1));
       while (rows.length > cap) {
-        const next = rows.shift();
+        const idx = rows.findIndex(([id]) => !this.runs.held(id));
+        if (idx < 0) break;
+        const next = rows.splice(idx, 1)[0];
         if (!next) break;
         await this.deleteThread(next[0]);
       }

@@ -12,6 +12,7 @@ import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import type pg from "pg";
 import {
   CHECKPOINT_PIN_CHANNELS,
+  ThreadRunGuard,
   selectRetainedCheckpointIds,
   threadDeletionRequested,
   type CheckpointThreadStatus,
@@ -121,6 +122,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
   private readonly schemaName: string;
   private readonly q: string;
   private readonly threadPolicy = new Map<string, ResolvedCheckpointRetention>();
+  private readonly runs = new ThreadRunGuard();
   private lastSweepAt = 0;
 
   constructor(pool: pg.Pool, retention: ResolvedCheckpointRetention, options?: { schema?: string }) {
@@ -176,6 +178,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
   }
 
   override async deleteThread(threadId: string): Promise<void> {
+    if (this.runs.held(threadId)) return;
     const counted = await this.db().query<{ n: string }>(
       `SELECT COUNT(*) AS n FROM ${this.q}.checkpoints WHERE thread_id = $1`,
       [threadId],
@@ -194,6 +197,14 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
 
   noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
     this.threadPolicy.set(threadId, policy);
+  }
+
+  beginThreadRun(threadId: string): void {
+    this.runs.begin(threadId);
+  }
+
+  endThreadRun(threadId: string, status: CheckpointThreadStatus): void {
+    this.runs.end(threadId, status);
   }
 
   async noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = Date.now()): Promise<void> {
@@ -245,7 +256,14 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     }
     for (const [cap, rows] of groups) {
       if (rows.length <= cap) continue;
-      for (const row of rows.slice(0, rows.length - cap)) await this.deleteThread(row.thread_id);
+      let removed = 0;
+      const need = rows.length - cap;
+      for (const row of rows) {
+        if (removed >= need) break;
+        if (this.runs.held(row.thread_id)) continue;
+        await this.deleteThread(row.thread_id);
+        removed += 1;
+      }
     }
     if (this.retention.vacuum === "always") await this.maybeVacuum(1, { ...this.retention, vacuum: "always" });
   }
@@ -349,55 +367,65 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
   }
 
   private async pruneNamespace(threadId: string, ns: string, policy: ResolvedCheckpointRetention): Promise<number> {
-    const pool = this.db();
-    const listed = await pool.query<IdRow & { parent_checkpoint_id: string | null }>(
-      `SELECT checkpoint_id, parent_checkpoint_id FROM ${this.q}.checkpoints
-       WHERE thread_id = $1 AND checkpoint_ns = $2
-       ORDER BY checkpoint_id DESC`,
-      [threadId, ns],
-    );
-    const ids = listed.rows.map((row) => row.checkpoint_id);
-    if (ids.length === 0) return 0;
-    const interrupts = await pool.query<IdRow>(
-      `SELECT DISTINCT checkpoint_id FROM ${this.q}.checkpoint_writes
-       WHERE thread_id = $1 AND checkpoint_ns = $2 AND channel = ANY($3::text[])`,
-      [threadId, ns, PIN_LIST],
-    );
-    const pins = await pool.query<IdRow>(
-      `SELECT checkpoint_id FROM ${this.q}.fg_checkpoint_pins
-       WHERE thread_id = $1 AND checkpoint_ns = $2
-       ORDER BY pinned_at DESC`,
-      [threadId, ns],
-    );
-    const parentOf = new Map(listed.rows.map((row) => [row.checkpoint_id, row.parent_checkpoint_id]));
-    const keep = selectRetainedCheckpointIds({
-      idsNewestFirst: ids,
-      parentOf,
-      maxCheckpoints: policy.maxCheckpoints,
-      interruptIds: interrupts.rows.map((row) => row.checkpoint_id),
-      explicitPinsNewestFirst: pins.rows.map((row) => row.checkpoint_id),
-      maxInterruptPoints: policy.maxInterruptPoints,
-    });
-    if (keep.size === ids.length) return 0;
-    const keepIds = [...keep];
-    const client = await pool.connect();
+    const client = await this.db().connect();
     try {
       await client.query("BEGIN");
-      await client.query(
-        `DELETE FROM ${this.q}.checkpoints
-         WHERE thread_id = $1 AND checkpoint_ns = $2 AND NOT (checkpoint_id = ANY($3::text[]))`,
-        [threadId, ns, keepIds],
+      const listed = await client.query<IdRow & { parent_checkpoint_id: string | null }>(
+        `SELECT checkpoint_id, parent_checkpoint_id FROM ${this.q}.checkpoints
+         WHERE thread_id = $1 AND checkpoint_ns = $2
+         ORDER BY checkpoint_id DESC`,
+        [threadId, ns],
       );
-      await client.query(
-        `DELETE FROM ${this.q}.checkpoint_writes
-         WHERE thread_id = $1 AND checkpoint_ns = $2 AND NOT (checkpoint_id = ANY($3::text[]))`,
-        [threadId, ns, keepIds],
+      const ids = listed.rows.map((row) => row.checkpoint_id);
+      if (ids.length === 0) {
+        await client.query("COMMIT");
+        return 0;
+      }
+      const interrupts = await client.query<IdRow>(
+        `SELECT DISTINCT checkpoint_id FROM ${this.q}.checkpoint_writes
+         WHERE thread_id = $1 AND checkpoint_ns = $2 AND channel = ANY($3::text[])`,
+        [threadId, ns, PIN_LIST],
       );
-      await client.query(
-        `DELETE FROM ${this.q}.fg_checkpoint_pins
-         WHERE thread_id = $1 AND checkpoint_ns = $2 AND NOT (checkpoint_id = ANY($3::text[]))`,
-        [threadId, ns, keepIds],
+      const pins = await client.query<IdRow>(
+        `SELECT checkpoint_id FROM ${this.q}.fg_checkpoint_pins
+         WHERE thread_id = $1 AND checkpoint_ns = $2
+         ORDER BY pinned_at DESC`,
+        [threadId, ns],
       );
+      const parentOf = new Map(listed.rows.map((row) => [row.checkpoint_id, row.parent_checkpoint_id]));
+      const keep = selectRetainedCheckpointIds({
+        idsNewestFirst: ids,
+        parentOf,
+        maxCheckpoints: policy.maxCheckpoints,
+        interruptIds: interrupts.rows.map((row) => row.checkpoint_id),
+        explicitPinsNewestFirst: pins.rows.map((row) => row.checkpoint_id),
+        maxInterruptPoints: policy.maxInterruptPoints,
+      });
+      const drop = ids.filter((id) => !keep.has(id));
+      if (drop.length === 0) {
+        await client.query("COMMIT");
+        return 0;
+      }
+      // Only ids this transaction listed and chose to drop. NOT IN (keep)
+      // also deletes writes for a checkpoint LangGraph has not stored yet.
+      for (let i = 0; i < drop.length; i += 500) {
+        const chunk = drop.slice(i, i + 500);
+        await client.query(
+          `DELETE FROM ${this.q}.checkpoints
+           WHERE thread_id = $1 AND checkpoint_ns = $2 AND checkpoint_id = ANY($3::text[])`,
+          [threadId, ns, chunk],
+        );
+        await client.query(
+          `DELETE FROM ${this.q}.checkpoint_writes
+           WHERE thread_id = $1 AND checkpoint_ns = $2 AND checkpoint_id = ANY($3::text[])`,
+          [threadId, ns, chunk],
+        );
+        await client.query(
+          `DELETE FROM ${this.q}.fg_checkpoint_pins
+           WHERE thread_id = $1 AND checkpoint_ns = $2 AND checkpoint_id = ANY($3::text[])`,
+          [threadId, ns, chunk],
+        );
+      }
       await client.query(
         `DELETE FROM ${this.q}.checkpoint_blobs b
          WHERE b.thread_id = $1 AND b.checkpoint_ns = $2
@@ -410,12 +438,12 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
         [threadId, ns],
       );
       await client.query("COMMIT");
+      return drop.length;
     } catch (err) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw err;
     } finally {
       client.release();
     }
-    return ids.length - keep.size;
   }
 }

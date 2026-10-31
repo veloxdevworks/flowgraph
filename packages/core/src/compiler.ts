@@ -25,6 +25,7 @@ import type { NodeResult } from "./registry.js";
 import { buildStateAnnotation, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
 import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 import {
+  checkpointPrunedError,
   isRetentionSaver,
   resolveCheckpointRetention,
   retentionStatusForRun,
@@ -367,6 +368,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
     if (overrides.singleStep) cfg["interruptAfter"] = "*";
     const workspace = (baseCtx as RunContext).workspace;
+    const retention = checkpointer && isRetentionSaver(checkpointer) ? checkpointer : undefined;
+    let retentionOpen = false;
     const finish = async (r: RunResult): Promise<RunResult> => {
       try {
         const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
@@ -374,9 +377,17 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       } catch {
         /* ignore unreadable issue logs */
       }
-      if (checkpointer && isRetentionSaver(checkpointer)) {
+      if (retentionOpen) {
+        retentionOpen = false;
         try {
-          await checkpointer.noteThreadStatus(threadId, retentionStatusForRun(r.status));
+          retention?.endThreadRun?.(threadId, retentionStatusForRun(r.status));
+        } catch {
+          /* bookkeeping must not hide the run result */
+        }
+      }
+      if (retention) {
+        try {
+          await retention.noteThreadStatus(threadId, retentionStatusForRun(r.status));
         } catch {
           // Retention bookkeeping must not fail a run that already finished.
         }
@@ -428,7 +439,21 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       graphName: graphSpec.metadata.name,
     });
 
+    const requestedCheckpoint = (runOpts as ResumeOptions).checkpointId;
+    if (requestedCheckpoint && checkpointer) {
+      const found = await checkpointer.getTuple({
+        configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: requestedCheckpoint },
+      });
+      if (!found) {
+        const error = checkpointPrunedError(threadId, requestedCheckpoint);
+        events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
+        return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
+      }
+    }
+
     try {
+      retention?.beginThreadRun?.(threadId);
+      retentionOpen = true;
       let current: Record<string, unknown> | Command | null = payload;
 
       if (mode === "start" && current != null && !(current instanceof Command) && hooks.has("run:before")) {
