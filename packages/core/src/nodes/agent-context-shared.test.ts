@@ -137,3 +137,46 @@ describe("agents sharing a history channel", () => {
     expect(ensureDeclaredOutputChannels(bare).state!.channels["chat"]).toEqual({ type: "messages" });
   });
 });
+
+describe("reserved history channels", () => {
+  for (const ch of ["__issues", "__once", "__mapCollect", "__worktrees", "__services", "__anything"]) {
+    it(`compileGraph refuses with.context.history "${ch}"`, async () => {
+      const spec = {
+        metadata: { name: "rsv" },
+        state: { channels: {} },
+        nodes: [{ id: "a", type: "agent", provider: "rsv", with: { prompt: "hi", context: { history: ch } } }],
+        edges: [
+          { from: "START", to: "a" },
+          { from: "a", to: "END" },
+        ],
+      } as unknown as GraphSpec;
+      const p = createScriptedProvider("rsv", () => ({ output: { text: "ok" }, stopReason: "done" }), { contextMessages: true });
+      await expect(compileGraph(spec, { providers: [p] } as never)).rejects.toThrow(/reserved channel/);
+    });
+  }
+
+  it("also inside map", async () => {
+    const spec = {
+      metadata: { name: "rsv-map" },
+      state: { channels: { items: { type: "array" } } },
+      nodes: [
+        {
+          id: "m",
+          type: "map",
+          with: { over: "{{ state.items }}", node: { id: "inner", type: "agent", provider: "rsv", with: { prompt: "hi", context: { history: "__issues" } } } },
+        },
+      ],
+      edges: [
+        { from: "START", to: "m" },
+        { from: "m", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const p = createScriptedProvider("rsv", () => ({ output: { text: "ok" }, stopReason: "done" }), { contextMessages: true });
+    const attempt = async () => {
+      const g = await compileGraph(spec, { providers: [p] } as never);
+      const r = await g.run({ threadId: "rsv-map", input: { items: [1] } });
+      if (r.status !== "completed") throw new Error(r.error?.message ?? r.status);
+    };
+    await expect(attempt()).rejects.toThrow(/reserved channel/);
+  });
+});

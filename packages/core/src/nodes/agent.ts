@@ -51,6 +51,7 @@ export const agentNode = defineNode<Config>({
     // invokeNode once all sibling nodes are built). Read lazily at call time.
     const wiring: ToolWiring =
       (buildCtx as BuildContext & { toolWiring?: ToolWiring }).toolWiring ?? {};
+    assertHistoryChannelAllowed(String(nodeSpec["id"] ?? "?"), (config.context as { history?: unknown } | undefined)?.history);
 
     return {
       contract: {},
@@ -342,5 +343,18 @@ function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number; costU
       remediation: "Raise runtime.budget.maxTokens / maxUSD, or set onExceed: fail to stop instead of degrading.",
       detail: { usedTokens: budget.usedTokens, usedUSD: budget.usedUSD },
     });
+  }
+}
+
+/**
+ * `__`-prefixed channels belong to the engine (issues, replay, services, ...).
+ * An agent's history channel gets removals and summaries written to it, so it
+ * may never be one of them, under any node policy.
+ */
+export function assertHistoryChannelAllowed(nodeId: string, history: unknown): void {
+  if (typeof history === "string" && history.startsWith("__")) {
+    throw new Error(
+      `agent node "${nodeId}": with.context.history "${history}" is a reserved channel (names starting with "__" belong to the engine); use a channel of your own with type: messages`,
+    );
   }
 }
