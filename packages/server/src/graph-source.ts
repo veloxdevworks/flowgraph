@@ -123,11 +123,10 @@ export async function ensureGraphStoreDir(dir: string): Promise<void> {
 }
 
 /**
- * Replace `filePath` with `data` so a reader sees either the old file or the
- * new one, never a partly written one: write a temporary file in the same
- * directory, flush it to disk, then rename it over the target.
+ * Write `data` to a new temporary file next to `filePath` and flush it to
+ * disk. Returns the temporary file's path; on failure nothing is left behind.
  */
-export async function writeFileAtomic(filePath: string, data: string): Promise<void> {
+async function stageFile(filePath: string, data: string): Promise<string> {
   const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath).slice(0, 200)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let handle: fs.FileHandle | undefined;
   try {
@@ -136,13 +135,69 @@ export async function writeFileAtomic(filePath: string, data: string): Promise<v
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await fs.rename(tmp, filePath);
+    return tmp;
   } catch (err) {
     await handle?.close().catch(() => undefined);
     await fs.rm(tmp, { force: true }).catch(() => undefined);
     throw err;
   }
+}
+
+/**
+ * Replace `filePath` with `data` so a reader sees either the old file or the
+ * new one, never a partly written one: write a temporary file in the same
+ * directory, flush it to disk, then rename it over the target.
+ */
+export async function writeFileAtomic(filePath: string, data: string): Promise<void> {
+  const tmp = await stageFile(filePath, data);
+  try {
+    await fs.rename(tmp, filePath);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
   await syncDir(path.dirname(filePath));
+}
+
+/** Filesystems that cannot hard-link answer with one of these. */
+const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"]);
+
+/**
+ * Create `filePath` holding `data`, failing with `EEXIST` when it already
+ * exists, even when another process creates it at the same moment. The data
+ * is written and flushed to a temporary file first, then hard-linked to the
+ * target: the link fails if the target exists, and a reader never sees the
+ * target partly written. Where the filesystem has no hard links, the target
+ * is opened with `wx` (still exclusive) and written in place, so a reader
+ * may briefly find it incomplete; readers treat that as unreadable (503),
+ * not as a missing thread.
+ */
+export async function createFileExclusive(filePath: string, data: string): Promise<void> {
+  const tmp = await stageFile(filePath, data);
+  let linked = false;
+  try {
+    await fs.link(tmp, filePath);
+    linked = true;
+  } catch (err) {
+    if (!NO_HARD_LINKS.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+  }
+  if (!linked) await writeNewFileInPlace(filePath, data);
+  await syncDir(path.dirname(filePath));
+}
+
+async function writeNewFileInPlace(filePath: string, data: string): Promise<void> {
+  const handle = await fs.open(filePath, "wx", 0o600);
+  try {
+    await handle.writeFile(data, "utf-8");
+    await handle.sync();
+  } catch (err) {
+    await handle.close().catch(() => undefined);
+    await fs.rm(filePath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+  await handle.close();
 }
 
 /** Flush a directory so a rename in it survives a crash. Some filesystems cannot, which is not an error. */
@@ -158,14 +213,22 @@ async function syncDir(dir: string): Promise<void> {
   }
 }
 
+/**
+ * Test seams. `beforeMetaCreate` runs after a store has found no meta file
+ * for a new thread and before it creates one, which is where another server
+ * process sharing the store can create the same file first.
+ */
+export const graphStoreHooks: { beforeMetaCreate?: (threadId: string, metaPath: string) => Promise<void> | void } = {};
+
 /** Meta updates in progress, by meta file path. */
 const metaLocks = new Map<string, Promise<unknown>>();
 
 /**
  * Run `fn` after every earlier call for the same meta file has settled, so
  * read-modify-write updates of one thread's meta apply in order and none is
- * lost. This orders writes within one process; a graph store directory
- * belongs to one server process.
+ * lost. This orders writes within one process. Another process sharing the
+ * directory is not ordered with these writes; creating a thread's meta file
+ * is still exclusive across processes (see {@link createFileExclusive}).
  */
 async function withMetaLock<T>(metaPath: string, fn: () => Promise<T>): Promise<T> {
   const prev = metaLocks.get(metaPath) ?? Promise.resolve();
@@ -188,6 +251,32 @@ export class GraphMetaUnreadableError extends ServerRequestError {
     super(503, "THREAD_META_UNREADABLE", `The stored record for thread "${threadId}" cannot be read, so access is refused; try again, or ask an operator to repair it`);
     this.name = "GraphMetaUnreadableError";
     this.cause = cause;
+  }
+}
+
+/**
+ * Longest thread id the graph store accepts: 234, so its longest file name
+ * (`{id}.graph.yaml.meta.json`) fits the usual 255-byte limit. Thread ids map
+ * to file names one ASCII character per UTF-16 unit, so this counts `length`.
+ * Longer ids could never be stored, so none that worked before is refused.
+ */
+export const MAX_THREAD_ID_LENGTH = 255 - ".graph.yaml.meta.json".length;
+
+/**
+ * Refuse a thread id the graph store cannot hold a file for (empty, longer
+ * than {@link MAX_THREAD_ID_LENGTH}) with 400 INVALID_THREAD_ID, rather than
+ * letting the file system error look like an unreadable stored thread.
+ */
+export function assertValidThreadId(threadId: string): void {
+  if (typeof threadId !== "string" || threadId.length === 0) {
+    throw new ServerRequestError(400, "INVALID_THREAD_ID", "threadId is required");
+  }
+  if (threadId.length > MAX_THREAD_ID_LENGTH) {
+    throw new ServerRequestError(
+      400,
+      "INVALID_THREAD_ID",
+      `threadId is ${threadId.length} characters; the most allowed is ${MAX_THREAD_ID_LENGTH}`,
+    );
   }
 }
 
@@ -243,6 +332,7 @@ export async function persistGraph(
   spec: GraphSpec,
   extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" } = {},
 ): Promise<PersistedGraph> {
+  assertValidThreadId(threadId);
   await ensureGraphStoreDir(dir);
   return withMetaLock(metaPathFor(dir, threadId), () => persistGraphLocked(dir, threadId, yaml, spec, extras));
 }
@@ -260,10 +350,7 @@ async function persistGraphLocked(
   // that maps to the same file name ("a/b" and "a_b"). Callers check access
   // first; this keeps the write safe if a check raced with another write.
   const existing = await readGraphMeta(dir, threadId);
-  if (existing && existing.threadId !== threadId) {
-    throw new ServerRequestError(409, "THREAD_ID_CONFLICT", `Thread id "${threadId}" collides with another stored thread; use another id`);
-  }
-  await writeFileAtomic(filePath, yaml);
+  if (existing && existing.threadId !== threadId) throw threadIdTaken(threadId);
   const now = new Date().toISOString();
   const storedAt = existing?.storedAt ?? now;
   const meta: GraphMeta = {
@@ -278,7 +365,12 @@ async function persistGraphLocked(
     // Describes the file just written, so it never carries over.
     ...(extras.yamlFormat ? { yamlFormat: extras.yamlFormat } : {}),
   };
-  await writeGraphMeta(dir, threadId, meta);
+  if (existing) {
+    await writeFileAtomic(filePath, yaml);
+    await writeGraphMeta(dir, threadId, meta);
+  } else {
+    await createThreadFiles(dir, threadId, filePath, yaml, meta);
+  }
   return {
     threadId,
     yaml,
@@ -289,6 +381,46 @@ async function persistGraphLocked(
     ...(meta.graphName ? { graphName: meta.graphName } : {}),
     ...(meta.status ? { status: meta.status } : {}),
   };
+}
+
+function threadIdTaken(threadId: string): ServerRequestError {
+  return new ServerRequestError(409, "THREAD_ID_CONFLICT", `Thread id "${threadId}" collides with another stored thread; use another id`);
+}
+
+/**
+ * Store a new thread. Creating its meta file is the claim: it is exclusive
+ * across processes sharing the store, so when another server created the
+ * file first (for this thread id or one sharing its file name) this one gets
+ * 409 THREAD_ID_CONFLICT and changes neither file. The graph is flushed to a
+ * temporary file before the claim and moved into place after it, so the
+ * loser never replaces the winner's graph.
+ */
+async function createThreadFiles(dir: string, threadId: string, filePath: string, yaml: string, meta: GraphMeta): Promise<void> {
+  const metaPath = metaPathFor(dir, threadId);
+  const stagedYaml = await stageFile(filePath, yaml);
+  let claimed = false;
+  try {
+    await graphStoreHooks.beforeMetaCreate?.(threadId, metaPath);
+    try {
+      await createFileExclusive(metaPath, JSON.stringify(meta));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const winner = await readGraphMeta(dir, threadId).catch(() => null);
+      log("warn", "graph meta created by another process", { threadId, path: metaPath, sameThread: winner?.threadId === threadId });
+      if (winner && winner.threadId === threadId) {
+        throw new ServerRequestError(409, "THREAD_ID_CONFLICT", `Thread "${threadId}" was just created by another request; retry, or use another id`);
+      }
+      throw threadIdTaken(threadId);
+    }
+    claimed = true;
+    await fs.rename(stagedYaml, filePath);
+  } catch (err) {
+    await fs.rm(stagedYaml, { force: true }).catch(() => undefined);
+    // The meta file was ours: without its graph it would describe nothing.
+    if (claimed) await fs.rm(metaPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+  await syncDir(dir);
 }
 
 function metaPathFor(dir: string, threadId: string): string {
@@ -310,6 +442,7 @@ function isThreadOwner(v: unknown): v is ThreadOwner {
  * take it for a thread that was never stored.
  */
 export async function readGraphMeta(dir: string, threadId: string): Promise<GraphMeta | null> {
+  assertValidThreadId(threadId);
   const metaPath = metaPathFor(dir, threadId);
   let parsed: Partial<GraphMeta> | null;
   try {
@@ -341,9 +474,12 @@ export async function updateGraphMeta(
   threadId: string,
   patch: Partial<Pick<GraphMeta, "label" | "status" | "graphName">>,
 ): Promise<GraphMeta | null> {
+  assertValidThreadId(threadId);
   return withMetaLock(metaPathFor(dir, threadId), async () => {
     const existing = await readGraphMeta(dir, threadId);
     if (!existing) return null;
+    // Thread ids that share a file name ("a/b" and "a_b"): never patch the other thread's record.
+    if (existing.threadId !== threadId) throw threadIdTaken(threadId);
     const next: GraphMeta = {
       ...existing,
       ...patch,
@@ -375,7 +511,7 @@ export async function loadPersistedGraph(
     if (!parsed.spec) return null;
     return { yaml: raw ? stored.yaml : parsed.yaml, spec: parsed.spec, meta: stored.meta };
   } catch (err) {
-    if (err instanceof GraphMetaUnreadableError) throw err;
+    if (err instanceof ServerRequestError) throw err;
     return null;
   }
 }
@@ -386,6 +522,7 @@ export async function loadPersistedGraph(
  * {@link GraphMetaUnreadableError}.
  */
 export async function readPersistedGraphYaml(dir: string, threadId: string): Promise<{ yaml: string; meta: GraphMeta | null } | null> {
+  assertValidThreadId(threadId);
   let yaml: string;
   try {
     yaml = await fs.readFile(graphPathFor(dir, threadId), "utf-8");

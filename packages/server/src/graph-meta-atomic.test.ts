@@ -163,10 +163,12 @@ describe("meta writes and concurrent readers", () => {
     ]);
     expect(results.slice(0, 30).every((r) => r.status === "fulfilled")).toBe(true);
     expect(results[30]).toMatchObject({ status: "rejected", reason: { status: 409, code: "THREAD_ID_CONFLICT" } });
+    // A patch for the other id never lands in this thread's record.
+    expect(results[31]).toMatchObject({ status: "rejected", reason: { status: 409, code: "THREAD_ID_CONFLICT" } });
     const meta = await readGraphMeta(dir, "a/b");
     expect(meta).toMatchObject({ threadId: "a/b", owner: { id: owner.id } });
-    // The last queued patch for the shared file wins, in order.
-    expect(meta?.label).toBe("from-the-other-id");
+    // The last queued patch for this thread wins, in order.
+    expect(meta?.label).toBe("label-29");
     expect(await fs.readFile(graphFile, "utf-8")).toBe(before);
   });
 

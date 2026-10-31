@@ -9,6 +9,7 @@ export {
   listPersistedGraphs,
   updateGraphMeta,
   GraphMetaUnreadableError,
+  MAX_THREAD_ID_LENGTH,
   appendEventJournal,
   loadEventJournal,
 } from "./graph-source.js";
