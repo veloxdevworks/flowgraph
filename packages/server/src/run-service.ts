@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph";
+import type { BaseCheckpointSaver } from "@langchain/langgraph";
+import { FlowgraphMemorySaver } from "@flowgraph/core";
 import {
   compileGraph,
   createInMemoryMemoryBackend,
@@ -467,7 +468,10 @@ export class RunService {
         if (memBackend === "sqlite") {
           const sqlite = await loadSqlite();
           const file = this.config.memory?.sqlitePath ?? path.join(this.config.graphStoreDir, "memory.db");
-          const b = await sqlite.openSqliteBackend(file);
+          const b = await sqlite.openSqliteBackend({
+            path: file,
+            ...(this.config.checkpointRetention !== undefined ? { retention: this.config.checkpointRetention } : {}),
+          });
           this.closers.push(() => b.close());
           this.useDurableMemory(b.memory);
           this.graphNames = b.graphNames;
@@ -480,6 +484,7 @@ export class RunService {
           const pg = await openPostgresBackend({
             connectionString: this.config.databaseUrl,
             ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
+            ...(this.config.checkpointRetention !== undefined ? { retention: this.config.checkpointRetention } : {}),
             onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
           });
           this.closers.push(() => pg.close());
@@ -493,10 +498,10 @@ export class RunService {
           this.checkpointer = pg.checkpointer;
           return pg.checkpointer;
         }
-        // One MemorySaver shared by every compile. Letting compileGraph create its own
+        // One saver shared by every compile. Letting compileGraph create its own
         // per call gave each start/resume/getState an empty saver, so HITL resume
         // "completed" without running the remaining nodes.
-        const cp = new MemorySaver();
+        const cp = new FlowgraphMemorySaver(this.config.checkpointRetention);
         this.checkpointer = cp;
         return cp;
       })();
@@ -569,6 +574,7 @@ export class RunService {
       cwd,
       graphPath,
       checkpointer,
+      ...(this.config.checkpointRetention !== undefined ? { checkpointRetention: this.config.checkpointRetention } : {}),
       legacyStoreBackend: this.legacyStoreBackend,
       ...(identity ? { memoryIdentity: identity } : {}),
       ...(principal.trusted ? {} : { nodePolicy: untrustedNodePolicy(this.uploadOptions) }),

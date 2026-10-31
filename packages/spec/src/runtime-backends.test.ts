@@ -27,4 +27,14 @@ describe("runtime backend enums", () => {
     const r = RuntimeSchema.parse({ store: {} });
     expect(r.store?.backend).toBe("memory");
   });
+
+  it("accepts checkpoint retention settings", () => {
+    const parsed = RuntimeSchema.parse({
+      checkpoint: { retention: { maxCheckpoints: 10, finishedTtl: "7d", vacuum: "never" } },
+    });
+    expect(parsed.checkpoint?.retention).toMatchObject({ maxCheckpoints: 10, finishedTtl: "7d", vacuum: "never" });
+    expect(RuntimeSchema.parse({ checkpoint: { retention: false } }).checkpoint?.retention).toBe(false);
+    expect(RuntimeSchema.safeParse({ checkpoint: { retention: { maxCheckpoints: 0 } } }).success).toBe(false);
+    expect(RuntimeSchema.safeParse({ checkpoint: { retention: { finishedTtl: "soon" } } }).success).toBe(false);
+  });
 });

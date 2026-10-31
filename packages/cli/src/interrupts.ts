@@ -42,8 +42,10 @@ export async function checkpointerOption(
   if (ck?.backend === "sqlite") {
     const checkpoint = await loadCheckpointSqlite();
     const dbPath = ck.path ?? ".flowgraph/checkpoints.db";
-    if (!usesDurableMemory(spec)) return { checkpointer: checkpoint.createSqliteCheckpointer(dbPath) };
-    const sqlite = await checkpoint.openSqliteBackend(dbPath);
+    const retention = ck.retention;
+    const sqliteOptions = { path: dbPath, ...(retention !== undefined ? { retention } : {}) };
+    if (!usesDurableMemory(spec)) return { checkpointer: checkpoint.createSqliteCheckpointer(sqliteOptions) };
+    const sqlite = await checkpoint.openSqliteBackend(sqliteOptions);
     return { checkpointer: sqlite.checkpointer, memory: { backend: sqlite.memory, identity: memoryIdentity(extras) } };
   }
   if (ck?.backend === "postgres") {
@@ -58,9 +60,17 @@ export async function checkpointerOption(
           "Pass runtime.checkpoint.path or set DATABASE_URL.",
       );
     }
-    if (!usesDurableMemory(spec)) return { checkpointer: await checkpoint.createPostgresCheckpointer(connectionString) };
+    const retention = ck.retention;
+    const withRetention = retention !== undefined ? { retention } : {};
+    if (!usesDurableMemory(spec)) {
+      return { checkpointer: await checkpoint.createPostgresCheckpointer({ connectionString, ...withRetention }) };
+    }
     // One pool for checkpoints and memory; let the process exit once the run is done.
-    const pg = await checkpoint.openPostgresBackend({ connectionString, poolConfig: { allowExitOnIdle: true } });
+    const pg = await checkpoint.openPostgresBackend({
+      connectionString,
+      ...withRetention,
+      poolConfig: { allowExitOnIdle: true },
+    });
     return { checkpointer: pg.checkpointer, memory: { backend: pg.memory, identity: memoryIdentity(extras) } };
   }
   return {};

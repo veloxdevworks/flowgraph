@@ -16,6 +16,7 @@
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
 import pg from "pg";
+import { resolveCheckpointRetention, type CheckpointRetentionInput } from "@flowgraph/core";
 import { DEFAULT_SETUP_LOCK_TIMEOUT_MS, retrySetupRace, withSetupLock } from "./setup-lock.js";
 import type { GraphNameRegistry, ThreadOwnerRegistry } from "@flowgraph/core";
 import {
@@ -26,6 +27,7 @@ import {
   quoteSchema,
   type PostgresMemoryBackend,
 } from "./memory.js";
+import { FlowgraphPostgresSaver } from "./retention.js";
 
 export interface PostgresCheckpointerOptions {
   /** Postgres connection string, e.g. postgres://user:pass@host:5432/db */
@@ -34,6 +36,13 @@ export interface PostgresCheckpointerOptions {
   setup?: boolean;
   /** How long to wait for another host's setup to finish before failing. Default 60s. */
   setupLockTimeoutMs?: number;
+  /**
+   * How much checkpoint history to keep. Default keeps the newest 40
+   * checkpoints on each branch and a few interrupt points. Finished threads
+   * are kept unless `finishedTtl` or `maxFinishedThreads` is set. `false`
+   * keeps every checkpoint.
+   */
+  retention?: boolean | CheckpointRetentionInput | null;
 }
 
 /**
@@ -54,10 +63,19 @@ export async function createPostgresCheckpointer(
     throw new Error("createPostgresCheckpointer: a connection string is required.");
   }
 
-  const saver = PostgresSaver.fromConnString(connectionString);
+  const retention = resolveCheckpointRetention(
+    typeof connStringOrOptions === "string" ? undefined : connStringOrOptions.retention,
+  );
+  const pool = new pg.Pool({ connectionString });
+  const saver = new FlowgraphPostgresSaver(pool, retention);
   if (doSetup) {
     const timeoutMs = typeof connStringOrOptions === "string" ? undefined : connStringOrOptions.setupLockTimeoutMs;
-    await withSetupLock({ connectionString }, "public", () => retrySetupRace(() => saver.setup()), { timeoutMs });
+    try {
+      await withSetupLock({ connectionString }, "public", () => retrySetupRace(() => saver.setup()), { timeoutMs });
+    } catch (err) {
+      await saver.end().catch(() => undefined);
+      throw err;
+    }
   }
   return saver as unknown as BaseCheckpointSaver;
 }
@@ -85,6 +103,11 @@ export interface PostgresBackendOptions {
   setupLockTimeoutMs?: number;
   /** Sweep expired memory on open when the last sweep is older than this. Default 1h. */
   sweepIntervalMs?: number;
+  /**
+   * How much checkpoint history to keep. Same shape as
+   * {@link PostgresCheckpointerOptions.retention}. Default is bounded.
+   */
+  retention?: boolean | CheckpointRetentionInput | null;
   /** Extra pg.Pool settings when this call creates the pool (e.g. max, allowExitOnIdle). */
   poolConfig?: Omit<pg.PoolConfig, "connectionString">;
   /**
@@ -141,7 +164,7 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
     );
   }
   try {
-    const saver = new PostgresSaver(pool, undefined, { schema });
+    const saver = new FlowgraphPostgresSaver(pool, resolveCheckpointRetention(opts.retention), { schema });
     const setup = opts.setup !== false;
     const memory = setup
       ? await withSetupLock(
@@ -178,6 +201,7 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
 }
 
 export { PostgresSaver, DEFAULT_SETUP_LOCK_TIMEOUT_MS };
+export { FlowgraphPostgresSaver, migratePostgresCheckpointRetention } from "./retention.js";
 export {
   createPostgresMemoryBackend,
   createPostgresGraphNameRegistry,
