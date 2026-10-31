@@ -17,7 +17,6 @@ import {
   removeMessage,
   renderTranscript,
   summaryMessageId,
-  SUMMARY_ID_PREFIX,
   toLangChainMessage,
 } from "../context/messages.js";
 import { summarizeWithProvider } from "../context/summarize.js";
@@ -55,8 +54,15 @@ interface StoredHistory {
   lastId: string;
 }
 
-function isSummaryMessage(m: ContextMessage): boolean {
-  return m.meta?.["summary"] === true && (m.id ?? "").startsWith(SUMMARY_ID_PREFIX);
+/**
+ * A running summary some agent wrote to this channel: summary meta, and an id
+ * that is exactly the summary id of the node the meta names. A message that
+ * only looks like one (from run input, say, with another node or channel in
+ * its id) is ordinary history, and its meta is ignored.
+ */
+function isSummaryMessage(m: ContextMessage, channel: string): boolean {
+  const node = m.meta?.["node"];
+  return m.meta?.["summary"] === true && typeof node === "string" && node !== "" && m.id === summaryMessageId(channel, node);
 }
 
 const isString = (v: unknown): v is string => typeof v === "string";
@@ -77,13 +83,13 @@ function readHistory(state: Record<string, unknown>, policy: ContextPolicy, node
   }
   const stored = ((raw as unknown[] | undefined) ?? []).map(fromStoredMessage).filter((m): m is ContextMessage => !!m);
   const sid = summaryMessageId(channel, nodeId);
-  const summaries = stored.filter(isSummaryMessage);
+  const summaries = stored.filter((m) => isSummaryMessage(m, channel));
   const summary = summaries.find((m) => m.id === sid);
   const shared = summaries
     .filter((m) => m !== summary)
-    .map((m) => ({ node: typeof m.meta?.["node"] === "string" ? (m.meta["node"] as string) : (m.id ?? ""), text: summaryText(m) }));
-  const systemNotes = stored.filter((m) => m.role === "system" && !isSummaryMessage(m)).map((m) => m.content);
-  let history = stored.filter((m) => m.role !== "system" && !isSummaryMessage(m));
+    .map((m) => ({ node: m.meta!["node"] as string, text: summaryText(m) }));
+  const systemNotes = stored.filter((m) => m.role === "system" && !isSummaryMessage(m, channel)).map((m) => m.content);
+  let history = stored.filter((m) => m.role !== "system" && !isSummaryMessage(m, channel));
   // With compact: false the summarized messages stay in the channel; skip what the summary covers.
   const covers = summary?.meta?.["coversThroughId"];
   if (typeof covers === "string") {
