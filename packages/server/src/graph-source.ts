@@ -5,6 +5,7 @@
  * server-configured / YAML-declared providers are supported.
  */
 
+import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -120,6 +121,48 @@ export async function ensureGraphStoreDir(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
 }
 
+/**
+ * Replace `filePath` with `data` so a reader sees either the old file or the
+ * new one, never a partly written one: write a temporary file in the same
+ * directory, flush it to disk, then rename it over the target.
+ */
+export async function writeFileAtomic(filePath: string, data: string): Promise<void> {
+  const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath).slice(0, 200)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(tmp, "wx", 0o600);
+    await handle.writeFile(data, "utf-8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await fs.rename(tmp, filePath);
+  } catch (err) {
+    await handle?.close().catch(() => undefined);
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+/** Meta updates in progress, by meta file path. */
+const metaLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Run `fn` after every earlier call for the same meta file has settled, so
+ * read-modify-write updates of one thread's meta apply in order and none is
+ * lost. This orders writes within one process; a graph store directory
+ * belongs to one server process.
+ */
+async function withMetaLock<T>(metaPath: string, fn: () => Promise<T>): Promise<T> {
+  const prev = metaLocks.get(metaPath) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const settled = run.catch(() => undefined);
+  metaLocks.set(metaPath, settled);
+  void settled.then(() => {
+    if (metaLocks.get(metaPath) === settled) metaLocks.delete(metaPath);
+  });
+  return run;
+}
+
 export function safeThreadId(threadId: string): string {
   return threadId.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
@@ -173,8 +216,18 @@ export async function persistGraph(
   extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" } = {},
 ): Promise<PersistedGraph> {
   await ensureGraphStoreDir(dir);
+  return withMetaLock(metaPathFor(dir, threadId), () => persistGraphLocked(dir, threadId, yaml, spec, extras));
+}
+
+async function persistGraphLocked(
+  dir: string,
+  threadId: string,
+  yaml: string,
+  spec: GraphSpec,
+  extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" },
+): Promise<PersistedGraph> {
   const filePath = graphPathFor(dir, threadId);
-  await fs.writeFile(filePath, yaml, "utf-8");
+  await writeFileAtomic(filePath, yaml);
   const now = new Date().toISOString();
   const existing = await readGraphMeta(dir, threadId);
   const storedAt = existing?.storedAt ?? now;
@@ -208,7 +261,7 @@ function metaPathFor(dir: string, threadId: string): string {
 }
 
 async function writeGraphMeta(dir: string, threadId: string, meta: GraphMeta): Promise<void> {
-  await fs.writeFile(metaPathFor(dir, threadId), JSON.stringify(meta), "utf-8");
+  await writeFileAtomic(metaPathFor(dir, threadId), JSON.stringify(meta));
 }
 
 function isThreadOwner(v: unknown): v is ThreadOwner {
@@ -243,15 +296,17 @@ export async function updateGraphMeta(
   threadId: string,
   patch: Partial<Pick<GraphMeta, "label" | "status" | "graphName">>,
 ): Promise<GraphMeta | null> {
-  const existing = await readGraphMeta(dir, threadId);
-  if (!existing) return null;
-  const next: GraphMeta = {
-    ...existing,
-    ...patch,
-    updatedAt: new Date().toISOString(),
-  };
-  await writeGraphMeta(dir, threadId, next);
-  return next;
+  return withMetaLock(metaPathFor(dir, threadId), async () => {
+    const existing = await readGraphMeta(dir, threadId);
+    if (!existing) return null;
+    const next: GraphMeta = {
+      ...existing,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    await writeGraphMeta(dir, threadId, next);
+    return next;
+  });
 }
 
 /**
