@@ -18,6 +18,7 @@ import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
 import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
+import { createLegacyWriteCursor } from "../memory/handle.js";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import { childRunConfig, isGraphInterrupt, recordedToolResult, ReplayMismatchError, ReplayStore, replayNodeKey, replayedToolResult, runScopeOf, toolArgsHash } from "../providers/replay-cache.js";
 import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
@@ -129,6 +130,10 @@ export const agentNode = defineNode<Config>({
         const replayStore = runScope?.replay ?? new ReplayStore();
         const cacheKey = replayNodeKey(runScope?.path ?? [], ctx.nodeId);
         let toolSeq = 0;
+        // Older builds counted every tool write on the agent's handle, in call
+        // order. A fresh cursor per execution matches that numbering, including
+        // a resume that skips calls whose results are already cached.
+        const legacyWrites = createLegacyWriteCursor();
         // A provider may hand a tool error back to the model; a replay
         // mismatch must fail the node instead.
         let mismatch: ReplayMismatchError | undefined;
@@ -186,6 +191,7 @@ export const agentNode = defineNode<Config>({
               {
                 checkpointNs: typeof parentConf["checkpoint_ns"] === "string" ? parentConf["checkpoint_ns"] : "",
                 nodeId: ctx.nodeId,
+                cursor: legacyWrites,
               },
               { name, argsHash: toolArgsHash(callArgs) },
             );

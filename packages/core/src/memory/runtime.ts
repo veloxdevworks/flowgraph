@@ -8,7 +8,7 @@ import { renderDeep } from "@flowgraph/expr";
 import { replayNodeKey, runScopeOf } from "../providers/replay-cache.js";
 import { parseDuration } from "../runtime/duration.js";
 import { createInMemoryMemoryBackend } from "./in-memory.js";
-import { createScopedMemory, defaultMemoryPolicy, type MemoryOpSource, type MemoryPolicy, type ScopedMemory } from "./handle.js";
+import { createScopedMemory, defaultMemoryPolicy, type LegacyWriteCursor, type MemoryOpSource, type MemoryPolicy, type ScopedMemory } from "./handle.js";
 import { LegacyScopedStore } from "./legacy-store.js";
 import { normalizeSubjectKey, tupleForScope, type MemoryBinding } from "./scope.js";
 import {
@@ -246,7 +246,7 @@ export class MemoryRuntime {
     lgConfig: { configurable?: Record<string, unknown> } | undefined,
     nodeId: string,
     meta?: { runId?: string | undefined; threadId?: string | undefined },
-    legacy?: { checkpointNs?: string | undefined; nodeId: string },
+    legacy?: { checkpointNs?: string | undefined; nodeId: string; cursor?: LegacyWriteCursor | undefined },
     tool?: { name: string; argsHash: string },
   ): ScopedMemory | undefined {
     const conf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
@@ -259,6 +259,7 @@ export class MemoryRuntime {
       runId: meta?.runId,
       legacyCheckpointNs: legacy ? legacy.checkpointNs : undefined,
       legacyNodeId: legacy?.nodeId ?? nodeId,
+      legacyCursor: legacy?.cursor,
     });
   }
 

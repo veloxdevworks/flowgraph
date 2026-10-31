@@ -313,7 +313,7 @@ function assertWriteStorable(op: MemoryWriteOp): void {
 }
 
 type OpRecord = { version: number; value: unknown; fingerprint: string | null };
-type LegacyLookup = { kind: "hit"; row: OpRecord } | { kind: "none" } | { kind: "miss" };
+type LegacyLookup = { kind: "hit"; row: OpRecord; opId: string } | { kind: "none" } | { kind: "miss" };
 
 /**
  * Find the `matchIndex`th positional record (0-based) whose fingerprint equals
@@ -346,7 +346,8 @@ function* lookupLegacy(fingerprint: string, matchIndex: number, opIdAt: (index: 
         if (alt?.fingerprint === fingerprint) hit = alt;
       }
       if (hit) {
-        if (seen === matchIndex) return { kind: "hit", row: hit };
+        const opId = hit === row ? id : `${id}~${fingerprint}`;
+        if (seen === matchIndex) return { kind: "hit", row: hit, opId };
         seen += 1;
         seenAny = true;
         misses = 0;
@@ -408,26 +409,47 @@ function* writeProgram(op: MemoryWriteOp): Program<MemoryWriteResult> {
   // Older builds keyed the id by call order. On a miss, adopt the Nth positional
   // row with this fingerprint (a reordered or repeated write still matches) and
   // copy it under the new id. A null fingerprint does not match. The empty
-  // prefix of an attempt is one batched read.
+  // prefix of an attempt is one batched read. Tool calls ask for one exact
+  // index instead, the write number shared across that agent attempt.
   let reportLegacyAbsent = false;
   if (primaryAbsent && op.opId && fingerprint !== null && op.legacyOpIdAt && op.legacyMatchIndex !== undefined) {
-    const gapIds = Array.from({ length: LEGACY_OP_GAP }, (_, i) => op.legacyOpIdAt!(i));
-    const probeIds = op.legacySentinelId ? [...gapIds, op.legacySentinelId] : gapIds;
-    const probed = yield* call("opGetMany", probeIds);
-    const sentinelHit = op.legacySentinelId !== undefined && probed.has(op.legacySentinelId);
-    const gapEmpty = gapIds.every((id) => !probed.has(id));
-    if (sentinelHit || gapEmpty) {
-      reportLegacyAbsent = true;
-      if (gapEmpty && !sentinelHit && op.legacySentinelId) {
-        yield* call("opPut", op.legacySentinelId, { version: 0, value: null }, now, "nolegacy");
+    if (op.legacyExact) {
+      const id = op.legacyOpIdAt(op.legacyMatchIndex);
+      const row = yield* call("opGet", id);
+      let hitId = id;
+      let hit: OpRecord | undefined;
+      if (row?.fingerprint === fingerprint) hit = row;
+      else if (row) {
+        const altId = `${id}~${fingerprint}`;
+        const alt = yield* call("opGet", altId);
+        if (alt?.fingerprint === fingerprint) {
+          hit = alt;
+          hitId = altId;
+        }
+      }
+      if (hit && (op.legacyClaim?.(hitId) ?? true)) {
+        yield* call("opPut", op.opId, { version: hit.version, value: hit.value }, now, fingerprint);
+        return { version: hit.version, value: hit.value, deduped: true, evicted: 0 };
       }
     } else {
-      const found = yield* lookupLegacy(fingerprint, op.legacyMatchIndex, op.legacyOpIdAt);
-      if (found.kind === "hit") {
-        yield* call("opPut", op.opId, { version: found.row.version, value: found.row.value }, now, fingerprint);
-        return { version: found.row.version, value: found.row.value, deduped: true, evicted: 0 };
+      const gapIds = Array.from({ length: LEGACY_OP_GAP }, (_, i) => op.legacyOpIdAt!(i));
+      const probeIds = op.legacySentinelId ? [...gapIds, op.legacySentinelId] : gapIds;
+      const probed = yield* call("opGetMany", probeIds);
+      const sentinelHit = op.legacySentinelId !== undefined && probed.has(op.legacySentinelId);
+      const gapEmpty = gapIds.every((id) => !probed.has(id));
+      if (sentinelHit || gapEmpty) {
+        reportLegacyAbsent = true;
+        if (gapEmpty && !sentinelHit && op.legacySentinelId) {
+          yield* call("opPut", op.legacySentinelId, { version: 0, value: null }, now, "nolegacy");
+        }
+      } else {
+        const found = yield* lookupLegacy(fingerprint, op.legacyMatchIndex, op.legacyOpIdAt);
+        if (found.kind === "hit" && (op.legacyClaim?.(found.opId) ?? true)) {
+          yield* call("opPut", op.opId, { version: found.row.version, value: found.row.value }, now, fingerprint);
+          return { version: found.row.version, value: found.row.value, deduped: true, evicted: 0 };
+        }
+        if (found.kind === "none") reportLegacyAbsent = true;
       }
-      if (found.kind === "none") reportLegacyAbsent = true;
     }
   }
 

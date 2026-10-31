@@ -151,6 +151,38 @@ export interface MemoryOpSource {
    */
   legacyCheckpointNs?: string | undefined;
   legacyNodeId?: string | undefined;
+  /**
+   * Write numbers for an older build, shared by every tool call of one agent
+   * attempt and counted in call order. Each call's own handle starts at zero;
+   * this cursor does not.
+   */
+  legacyCursor?: LegacyWriteCursor | undefined;
+}
+
+/**
+ * Positional indexes an older build assigned, and the rows already adopted.
+ * One cursor per agent attempt, shared by that attempt's tool calls.
+ */
+export interface LegacyWriteCursor {
+  /** Next write number, in call order. */
+  nextIndex(): number;
+  /** False when `opId` was already adopted in this attempt. */
+  claim(opId: string): boolean;
+}
+
+export function createLegacyWriteCursor(): LegacyWriteCursor {
+  let next = 0;
+  const claimed = new Set<string>();
+  return {
+    nextIndex() {
+      return next++;
+    },
+    claim(opId) {
+      if (claimed.has(opId)) return false;
+      claimed.add(opId);
+      return true;
+    },
+  };
 }
 
 function replayHash(parts: readonly string[]): string {
@@ -191,6 +223,8 @@ interface ReplayAssignment {
   opId?: string | undefined;
   fingerprint?: string | undefined;
   legacyMatchIndex?: number | undefined;
+  legacyExact?: boolean | undefined;
+  legacyClaim?: ((opId: string) => boolean) | undefined;
   legacyOpIdAt?: ((index: number) => string) | undefined;
   legacySentinelId?: string | undefined;
   rejectFingerprintMismatch?: boolean | undefined;
@@ -250,6 +284,14 @@ export function createScopedMemory(
   };
   const legacyOpIdAt = canDedupe ? (index: number) => memoryPositionalOpId(legacySource, index)! : undefined;
   const legacySentinelId = canDedupe ? replayHash([...sourceParts, "v2-nolegacy"]) : undefined;
+  const claimedLegacy = new Set<string>();
+  const claimLegacy = source.legacyCursor
+    ? (id: string) => source.legacyCursor!.claim(id)
+    : (id: string) => {
+        if (claimedLegacy.has(id)) return false;
+        claimedLegacy.add(id);
+        return true;
+      };
 
   const assignReplay = (fingerprint: string, mode: "content" | "idem", idemKey?: string): ReplayAssignment => {
     if (mode === "idem" && idemKey !== undefined) {
@@ -278,10 +320,18 @@ export function createScopedMemory(
       opId: replayHash([...sourceParts, "v2", fingerprint, String(n)]),
     };
     // Once this attempt has seen no positional rows, later writes skip that read.
+    // A shared cursor numbers every tool call of the agent attempt the way an
+    // older build did, and adopts only that exact row.
     if (mode === "content" && !skipLegacy) {
-      assigned.legacyMatchIndex = n;
       assigned.legacyOpIdAt = legacyOpIdAt;
-      assigned.legacySentinelId = legacySentinelId;
+      assigned.legacyClaim = claimLegacy;
+      if (source.legacyCursor) {
+        assigned.legacyMatchIndex = source.legacyCursor.nextIndex();
+        assigned.legacyExact = true;
+      } else {
+        assigned.legacyMatchIndex = n;
+        assigned.legacySentinelId = legacySentinelId;
+      }
     }
     return assigned;
   };
@@ -331,6 +381,8 @@ export function createScopedMemory(
       opId: assigned.opId,
       fingerprint: extra.fingerprint ?? assigned.fingerprint,
       legacyMatchIndex: assigned.legacyMatchIndex,
+      legacyExact: assigned.legacyExact,
+      legacyClaim: assigned.legacyClaim,
       legacyOpIdAt: assigned.legacyOpIdAt,
       legacySentinelId: assigned.legacySentinelId,
       rejectFingerprintMismatch: assigned.rejectFingerprintMismatch,
@@ -342,6 +394,8 @@ export function createScopedMemory(
     if (r.legacyAbsent) {
       skipLegacy = true;
       assigned.legacyMatchIndex = undefined;
+      assigned.legacyExact = undefined;
+      assigned.legacyClaim = undefined;
       assigned.legacyOpIdAt = undefined;
       assigned.legacySentinelId = undefined;
     }

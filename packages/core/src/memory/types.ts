@@ -181,11 +181,23 @@ export interface MemoryWriteOp {
    */
   rejectFingerprintMismatch?: boolean | undefined;
   /**
-   * Which older positional record with this fingerprint to adopt (0 is the
-   * first). Set with {@link legacyOpIdAt}. Absent means positional records
-   * are not consulted. A null fingerprint never matches.
+   * Which older positional record to adopt. Without {@link legacyExact}, 0 is
+   * the first row with this fingerprint. With it, the index is the write
+   * number an older build stored, and only that row is considered. Absent
+   * means positional records are not consulted. A null fingerprint never matches.
    */
   legacyMatchIndex?: number | undefined;
+  /**
+   * Adopt only the row at {@link legacyMatchIndex}. Tool calls set this so a
+   * later call cannot take an earlier call's row by being the first write of
+   * its own handle.
+   */
+  legacyExact?: boolean | undefined;
+  /**
+   * False when this old op id was already adopted in the attempt. The write
+   * then applies instead of replaying that row.
+   */
+  legacyClaim?: ((opId: string) => boolean) | undefined;
   /** Positional op id an older build stored at `index` for this node attempt. */
   legacyOpIdAt?: ((index: number) => string) | undefined;
   /**
