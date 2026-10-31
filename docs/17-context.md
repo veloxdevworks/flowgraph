@@ -2,7 +2,9 @@
 
 An agent node's prompt grows in two ways: its own tool loop (every tool call and result is sent back on the next model call), and conversation history carried across loop iterations or runs. Without limits, a long tool loop or a chat thread ends up sending hundreds of thousands of tokens per call, and then fails at the provider's context limit.
 
-`with.context` bounds what an agent sends on each model call. `runtime.context` sets graph-wide defaults. Agents with neither send exactly what they did before.
+`with.context` bounds what an agent sends on each model call. `runtime.context` sets graph-wide defaults.
+
+Context management is opt-in: an agent with neither block sends exactly what it did before, with no budget, no trimming and no summary calls. Declaring either block turns it on with the defaults below.
 
 ## 1. Quick start
 
@@ -43,11 +45,13 @@ Each run on the same thread sees the earlier turns as real chat messages, the hi
 | `strategy` | `trim` | How to make room. See §3. |
 | `lastN` | `20` | For `strategy: last`: how many history and tool-loop messages to keep, besides the prompt. |
 | `toolResultMaxTokens` | none | Cut every tool result to this many tokens, with a `…[truncated: n of total tokens kept]` marker. |
-| `summarize.provider` / `summarize.model` | none | Model used to write summaries (`strategy: summarize`). A registered provider name; a `model` alone uses the agent's provider. Without either, a deterministic extract is used. |
+| `summarize.mode` | `model` | `model`: a model writes the summary. `extract`: a deterministic list of excerpts, with no model call. |
+| `summarize.provider` / `summarize.model` | the agent's own | Provider and model that write summaries. With neither set, the agent's own provider and model are used; a `model` alone runs on the agent's provider. Point these at a cheaper model to save cost. |
 | `summarize.maxTokens` | `500` | Size of the running summary. |
 | `summarize.instructions` | none | Extra instructions for the summary model. |
+| `issuesMaxTokens` | `min(1000, ¼ of maxTokens − reserveTokens)` | Cap on the "Known issues so far" section of the system text. The newest issues are kept; a line counts the ones left out. |
 | `estimator` | `bytes` | Token estimator name. See §6. |
-| `onOverflow` | `error` | When the parts that are never dropped (system, prompt, newest tool step) exceed the budget: `error` fails the node with `ContextOverflowError` (never retried); `warn` sends anyway and records a `CONTEXT_OVER_BUDGET` run issue. |
+| `onOverflow` | `error` | When the parts that are never dropped (system, prompt, newest tool step) exceed the budget even after the strategy has done what it can: `error` fails the node with `ContextOverflowError`, code `CONTEXT_OVERFLOW` (never retried); `warn` sends anyway and records a `CONTEXT_OVER_BUDGET` run issue. |
 | `history` | none | A `type: messages` channel to read as prior conversation and append to. Node level only. |
 | `record` | `turns` | What the agent appends to `history`: `turns` (the prompt and the final reply) or `all` (also tool calls and results). |
 | `compact` | `true` | Remove messages the agent left out from `history` (folded into the summary under `summarize`). With `false` the channel keeps everything and only the calls are bounded. |
@@ -63,7 +67,7 @@ Never dropped: the system text, the current prompt, and the newest tool step. Ev
 - **`none`**: send everything; only the overflow check applies.
 - **`last`**: keep the newest `lastN` messages, then trim further if still over budget.
 - **`trim`**: drop the oldest units until the call fits. A line in the system text says how many messages were left out.
-- **`summarize`**: when the call does not fit, drop the oldest units down to about 75% of the free budget and fold them into a running summary, shown in the system text under `## Earlier conversation (summary)`. The slack means the summarizer runs once every several calls, not every call. With `history`, the summary is stored in the channel as a system message with id `fg-summary-<channel>` and carried into later runs.
+- **`summarize`**: when the call does not fit, drop the oldest units down to about 75% of the free budget and fold them into a running summary, shown in the system text under `## Earlier conversation (summary)`. The slack means the summarizer runs once every several calls, not every call. The summary is written by the agent's own model unless `summarize.provider` / `model` name another; if that call fails, a deterministic extract is used and a `CONTEXT_SUMMARY_FAILED` issue is recorded. With `history`, the summary is stored in the channel as a system message with id `fg-summary-<channel>` and carried into later runs.
 
 ## 4. History channels
 
@@ -87,13 +91,17 @@ assistant: …
 
 **Map:** agents inside `map` run in parallel, so they read `history` but do not write it (run issue `CONTEXT_HISTORY_READ_ONLY`, lint `CONTEXT_HISTORY_IN_MAP`).
 
-**Subgraphs:** map the channel in and out with `stateMap`. Turns a child appends reach the parent; ids keep the parent's copy free of duplicates. Removals made by a child's compaction do not propagate to the parent channel, so the parent's channel can be longer than the child's. The calls stay within budget either way.
+**Subgraphs:** map the channel in and out with `stateMap`. Turns a child appends reach the parent; ids keep the parent's copy free of duplicates. Compaction is local to the graph that runs it: removals made by a child agent do not propagate to the parent's channel, so the parent keeps its full history and the child's new turns. Each agent fits its own calls, so every call stays within budget either way. To bound the parent's channel too, give a parent agent on that channel its own `with.context`.
 
-## 5. Memory recall
+## 5. Known issues
+
+Agents list the run's earlier issues in their system text. Under a context budget that section has its own cap, `issuesMaxTokens`: the newest issues are kept and a line such as `[12 earlier issues were left out to fit the context budget.]` counts the rest. Without a context block every issue is listed, as before.
+
+## 6. Memory recall
 
 `with.memory.recall` has its own `maxTokens` (default 1000). Under a context budget, recall is limited to half of `maxTokens − reserveTokens`, so recalled memory and conversation history share one budget. Lint `CONTEXT_MEMORY_OVER_BUDGET` warns when `memory.maxTokens` asks for more. Recalled memory is part of the system text and is never dropped.
 
-## 6. Token estimates
+## 7. Token estimates
 
 The default estimator counts UTF-8 bytes / 4 (the same as memory recall). Each message adds 4 tokens of overhead plus its tool calls as JSON; tool schemas count as their JSON. Register a real tokenizer before compiling:
 
@@ -109,11 +117,11 @@ runtime:
 
 An unregistered estimator name fails the node with a message naming the registered ones.
 
-## 7. Interrupt, resume and replay
+## 8. Interrupt, resume and replay
 
 Fitting is deterministic: each call depends only on the history channel, the prompt and the tool loop so far. On resume the agent refits every replayed step the same way, and summaries made by a model are kept in the agent's replay cache, so a run interrupted at every tool call sends the same inputs as a straight run and does not pay for a summary twice. This also holds when the process restarts between interrupt and resume.
 
-## 8. Providers
+## 9. Providers
 
 | Provider | Tool loop bounded | History |
 |----------|-------------------|---------|
@@ -121,23 +129,25 @@ Fitting is deterministic: each call depends only on the history channel, the pro
 | Scripted / mock | n/a | transcript in prompt |
 | Claude SDK, Cursor SDK, CLI, `hub: deepagents` | no: they run their own loop; only the starting history and prompt are fitted | transcript in prompt |
 
+**Limit for providers with their own tool loop:** Claude SDK, Cursor SDK, the CLI providers and `hub: deepagents` run the tool loop inside the vendor SDK or binary, so flowgraph sees only the request it starts with. For these, the budget applies to the starting system text, history and prompt; tool calls and results added during the run are not trimmed or summarized, and `toolResultMaxTokens` does not apply. Use the LangChain provider when a long tool loop must stay within budget.
+
 Custom providers can opt in: set `capabilities.contextMessages: true` to receive `req.messages`, and call `ctx.context.fit(loop)` before each model call with the assistant and tool messages produced so far; it returns `{ system, messages, stats }` to send. Use `ctx.context.capToolResult(text)` on tool results.
 
-## 9. Observability
+## 10. Observability
 
 Every fitted call emits `agent.context` with `budget`, `total`, `system`, `tools`, `reserve`, `history`, `prompt`, `loop`, `summary`, `keptMessages`, `droppedMessages` and `summarizedMessages`. Summary model usage is emitted as `agent.usage` with `purpose: "context.summary"` and counts toward `runtime.budget`.
 
-Run issues: `CONTEXT_OVER_BUDGET`, `CONTEXT_SUMMARY_FAILED` (the summary model failed; a plain extract was used), `CONTEXT_HISTORY_READ_ONLY`.
+Run issues: `CONTEXT_OVER_BUDGET`, `CONTEXT_SUMMARY_FAILED` (the summary model failed; a plain extract was used), `CONTEXT_HISTORY_READ_ONLY`. A budget that cannot be met fails the node with error code `CONTEXT_OVERFLOW`.
 
-## 10. Lint codes
+## 11. Lint codes
 
 | Code | Severity | When |
 |------|----------|------|
 | `CONTEXT_HISTORY_CHANNEL` | error | `history` is not a declared `type: messages` channel |
 | `CONTEXT_BUDGET_TOO_SMALL` | error | `maxTokens` leaves no room after `reserveTokens`, or `summarize.maxTokens` is half the usable budget or more |
-| `CONTEXT_BUDGET_TOO_SMALL` | warning | `toolResultMaxTokens` is not below the usable budget |
+| `CONTEXT_BUDGET_TOO_SMALL` | warning | `toolResultMaxTokens` is not below the usable budget, or `issuesMaxTokens` is half of it or more |
 | `CONTEXT_MEMORY_OVER_BUDGET` | warning | `memory.maxTokens` is over half the usable budget; recall will be limited |
-| `CONTEXT_OPTION_UNUSED` | warning | `lastN` without `strategy: last`, `summarize` without `strategy: summarize`, `record`/`compact` without `history` |
+| `CONTEXT_OPTION_UNUSED` | warning | `lastN` without `strategy: last`, `summarize` without `strategy: summarize`, `summarize.provider`/`model` with `mode: extract`, `record`/`compact` without `history` |
 | `CONTEXT_HISTORY_IN_MAP` | warning | an agent inside `map` names a `history` channel |
 | `CONTEXT_HUB_UNSUPPORTED` | warning | `hub: deepagents` with `with.context` |
 
