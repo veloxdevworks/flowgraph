@@ -1904,12 +1904,7 @@ function buildNodeCtx(
   if (memoryRuntime?.exposeMemory) {
     const conf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
     const threadId = typeof conf["thread_id"] === "string" ? conf["thread_id"] : meta?.threadId;
-    const memory = memoryRuntime.memoryFor(threadId, {
-      checkpointNs: typeof conf["checkpoint_ns"] === "string" ? conf["checkpoint_ns"] : undefined,
-      taskId: typeof conf["__pregel_task_id"] === "string" ? conf["__pregel_task_id"] : undefined,
-      nodeId,
-      runId: meta?.runId,
-    });
+    const memory = memoryRuntime.memoryForConfig(lgConfig, nodeId, { runId: meta?.runId, threadId });
     if (memory) ctx.memory = memory;
   }
   return ctx;

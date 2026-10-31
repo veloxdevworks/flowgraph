@@ -5,6 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { parseDuration } from "../runtime/duration.js";
+import { assertStorableText, writeFingerprint } from "./engine.js";
 import { availableScopes, isMemoryScopeName, tupleForScope, tupleKey, type MemoryBinding } from "./scope.js";
 import {
   MemoryError,
@@ -17,6 +18,7 @@ import {
   type MemoryRecord,
   type MemoryRow,
   type MemoryScopeName,
+  type MemoryTuple,
   type MemoryWriteKind,
   type MemoryWriteOp,
 } from "./types.js";
@@ -27,6 +29,14 @@ export interface MemoryWriteOptions {
   ttl?: string | number | undefined;
   /** CAS: expected current version; 0 = create only. */
   ifVersion?: number | undefined;
+  /**
+   * Caller-chosen identity for this write within the node attempt. The first
+   * payload stored for the key is the one a retry returns; a later call with
+   * the same key and a different payload does not write again. A second call
+   * in the same attempt is a second write. Ignored when the attempt has no
+   * thread and task id (nothing to replay against).
+   */
+  idempotencyKey?: string | undefined;
 }
 
 export interface MemoryReadOptions {
@@ -135,6 +145,100 @@ export interface MemoryOpSource {
   taskId?: string | undefined;
   nodeId?: string | undefined;
   runId?: string | undefined;
+  /**
+   * Namespace and node id an older build used for this attempt's positional
+   * ids. A tool call was stored on the outermost agent's namespace and node id.
+   */
+  legacyCheckpointNs?: string | undefined;
+  legacyNodeId?: string | undefined;
+  /**
+   * Write numbers for an older build, shared by every tool call of one agent
+   * attempt and counted in call order. A nested agent reuses the enclosing
+   * call's cursor. Each call's own handle starts at zero; this cursor does not.
+   */
+  legacyCursor?: LegacyWriteCursor | undefined;
+}
+
+/** Legacy numbering an enclosing tool call hands to a nested agent. */
+export const LEGACY_TOOL_SCOPE: unique symbol = Symbol.for("flowgraph.legacyToolScope");
+
+export interface LegacyToolScope {
+  checkpointNs: string;
+  nodeId: string;
+  cursor: LegacyWriteCursor;
+}
+
+/**
+ * Positional indexes an older build assigned, and the rows already adopted.
+ * One cursor per agent attempt, shared by that attempt's tool calls.
+ */
+export interface LegacyWriteCursor {
+  /** Next write number, in call order. */
+  nextIndex(): number;
+  /** False when `opId` was already adopted in this attempt. */
+  claim(opId: string): boolean;
+}
+
+export function createLegacyWriteCursor(): LegacyWriteCursor {
+  let next = 0;
+  const claimed = new Set<string>();
+  return {
+    nextIndex() {
+      return next++;
+    },
+    claim(opId) {
+      if (claimed.has(opId)) return false;
+      claimed.add(opId);
+      return true;
+    },
+  };
+}
+
+function replayHash(parts: readonly string[]): string {
+  return createHash("sha256").update(parts.join("\u0000")).digest("hex");
+}
+
+/**
+ * Op id an older build stored for write number `index` (0-based) of this node
+ * attempt: sha256 of thread, checkpoint namespace, task, node and index.
+ * Current builds still recognize these rows.
+ */
+export function memoryPositionalOpId(source: MemoryOpSource, index: number): string | undefined {
+  if (!source.threadId || !source.taskId || !Number.isInteger(index) || index < 0) return undefined;
+  return replayHash([source.threadId, source.checkpointNs ?? "", source.taskId, source.nodeId ?? "", String(index)]);
+}
+
+/**
+ * Fingerprint of an idempotency key bound to one operation: the key, the kind,
+ * the scope tuple and the memory key. The payload is not part of it, so a
+ * retry of the same operation keeps the first value. A different kind, scope
+ * or memory key is a different fingerprint.
+ */
+function idempotencyFingerprint(key: string, kind: string, tuple: MemoryTuple, memoryKey: string): string {
+  return replayHash(["idem", key, kind, tupleKey(tuple), memoryKey]);
+}
+
+const IDEMPOTENCY_KEY_MAX = 1024;
+
+function validateIdempotencyKey(key: unknown): string {
+  if (typeof key !== "string" || key.length < 1 || key.length > IDEMPOTENCY_KEY_MAX) {
+    throw new MemoryError("MEMORY_KEY_INVALID", `idempotencyKey must be a string of 1 to ${IDEMPOTENCY_KEY_MAX} characters`);
+  }
+  assertStorableText("idempotencyKey", key);
+  return key;
+}
+
+interface ReplayAssignment {
+  opId?: string | undefined;
+  fingerprint?: string | undefined;
+  legacyMatchIndex?: number | undefined;
+  legacyExact?: boolean | undefined;
+  legacyClaim?: ((opId: string) => boolean) | undefined;
+  legacyOpIdAt?: ((index: number) => string) | undefined;
+  legacySentinelId?: string | undefined;
+  rejectFingerprintMismatch?: boolean | undefined;
+  /** Recorded only after the write commits, so a rejected reuse does not burn the slot. */
+  commitIdem?: { key: string; fingerprint: string } | undefined;
 }
 
 export function rowToRecord(row: MemoryRow, scope: MemoryScopeName): MemoryRecord {
@@ -168,14 +272,81 @@ export function createScopedMemory(
   policy: MemoryPolicy,
   source: MemoryOpSource = {},
 ): ScopedMemory {
-  let opIndex = 0;
+  // Replay ids name the write, not its position in the attempt. `occurrences`
+  // counts identical writes (same fingerprint) so two increments of one key
+  // both apply, and a retry of both matches either order. Positional ids from
+  // older builds are read back through legacyOpIdAt.
   const canDedupe = !!(source.threadId && source.taskId);
-  const nextOpId = (): string | undefined => {
-    const n = opIndex++;
-    if (!canDedupe) return undefined;
-    return createHash("sha256")
-      .update([source.threadId, source.checkpointNs ?? "", source.taskId, source.nodeId ?? "", String(n)].join("\u0000"))
-      .digest("hex");
+  const occurrences = new Map<string, number>();
+  /** Idempotency key → fingerprint of the operation it was bound to in this attempt. */
+  const idemBound = new Map<string, string>();
+  let skipLegacy = false;
+  const sourceParts = [source.threadId ?? "", source.checkpointNs ?? "", source.taskId ?? "", source.nodeId ?? ""];
+  // Positional ids use the namespace and node id an older build wrote. The
+  // sentinel stays on the current identity, so one attempt skipping the scan
+  // does not hide another node's older rows.
+  const legacySource: MemoryOpSource = {
+    threadId: source.threadId,
+    checkpointNs: source.legacyCheckpointNs ?? source.checkpointNs,
+    taskId: source.taskId,
+    nodeId: source.legacyNodeId ?? source.nodeId,
+  };
+  const legacyOpIdAt = canDedupe ? (index: number) => memoryPositionalOpId(legacySource, index)! : undefined;
+  const legacySentinelId = canDedupe ? replayHash([...sourceParts, "v2-nolegacy"]) : undefined;
+  const claimedLegacy = new Set<string>();
+  const claimLegacy = source.legacyCursor
+    ? (id: string) => source.legacyCursor!.claim(id)
+    : (id: string) => {
+        if (claimedLegacy.has(id)) return false;
+        claimedLegacy.add(id);
+        return true;
+      };
+
+  const assignReplay = (fingerprint: string, mode: "content" | "idem", idemKey?: string): ReplayAssignment => {
+    if (mode === "idem" && idemKey !== undefined) {
+      const bound = idemBound.get(idemKey);
+      if (bound !== undefined && bound !== fingerprint) {
+        throw new MemoryError(
+          "MEMORY_IDEMPOTENCY_CONFLICT",
+          `idempotency key ${JSON.stringify(idemKey)} was already used for a different operation (kind, scope, or key)`,
+        );
+      }
+      const occKey = `idem\0${idemKey}`;
+      const n = occurrences.get(occKey) ?? 0;
+      if (!canDedupe) return { fingerprint, commitIdem: { key: idemKey, fingerprint } };
+      return {
+        fingerprint,
+        opId: replayHash([...sourceParts, "v2", "idem", idemKey, String(n)]),
+        rejectFingerprintMismatch: true,
+        commitIdem: { key: idemKey, fingerprint },
+      };
+    }
+    const n = occurrences.get(fingerprint) ?? 0;
+    occurrences.set(fingerprint, n + 1);
+    if (!canDedupe || !legacyOpIdAt || !legacySentinelId) return { fingerprint };
+    const assigned: ReplayAssignment = {
+      fingerprint,
+      opId: replayHash([...sourceParts, "v2", fingerprint, String(n)]),
+    };
+    // Once this attempt has seen no positional rows, later writes skip that read.
+    // A shared cursor numbers every tool call of the agent attempt the way an
+    // older build did, and adopts only that exact row.
+    // An older build took the next number before the scope check, so a write
+    // that threw there still consumed a number. This one takes the number only
+    // after that check. An idempotencyKey write takes no number; an older
+    // build had no such option and would have numbered that call.
+    if (mode === "content" && !skipLegacy) {
+      assigned.legacyOpIdAt = legacyOpIdAt;
+      assigned.legacyClaim = claimLegacy;
+      if (source.legacyCursor) {
+        assigned.legacyMatchIndex = source.legacyCursor.nextIndex();
+        assigned.legacyExact = true;
+      } else {
+        assigned.legacyMatchIndex = n;
+        assigned.legacySentinelId = legacySentinelId;
+      }
+    }
+    return assigned;
   };
 
   const readScopes = (scopes: MemoryScopeName[] | undefined) =>
@@ -187,10 +358,30 @@ export function createScopedMemory(
     key: string,
     extra: Partial<MemoryWriteOp>,
     opts: MemoryWriteOptions | undefined,
-    opId = nextOpId(),
+    preset?: ReplayAssignment,
   ): Promise<MemoryWriteOutcome> => {
     const s = checkScope(scope);
     const tuple = tupleForScope(binding, s);
+    let assigned = preset;
+    if (!assigned) {
+      const idem = opts?.idempotencyKey !== undefined ? validateIdempotencyKey(opts.idempotencyKey) : undefined;
+      const fingerprint = idem
+        ? idempotencyFingerprint(idem, kind, tuple, key)
+        : (extra.fingerprint ??
+          writeFingerprint({
+            kind,
+            tuple,
+            key,
+            value: extra.value,
+            attrs: opts?.attrs,
+            field: extra.field,
+            by: extra.by,
+            max: extra.max,
+            ifVersion: opts?.ifVersion,
+            ttlMs: toTtlMs(opts?.ttl),
+          }));
+      assigned = assignReplay(fingerprint, idem ? "idem" : "content", idem);
+    }
     const op: MemoryWriteOp = {
       kind,
       tuple,
@@ -200,12 +391,31 @@ export function createScopedMemory(
       ifVersion: opts?.ifVersion,
       ttlMs: toTtlMs(opts?.ttl),
       subjectTtlMs: policy.subjectTtlMs,
-      opId,
+      opId: assigned.opId,
+      fingerprint: extra.fingerprint ?? assigned.fingerprint,
+      legacyMatchIndex: assigned.legacyMatchIndex,
+      legacyExact: assigned.legacyExact,
+      legacyClaim: assigned.legacyClaim,
+      legacyOpIdAt: assigned.legacyOpIdAt,
+      legacySentinelId: assigned.legacySentinelId,
+      rejectFingerprintMismatch: assigned.rejectFingerprintMismatch,
       limits: s === "subject" ? policy.subjectLimits : policy.limits,
       writtenBy: binding.user || undefined,
       writtenByRun: source.runId,
     };
     const r = await backend.write(op);
+    if (r.legacyAbsent) {
+      skipLegacy = true;
+      assigned.legacyMatchIndex = undefined;
+      assigned.legacyExact = undefined;
+      assigned.legacyClaim = undefined;
+      assigned.legacyOpIdAt = undefined;
+      assigned.legacySentinelId = undefined;
+    }
+    if (assigned.commitIdem) {
+      occurrences.set(`idem\0${assigned.commitIdem.key}`, (occurrences.get(`idem\0${assigned.commitIdem.key}`) ?? 0) + 1);
+      idemBound.set(assigned.commitIdem.key, assigned.commitIdem.fingerprint);
+    }
     return { version: r.version, value: r.value, deduped: r.deduped };
   };
 
@@ -303,16 +513,19 @@ export function createScopedMemory(
       const s = checkScope(scope);
       const tuple = tupleForScope(binding, s);
       const retries = Math.max(0, opts?.retries ?? 5);
-      const opId = nextOpId();
+      const idem = opts?.idempotencyKey !== undefined ? validateIdempotencyKey(opts.idempotencyKey) : undefined;
       // The computed value may differ on a replay (it depends on the current
-      // value), so an update dedupes on its target alone.
-      const fingerprint = createHash("sha256").update([tupleKey(tuple), key, "update"].join("\u0000")).digest("hex");
+      // value). Without an idempotency key, dedupe on the target alone so the
+      // CAS loop still counts once. The id is assigned once for every attempt
+      // of this call, including version-conflict retries.
+      const fingerprint = idem ? idempotencyFingerprint(idem, "update", tuple, key) : replayHash([tupleKey(tuple), key, "update"]);
+      const assigned = assignReplay(fingerprint, idem ? "idem" : "content", idem);
       for (let attempt = 0; ; attempt++) {
         const row = await backend.get(tuple, key);
         const version = row?.version ?? 0;
         const next = await fn(row ? row.value : undefined, version);
         try {
-          return await write("put", s, key, { value: next, fingerprint }, { ...opts, ifVersion: version }, opId);
+          return await write("put", s, key, { value: next, fingerprint }, { ...opts, ifVersion: version }, assigned);
         } catch (err) {
           if (err instanceof MemoryError && err.code === "MEMORY_VERSION_CONFLICT" && attempt < retries) {
             await new Promise((r) => setTimeout(r, Math.random() * Math.min(200, 4 * 2 ** attempt)));

@@ -9,6 +9,7 @@ import {
   createScopedMemory,
   defaultMemoryPolicy,
   fitRecall,
+  memoryPositionalOpId,
   referencedRecallIds,
   MemoryRuntime,
   normalizeSubjectKey,
@@ -26,7 +27,7 @@ describe("op-id dedupe is tied to the write", () => {
     // Attempt 1: the model remembers fix-a in graph scope.
     const a1 = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
     expect((await a1.put("graph", "agent/fix-a", { v: "a" })).deduped).toBe(false);
-    // Attempt 2 (same task, op position 0): the model picks a different call.
+    // Attempt 2 (same task, first call): the model picks a different call.
     const a2 = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
     const r = await a2.put("user", "agent/pref-b", { v: "b" });
     expect(r.deduped).toBe(false);
@@ -65,6 +66,67 @@ describe("op-id dedupe is tied to the write", () => {
       expect(u.deduped).toBe(attempt > 0);
       expect(u.value).toBe(1);
     }
+  });
+
+  it("two identical increments both apply, and a retry dedupes both in either order", async () => {
+    const be = createInMemoryMemoryBackend();
+    const first = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
+    await first.increment("graph", "c", "n");
+    await first.increment("graph", "c", "n");
+    const retry = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
+    expect((await retry.increment("graph", "c", "n")).deduped).toBe(true);
+    expect((await retry.increment("graph", "c", "n")).deduped).toBe(true);
+    const read = createScopedMemory(be, binding, defaultMemoryPolicy(), {});
+    expect((await read.get("c"))?.value).toEqual({ n: 2 });
+  });
+
+  it("update() still dedupes when a retry inserts a write ahead of it", async () => {
+    const be = createInMemoryMemoryBackend();
+    const first = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
+    await first.increment("graph", "c", "n");
+    const u1 = await first.update("graph", "counter", (cur) => ((cur as number | undefined) ?? 0) + 1);
+    expect(u1.value).toBe(1);
+
+    const retry = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
+    await retry.append("graph", "log", "extra");
+    const u2 = await retry.update("graph", "counter", (cur) => ((cur as number | undefined) ?? 0) + 1);
+    expect(u2.deduped).toBe(true);
+    expect(u2.value).toBe(1);
+    expect((await retry.increment("graph", "c", "n")).deduped).toBe(true);
+    expect((await retry.get("log"))?.value).toEqual(["extra"]);
+    expect((await retry.get("counter"))?.value).toBe(1);
+  });
+
+  it("an idempotency key keeps the first payload and a second call in the attempt is a new write", async () => {
+    const be = createInMemoryMemoryBackend();
+    const first = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
+    await first.increment("graph", "c", "n", 1, { idempotencyKey: "charge" });
+    await first.increment("graph", "c", "n", 1, { idempotencyKey: "charge" });
+    expect((await first.get("c"))?.value).toEqual({ n: 2 });
+
+    const retry = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
+    const again = await retry.increment("graph", "c", "n", 9, { idempotencyKey: "charge" });
+    expect(again).toMatchObject({ deduped: true, value: { n: 1 } });
+    expect((await retry.increment("graph", "c", "n", 9, { idempotencyKey: "charge" })).deduped).toBe(true);
+    expect((await retry.get("c"))?.value).toEqual({ n: 2 });
+
+    const bare = createScopedMemory(be, binding, defaultMemoryPolicy(), {});
+    await bare.increment("graph", "c", "n", 1, { idempotencyKey: "charge" });
+    await bare.increment("graph", "c", "n", 1, { idempotencyKey: "charge" });
+    expect((await bare.get("c"))?.value).toEqual({ n: 4 });
+
+    const bad = createScopedMemory(be, binding, defaultMemoryPolicy(), src);
+    await expect(bad.put("graph", "k", 1, { idempotencyKey: "" })).rejects.toThrow(/MEMORY_KEY_INVALID/);
+    await expect(bad.put("graph", "k", 1, { idempotencyKey: "a\u0000b" })).rejects.toThrow(/MEMORY_NUL_CHARACTER/);
+  });
+
+  it("positional op ids stay the sha256 an older build stored", () => {
+    expect(memoryPositionalOpId({ threadId: "t", checkpointNs: "ns", taskId: "task", nodeId: "node" }, 0)).toBe(
+      "634b27bcbedd1bedc7f40afbef623498fe0c0b26a2f40d0befeb995356f3570d",
+    );
+    expect(memoryPositionalOpId({ threadId: "t", taskId: "task" }, 0)).toMatch(/^[0-9a-f]{64}$/);
+    expect(memoryPositionalOpId({ threadId: "t" }, 0)).toBeUndefined();
+    expect(memoryPositionalOpId({ threadId: "t", taskId: "task" }, -1)).toBeUndefined();
   });
 });
 

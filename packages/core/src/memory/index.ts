@@ -33,6 +33,7 @@ export { createInMemoryMemoryBackend, type InMemoryMemoryBackendOptions } from "
 export {
   createScopedMemory,
   defaultMemoryPolicy,
+  memoryPositionalOpId,
   rowToRecord,
   type ScopedMemory,
   type MemoryPolicy,

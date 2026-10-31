@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
+import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, createScopedMemory, defaultMemoryPolicy, memoryPositionalOpId, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
 import { describeGraphNameRegistryConformance, describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
 import { openSqliteBackend, createSqliteMemoryBackend, type SqliteBackend } from "./index.js";
 import { createSqliteGraphNameRegistry, openDatabase } from "./memory.js";
@@ -110,6 +110,22 @@ describe("sqlite memory backend", () => {
     const indexes = (b.db.prepare(`SELECT name FROM sqlite_master WHERE type='index'`).all() as Array<{ name: string }>).map((r) => r.name);
     expect(indexes).toContain("fg_memory_subject_keys");
     expect(indexes).not.toContain("fg_memory_subject_recent");
+  });
+
+  it("a positional op row with a null fingerprint is applied again, then stable", async () => {
+    const b = await backend(tmpDb());
+    const binding = { org: "acme", project: "p", graph: "g", user: "u" };
+    const source = { threadId: "t-old", checkpointNs: "", taskId: "task-old", nodeId: "n" };
+    const tuple = { org: "acme", project: "p", graph: "g", usr: "", subjectType: "", subjectKey: "" };
+    const id = memoryPositionalOpId(source, 0)!;
+    await b.memory.write({ kind: "increment", tuple, key: "c", field: "n", by: 1, opId: id, limits: MEMORY_DEFAULT_LIMITS });
+    b.db.prepare(`UPDATE fg_memory_ops SET fingerprint = NULL WHERE op_id = ?`).run(id);
+    const again = await createScopedMemory(b.memory, binding, defaultMemoryPolicy(), source).increment("graph", "c", "n");
+    expect(again.deduped).toBe(false);
+    expect(again.value).toEqual({ n: 2 });
+    const stable = await createScopedMemory(b.memory, binding, defaultMemoryPolicy(), source).increment("graph", "c", "n");
+    expect(stable.deduped).toBe(true);
+    expect(stable.value).toEqual({ n: 2 });
   });
 
   it("the subject cap and cross-subject search use the covering subject index", async () => {

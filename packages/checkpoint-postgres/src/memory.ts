@@ -405,6 +405,18 @@ class PostgresMemoryTable implements AsyncMemoryWriteTable {
     const row = r.rows[0];
     return row ? { version: Number(row.version), value: row.value ?? null, fingerprint: row.fingerprint } : undefined;
   }
+  async opGetMany(opIds: readonly string[]) {
+    const out = new Map<string, { version: number; value: unknown; fingerprint: string | null }>();
+    if (opIds.length === 0) return out;
+    const r = await this.q<{ op_id: string; version: number; value: unknown; fingerprint: string | null }>(
+      `SELECT op_id, version, value, fingerprint FROM ${this.s}.fg_memory_ops WHERE op_id = ANY($1::text[])`,
+      [opIds],
+    );
+    for (const row of r.rows) {
+      out.set(row.op_id, { version: Number(row.version), value: row.value ?? null, fingerprint: row.fingerprint });
+    }
+    return out;
+  }
   async opPut(opId: string, result: { version: number; value: unknown }, now: number, fingerprint: string | null) {
     await this.q(
       `INSERT INTO ${this.s}.fg_memory_ops (op_id, version, value, applied_at, fingerprint) VALUES ($1, $2, $3::json, $4, $5)

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
-import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
+import { compileGraph, registerFunction, MEMORY_DEFAULT_LIMITS, createScopedMemory, defaultMemoryPolicy, memoryPositionalOpId, type GraphSpec, type NodeRunContext, type MemoryIdentity } from "@flowgraph/core";
 import { describeGraphNameRegistryConformance, describeMemoryBackendConformance } from "@flowgraph/testing/memory-conformance";
 import { openPostgresBackend, createPostgresGraphNameRegistry, createPostgresMemoryBackend, migratePostgresMemorySchema, POSTGRES_MEMORY_MIGRATIONS, type PostgresBackend } from "./index.js";
 
@@ -284,6 +284,25 @@ describe.skipIf(!DB)("postgres memory backend (integration)", () => {
     expect(await migratePostgresMemorySchema(admin!, old)).toBe(POSTGRES_MEMORY_MIGRATIONS.length - 1);
     expect(await indexes(old)).toContain("fg_memory_subject_keys");
     expect(await indexes(old)).not.toContain("fg_memory_subject_recent");
+  });
+
+  it("a positional op row with a null fingerprint is applied again, then stable", async () => {
+    const b = await open();
+    try {
+      const binding = { org: "acme", project: "p", graph: "g", user: "u" };
+      const source = { threadId: "t-old", checkpointNs: "", taskId: "task-old", nodeId: "n" };
+      const id = memoryPositionalOpId(source, 0)!;
+      await b.memory.write({ kind: "increment", tuple: tu({ graph: "g" }), key: "c", field: "n", by: 1, opId: id, limits: MEMORY_DEFAULT_LIMITS });
+      await b.pool.query(`UPDATE "${b.memory.schema}".fg_memory_ops SET fingerprint = NULL WHERE op_id = $1`, [id]);
+      const again = await createScopedMemory(b.memory, binding, defaultMemoryPolicy(), source).increment("graph", "c", "n");
+      expect(again.deduped).toBe(false);
+      expect(again.value).toEqual({ n: 2 });
+      const stable = await createScopedMemory(b.memory, binding, defaultMemoryPolicy(), source).increment("graph", "c", "n");
+      expect(stable.deduped).toBe(true);
+      expect(stable.value).toEqual({ n: 2 });
+    } finally {
+      await b.close();
+    }
   });
 
   it("refuses a schema migrated by a newer flowgraph", async () => {

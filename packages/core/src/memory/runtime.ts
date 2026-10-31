@@ -5,9 +5,10 @@
  * root graph's scopes.
  */
 import { renderDeep } from "@flowgraph/expr";
+import { replayNodeKey, runScopeOf } from "../providers/replay-cache.js";
 import { parseDuration } from "../runtime/duration.js";
 import { createInMemoryMemoryBackend } from "./in-memory.js";
-import { createScopedMemory, defaultMemoryPolicy, type MemoryOpSource, type MemoryPolicy, type ScopedMemory } from "./handle.js";
+import { createScopedMemory, defaultMemoryPolicy, type LegacyWriteCursor, type MemoryOpSource, type MemoryPolicy, type ScopedMemory } from "./handle.js";
 import { LegacyScopedStore } from "./legacy-store.js";
 import { normalizeSubjectKey, tupleForScope, type MemoryBinding } from "./scope.js";
 import {
@@ -209,10 +210,57 @@ export class MemoryRuntime {
     return (threadId ? this.bindings.get(threadId) : undefined) ?? this.baseBinding();
   }
 
+  /**
+   * Replay identity for one node attempt. A top-level node keeps its id, so
+   * records written by older builds still match. A node below another node
+   * includes the path. A tool call's path already ends in `tool:<n>`; with the
+   * tool name and argument hash, that call is the identity, so two calls do
+   * not share an occurrence count and a different call at the same index does
+   * not reuse an earlier write.
+   */
+  static nodeIdForScope(
+    path: readonly string[] | undefined,
+    nodeId: string,
+    tool?: { name: string; argsHash: string },
+  ): string {
+    const p = path ?? [];
+    if (p.length === 0) return nodeId;
+    if (p[p.length - 1]?.startsWith("tool:")) return JSON.stringify(tool ? [...p, tool.name, tool.argsHash] : [...p]);
+    return replayNodeKey(p, nodeId);
+  }
+
   /** `ctx.memory` for one node attempt (fresh op counter per attempt). */
   memoryFor(threadId: string | undefined, source: MemoryOpSource): ScopedMemory | undefined {
     if (!this.exposeMemory) return undefined;
     return createScopedMemory(this.backend, this.bindingFor(threadId), this.policy, { ...source, threadId });
+  }
+
+  /**
+   * `ctx.memory` for the node or tool call described by a LangGraph config.
+   * `nodeId` is the node being built; a config whose path already ends in
+   * `tool:<n>` names that tool call instead. Positional ids from an older
+   * build use `legacy` when the call's namespace or node id has changed, and
+   * otherwise the node's own id with the config's namespace.
+   */
+  memoryForConfig(
+    lgConfig: { configurable?: Record<string, unknown> } | undefined,
+    nodeId: string,
+    meta?: { runId?: string | undefined; threadId?: string | undefined },
+    legacy?: { checkpointNs?: string | undefined; nodeId: string; cursor?: LegacyWriteCursor | undefined },
+    tool?: { name: string; argsHash: string },
+  ): ScopedMemory | undefined {
+    const conf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
+    const scope = runScopeOf(lgConfig);
+    const threadId = typeof conf["thread_id"] === "string" ? conf["thread_id"] : meta?.threadId;
+    return this.memoryFor(threadId, {
+      checkpointNs: typeof conf["checkpoint_ns"] === "string" ? conf["checkpoint_ns"] : undefined,
+      taskId: typeof conf["__pregel_task_id"] === "string" ? conf["__pregel_task_id"] : undefined,
+      nodeId: MemoryRuntime.nodeIdForScope(scope?.path, nodeId, tool),
+      runId: meta?.runId,
+      legacyCheckpointNs: legacy ? legacy.checkpointNs : undefined,
+      legacyNodeId: legacy?.nodeId ?? nodeId,
+      legacyCursor: legacy?.cursor,
+    });
   }
 
   /** The graph-scoped legacy `ctx.store` view. */

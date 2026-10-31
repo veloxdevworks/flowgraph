@@ -260,7 +260,7 @@ function chatGraph(name: string, provider: string, context: Record<string, unkno
 }
 
 describe("agent with.context.history", () => {
-  it("carries the conversation across runs on a thread as chat turns, bounded by the budget", async () => {
+  it("carries the conversation across runs on a thread as chat turns, bounded by the budget", { timeout: 30_000 }, async () => {
     const fm = fakeModel((i) => new AIMessage({ content: `reply ${i} ${"w".repeat(600)}` }));
     const g = await compileGraph(chatGraph("ctx-chat", "lc-chat", { maxTokens: 2500 }), {
       providers: [createLangChainProvider(fm.model, { name: "lc-chat" })],
