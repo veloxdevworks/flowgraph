@@ -182,9 +182,12 @@ export interface RunOptions {
   threadId?: string;
   signal?: AbortSignal;
   /**
-   * Graceful pause: after the current node completes, stop and return
-   * `status: "paused"` so the thread can later be resumed via `continueRun`.
-   * Distinct from `signal`, which hard-cancels (not resumable).
+   * Graceful pause: stop before the next node of the top-level graph starts
+   * and return `status: "paused"` so the thread can later be resumed via
+   * `continueRun`. Nodes already running finish first, with everything they
+   * run: the nodes of an embedded subgraph, the items of a map, and nodes
+   * or subgraphs an agent calls as tools. Distinct from `signal`, which
+   * hard-cancels (not resumable).
    */
   pauseSignal?: AbortSignal;
   sinks?: EventSink[];
