@@ -327,9 +327,11 @@ export const ContextStrategySchema = z.enum(["none", "last", "trim", "summarize"
 
 export const ContextSummarizeSchema = z
   .object({
-    /** Registered provider used to summarize older turns. Omit for the deterministic extractive summary. */
+    /** model (default): a model writes the summary; extract: a deterministic list of excerpts, no model call. */
+    mode: z.enum(["model", "extract"]).optional(),
+    /** Registered provider used to summarize older turns (default: the agent's own provider). */
     provider: z.string().min(1).optional(),
-    /** Model for the summarizer (a cheap one is fine). */
+    /** Model for the summarizer, a cheap one is fine (default: the agent's own model when provider is unset). */
     model: z.string().min(1).optional(),
     /** Token cap for the running summary (default 500). */
     maxTokens: z.number().int().positive().optional(),
@@ -351,6 +353,8 @@ const contextPolicyFields = {
   toolResultMaxTokens: z.number().int().positive().optional(),
   /** strategy summarize: how older turns are folded into a running summary. */
   summarize: ContextSummarizeSchema.optional(),
+  /** Cap on the known-issues section of the system prompt; the newest issues are kept (default min(1000, a quarter of the usable budget)). */
+  issuesMaxTokens: z.number().int().positive().optional(),
   /** Registered token estimator (default "bytes": UTF-8 bytes / 4). */
   estimator: z.string().min(1).optional(),
   /** When the pinned part alone (system, memory, prompt, latest tool turn) is over budget: error (default) or warn. */

@@ -2,6 +2,7 @@
  * Resolve an agent's context policy from runtime.context and with.context.
  */
 import {
+  CONTEXT_DEFAULT_ISSUES_TOKENS,
   CONTEXT_DEFAULT_LAST_N,
   CONTEXT_DEFAULT_MAX_TOKENS,
   CONTEXT_DEFAULT_SUMMARY_TOKENS,
@@ -23,14 +24,20 @@ export function resolveContextPolicy(
   const pick = <K extends keyof ContextConfigInput>(k: K): ContextConfigInput[K] =>
     node?.[k] !== undefined ? node[k] : graphDefaults?.[k];
   const summarize = pick("summarize");
+  const maxTokens = pick("maxTokens") ?? CONTEXT_DEFAULT_MAX_TOKENS;
+  const reserveTokens = pick("reserveTokens") ?? opts.outputMaxTokens ?? 0;
   return {
-    maxTokens: pick("maxTokens") ?? CONTEXT_DEFAULT_MAX_TOKENS,
-    reserveTokens: pick("reserveTokens") ?? opts.outputMaxTokens ?? 0,
+    maxTokens,
+    reserveTokens,
     strategy: pick("strategy") ?? "trim",
     lastN: pick("lastN") ?? CONTEXT_DEFAULT_LAST_N,
     toolResultMaxTokens: pick("toolResultMaxTokens"),
+    issuesMaxTokens:
+      pick("issuesMaxTokens") ??
+      Math.max(1, Math.min(CONTEXT_DEFAULT_ISSUES_TOKENS, Math.floor((maxTokens - reserveTokens) / 4))),
     summarize: {
       ...(summarize ?? {}),
+      mode: summarize?.mode ?? "model",
       maxTokens: summarize?.maxTokens ?? CONTEXT_DEFAULT_SUMMARY_TOKENS,
     },
     estimator: pick("estimator") ?? "bytes",

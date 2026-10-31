@@ -21,7 +21,8 @@ describe("agent with.context schema", () => {
       strategy: "summarize",
       lastN: 10,
       toolResultMaxTokens: 2000,
-      summarize: { provider: "cheap", model: "mini", maxTokens: 300, instructions: "be brief" },
+      summarize: { mode: "model", provider: "cheap", model: "mini", maxTokens: 300, instructions: "be brief" },
+      issuesMaxTokens: 400,
       estimator: "bytes",
       onOverflow: "warn",
       record: "all",
@@ -38,6 +39,8 @@ describe("agent with.context schema", () => {
     expect(agent({ maxTokens: 0 }).success).toBe(false);
     expect(agent({ summarize: { model: "x", extra: 1 } }).success).toBe(false);
     expect(agent({ record: "everything" }).success).toBe(false);
+    expect(agent({ summarize: { mode: "abstract" } }).success).toBe(false);
+    expect(agent({ issuesMaxTokens: 0 }).success).toBe(false);
   });
 });
 

@@ -15,8 +15,10 @@ export interface ContextConfigInput {
   strategy?: ContextStrategy | undefined;
   lastN?: number | undefined;
   toolResultMaxTokens?: number | undefined;
+  issuesMaxTokens?: number | undefined;
   summarize?:
     | {
+        mode?: "model" | "extract" | undefined;
         provider?: string | undefined;
         model?: string | undefined;
         maxTokens?: number | undefined;
@@ -37,7 +39,10 @@ export interface ContextPolicy {
   strategy: ContextStrategy;
   lastN: number;
   toolResultMaxTokens?: number | undefined;
+  /** Cap on the known run issues rendered into the system prompt. */
+  issuesMaxTokens: number;
   summarize: {
+    mode: "model" | "extract";
     provider?: string | undefined;
     model?: string | undefined;
     maxTokens: number;
@@ -53,6 +58,7 @@ export interface ContextPolicy {
 export const CONTEXT_DEFAULT_MAX_TOKENS = 16000;
 export const CONTEXT_DEFAULT_LAST_N = 20;
 export const CONTEXT_DEFAULT_SUMMARY_TOKENS = 500;
+export const CONTEXT_DEFAULT_ISSUES_TOKENS = 1000;
 
 /** Token counts for one fitted model call (the `agent.context` event). */
 export interface ContextStats {

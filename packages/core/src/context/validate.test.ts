@@ -31,6 +31,13 @@ describe("context lint", () => {
     expect(d[0]!.path).toBe("nodes.a.with.context.history");
   });
 
+  it("warns about a large issues cap and summarizer settings that extract ignores", () => {
+    expect(codes(graph({ context: { maxTokens: 1000, issuesMaxTokens: 600 } }))).toEqual(["warning:CONTEXT_BUDGET_TOO_SMALL"]);
+    expect(codes(graph({ context: { maxTokens: 8000, issuesMaxTokens: 600 } }))).toEqual([]);
+    expect(codes(graph({ context: { strategy: "summarize", summarize: { mode: "extract", model: "mini" } } }))).toEqual(["warning:CONTEXT_OPTION_UNUSED"]);
+    expect(codes(graph({ context: { strategy: "summarize", summarize: { mode: "extract" } } }))).toEqual([]);
+  });
+
   it("flags budgets that leave no room", () => {
     expect(codes(graph({ maxTokens: 4000, context: { maxTokens: 3000 } }))).toEqual(["error:CONTEXT_BUDGET_TOO_SMALL"]);
     expect(codes(graph({ context: { maxTokens: 1000, strategy: "summarize", summarize: { maxTokens: 600 } } }))).toEqual(["error:CONTEXT_BUDGET_TOO_SMALL"]);

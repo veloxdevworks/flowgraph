@@ -8,6 +8,7 @@ export {
   type TokenEstimator,
 } from "./estimator.js";
 export { resolveContextPolicy, recallBudget } from "./policy.js";
+export { capIssueLines } from "./issues.js";
 export {
   ContextWindow,
   capToolResult,

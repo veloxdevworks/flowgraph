@@ -13,7 +13,13 @@ function isMessagesChannel(ch: { type?: string; reducer?: string } | undefined):
 }
 
 function budgetDiagnostics(cfg: ContextConfigInput, reserve: number, path: string, out: Diagnostic[]): void {
-  if (cfg.maxTokens === undefined && cfg.summarize?.maxTokens === undefined && cfg.toolResultMaxTokens === undefined) return;
+  if (
+    cfg.maxTokens === undefined &&
+    cfg.summarize?.maxTokens === undefined &&
+    cfg.toolResultMaxTokens === undefined &&
+    cfg.issuesMaxTokens === undefined
+  )
+    return;
   const p = resolveContextPolicy(undefined, cfg, { outputMaxTokens: reserve })!;
   const usable = p.maxTokens - p.reserveTokens;
   if (usable <= 0) {
@@ -41,11 +47,22 @@ function budgetDiagnostics(cfg: ContextConfigInput, reserve: number, path: strin
       path: `${path}.toolResultMaxTokens`,
     });
   }
+  if (cfg.issuesMaxTokens !== undefined && cfg.issuesMaxTokens * 2 >= usable) {
+    out.push({
+      severity: "warning",
+      code: "CONTEXT_BUDGET_TOO_SMALL",
+      message: `issuesMaxTokens ${cfg.issuesMaxTokens} is half of the usable budget (${usable}) or more; known issues can crowd out history`,
+      path: `${path}.issuesMaxTokens`,
+    });
+  }
 }
 
 function unusedDiagnostics(cfg: ContextConfigInput, strategy: string, path: string, out: Diagnostic[]): void {
   if (cfg.lastN !== undefined && strategy !== "last") {
     out.push({ severity: "warning", code: "CONTEXT_OPTION_UNUSED", message: `lastN only applies to strategy: last (strategy is ${strategy})`, path: `${path}.lastN` });
+  }
+  if (cfg.summarize?.mode === "extract" && (cfg.summarize.provider !== undefined || cfg.summarize.model !== undefined)) {
+    out.push({ severity: "warning", code: "CONTEXT_OPTION_UNUSED", message: "summarize.provider / model are ignored with summarize.mode: extract", path: `${path}.summarize` });
   }
   if (cfg.summarize !== undefined && strategy !== "summarize") {
     out.push({ severity: "warning", code: "CONTEXT_OPTION_UNUSED", message: `summarize only applies to strategy: summarize (strategy is ${strategy})`, path: `${path}.summarize` });

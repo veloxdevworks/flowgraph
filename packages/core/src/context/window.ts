@@ -258,7 +258,7 @@ export class ContextWindow {
     this.lastStats = stats;
     if (stats.overBudget && p.onOverflow === "error") {
       throw new ContextOverflowError(
-        `context budget exceeded: this call needs ~${total} tokens but with.context.maxTokens is ${p.maxTokens} ` +
+        `CONTEXT_OVERFLOW: context budget exceeded: this call needs ~${total} tokens but with.context.maxTokens is ${p.maxTokens} ` +
           `(system ${stats.system}, tools ${stats.tools}, reserve ${stats.reserve}, prompt ${stats.prompt}, ` +
           `newest tool step ${loopTok}, history ${historyTok}, summary ${sectionTok}). ` +
           `Raise maxTokens, set toolResultMaxTokens, shorten the prompt, or set onOverflow: warn.`,

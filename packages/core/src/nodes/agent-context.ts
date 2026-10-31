@@ -110,7 +110,8 @@ export function startAgentContext(args: {
           if (typeof cached === "string") return cached;
           let text: string;
           const s = policy.summarize;
-          const providerName = s.provider ?? (s.model ? args.agentProvider : undefined);
+          // Default: the agent's own provider and model; extract only when asked for.
+          const providerName = s.mode === "extract" ? undefined : (s.provider ?? args.agentProvider);
           if (!providerName) {
             text = await extractive(r);
           } else {
@@ -133,7 +134,7 @@ export function startAgentContext(args: {
                 severity: "warning",
                 message: `context summary model failed, used a plain extract instead: ${err instanceof Error ? err.message : String(err)}`,
                 impact: "The earlier-conversation summary is a list of excerpts rather than a written summary.",
-                remediation: "Check with.context.summarize.provider / model, or leave them unset to always use the extract.",
+                remediation: "Check with.context.summarize.provider / model, or set summarize.mode: extract to skip the model.",
               });
               text = await extractive(r);
             }

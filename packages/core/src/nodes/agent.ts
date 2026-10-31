@@ -30,7 +30,9 @@ import type { AgentMemoryConfig } from "../memory/recall.js";
 import { MEMORY_RECALL_DEFAULT_TOKENS } from "../memory/types.js";
 import { appendRecallSection, recallForAgent, rememberTool } from "./agent-memory.js";
 import { resolveContextPolicy, recallBudget } from "../context/policy.js";
-import type { ContextConfigInput } from "../context/types.js";
+import type { ContextConfigInput, ContextPolicy } from "../context/types.js";
+import { capIssueLines } from "../context/issues.js";
+import { getTokenEstimator } from "../context/estimator.js";
 import { startAgentContext, type AgentContextSession } from "./agent-context.js";
 
 const configSchema = AgentWithSchema;
@@ -110,7 +112,7 @@ export const agentNode = defineNode<Config>({
         } else if (config.system) {
           system = stringifyRendered(renderDeep(config.system, tplScope));
         }
-        system = prependKnownIssues(system, state);
+        system = prependKnownIssues(system, state, contextPolicy);
         system = appendRecallSection(system, recall);
 
         const { normalized, mcpRefs } = normalizeTools(config.tools as ToolRef[] | undefined, wiring);
@@ -246,17 +248,22 @@ export const agentNode = defineNode<Config>({
   },
 });
 
-function prependKnownIssues(system: string | undefined, state: Record<string, unknown>): string | undefined {
+function prependKnownIssues(
+  system: string | undefined,
+  state: Record<string, unknown>,
+  contextPolicy?: ContextPolicy,
+): string | undefined {
   const issues = (state[ISSUES_CHANNEL] as RunIssue[] | undefined) ?? [];
   if (issues.length === 0) return system;
-  const block = issues
-    .map((i) => {
-      const loc = i.nodeId ? ` [${i.nodeId}]` : "";
-      const impact = i.impact ? ` Impact: ${i.impact}` : "";
-      const fix = i.remediation ? ` Remediation: ${i.remediation}` : "";
-      return `- [${i.severity}] ${i.code}${loc}: ${i.message}.${impact}${fix}`;
-    })
-    .join("\n");
+  let lines = issues.map((i) => {
+    const loc = i.nodeId ? ` [${i.nodeId}]` : "";
+    const impact = i.impact ? ` Impact: ${i.impact}` : "";
+    const fix = i.remediation ? ` Remediation: ${i.remediation}` : "";
+    return `- [${i.severity}] ${i.code}${loc}: ${i.message}.${impact}${fix}`;
+  });
+  // Under a context budget the issues section has its own cap (newest kept).
+  if (contextPolicy) lines = capIssueLines(lines, contextPolicy.issuesMaxTokens, getTokenEstimator(contextPolicy.estimator));
+  const block = lines.join("\n");
   const section =
     `Known issues so far (these may affect result quality; try to remediate if you can, or report remaining gaps with report_issue):\n${block}`;
   return system ? `${system}\n\n${section}` : section;

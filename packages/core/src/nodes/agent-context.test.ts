@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
-import { AIMessage, type BaseMessage } from "@langchain/core/messages";
+import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import type { GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import { registerTool } from "../index.js";
@@ -13,6 +13,8 @@ import type { AgentRequest, ProviderAdapter } from "../providers/types.js";
 import { clearAllReplayCaches } from "../providers/replay-cache.js";
 import { createInMemoryMemoryBackend, defaultMemoryPolicy, type MemoryIdentity } from "../index.js";
 import { bytesEstimator as est } from "../context/estimator.js";
+import { registerFunction } from "./function.js";
+import type { NodeRunContext } from "../context.js";
 
 const kind = (m: BaseMessage) => m._getType();
 
@@ -116,7 +118,7 @@ describe("agent with.context: tool loop", () => {
     it(`${strategy}: every call is within budget, tool pairs intact, results capped`, async () => {
       const fm = fakeModel(script);
       const g = await compileGraph(
-        toolGraph(`ctx-${strategy}`, `lc-${strategy}`, { maxTokens: 12000, strategy, lastN: 6, toolResultMaxTokens: 2000, summarize: { maxTokens: 300 } }),
+        toolGraph(`ctx-${strategy}`, `lc-${strategy}`, { maxTokens: 12000, strategy, lastN: 6, toolResultMaxTokens: 2000, summarize: { mode: "extract", maxTokens: 300 } }),
         { providers: [createLangChainProvider(fm.model, { name: `lc-${strategy}` })] },
       );
       const events: Array<{ type: string; data: unknown }> = [];
@@ -154,7 +156,14 @@ describe("agent with.context: tool loop", () => {
     });
     const r = await g.run({ threadId: "over" });
     expect(r.status).toBe("error");
-    expect(r.error?.message).toMatch(/context budget exceeded/);
+    expect(r.error?.message).toMatch(/CONTEXT_OVERFLOW: context budget exceeded/);
+    let e: unknown = r.error;
+    const codes: unknown[] = [];
+    while (e && typeof e === "object") {
+      codes.push((e as { code?: unknown }).code);
+      e = (e as { cause?: unknown }).cause;
+    }
+    expect(codes).toContain("CONTEXT_OVERFLOW");
     expect(retries).toHaveLength(0);
     expect(fm.calls).toHaveLength(0);
   });
@@ -265,7 +274,7 @@ describe("agent with.context.history", () => {
 
   it("summarize keeps a running summary message in the channel", async () => {
     const fm = fakeModel((i) => new AIMessage({ content: `reply ${i} ${"w".repeat(600)}` }));
-    const g = await compileGraph(chatGraph("ctx-chat-sum", "lc-chat-sum", { maxTokens: 2500, strategy: "summarize", summarize: { maxTokens: 200 } }), {
+    const g = await compileGraph(chatGraph("ctx-chat-sum", "lc-chat-sum", { maxTokens: 2500, strategy: "summarize", summarize: { mode: "extract", maxTokens: 200 } }), {
       providers: [createLangChainProvider(fm.model, { name: "lc-chat-sum" })],
     });
     let r;
@@ -473,6 +482,56 @@ describe("agent with.context inside map and subgraphs", () => {
       const chat = r.state["chat"] as BaseMessage[];
       expect(chat.map((m) => m.content)).toEqual(["parent: x", "re: parent: x", "child: x", "re: child: x"]);
     });
+
+    it("compaction inside the child does not remove messages from the parent's channel", async () => {
+      const reqs: AgentRequest[] = [];
+      const p: ProviderAdapter = createScriptedProvider("ctx-sub2", (req) => {
+        reqs.push(req);
+        return { output: { text: "ok" }, stopReason: "done" };
+      }, { contextMessages: true });
+      await fs.writeFile(
+        path.join(dir, "child-small.graph.yaml"),
+        yaml.stringify({
+          apiVersion: "flowgraph/v1",
+          kind: "Graph",
+          metadata: { name: "ctx-child-small" },
+          state: { channels: { chat: { type: "messages" }, q: { type: "string" } } },
+          nodes: [{ id: "inner", type: "agent", provider: "ctx-sub2", with: { prompt: "child: {{ state.q }}", context: { history: "chat", maxTokens: 600 } } }],
+          edges: [
+            { from: "START", to: "inner" },
+            { from: "inner", to: "END" },
+          ],
+        }),
+      );
+      const seeded: BaseMessage[] = [];
+      for (let i = 0; i < 10; i++) {
+        seeded.push(new HumanMessage({ id: `seed-u${i}`, content: `question ${i} ${"q".repeat(200)}` }));
+        seeded.push(new AIMessage({ id: `seed-a${i}`, content: `answer ${i} ${"a".repeat(200)}` }));
+      }
+      const spec = {
+        apiVersion: "flowgraph/v1",
+        kind: "Graph",
+        metadata: { name: "ctx-parent-small" },
+        state: { channels: { chat: { type: "messages" }, q: { type: "string" } } },
+        nodes: [{ id: "embed", type: "subgraph", uses: "./child-small.graph.yaml", with: { stateMap: { in: { chat: "chat", q: "q" }, out: { chat: "chat" } } } }],
+        edges: [
+          { from: "START", to: "embed" },
+          { from: "embed", to: "END" },
+        ],
+        runtime: { checkpoint: { enabled: true, backend: "memory" } },
+      } as unknown as GraphSpec;
+      const g = await compileGraph(spec, { providers: [p], cwd: dir, checkpointer: "memory" });
+      const r = await g.run({ threadId: "sub-compact", input: { q: "x", chat: seeded } });
+      expect(r.error?.message).toBeUndefined();
+      expect(r.status).toBe("completed");
+      // The child sent only what fit...
+      expect(reqs[0]!.messages!.length).toBeLessThan(seeded.length);
+      // ...but the parent keeps its full history plus the child's new turn.
+      const chat = r.state["chat"] as BaseMessage[];
+      expect(chat.length).toBe(seeded.length + 2);
+      expect(chat.slice(0, seeded.length).map((m) => m.id)).toEqual(seeded.map((m) => m.id));
+      expect(chat.at(-2)!.content).toBe("child: x");
+    });
   });
 });
 
@@ -490,5 +549,106 @@ describe("agent with.context summarizer", () => {
     expect(r.status).toBe("completed");
     expect(r.issues?.some((i) => i.code === "CONTEXT_SUMMARY_FAILED")).toBe(true);
     expect(String(fm.calls.at(-1)![0]!.content)).toMatch(/## Earlier conversation \(summary\)\n- /);
+  });
+});
+
+describe("agent with.context summarizer defaults", () => {
+  it("uses the agent's own provider and model when no summarizer is set", async () => {
+    const summaryInputs: BaseMessage[][] = [];
+    let agentCalls = 0;
+    const fm = fakeModel((_i, input) => {
+      if (String(input[0]?.content ?? "").startsWith("You maintain a running summary")) {
+        summaryInputs.push(input);
+        return new AIMessage({ content: "own-model summary" });
+      }
+      const n = agentCalls++;
+      return n < 8 ? toolCall(n) : new AIMessage({ content: "done" });
+    });
+    const g = await compileGraph(
+      toolGraph("ctx-sum-own", "lc-sum-own", { maxTokens: 6000, strategy: "summarize", toolResultMaxTokens: 1500 }),
+      { providers: [createLangChainProvider(fm.model, { name: "lc-sum-own" })] },
+    );
+    const r = await g.run({ threadId: "sum-own" });
+    expect(r.error?.message).toBeUndefined();
+    expect(r.status).toBe("completed");
+    expect(summaryInputs.length).toBeGreaterThan(0);
+    expect(r.issues?.some((x) => x.code === "CONTEXT_SUMMARY_FAILED") ?? false).toBe(false);
+    const last = fm.calls.at(-1)!;
+    expect(String(last[0]!.content)).toContain("own-model summary");
+  });
+
+  it("mode extract never calls a model for the summary", async () => {
+    const fm = fakeModel((i) => (i < 8 ? toolCall(i) : new AIMessage({ content: "done" })));
+    const g = await compileGraph(
+      toolGraph("ctx-sum-ext", "lc-sum-ext", { maxTokens: 6000, strategy: "summarize", toolResultMaxTokens: 1500, summarize: { mode: "extract" } }),
+      { providers: [createLangChainProvider(fm.model, { name: "lc-sum-ext" })] },
+    );
+    const r = await g.run({ threadId: "sum-ext" });
+    expect(r.status).toBe("completed");
+    expect(fm.calls.length).toBe(9);
+    expect(String(fm.calls.at(-1)![0]!.content)).toMatch(/## Earlier conversation \(summary\)\n- /);
+  });
+});
+
+describe("agent with.context known issues", () => {
+  function issuesGraph(name: string, provider: string, context: Record<string, unknown> | undefined): GraphSpec {
+    return {
+      metadata: { name },
+      state: { channels: { out: { type: "object" }, answer: { type: "object" } } },
+      nodes: [
+        { id: "raise", type: "function", with: { fn: "ctxRaiseMany", output: { to: "out" } } },
+        {
+          id: "agent",
+          type: "agent",
+          provider,
+          with: { system: "Sys.", prompt: "Go.", ...(context ? { context } : {}), output: { to: "answer" } },
+        },
+      ],
+      edges: [
+        { from: "START", to: "raise" },
+        { from: "raise", to: "agent" },
+        { from: "agent", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false, backend: "memory" } },
+    } as unknown as GraphSpec;
+  }
+
+  beforeAll(() => {
+    registerFunction("ctxRaiseMany", async (_args, ctx: NodeRunContext) => {
+      for (let i = 0; i < 60; i++) {
+        ctx.issue({ code: `CTX_TEST_${i}`, severity: "warning", message: `issue number ${i} ${"x".repeat(200)}` });
+      }
+      return { ok: true };
+    });
+  });
+
+  it("caps the known-issues section, keeping the newest", async () => {
+    const seen: AgentRequest[] = [];
+    const p = createScriptedProvider("ctx-issues", (req) => {
+      seen.push(req);
+      return { output: "ok", stopReason: "done" };
+    });
+    const g = await compileGraph(issuesGraph("ctx-issues", "ctx-issues", { maxTokens: 8000, issuesMaxTokens: 400 }), { providers: [p] });
+    const r = await g.run({ threadId: "issues-cap" });
+    expect(r.status).toBe("completed");
+    const system = seen[0]!.system!;
+    const section = system.slice(system.indexOf("Known issues so far"));
+    expect(est(section)).toBeLessThanOrEqual(400 + 60);
+    expect(section).toContain("CTX_TEST_59");
+    expect(section).not.toContain("CTX_TEST_0 [");
+    expect(section).toMatch(/\[\d+ earlier issues were left out to fit the context budget\.\]/);
+  });
+
+  it("without a context block every issue is listed", async () => {
+    const seen: AgentRequest[] = [];
+    const p = createScriptedProvider("ctx-issues-off", (req) => {
+      seen.push(req);
+      return { output: "ok", stopReason: "done" };
+    });
+    const g = await compileGraph(issuesGraph("ctx-issues-off", "ctx-issues-off", undefined), { providers: [p] });
+    await g.run({ threadId: "issues-off" });
+    const system = seen[0]!.system!;
+    for (let i = 0; i < 60; i++) expect(system).toContain(`CTX_TEST_${i} [`);
+    expect(system).not.toContain("left out");
   });
 });
