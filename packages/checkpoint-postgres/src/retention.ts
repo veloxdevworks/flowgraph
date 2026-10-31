@@ -46,7 +46,7 @@ export async function migratePostgresCheckpointRetention(pool: pg.Pool, schema: 
       `SELECT MAX(version) AS v FROM ${s}.fg_schema_migrations WHERE component = 'checkpoint'`,
     );
     const current = currentRow.rows[0]?.v ?? 0;
-    const latest = 2;
+    const latest = 3;
     if (current > latest) {
       throw new Error(
         `postgres schema ${schema}: checkpoint schema version ${current} is newer than this flowgraph supports (${latest}); upgrade flowgraph`,
@@ -86,6 +86,14 @@ export async function migratePostgresCheckpointRetention(pool: pg.Pool, schema: 
       await client.query(`ALTER TABLE ${s}.fg_checkpoint_threads ADD COLUMN IF NOT EXISTS max_finished INTEGER`);
       await client.query(
         `INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 2, $1)`,
+        [Date.now()],
+      );
+      applied += 1;
+    }
+    if (current < 3) {
+      await client.query(`ALTER TABLE ${s}.fg_checkpoint_threads ADD COLUMN IF NOT EXISTS active_mark TEXT`);
+      await client.query(
+        `INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 3, $1)`,
         [Date.now()],
       );
       applied += 1;
@@ -255,10 +263,12 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
-  async markThreadActive(threadId: string): Promise<void> {
+  async markThreadActive(threadId: string): Promise<string | undefined> {
     const policy = this.policyFor(threadId);
-    if (!policy.enabled || !threadDeletionRequested(policy)) return;
-    await this.touch(threadId, "active", Date.now(), policy);
+    if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
+    const mark = crypto.randomUUID();
+    await this.touch(threadId, "active", Date.now(), policy, mark);
+    return mark;
   }
 
   async savedThreadStatus(threadId: string): Promise<{ status: CheckpointThreadStatus; updatedAt: number } | undefined> {
@@ -274,12 +284,31 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
   async restoreThreadStatus(
     threadId: string,
     prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined,
+    activeMark: string,
   ): Promise<void> {
     if (!prior) {
-      await this.db().query(`DELETE FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1`, [threadId]);
+      await this.db().query(
+        `DELETE FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1 AND status = 'active' AND active_mark = $2`,
+        [threadId, activeMark],
+      );
       return;
     }
-    await this.touch(threadId, prior.status, prior.updatedAt, this.policyFor(threadId));
+    const policy = this.policyFor(threadId);
+    const deletable = prior.status === "finished" && threadDeletionRequested(policy) ? 1 : 0;
+    await this.db().query(
+      `UPDATE ${this.q}.fg_checkpoint_threads
+       SET status = $2, updated_at = $3, deletable = $4, finished_ttl_ms = $5, max_finished = $6, active_mark = NULL
+       WHERE thread_id = $1 AND status = 'active' AND active_mark = $7`,
+      [
+        threadId,
+        prior.status,
+        prior.updatedAt,
+        deletable,
+        deletable ? policy.finishedTtlMs : null,
+        deletable ? policy.maxFinishedThreads : null,
+        activeMark,
+      ],
+    );
   }
 
   beginThreadRun(threadId: string): number {
@@ -393,19 +422,29 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     status: CheckpointThreadStatus,
     now: number,
     policy: ResolvedCheckpointRetention,
+    activeMark: string | null = null,
   ): Promise<void> {
     const deletable = status === "finished" && threadDeletionRequested(policy) ? 1 : 0;
     await this.db().query(
       `INSERT INTO ${this.q}.fg_checkpoint_threads
-         (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished)
-       VALUES ($1, $2, $3, $4, $5, $6)
+         (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished, active_mark)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (thread_id) DO UPDATE SET
          status = EXCLUDED.status,
          updated_at = EXCLUDED.updated_at,
          deletable = EXCLUDED.deletable,
          finished_ttl_ms = EXCLUDED.finished_ttl_ms,
-         max_finished = EXCLUDED.max_finished`,
-      [threadId, status, now, deletable, deletable ? policy.finishedTtlMs : null, deletable ? policy.maxFinishedThreads : null],
+         max_finished = EXCLUDED.max_finished,
+         active_mark = EXCLUDED.active_mark`,
+      [
+        threadId,
+        status,
+        now,
+        deletable,
+        deletable ? policy.finishedTtlMs : null,
+        deletable ? policy.maxFinishedThreads : null,
+        activeMark,
+      ],
     );
   }
 

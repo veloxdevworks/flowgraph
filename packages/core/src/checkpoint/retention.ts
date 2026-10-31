@@ -365,18 +365,24 @@ export interface CheckpointRetentionSaver {
   noteThreadPolicy?(threadId: string, policy: ResolvedCheckpointRetention): void;
   /**
    * Mark the thread active before the run reads checkpoint state, when thread
-   * deletion is on. A crash after this and before the checkpoint row is written
-   * leaves the thread active until a later run or `deleteThread`.
+   * deletion is on. Returns a token stored on that row. A later restore
+   * matches the token, so a newer row from another run is left alone.
+   * A crash after this and before the checkpoint row is written leaves the
+   * thread active until a later run or `deleteThread`.
    */
-  markThreadActive?(threadId: string): void | Promise<void>;
+  markThreadActive?(threadId: string): string | undefined | Promise<string | undefined>;
   /** Status row for this thread, if this saver has recorded one. */
   savedThreadStatus?(threadId: string): SavedThreadStatus | undefined | Promise<SavedThreadStatus | undefined>;
   /**
-   * Put back the status from before {@link markThreadActive}. `undefined`
-   * removes a status row created for a run that never started. Checkpoints
-   * stay.
+   * Put back the status from before {@link markThreadActive}, only when the
+   * row is still this call's active mark. `undefined` removes that row.
+   * A newer status from another run is left alone. Checkpoints stay.
    */
-  restoreThreadStatus?(threadId: string, prior: SavedThreadStatus | undefined): void | Promise<void>;
+  restoreThreadStatus?(
+    threadId: string,
+    prior: SavedThreadStatus | undefined,
+    activeMark: string,
+  ): void | Promise<void>;
   /** Mark a thread in use. Returns a token for {@link endThreadRun}. */
   beginThreadRun?(threadId: string): number;
   /**

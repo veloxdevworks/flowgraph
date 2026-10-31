@@ -45,6 +45,7 @@ interface ThreadRec {
   deletable: boolean;
   finishedTtlMs: number | null;
   maxFinished: number | null;
+  activeMark: string | null;
 }
 
 function writeKey(threadId: string, ns: string, checkpointId: string): string {
@@ -141,10 +142,12 @@ export class FlowgraphMemorySaver extends MemorySaver {
     this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, hit[0], Date.now());
   }
 
-  markThreadActive(threadId: string): void {
+  markThreadActive(threadId: string): string | undefined {
     const policy = this.policyFor(threadId);
-    if (!policy.enabled || !threadDeletionRequested(policy)) return;
-    this.touch(threadId, "active", Date.now(), policy);
+    if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
+    const mark = crypto.randomUUID();
+    this.touch(threadId, "active", Date.now(), policy, mark);
+    return mark;
   }
 
   savedThreadStatus(threadId: string): { status: CheckpointThreadStatus; updatedAt: number } | undefined {
@@ -153,7 +156,13 @@ export class FlowgraphMemorySaver extends MemorySaver {
     return { status: row.status, updatedAt: row.updatedAt };
   }
 
-  restoreThreadStatus(threadId: string, prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined): void {
+  restoreThreadStatus(
+    threadId: string,
+    prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined,
+    activeMark: string,
+  ): void {
+    const row = this.threads.get(threadId);
+    if (!row || row.status !== "active" || row.activeMark !== activeMark) return;
     if (!prior) {
       this.threads.delete(threadId);
       return;
@@ -270,6 +279,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
     status: CheckpointThreadStatus,
     updatedAt: number,
     policy: ResolvedCheckpointRetention,
+    activeMark: string | null = null,
   ): void {
     const deletable = status === "finished" && threadDeletionRequested(policy);
     this.threads.set(threadId, {
@@ -278,6 +288,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
       deletable,
       finishedTtlMs: deletable ? policy.finishedTtlMs : null,
       maxFinished: deletable ? policy.maxFinishedThreads : null,
+      activeMark,
     });
   }
 

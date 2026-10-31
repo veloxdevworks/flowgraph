@@ -60,6 +60,10 @@ ALTER TABLE fg_checkpoint_threads ADD COLUMN finished_ttl_ms INTEGER;
 ALTER TABLE fg_checkpoint_threads ADD COLUMN max_finished INTEGER;
 `;
 
+const MIGRATION_V3 = `
+ALTER TABLE fg_checkpoint_threads ADD COLUMN active_mark TEXT;
+`;
+
 interface IdRow {
   checkpoint_id: string;
 }
@@ -111,6 +115,7 @@ export function migrateSqliteCheckpointRetention(db: SqliteDatabase): number {
     const steps = [
       { version: 1, sql: MIGRATION_V1 },
       { version: 2, sql: MIGRATION_V2 },
+      { version: 3, sql: MIGRATION_V3 },
     ];
     const latest = steps[steps.length - 1]?.version ?? 0;
     if (current > latest) {
@@ -209,11 +214,13 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
-  markThreadActive(threadId: string): void {
+  markThreadActive(threadId: string): string | undefined {
     const policy = this.policyFor(threadId);
-    if (!policy.enabled || !threadDeletionRequested(policy)) return;
+    if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
     this.setup();
-    this.touch(threadId, "active", Date.now(), policy);
+    const mark = crypto.randomUUID();
+    this.touch(threadId, "active", Date.now(), policy, mark);
+    return mark;
   }
 
   savedThreadStatus(threadId: string): { status: CheckpointThreadStatus; updatedAt: number } | undefined {
@@ -225,13 +232,35 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     return { status: row.status, updatedAt: Number(row.updated_at) };
   }
 
-  restoreThreadStatus(threadId: string, prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined): void {
+  restoreThreadStatus(
+    threadId: string,
+    prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined,
+    activeMark: string,
+  ): void {
     this.setup();
     if (!prior) {
-      this.sqlite.prepare(`DELETE FROM fg_checkpoint_threads WHERE thread_id = ?`).run(threadId);
+      this.sqlite
+        .prepare(`DELETE FROM fg_checkpoint_threads WHERE thread_id = ? AND status = 'active' AND active_mark = ?`)
+        .run(threadId, activeMark);
       return;
     }
-    this.touch(threadId, prior.status, prior.updatedAt, this.policyFor(threadId));
+    const policy = this.policyFor(threadId);
+    const deletable = prior.status === "finished" && threadDeletionRequested(policy) ? 1 : 0;
+    this.sqlite
+      .prepare(
+        `UPDATE fg_checkpoint_threads
+         SET status = ?, updated_at = ?, deletable = ?, finished_ttl_ms = ?, max_finished = ?, active_mark = NULL
+         WHERE thread_id = ? AND status = 'active' AND active_mark = ?`,
+      )
+      .run(
+        prior.status,
+        prior.updatedAt,
+        deletable,
+        deletable ? policy.finishedTtlMs : null,
+        deletable ? policy.maxFinishedThreads : null,
+        threadId,
+        activeMark,
+      );
   }
 
   beginThreadRun(threadId: string): number {
@@ -398,23 +427,30 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     return this.threadPolicy.get(threadId) ?? this.retention;
   }
 
-  private touch(threadId: string, status: CheckpointThreadStatus, now: number, policy: ResolvedCheckpointRetention): void {
+  private touch(
+    threadId: string,
+    status: CheckpointThreadStatus,
+    now: number,
+    policy: ResolvedCheckpointRetention,
+    activeMark: string | null = null,
+  ): void {
     const deletable = status === "finished" && threadDeletionRequested(policy) ? 1 : 0;
     const ttl = deletable ? policy.finishedTtlMs : null;
     const cap = deletable ? policy.maxFinishedThreads : null;
     this.sqlite
       .prepare(
         `INSERT INTO fg_checkpoint_threads
-           (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished)
-         VALUES (?, ?, ?, ?, ?, ?)
+           (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished, active_mark)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (thread_id) DO UPDATE SET
            status = excluded.status,
            updated_at = excluded.updated_at,
            deletable = excluded.deletable,
            finished_ttl_ms = excluded.finished_ttl_ms,
-           max_finished = excluded.max_finished`,
+           max_finished = excluded.max_finished,
+           active_mark = excluded.active_mark`,
       )
-      .run(threadId, status, now, deletable, ttl, cap);
+      .run(threadId, status, now, deletable, ttl, cap, activeMark);
   }
 
   private addPin(threadId: string, ns: string, checkpointId: string, reason: string, now: number): void {

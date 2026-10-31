@@ -482,7 +482,102 @@ describe.skipIf(!DB)("postgres checkpoint retention", () => {
     );
     expect(Number(left.rows[0]?.n)).toBe(0);
   });
+
+  for (const fail of ["throw", "pruned"] as const) {
+    it(`another saver's thread survives when this call ${fail === "throw" ? "throws" : "gets CHECKPOINT_PRUNED"}`, async () => {
+      const schema = schemaName();
+      const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+      const writer = await openPostgresBackend({ connectionString: DB!, schema, retention });
+      const other = await openPostgresBackend({ connectionString: DB!, schema, retention, setup: false });
+      const sweeper = await openPostgresBackend({ connectionString: DB!, schema, retention, setup: false });
+      open.push(writer, other, sweeper);
+      schemas.push(schema);
+      await pgCrossSaver(fail, writer, other, sweeper, schema, `kept-${fail}`, true);
+      await pgCrossSaver(fail, writer, other, sweeper, schema, `fresh-${fail}`, false);
+    });
+  }
 });
+
+async function pgCrossSaver(
+  fail: "throw" | "pruned",
+  writer: PostgresBackend,
+  other: PostgresBackend,
+  sweeper: PostgresBackend,
+  schema: string,
+  threadId: string,
+  seedFinished: boolean,
+) {
+  const checkpoint = {
+    v: 4,
+    id: "1",
+    ts: new Date().toISOString(),
+    channel_values: { a: "keep" },
+    channel_versions: { a: "1" },
+    versions_seen: {},
+  };
+  const meta = { source: "loop", step: 1, parents: {} };
+  const versions = { a: "1" };
+  const api = writer.checkpointer as unknown as {
+    put(config: unknown, checkpoint: unknown, metadata: unknown, versions: unknown): Promise<unknown>;
+    noteThreadStatus(threadId: string, status: "paused" | "finished", now?: number): Promise<void>;
+    getTuple(config: unknown): Promise<unknown>;
+  };
+  const otherApi = other.checkpointer as unknown as typeof api;
+  if (seedFinished) {
+    await api.put({ configurable: { thread_id: threadId, checkpoint_ns: "" } }, checkpoint, meta, versions);
+    await api.noteThreadStatus(threadId, "finished", 1);
+  }
+  const compiled = await compileGraph(pgEarly(), { checkpointer: writer.checkpointer });
+  let release!: () => void;
+  const otherDone = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let opened!: () => void;
+  const marked = new Promise<void>((resolve) => {
+    opened = resolve;
+  });
+  const orig = api.getTuple.bind(api);
+  let calls = 0;
+  api.getTuple = async (config) => {
+    calls += 1;
+    if (calls === 1) {
+      opened();
+      await otherDone;
+      if (fail === "throw") throw new Error("read failed");
+    }
+    if (fail === "pruned") return undefined;
+    return orig(config);
+  };
+  const pending =
+    fail === "throw"
+      ? compiled.resume({ threadId, resume: true, onInterrupt: "fail" })
+      : compiled.resumeFrom({ threadId, checkpointId: "bogus", resume: true, onInterrupt: "fail" });
+  await marked;
+  if (!seedFinished) {
+    await otherApi.put({ configurable: { thread_id: threadId, checkpoint_ns: "" } }, checkpoint, meta, versions);
+  }
+  await otherApi.noteThreadStatus(threadId, "paused", Date.now());
+  release();
+  if (fail === "throw") {
+    await expect(pending).rejects.toThrow(/read failed/);
+  } else {
+    const result = await pending;
+    expect(result.status).toBe("error");
+    expect((result.error as { code?: string }).code).toBe(CHECKPOINT_PRUNED);
+  }
+  api.getTuple = orig;
+  await (sweeper.checkpointer as unknown as { sweep(now?: number): Promise<void> }).sweep(Date.now());
+  const status = await writer.pool.query<{ status: string }>(
+    `SELECT status FROM "${schema}".fg_checkpoint_threads WHERE thread_id = $1`,
+    [threadId],
+  );
+  expect(status.rows[0]?.status).toBe("paused");
+  const left = await writer.pool.query<{ n: string }>(
+    `SELECT COUNT(*) AS n FROM "${schema}".checkpoints WHERE thread_id = $1`,
+    [threadId],
+  );
+  expect(Number(left.rows[0]?.n)).toBeGreaterThan(0);
+}
 
 function pgEarly(): GraphSpec {
   return {

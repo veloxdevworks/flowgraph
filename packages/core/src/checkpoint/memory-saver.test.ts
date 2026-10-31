@@ -285,6 +285,18 @@ describe("thread run guard", () => {
     await saver.noteThreadStatus("same", "finished");
     expect(saver.storage["same"]).toBeDefined();
   });
+
+  it("a restore leaves a newer status from a later mark alone", async () => {
+    const saver = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ finishedTtl: "1h", maxFinishedThreads: null }),
+    );
+    const mark = saver.markThreadActive("later");
+    expect(mark).toBeTruthy();
+    await saver.noteThreadStatus("later", "paused", 50);
+    saver.restoreThreadStatus("later", { status: "finished", updatedAt: 1 }, mark!);
+    const row = (saver as unknown as { threads: Map<string, { status: string }> }).threads.get("later");
+    expect(row?.status).toBe("paused");
+  });
 });
 
 function gateSpec(gates: number): GraphSpec {
