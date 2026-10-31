@@ -184,7 +184,7 @@ describe("resume after checkpoint pruning", () => {
 
   it("returns CHECKPOINT_PRUNED when the requested checkpoint was dropped", async () => {
     const saver = new FlowgraphMemorySaver(
-      resolveCheckpointRetention({ maxCheckpoints: 1, maxInterruptPoints: 0, finishedTtl: null }),
+      resolveCheckpointRetention({ maxCheckpoints: 1, maxInterruptPoints: 0, finishedTtl: "1h" }),
     );
     const spec = {
       metadata: { name: "pruned-id" },
@@ -212,7 +212,9 @@ describe("resume after checkpoint pruning", () => {
     expect((again.error as { message?: string } | undefined)?.message).toMatch(/missing or was pruned/);
     expect((again.error as { message?: string } | undefined)?.message).not.toMatch(/Retention pruned it/);
     const row = (saver as unknown as { threads: Map<string, { status: string }> }).threads.get(threadId);
-    expect(row?.status).not.toBe("paused");
+    expect(row?.status).toBe("finished");
+    await saver.sweep(Date.now() + 2 * 60 * 60 * 1000);
+    expect(saver.storage[threadId]).toBeUndefined();
   });
 
   it("does not mention retention when a missing checkpoint is resumed with retention off", async () => {
@@ -357,5 +359,60 @@ describe("several interrupts then a sweep", () => {
     expect(again.status).toBe("completed");
     expect(seen[0]).toBe("active");
     expect(saver.storage[threadId]).toBeDefined();
+  });
+
+  it("a read that throws before the run starts keeps the finished thread sweepable", async () => {
+    const saver = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ finishedTtl: "1h", maxFinishedThreads: null }),
+    );
+    const spec = {
+      metadata: { name: "read-throws" },
+      state: { channels: { n: { type: "number" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "retTag", output: { to: "n" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(spec, { checkpointer: saver });
+    const threadId = "read-throws";
+    await compiled.run({ threadId, input: { n: 1 }, onInterrupt: "fail" });
+    const realId = (await compiled.getState(threadId))?.checkpointId;
+    expect(realId).toBeTruthy();
+    const orig = saver.getTuple.bind(saver);
+    let calls = 0;
+    saver.getTuple = async (config) => {
+      calls += 1;
+      if (calls === 1) throw new Error("getState failed");
+      return orig(config);
+    };
+    await expect(compiled.resume({ threadId, resume: true, onInterrupt: "fail" })).rejects.toThrow(/getState failed/);
+    expect((saver as unknown as { threads: Map<string, { status: string }> }).threads.get(threadId)?.status).toBe("finished");
+    saver.getTuple = orig;
+    await saver.sweep(Date.now() + 2 * 60 * 60 * 1000);
+    expect(saver.storage[threadId]).toBeUndefined();
+
+    const again = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ finishedTtl: "1h", maxFinishedThreads: null }),
+    );
+    const againCompiled = await compileGraph(spec, { checkpointer: again });
+    const againThread = "tuple-throws";
+    await againCompiled.run({ threadId: againThread, input: { n: 1 }, onInterrupt: "fail" });
+    const keptId = (await againCompiled.getState(againThread))?.checkpointId;
+    const origAgain = again.getTuple.bind(again);
+    let lookups = 0;
+    again.getTuple = async (config) => {
+      lookups += 1;
+      const id = (config as { configurable?: { checkpoint_id?: string } }).configurable?.checkpoint_id;
+      if (lookups > 1 && id === keptId) throw new Error("tuple failed");
+      return origAgain(config);
+    };
+    await expect(
+      againCompiled.resumeFrom({ threadId: againThread, checkpointId: keptId!, resume: true, onInterrupt: "fail" }),
+    ).rejects.toThrow(/tuple failed/);
+    expect((again as unknown as { threads: Map<string, { status: string }> }).threads.get(againThread)?.status).toBe("finished");
+    again.getTuple = origAgain;
+    await again.sweep(Date.now() + 2 * 60 * 60 * 1000);
+    expect(again.storage[againThread]).toBeUndefined();
   });
 });

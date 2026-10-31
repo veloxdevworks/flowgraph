@@ -261,12 +261,33 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     await this.touch(threadId, "active", Date.now(), policy);
   }
 
+  async savedThreadStatus(threadId: string): Promise<{ status: CheckpointThreadStatus; updatedAt: number } | undefined> {
+    const found = await this.db().query<{ status: CheckpointThreadStatus; updated_at: string | number }>(
+      `SELECT status, updated_at FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1`,
+      [threadId],
+    );
+    const row = found.rows[0];
+    if (!row) return undefined;
+    return { status: row.status, updatedAt: Number(row.updated_at) };
+  }
+
+  async restoreThreadStatus(
+    threadId: string,
+    prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined,
+  ): Promise<void> {
+    if (!prior) {
+      await this.db().query(`DELETE FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1`, [threadId]);
+      return;
+    }
+    await this.touch(threadId, prior.status, prior.updatedAt, this.policyFor(threadId));
+  }
+
   beginThreadRun(threadId: string): number {
     return this.runs.begin(threadId);
   }
 
-  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false): void {
-    this.runs.end(threadId, status, token, resumed);
+  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false, releaseOnly = false): void {
+    this.runs.end(threadId, status, token, resumed, releaseOnly);
   }
 
   async noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = Date.now()): Promise<void> {

@@ -84,6 +84,7 @@ export type {
   CheckpointRetentionInput,
   CheckpointRetentionSaver,
   CheckpointThreadStatus,
+  SavedThreadStatus,
   CheckpointVacuum,
   ResolvedCheckpointRetention,
 } from "./checkpoint/retention.js";

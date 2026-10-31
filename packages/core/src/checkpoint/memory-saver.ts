@@ -147,12 +147,26 @@ export class FlowgraphMemorySaver extends MemorySaver {
     this.touch(threadId, "active", Date.now(), policy);
   }
 
+  savedThreadStatus(threadId: string): { status: CheckpointThreadStatus; updatedAt: number } | undefined {
+    const row = this.threads.get(threadId);
+    if (!row) return undefined;
+    return { status: row.status, updatedAt: row.updatedAt };
+  }
+
+  restoreThreadStatus(threadId: string, prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined): void {
+    if (!prior) {
+      this.threads.delete(threadId);
+      return;
+    }
+    this.touch(threadId, prior.status, prior.updatedAt, this.policyFor(threadId));
+  }
+
   beginThreadRun(threadId: string): number {
     return this.runs.begin(threadId);
   }
 
-  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false): void {
-    this.runs.end(threadId, status, token, resumed);
+  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false, releaseOnly = false): void {
+    this.runs.end(threadId, status, token, resumed, releaseOnly);
   }
 
   override async deleteThread(threadId: string): Promise<void> {

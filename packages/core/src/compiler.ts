@@ -382,7 +382,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (retentionOpen) {
         retentionOpen = false;
         try {
-          retention?.endThreadRun?.(threadId, retentionStatusForRun(r.status), runToken, resumed ?? resumedRun());
+          if (bookkeeping) {
+            retention?.endThreadRun?.(threadId, retentionStatusForRun(r.status), runToken, resumed ?? resumedRun());
+          } else {
+            // This run never started. Drop its token and do not park it.
+            retention?.endThreadRun?.(threadId, "active", runToken, false, true);
+          }
         } catch {
           /* bookkeeping must not hide the run result */
         }
@@ -408,14 +413,23 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     }
 
     // Hold the thread and mark it active before any read, so a sweep in the
-    // window before the first checkpoint write cannot delete it.
-    runToken = retention?.beginThreadRun?.(threadId) ?? 0;
-    retentionOpen = !!retention;
+    // window before the first checkpoint write cannot delete it. If the run
+    // stops before it starts, put the saved status back and drop the token.
+    let enteredRun = false;
+    let priorRead = false;
+    let priorStatus: { status: "active" | "paused" | "finished"; updatedAt: number } | undefined;
     try {
-      await retention?.markThreadActive?.(threadId);
-    } catch {
-      // A missed active mark must not fail the run. The in-process hold still applies.
-    }
+      runToken = retention?.beginThreadRun?.(threadId) ?? 0;
+      retentionOpen = !!retention;
+      if (retention?.savedThreadStatus) {
+        priorStatus = await retention.savedThreadStatus(threadId);
+        priorRead = true;
+      }
+      try {
+        await retention?.markThreadActive?.(threadId);
+      } catch {
+        // A missed active mark must not fail the run. The in-process hold still applies.
+      }
 
     // Agent replay entries belong to this execution only. A fresh start begins
     // empty; resume/continue load the snapshots the engine attached to this
@@ -463,11 +477,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           (retention as { retention?: { enabled?: boolean } }).retention?.enabled !== false;
         const error = checkpointPrunedError(threadId, requestedCheckpoint, { retention: retentionOn });
         events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
-        // Do not record this as a pause, and do not release a park this run never continued.
+        // Do not record this as a pause. The outer exit restores the saved status.
         return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs }, false, false);
       }
     }
 
+    enteredRun = true;
     try {
       let current: Record<string, unknown> | Command | null = payload;
 
@@ -699,6 +714,27 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
       return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
     } finally {
+      delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
+      for (const u of unsubs) u();
+    }
+    } finally {
+      if (!enteredRun) {
+        if (retentionOpen) {
+          retentionOpen = false;
+          try {
+            retention?.endThreadRun?.(threadId, "active", runToken, false, true);
+          } catch {
+            /* releasing the guard must not hide the original error */
+          }
+        }
+        if (priorRead) {
+          try {
+            await retention?.restoreThreadStatus?.(threadId, priorStatus);
+          } catch {
+            /* restoring status must not hide the original error */
+          }
+        }
+      }
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       for (const u of unsubs) u();
     }

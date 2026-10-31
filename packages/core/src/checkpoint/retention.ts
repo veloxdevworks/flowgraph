@@ -184,12 +184,20 @@ export class ThreadRunGuard {
    * one earlier park before this run parks again or finishes, so a thread
    * that pauses several times does not stay parked after the last run ends.
    * A finish that did not resume leaves every other park in place.
+   * @param releaseOnly Drop this run's token and do not park it. A run that
+   * stops before it starts uses this so it does not hold the thread.
    */
-  end(threadId: string, status: CheckpointThreadStatus, token: number, resumed = false): void {
+  end(threadId: string, status: CheckpointThreadStatus, token: number, resumed = false, releaseOnly = false): void {
     const live = this.inFlight.get(threadId);
     live?.delete(token);
     if (live && live.size === 0) this.inFlight.delete(threadId);
     const parks = this.parked.get(threadId) ?? new Set<number>();
+    if (releaseOnly) {
+      parks.delete(token);
+      if (parks.size === 0) this.parked.delete(threadId);
+      else this.parked.set(threadId, parks);
+      return;
+    }
     if (resumed) {
       const earlier = parks.values().next().value;
       if (earlier !== undefined) parks.delete(earlier);
@@ -344,6 +352,12 @@ export function retentionStatusForRun(
   return status === "completed" ? "finished" : "paused";
 }
 
+/** Status row saved before a run marks the thread active. */
+export interface SavedThreadStatus {
+  status: CheckpointThreadStatus;
+  updatedAt: number;
+}
+
 export interface CheckpointRetentionSaver {
   noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now?: number): Promise<void> | void;
   sweep(now?: number): Promise<void> | void;
@@ -355,13 +369,28 @@ export interface CheckpointRetentionSaver {
    * leaves the thread active until a later run or `deleteThread`.
    */
   markThreadActive?(threadId: string): void | Promise<void>;
+  /** Status row for this thread, if this saver has recorded one. */
+  savedThreadStatus?(threadId: string): SavedThreadStatus | undefined | Promise<SavedThreadStatus | undefined>;
+  /**
+   * Put back the status from before {@link markThreadActive}. `undefined`
+   * removes a status row created for a run that never started. Checkpoints
+   * stay.
+   */
+  restoreThreadStatus?(threadId: string, prior: SavedThreadStatus | undefined): void | Promise<void>;
   /** Mark a thread in use. Returns a token for {@link endThreadRun}. */
   beginThreadRun?(threadId: string): number;
   /**
    * Pair with {@link beginThreadRun}. `paused` parks this run's token.
    * `resumed` lets a finished resume clear one other parked interrupt, not every one.
+   * `releaseOnly` drops this run's token and does not park it.
    */
-  endThreadRun?(threadId: string, status: CheckpointThreadStatus, token?: number, resumed?: boolean): void;
+  endThreadRun?(
+    threadId: string,
+    status: CheckpointThreadStatus,
+    token?: number,
+    resumed?: boolean,
+    releaseOnly?: boolean,
+  ): void;
 }
 
 export function isRetentionSaver(saver: unknown): saver is CheckpointRetentionSaver {

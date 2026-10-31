@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import pg from "pg";
-import { compileGraph, registerFunction, resolveCheckpointRetention, type GraphSpec } from "@flowgraph/core";
+import { CHECKPOINT_PRUNED, compileGraph, registerFunction, resolveCheckpointRetention, type GraphSpec } from "@flowgraph/core";
 import { openPostgresBackend, type PostgresBackend } from "./index.js";
 import { FlowgraphPostgresSaver } from "./retention.js";
 
@@ -414,7 +414,87 @@ describe.skipIf(!DB)("postgres checkpoint retention", () => {
     const tuple = await api.getTuple({ configurable: { thread_id: "window", checkpoint_ns: "" } });
     expect(tuple?.checkpoint.channel_values["a"]).toBe("keep");
   });
+
+  it("a bogus resumeFrom on a finished thread is still swept", async () => {
+    const schema = schemaName();
+    const backend = await openPostgresBackend({
+      connectionString: DB!,
+      schema,
+      retention: { finishedTtl: "1h", maxFinishedThreads: null },
+    });
+    open.push(backend);
+    schemas.push(schema);
+    const compiled = await compileGraph(pgEarly(), { checkpointer: backend.checkpointer });
+    const threadId = `early-${schema}`;
+    await compiled.run({ threadId, onInterrupt: "fail" });
+    const missing = await compiled.resumeFrom({
+      threadId,
+      checkpointId: "bogus",
+      resume: true,
+      onInterrupt: "fail",
+    });
+    expect(missing.status).toBe("error");
+    expect((missing.error as { code?: string }).code).toBe(CHECKPOINT_PRUNED);
+    const status = await backend.pool.query<{ status: string }>(
+      `SELECT status FROM "${schema}".fg_checkpoint_threads WHERE thread_id = $1`,
+      [threadId],
+    );
+    expect(status.rows[0]?.status).toBe("finished");
+    await (backend.checkpointer as unknown as { sweep(now?: number): Promise<void> }).sweep(Date.now() + 2 * 60 * 60 * 1000);
+    const left = await backend.pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM "${schema}".checkpoints WHERE thread_id = $1`,
+      [threadId],
+    );
+    expect(Number(left.rows[0]?.n)).toBe(0);
+  });
+
+  it("a throwing checkpoint read on a finished thread is still swept", async () => {
+    const schema = schemaName();
+    const backend = await openPostgresBackend({
+      connectionString: DB!,
+      schema,
+      retention: { finishedTtl: "1h", maxFinishedThreads: null },
+    });
+    open.push(backend);
+    schemas.push(schema);
+    const saver = backend.checkpointer as unknown as {
+      getTuple(config: { configurable?: { checkpoint_id?: string } }): Promise<unknown>;
+      sweep(now?: number): Promise<void>;
+    };
+    const compiled = await compileGraph(pgEarly(), { checkpointer: backend.checkpointer });
+    const threadId = `throw-${schema}`;
+    await compiled.run({ threadId, onInterrupt: "fail" });
+    const orig = saver.getTuple.bind(saver);
+    saver.getTuple = async () => {
+      throw new Error("getState failed");
+    };
+    await expect(compiled.resume({ threadId, resume: true, onInterrupt: "fail" })).rejects.toThrow(/getState failed/);
+    const status = await backend.pool.query<{ status: string }>(
+      `SELECT status FROM "${schema}".fg_checkpoint_threads WHERE thread_id = $1`,
+      [threadId],
+    );
+    expect(status.rows[0]?.status).toBe("finished");
+    saver.getTuple = orig;
+    await saver.sweep(Date.now() + 2 * 60 * 60 * 1000);
+    const left = await backend.pool.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM "${schema}".checkpoints WHERE thread_id = $1`,
+      [threadId],
+    );
+    expect(Number(left.rows[0]?.n)).toBe(0);
+  });
 });
+
+function pgEarly(): GraphSpec {
+  return {
+    metadata: { name: "pg-early" },
+    state: { channels: { tag: { type: "string" } } },
+    nodes: [{ id: "a", type: "function", with: { fn: "pgRet", output: { to: "tag" } } }],
+    edges: [
+      { from: "START", to: "a" },
+      { from: "a", to: "END" },
+    ],
+  } as unknown as GraphSpec;
+}
 
 function pgParallel(warm: number): GraphSpec {
   return {

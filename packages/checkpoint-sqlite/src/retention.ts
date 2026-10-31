@@ -216,12 +216,30 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.touch(threadId, "active", Date.now(), policy);
   }
 
+  savedThreadStatus(threadId: string): { status: CheckpointThreadStatus; updatedAt: number } | undefined {
+    this.setup();
+    const row = this.sqlite
+      .prepare(`SELECT status, updated_at FROM fg_checkpoint_threads WHERE thread_id = ?`)
+      .get(threadId) as { status: CheckpointThreadStatus; updated_at: number } | undefined;
+    if (!row) return undefined;
+    return { status: row.status, updatedAt: Number(row.updated_at) };
+  }
+
+  restoreThreadStatus(threadId: string, prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined): void {
+    this.setup();
+    if (!prior) {
+      this.sqlite.prepare(`DELETE FROM fg_checkpoint_threads WHERE thread_id = ?`).run(threadId);
+      return;
+    }
+    this.touch(threadId, prior.status, prior.updatedAt, this.policyFor(threadId));
+  }
+
   beginThreadRun(threadId: string): number {
     return this.runs.begin(threadId);
   }
 
-  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false): void {
-    this.runs.end(threadId, status, token, resumed);
+  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false, releaseOnly = false): void {
+    this.runs.end(threadId, status, token, resumed, releaseOnly);
   }
 
   override async getTuple(config: Parameters<SqliteSaver["getTuple"]>[0]): Promise<CheckpointTuple | undefined> {
