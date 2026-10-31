@@ -62,6 +62,69 @@ edges:
     expect(result.spec.imports).toBeUndefined();
   });
 
+  it("strips imports from inline subgraphs and map inners at any depth", () => {
+    const yaml = `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: nested-imports }
+state:
+  channels:
+    items: { type: array }
+nodes:
+  - id: sg
+    type: subgraph
+    spec:
+      apiVersion: flowgraph/v1
+      kind: Graph
+      metadata: { name: child }
+      imports:
+        - { providers: "/tmp/anything.mjs" }
+      nodes:
+        - id: inner
+          type: subgraph
+          spec:
+            apiVersion: flowgraph/v1
+            kind: Graph
+            metadata: { name: grandchild }
+            imports:
+              - { nodes: "/tmp/anything.mjs" }
+            nodes:
+              - { id: w, type: wait, with: { duration: "1ms" } }
+            edges:
+              - { from: START, to: w }
+              - { from: w, to: END }
+      edges:
+        - { from: START, to: inner }
+        - { from: inner, to: END }
+  - id: m
+    type: map
+    with:
+      over: "{{ state.items }}"
+      node:
+        id: each
+        type: subgraph
+        spec:
+          apiVersion: flowgraph/v1
+          kind: Graph
+          metadata: { name: per-item }
+          imports:
+            - { reducers: "/tmp/anything.mjs" }
+          nodes:
+            - { id: w, type: wait, with: { duration: "1ms" } }
+          edges:
+            - { from: START, to: w }
+            - { from: w, to: END }
+edges:
+  - { from: START, to: sg }
+  - { from: sg, to: m }
+  - { from: m, to: END }
+`;
+    const result = parseGraphYaml(yaml, { expandEnv: false });
+    if (!result.spec) throw new Error(result.diagnostics.map((d) => d.message).join("; "));
+    expect(result.importsStripped).toBe(true);
+    expect(JSON.stringify(result.spec)).not.toContain("anything.mjs");
+  });
+
   it("rejects invalid yaml", () => {
     const result = parseGraphYaml("::: not yaml");
     expect(result.spec).toBeNull();

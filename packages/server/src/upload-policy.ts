@@ -8,13 +8,35 @@
  * still cannot run a blocked node.
  */
 
-import { classifyAddress, hostIsAllowListed, walkNodes, type NodePolicy } from "@flowgraph/core";
+import {
+  RESERVED_CHANNEL_PREFIX,
+  classifyAddress,
+  collectNodeWriteChannels,
+  hostIsAllowListed,
+  isReservedChannel,
+  registeredToolNamesOf,
+  reservedInputRefs,
+  reservedStateMapRefs,
+  reservedTemplateRefs,
+  templateRefs,
+  walkNodes,
+  type NodePolicy,
+} from "@flowgraph/core";
 import { isIP } from "node:net";
 import type { GraphSpec } from "@flowgraph/spec";
 import { ServerRequestError } from "./errors.js";
 
 /** Node types an untrusted upload may not contain (host commands, processes, files). */
 export const UNTRUSTED_BLOCKED_NODE_TYPES: readonly string[] = ["shell", "script", "service", "worktree", "skill", "demo", "mcp"];
+
+/**
+ * Registered agent function tools an untrusted graph may call: asking the
+ * human, and reading the status of this thread's services (which untrusted
+ * graphs cannot start). Operators add their own with
+ * FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS. start_service, restart_service and
+ * stop_service stay refused even when listed, because service nodes are.
+ */
+export const UNTRUSTED_ALLOWED_TOOLS: readonly string[] = ["ask_human", "list_services", "service_status"];
 
 /** LangChain model options an untrusted upload may set; anything else could redirect the request or the key. */
 export const UNTRUSTED_PROVIDER_OPTIONS: readonly string[] = [
@@ -42,13 +64,23 @@ export type UploadViolationCode =
   | "UPLOAD_SECRET_REFERENCE_BLOCKED"
   | "UPLOAD_SUBGRAPH_FILE_BLOCKED"
   | "UPLOAD_AGENT_SKILL_TOOL_BLOCKED"
+  | "UPLOAD_AGENT_TOOL_BLOCKED"
+  | "UPLOAD_FUNCTION_BLOCKED"
   | "UPLOAD_PROVIDER_OVERRIDE_BLOCKED"
   | "UPLOAD_PROVIDER_ENDPOINT_BLOCKED"
   | "UPLOAD_HTTP_TARGET_BLOCKED"
   | "UPLOAD_MCP_BLOCKED"
   | "UPLOAD_LOCAL_TOOLS_BLOCKED"
   | "UPLOAD_HOST_PROBE_BLOCKED"
-  | "UPLOAD_HOST_PATH_BLOCKED";
+  | "UPLOAD_HOST_PATH_BLOCKED"
+  | "UPLOAD_RUNTIME_HOST_EXEC_BLOCKED"
+  | "UPLOAD_RESERVED_CHANNEL_BLOCKED"
+  | "UPLOAD_AGENT_REF_BLOCKED"
+  | "UPLOAD_IMPORTS_BLOCKED"
+  | "UPLOAD_INBOUND_WEBHOOK_BLOCKED";
+
+/** Why a reserved name is refused (every `__` name belongs to the engine: service intents, worktree paths, agent replay, ...). */
+const RESERVED_WHY = `names starting with "${RESERVED_CHANNEL_PREFIX}" are reserved state channels`;
 
 export interface UploadViolation {
   severity: "error";
@@ -68,13 +100,28 @@ export const UNTRUSTED_NODE_POLICY: NodePolicy = {
   blockMcp: true,
   blockLocalTools: true,
   blockHostProbes: true,
+  allowedTools: UNTRUSTED_ALLOWED_TOOLS,
+  allowedFunctions: [],
+  blockHostExec: true,
+  blockAgentRefs: true,
+  blockImports: true,
+  blockInboundWebhooks: true,
   reason: REASON,
 };
 
-/** UNTRUSTED_NODE_POLICY with the operator's http allow list (FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS). */
-export function untrustedNodePolicy(allowHosts?: readonly string[]): NodePolicy {
-  if (!allowHosts?.length) return UNTRUSTED_NODE_POLICY;
-  return { ...UNTRUSTED_NODE_POLICY, outboundHttp: { publicOnly: true, allowHosts } };
+/**
+ * UNTRUSTED_NODE_POLICY plus the operator's allow lists: http hosts
+ * (FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS), agent tools
+ * (FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS) and registered functions
+ * (FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS). A bare array is the http host list.
+ */
+export function untrustedNodePolicy(opts: UntrustedUploadOptions | readonly string[] = {}): NodePolicy {
+  const o: UntrustedUploadOptions = Array.isArray(opts) ? { allowHosts: opts as readonly string[] } : (opts as UntrustedUploadOptions);
+  const policy: NodePolicy = { ...UNTRUSTED_NODE_POLICY };
+  if (o.allowHosts?.length) policy.outboundHttp = { publicOnly: true, allowHosts: o.allowHosts };
+  if (o.allowTools?.length) policy.allowedTools = [...UNTRUSTED_ALLOWED_TOOLS, ...o.allowTools];
+  if (o.allowFunctions?.length) policy.allowedFunctions = [...o.allowFunctions];
+  return policy;
 }
 
 /** LangChain vendors whose default endpoint is on the server itself. */
@@ -83,29 +130,70 @@ const LOCAL_ENDPOINT_VENDORS: readonly string[] = ["ollama"];
 export interface UntrustedUploadOptions {
   /** Hosts http / webhook nodes may reach even on non-public addresses. */
   allowHosts?: readonly string[] | undefined;
+  /** Registered agent function tools allowed beyond UNTRUSTED_ALLOWED_TOOLS. */
+  allowTools?: readonly string[] | undefined;
+  /** Registered functions `function` nodes may call. Default: none. */
+  allowFunctions?: readonly string[] | undefined;
 }
 
-const ENV_PLACEHOLDER = /\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}/;
-const SECRET_REFERENCE = /\{\{[^}]*\bsecrets?\s*(?:\.|\[)/;
+/** `[A-Za-z_]`, by character code. */
+function isIdentStart(c: number): boolean {
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+}
+
+/** `[A-Za-z0-9_]`, by character code. */
+function isIdentPart(c: number): boolean {
+  return isIdentStart(c) || (c >= 48 && c <= 57);
+}
+
+/**
+ * The first `${NAME}` or `${NAME:-default}` in a line of raw YAML, or
+ * undefined. Matches what `/\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}/` finds,
+ * in time linear in the line's length (that expression restarts at every
+ * `${` and can take quadratic time on a line of unclosed `${a:-`).
+ */
+export function findEnvPlaceholder(line: string): string | undefined {
+  let from = 0;
+  for (;;) {
+    const start = line.indexOf("${", from);
+    if (start < 0) return undefined;
+    let i = start + 2;
+    if (isIdentStart(line.charCodeAt(i))) {
+      i++;
+      while (isIdentPart(line.charCodeAt(i))) i++;
+      if (line[i] === "}") return line.slice(start, i + 1);
+      if (line.startsWith(":-", i)) {
+        const close = line.indexOf("}", i + 2);
+        // No `}` after this point means no later `${` can be closed either.
+        if (close < 0) return undefined;
+        return line.slice(start, close + 1);
+      }
+    }
+    from = start + 2;
+  }
+}
 
 /** Check an untrusted upload. `raw` is the YAML text as sent; `spec` its parse without env expansion. */
 export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: UntrustedUploadOptions = {}): UploadViolation[] {
   const out: UploadViolation[] = [];
   const add = (code: UploadViolationCode, path: string, message: string) => out.push({ severity: "error", code, path, message });
+  const policy = untrustedNodePolicy(opts);
+  const allowedTools = policy.allowedTools ?? [];
+  const allowedFunctions = policy.allowedFunctions ?? [];
 
   raw.split("\n").forEach((line, i) => {
-    const m = ENV_PLACEHOLDER.exec(line);
-    if (m) {
+    const m = findEnvPlaceholder(line);
+    if (m !== undefined) {
       add(
         "UPLOAD_ENV_PLACEHOLDER_BLOCKED",
         `line ${i + 1}`,
-        `${m[0]} would read the server's environment; pass the value as run input instead`,
+        `${m} would read the server's environment; pass the value as run input instead`,
       );
     }
   });
 
   walkStrings(spec, "", (value, path) => {
-    if (SECRET_REFERENCE.test(value)) {
+    if (templateRefs(value).secret) {
       add("UPLOAD_SECRET_REFERENCE_BLOCKED", path, "secret.* templates read the server's environment; pass the value as run input instead");
     }
   });
@@ -127,6 +215,23 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
       add("UPLOAD_HOST_PATH_BLOCKED", `${path}.workspace`, "a node workspace is a path on the server");
     }
     const w = (n.with ?? {}) as Record<string, unknown>;
+    if ((type === "agent" || type === "intelligent") && w.agent !== undefined) {
+      add("UPLOAD_AGENT_REF_BLOCKED", `${path}.with.agent`, "with.agent loads an AGENT.md from a path or package on the server; put the instructions in with.system instead");
+    }
+    if (type === "wait" && w.webhook) {
+      add("UPLOAD_INBOUND_WEBHOOK_BLOCKED", `${path}.with.webhook`, "an inbound webhook listens on a port on the server; use a signal wait and resume the run instead");
+    }
+    // A node's input (map inner nodes included) becomes its input and, for a
+    // subgraph, the child's input state.
+    for (const ref of reservedInputRefs(n)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.${ref}`, `${ref} sets or reads a reserved state channel (${RESERVED_WHY})`);
+    }
+    for (const ref of reservedTemplateRefs(n)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.${ref}`, `${ref} reads a reserved state channel (${RESERVED_WHY})`);
+    }
+    for (const ref of reservedStateMapRefs(n)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.with.${ref}`, `${ref} names a reserved state channel (${RESERVED_WHY})`);
+    }
     if ((type === "agent" || type === "intelligent") && Array.isArray(w.tools)) {
       w.tools.forEach((t, i) => {
         if (t && typeof t === "object" && "skill" in t) {
@@ -135,7 +240,19 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
         if (t && typeof t === "object" && "mcp" in t) {
           add("UPLOAD_MCP_BLOCKED", `${path}.with.tools[${i}]`, "MCP tools connect to servers or start processes on the host");
         }
+        for (const name of registeredToolNamesOf([t])) {
+          if (!allowedTools.includes(name)) {
+            add(
+              "UPLOAD_AGENT_TOOL_BLOCKED",
+              `${path}.with.tools[${i}]`,
+              `tool function "${name}" runs server code untrusted graphs may not call (allowed: ${allowedTools.join(", ")})`,
+            );
+          }
+        }
       });
+    }
+    if ((type === "function" || type === "code") && typeof w.fn === "string" && !allowedFunctions.includes(w.fn)) {
+      add("UPLOAD_FUNCTION_BLOCKED", `${path}.with.fn`, `registered function "${w.fn}" runs server code untrusted graphs may not call`);
     }
     if (w.requires !== undefined) {
       add("UPLOAD_HOST_PROBE_BLOCKED", `${path}.with.requires`, "requires checks which programs are installed on the server");
@@ -144,8 +261,15 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
       const why = literalUrlProblem(w.url, opts.allowHosts);
       if (why) add("UPLOAD_HTTP_TARGET_BLOCKED", `${path}.with.url`, why);
     }
-    if (type === "workshop" && w.diff !== undefined && w.diff !== false) {
-      add("UPLOAD_HOST_PATH_BLOCKED", `${path}.with.diff`, "workshop diff runs git in a directory on the server");
+    const diff = w.diff as Record<string, unknown> | undefined;
+    const diffNode = type === "workshop" ? "workshop" : type === "hitl" && w.mode === "review" ? "review" : undefined;
+    if (diffNode && diff && typeof diff === "object" && diff.before == null && diff.after == null) {
+      add("UPLOAD_HOST_PATH_BLOCKED", `${path}.with.diff`, `${diffNode} diff runs git in a directory on the server; pass before/after text instead`);
+    }
+    for (const channel of collectNodeWriteChannels(node as Parameters<typeof collectNodeWriteChannels>[0])) {
+      if (isReservedChannel(channel)) {
+        add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.with.output`, `"${channel}": ${RESERVED_WHY}`);
+      }
     }
   });
   return out;
@@ -166,7 +290,37 @@ function checkGraphLevel(
   if (typeof defaultProvider === "string" && LOCAL_ENDPOINT_VENDORS.includes(defaultProvider) && !graph.providers?.[defaultProvider]) {
     add("UPLOAD_PROVIDER_ENDPOINT_BLOCKED", `${where}config.defaults.provider`, `vendor "${defaultProvider}" talks to a model server on the host`);
   }
+  for (const channel of Object.keys(graph.state?.channels ?? {})) {
+    if (isReservedChannel(channel)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}state.channels.${channel}`, `"${channel}": ${RESERVED_WHY}`);
+    }
+  }
+  for (const key of Object.keys((graph as { input?: Record<string, unknown> }).input ?? {})) {
+    if (isReservedChannel(key)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}input.${key}`, `"${key}": ${RESERVED_WHY}`);
+    }
+  }
+  // Parsing strips imports; a spec handed over some other way is checked here.
+  const imports = (graph as { imports?: unknown }).imports;
+  if (Array.isArray(imports) && imports.length > 0) {
+    add("UPLOAD_IMPORTS_BLOCKED", `${where}imports`, "imports load modules on the server and register them for the whole process");
+  }
   const runtime = (graph.runtime ?? {}) as Record<string, unknown>;
+  if (runtime.webhookServer !== undefined) {
+    add("UPLOAD_INBOUND_WEBHOOK_BLOCKED", `${where}runtime.webhookServer`, "runtime.webhookServer listens on a port on the server");
+  }
+  const services = runtime.services as { rehydrateOnResume?: unknown } | undefined;
+  if (services?.rehydrateOnResume) {
+    add(
+      "UPLOAD_RUNTIME_HOST_EXEC_BLOCKED",
+      `${where}runtime.services.rehydrateOnResume`,
+      "rehydrateOnResume restarts saved service commands on the server",
+    );
+  }
+  const cleanup = runtime.worktrees as { cleanupOnEnd?: unknown } | undefined;
+  if (cleanup?.cleanupOnEnd) {
+    add("UPLOAD_RUNTIME_HOST_EXEC_BLOCKED", `${where}runtime.worktrees.cleanupOnEnd`, "cleanupOnEnd runs git worktree remove on the server");
+  }
   if (typeof runtime.workspace === "string" && runtime.workspace) {
     add("UPLOAD_HOST_PATH_BLOCKED", `${where}runtime.workspace`, "runtime.workspace is a path on the server");
   }

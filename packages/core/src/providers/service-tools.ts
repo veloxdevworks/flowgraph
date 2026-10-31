@@ -14,6 +14,7 @@ import { z } from "zod";
 import { ServiceReadySchema } from "@flowgraph/spec";
 import { registerTool } from "./registry.js";
 import type { NodeRunContext } from "../context.js";
+import { assertNodeTypeAllowed, nodePolicyOf } from "../node-policy.js";
 import {
   startService,
   stopService,
@@ -23,6 +24,15 @@ import {
   type ServiceStartSpec,
   type ServiceInfo,
 } from "../runtime/service-manager.js";
+
+/**
+ * These tools do what a `service` node does, so they obey the same node
+ * policy: a host that blocks service nodes blocks the tools too, however the
+ * tool was reached (agent tool list, mapped builtin, or a direct handler call).
+ */
+function assertServiceToolAllowed(ctx: NodeRunContext, tool: string): void {
+  assertNodeTypeAllowed(nodePolicyOf(ctx ?? {}), "service", `agent tool "${tool}"`);
+}
 
 const nameSchema = z.object({ name: z.string().min(1) });
 
@@ -148,6 +158,7 @@ registerTool({
     required: ["name", "command"],
   },
   handler: async (args, ctx: NodeRunContext): Promise<ServiceInfo> => {
+    assertServiceToolAllowed(ctx, "start_service");
     const raw = (args ?? {}) as Record<string, unknown>;
     if (typeof raw.name !== "string" || !raw.name.trim()) {
       throw new Error('start_service requires a "name" string argument.');
@@ -176,6 +187,7 @@ registerTool({
     required: ["name"],
   },
   handler: async (args, ctx: NodeRunContext): Promise<ServiceInfo> => {
+    assertServiceToolAllowed(ctx, "stop_service");
     const raw = (args ?? {}) as Record<string, unknown>;
     const name = typeof raw.name === "string" ? raw.name : "";
     if (!name.trim()) {
@@ -201,6 +213,7 @@ registerTool({
     required: ["name", "command"],
   },
   handler: async (args, ctx: NodeRunContext): Promise<ServiceInfo> => {
+    assertServiceToolAllowed(ctx, "restart_service");
     const raw = (args ?? {}) as Record<string, unknown>;
     if (typeof raw.name !== "string" || !raw.name.trim()) {
       throw new Error('restart_service requires a "name" string argument.');

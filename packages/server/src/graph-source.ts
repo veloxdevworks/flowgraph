@@ -32,8 +32,31 @@ function expandEnvVars(yaml: string): string {
 }
 
 /**
- * Parse uploaded YAML into a GraphSpec. Strips `imports` so client code
- * modules are never loaded. `${VAR}` placeholders are filled from the server
+ * Remove `imports` from a graph and from every inline subgraph (`spec:`) and
+ * map inner node below it. Returns whether anything was removed.
+ */
+function stripImports(graph: Record<string, unknown>, depth: number): boolean {
+  if (depth > 32) return false;
+  let stripped = false;
+  if ("imports" in graph) {
+    stripped = Array.isArray(graph.imports) ? graph.imports.length > 0 : graph.imports != null;
+    delete graph.imports;
+  }
+  const visitNode = (node: unknown, nodeDepth: number): void => {
+    if (!node || typeof node !== "object" || Array.isArray(node) || nodeDepth > 32) return;
+    const n = node as { spec?: unknown; with?: { node?: unknown } };
+    if (n.spec && typeof n.spec === "object" && !Array.isArray(n.spec)) {
+      if (stripImports(n.spec as Record<string, unknown>, depth + 1)) stripped = true;
+    }
+    if (n.with && typeof n.with === "object") visitNode(n.with.node, nodeDepth + 1);
+  };
+  if (Array.isArray(graph.nodes)) for (const node of graph.nodes) visitNode(node, depth);
+  return stripped;
+}
+
+/**
+ * Parse uploaded YAML into a GraphSpec. Strips `imports` (on the graph and
+ * on inline subgraphs at any depth) so client code modules are never loaded. `${VAR}` placeholders are filled from the server
  * environment unless `expandEnv` is false (untrusted uploads, stored graphs).
  */
 export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}): ParseGraphYamlResult {
@@ -60,11 +83,7 @@ export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}):
   let importsStripped = false;
 
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const obj = parsed as Record<string, unknown>;
-    if (Array.isArray(obj.imports) && obj.imports.length > 0) {
-      importsStripped = true;
-      delete obj.imports;
-    }
+    importsStripped = stripImports(parsed as Record<string, unknown>, 0);
   }
 
   const result = GraphSpecSchema.safeParse(parsed);

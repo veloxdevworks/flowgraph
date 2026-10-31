@@ -63,3 +63,21 @@ describe("stringifyRendered", () => {
     expect(stringifyRendered(undefined)).toBe("");
   });
 });
+
+describe("engine channels are hidden from `state`", () => {
+  const scope = { state: { topic: "x", __services: { secret: 1 }, nested: { __own: 2 } }, input: { __in: 3 } };
+
+  it("hides `__` keys however they are read", () => {
+    expect(renderTemplate("{{ state.__services }}", scope)).toBeNull();
+    expect(renderTemplate("{{ state['_' + '_services'] }}", scope)).toBeNull();
+    expect(renderTemplate("{{ state }}", scope)).toEqual({ topic: "x", nested: { __own: 2 } });
+    expect(renderTemplate("{{ keys(state) }}", scope)).toEqual(["topic", "nested"]);
+    expect(renderTemplate("s={{ state }}", scope)).not.toContain("secret");
+  });
+
+  it("leaves user data below the top level and other scope roots alone", () => {
+    expect(renderTemplate("{{ state.nested.__own }}", scope)).toBe(2);
+    expect(renderTemplate("{{ input.__in }}", scope)).toBe(3);
+    expect(renderTemplate("{{ state.topic }}", scope)).toBe("x");
+  });
+});

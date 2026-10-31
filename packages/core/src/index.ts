@@ -10,6 +10,7 @@ export {
 export { loadGraphImports } from "./runtime/load-imports.js";
 export type { LoadGraphImportsOptions, LoadGraphImportsResult } from "./runtime/load-imports.js";
 export {
+  collectNodeWriteChannels,
   ensureDeclaredOutputChannels,
   undeclaredOutputChannelDiagnostics,
   unconditionalFanOutDiagnostics,
@@ -27,12 +28,35 @@ export {
   assertNodeTypeAllowed,
   assertSubgraphFileAllowed,
   assertSecretAllowed,
+  assertToolAllowed,
+  assertFunctionAllowed,
+  assertHostExecAllowed,
+  assertNodeSpecAllowed,
+  assertGraphRuntimeAllowed,
+  assertNoReservedChannels,
+  assertNoReservedInput,
+  withoutReservedKeys,
+  assertAgentRefAllowed,
+  assertImportsAllowed,
+  assertInboundWebhookAllowed,
+  isReservedChannel,
+  reservedStateMapRefs,
+  reservedInputRefs,
+  reservedTemplateRefs,
+  templateRefs,
+  RESERVED_CHANNEL_PREFIX,
+  hostExecAllowed,
+  registeredToolNamesOf,
+  BUILTIN_TOOL_TARGETS,
   nodePolicyOf,
   type NodePolicy,
   type NodePolicyErrorCode,
+  type TemplateRefs,
 } from "./node-policy.js";
 export {
   classifyAddress,
+  DEFAULT_OUTBOUND_MAX_RESPONSE_BYTES,
+  DEFAULT_OUTBOUND_TIMEOUT_MS,
   guardedFetch,
   hostIsAllowListed,
   type AddressVerdict,
@@ -72,14 +96,7 @@ export {
   ISSUES_CHANNEL,
   RESERVED_STATE_CHANNELS,
 } from "./runtime/state-annotation.js";
-export {
-  clearAllReplayCaches,
-  clearThreadReplayCache,
-  hydrateReplay,
-  hydrateReplayFromInterruptPayload,
-  snapshotReplay,
-  replayCacheKey,
-} from "./providers/replay-cache.js";
+export { ReplayMismatchError, ReplayStore, replayNodeKey, runScopeOf, type RunScope } from "./providers/replay-cache.js";
 export { parseDuration, sleep } from "./runtime/duration.js";
 export { runWithPolicy, isTimeoutError } from "./runtime/retry.js";
 export type { RetryConfig } from "./runtime/retry.js";
@@ -187,6 +204,10 @@ export {
   getProvider,
   hasProvider,
   listProviders,
+  providerFor,
+  providerNamesFor,
+  graphProviderList,
+  GRAPH_PROVIDERS,
   registerTool,
   getTool,
   mockProvider,
@@ -216,6 +237,7 @@ export type {
   Message,
   TokenUsage,
   ToolFunctionDef,
+  GraphProviders,
   ToolRef,
   ToolWiring,
   ToolExecutor,

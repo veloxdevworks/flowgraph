@@ -188,6 +188,119 @@ describe("untrusted outbound targets and provider endpoints", () => {
   });
 });
 
+describe("untrusted reserved channels, host-loaded definitions and inbound webhooks", () => {
+  const hitl = `  - { id: a, type: hitl, with: { mode: approve, message: "ok?" } }`;
+  const sg = (stateMap: string) => `  - id: a
+    type: subgraph
+    spec:
+      apiVersion: flowgraph/v1
+      kind: Graph
+      metadata: { name: child }
+      state: { channels: { x: { type: string } } }
+      nodes:
+        - { id: w, type: wait, with: { duration: "1ms" } }
+      edges:
+        - { from: START, to: w }
+        - { from: w, to: END }
+    with:
+      stateMap: ${stateMap}`;
+
+  const withX = (y: string) => y.replace("out: { type: string }", "out: { type: string }\n    x: { type: string }");
+  it("refuses reserved names in subgraph stateMap keys and values", () => {
+    expect(codesOf(withX(graph(sg("{ in: { __agentReplay: out } }"))))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.stateMap.in.__agentReplay"]);
+    expect(codesOf(withX(graph(sg("{ in: { x: __services } }"))))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.stateMap.in.x"]);
+    expect(codesOf(withX(graph(sg('{ in: { x: "{{ state.__worktrees }}" } }'))))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.stateMap.in.x"]);
+    const outKey = codesOf(withX(graph(sg("{ out: { __services: x } }"))).replace("x: { type: string }", "x: { type: string }\n    __services: { type: object }"));
+    expect(outKey).toContain("UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.stateMap.out.__services");
+    expect(outKey).toContain("UPLOAD_RESERVED_CHANNEL_BLOCKED state.channels.__services");
+    // An out value reads a child channel (the graph validator does not accept a
+    // reserved one as written, so set it on the parsed spec).
+    const parsed = parseGraphYaml(withX(graph(sg("{ out: { out: x } }"))), { expandEnv: false });
+    const node = parsed.spec!.nodes[0] as unknown as { with: { stateMap: { out: Record<string, string> } } };
+    node.with.stateMap.out = { out: "__agentReplay" };
+    expect(checkUntrustedUpload("", parsed.spec!).map((v) => `${v.code} ${v.path}`)).toContain("UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.stateMap.out.out");
+    expect(codesOf(withX(graph(sg("{ in: { x: out }, out: { out: x } }"))))).toEqual([]);
+  });
+
+  it("refuses __ keys and __ reads in node input, on map inners and in inline subgraphs", () => {
+    const sgInput = (input: string) => `  - id: a
+    type: subgraph
+    input: ${input}
+    spec:
+      apiVersion: flowgraph/v1
+      kind: Graph
+      metadata: { name: child }
+      nodes:
+        - { id: w, type: wait, with: { duration: "1ms" } }
+      edges:
+        - { from: START, to: w }
+        - { from: w, to: END }`;
+    expect(codesOf(graph(sgInput('{ __agentReplay: "{{ state.out }}" }')))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.input.__agentReplay"]);
+    expect(codesOf(graph(sgInput('{ x: "{{ state.__services }}" }')))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.input.x"]);
+    expect(codesOf(graph(sgInput('{ x: "{{ state.out }}" }')))).toEqual([]);
+    const mapInner = `  - id: a
+    type: map
+    with:
+      over: "{{ state.out }}"
+      node: { type: hitl, input: { __services: "{{ item.item }}" }, with: { mode: approve, message: "ok?" } }`;
+    expect(codesOf(graph(mapInner))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.map.?.input.__services"]);
+    const nested = `  - id: a
+    type: subgraph
+    spec:
+      apiVersion: flowgraph/v1
+      kind: Graph
+      metadata: { name: child }
+      nodes:
+        - { id: b, type: hitl, input: { __agentReplay: x }, with: { mode: approve, message: "ok?" } }
+      edges:
+        - { from: START, to: b }
+        - { from: b, to: END }`;
+    expect(codesOf(graph(nested))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.subgraph.b.input.__agentReplay"]);
+  });
+
+  it("refuses __ reads in any templated node field, lookalike spellings included", () => {
+    const msg = (m: string) => graph(`  - { id: a, type: hitl, with: { mode: approve, message: ${JSON.stringify(m)} } }`);
+    expect(codesOf(msg("{{ state.__services }}"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.message"]);
+    expect(codesOf(msg("{{ state['\uFF3F\uFF3Fservices'] }}"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.message"]);
+    expect(codesOf(msg("{{ state['\u200B__services'] }}"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.message"]);
+    // Text outside {{ }} is not a read.
+    expect(codesOf(msg("edit __init__.py? {{ state.out }}"))).toEqual([]);
+  });
+
+  it("refuses any __ name, known or not, as a channel, output or graph input", () => {
+    expect(codesOf(graph(hitl).replace("out: { type: string }", "out: { type: string }\n    __future: { type: string }"))).toEqual([
+      "UPLOAD_RESERVED_CHANNEL_BLOCKED state.channels.__future",
+    ]);
+    expect(codesOf(graph(`  - { id: a, type: hitl, with: { mode: approve, message: "ok?", output: { to: __future } } }`).replace("out: { type: string }", "__future: { type: string }"))).toContain(
+      "UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.output",
+    );
+    expect(codesOf(graph(hitl, "input:\n  __future: 1\n"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED input.__future"]);
+  });
+
+  it("refuses with.agent, including on map inners and in inline subgraphs", () => {
+    expect(codesOf(graph(`  - { id: a, type: agent, with: { agent: /etc, prompt: hi } }`))).toEqual(["UPLOAD_AGENT_REF_BLOCKED nodes.a.with.agent"]);
+    expect(codesOf(graph(`  - { id: a, type: map, with: { over: "{{ state.out }}", node: { id: i, type: agent, with: { agent: my-agent, prompt: hi } } } }`))).toEqual([
+      "UPLOAD_AGENT_REF_BLOCKED nodes.a.map.i.with.agent",
+    ]);
+  });
+
+  it("refuses wait webhooks and runtime.webhookServer", () => {
+    expect(codesOf(graph(`  - { id: a, type: wait, with: { webhook: true } }`))).toEqual(["UPLOAD_INBOUND_WEBHOOK_BLOCKED nodes.a.with.webhook"]);
+    expect(codesOf(graph(hitl, "runtime:\n  webhookServer: { host: 0.0.0.0, port: 8080 }\n"))).toEqual(["UPLOAD_INBOUND_WEBHOOK_BLOCKED runtime.webhookServer"]);
+  });
+
+  it("refuses imports on a spec that did not come through parsing", () => {
+    const parsed = parseGraphYaml(graph(hitl), { expandEnv: false });
+    const spec = { ...parsed.spec!, imports: [{ providers: "/tmp/x.mjs" }] } as unknown as NonNullable<typeof parsed.spec>;
+    expect(checkUntrustedUpload("", spec).map((v) => `${v.code} ${v.path}`)).toEqual(["UPLOAD_IMPORTS_BLOCKED imports"]);
+  });
+
+  it("compiles untrusted graphs with agent refs, imports and inbound webhooks off", () => {
+    expect(UNTRUSTED_NODE_POLICY).toMatchObject({ blockAgentRefs: true, blockImports: true, blockInboundWebhooks: true });
+    expect(untrustedNodePolicy(["h"])).toMatchObject({ blockAgentRefs: true, blockImports: true, blockInboundWebhooks: true });
+  });
+});
+
 describe("untrusted MCP, local tools and host probes", () => {
   const hitl = `  - { id: a, type: hitl, with: { mode: approve, message: "ok?" } }`;
 
@@ -433,5 +546,79 @@ edges:
       .concat(`mcpServers:\n  fs: { transport: stdio, command: "touch /tmp/fg-mcp-should-not-run" }\n`);
     await expect(s.startRun({ threadId: "m1", yaml }, principal("ursula", false))).rejects.toMatchObject({ status: 403, code: "UPLOAD_MCP_BLOCKED" });
     expect(await s.getRun("m1", principal("ursula", false))).toBeNull();
+  });
+});
+
+describe("untrusted agent tools, function nodes and host programs", () => {
+  const codes = (yaml: string, opts: { allowTools?: string[]; allowFunctions?: string[] } = {}) => {
+    const parsed = parseGraphYaml(yaml, { expandEnv: false });
+    expect(parsed.diagnostics.filter((d) => d.severity === "error"), JSON.stringify(parsed.diagnostics)).toEqual([]);
+    return checkUntrustedUpload(yaml, parsed.spec!, opts).map((v) => `${v.code} ${v.path}`);
+  };
+  const agent = (tools: string) => graph(`  - { id: a, type: agent, with: { provider: mock, prompt: hi, tools: ${tools} } }`);
+
+  it("refuses service tools and other registered tools outside the allow list", () => {
+    for (const t of ["start_service", "restart_service", "stop_service", "fs_bash", "my_tool"]) {
+      expect(codes(agent(`[ { function: ${t} } ]`))).toEqual(["UPLOAD_AGENT_TOOL_BLOCKED nodes.a.with.tools[0]"]);
+    }
+    expect(codes(agent(`[ { builtin: [Bash, Read] } ]`))).toEqual([
+      "UPLOAD_AGENT_TOOL_BLOCKED nodes.a.with.tools[0]",
+      "UPLOAD_AGENT_TOOL_BLOCKED nodes.a.with.tools[0]",
+    ]);
+    const mapped = graph(`  - id: a
+    type: map
+    with:
+      over: "{{ state.items }}"
+      node: { id: inner, type: agent, with: { provider: mock, prompt: hi, tools: [ { function: start_service } ] } }`);
+    expect(codes(mapped)).toContain("UPLOAD_AGENT_TOOL_BLOCKED nodes.a.map.inner.with.tools[0]");
+    expect(codes(agent(`[ { function: ask_human }, { function: list_services }, { function: service_status } ]`))).toEqual([]);
+    expect(codes(agent(`[ { function: my_tool } ]`), { allowTools: ["my_tool"] })).toEqual([]);
+  });
+
+  it("refuses function nodes unless the operator allows the function", () => {
+    const fn = graph(`  - { id: a, type: function, with: { fn: lookup, output: { to: out } } }`);
+    expect(codes(fn)).toEqual(["UPLOAD_FUNCTION_BLOCKED nodes.a.with.fn"]);
+    expect(codes(fn, { allowFunctions: ["lookup"] })).toEqual([]);
+  });
+
+  it("refuses a workshop diff that runs git but allows before/after text", () => {
+    const ws = (diff: string) => graph(`  - { id: a, type: workshop, with: { agenda: ["ok?"], diff: ${diff} } }`);
+    expect(codes(ws(`{ cwd: "/" }`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.diff"]);
+    expect(codes(ws(`{ before: "a", after: "b" }`))).toEqual([]);
+  });
+
+  it("compiles untrusted graphs with the tool and function allow lists", () => {
+    expect(UNTRUSTED_NODE_POLICY).toMatchObject({ allowedTools: ["ask_human", "list_services", "service_status"], allowedFunctions: [], blockHostExec: true });
+    const p = untrustedNodePolicy({ allowTools: ["my_tool"], allowFunctions: ["lookup"] });
+    expect(p.allowedTools).toEqual(["ask_human", "list_services", "service_status", "my_tool"]);
+    expect(p.allowedFunctions).toEqual(["lookup"]);
+  });
+
+  it("refuses an untrusted upload with start_service on the server", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-svc-"));
+    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, auth: OIDC });
+    await s.init();
+    try {
+      const yaml = agent(`[ { function: start_service } ]`).replace("upload-check", "svc-tool");
+      await expect(s.startRun({ threadId: "svc1", yaml }, principal("ursula", false))).rejects.toMatchObject({ status: 403, code: "UPLOAD_AGENT_TOOL_BLOCKED" });
+      expect(await s.getRun("svc1", principal("ursula", false))).toBeNull();
+    } finally {
+      await s.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses start_service at call time under the untrusted policy, even when allow-listed", async () => {
+    const marker = path.join(os.tmpdir(), `fg-review-svc-${process.pid}-${Date.now()}`);
+    const { getTool, NODE_POLICY } = await import("@flowgraph/core");
+    for (const policy of [UNTRUSTED_NODE_POLICY, untrustedNodePolicy({ allowTools: ["start_service"] })]) {
+      const ctx = { nodeId: "a", workspace: os.tmpdir(), meta: { threadId: "svc", runId: "r" }, emit: () => undefined, [NODE_POLICY]: policy };
+      const err = await Promise.resolve()
+        .then(() => getTool("start_service")!.handler({ name: "x", command: "sh", args: ["-c", `id > ${marker}`], keepAlive: true }, ctx as never))
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "NODE_TYPE_BLOCKED" });
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    await expect(fs.stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

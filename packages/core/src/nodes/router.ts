@@ -10,7 +10,7 @@ import { RouterWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import { getProvider, listProviders } from "../providers/registry.js";
+import { providerFor, providerNamesFor } from "../providers/registry.js";
 import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
 import { applyOutput } from "./output.js";
 import { ISSUE_CODE } from "../runtime/run-issues.js";
@@ -127,13 +127,13 @@ async function runModelRouter(
   nodeId: string,
   nodeProvider: string | undefined,
 ): Promise<import("../registry.js").NodeResult> {
-  const providerName = nodeProvider ?? config.provider ?? ctx.config.defaults?.provider ?? (listProviders().includes("mock") ? "mock" : listProviders()[0]);
+  const providerName = nodeProvider ?? config.provider ?? ctx.config.defaults?.provider ?? (providerNamesFor(ctx).includes("mock") ? "mock" : providerNamesFor(ctx)[0]);
   if (!providerName) {
     throw new Error(`router "${nodeId}" mode=model: no provider available. Register a provider or set provider/config.defaults.provider.`);
   }
-  const provider = getProvider(providerName);
+  const provider = providerFor(ctx, providerName);
   if (!provider) {
-    throw new Error(`router "${nodeId}" mode=model: provider "${providerName}" is not registered. Available: ${listProviders().join(", ") || "(none)"}.`);
+    throw new Error(`router "${nodeId}" mode=model: provider "${providerName}" is not registered. Available: ${providerNamesFor(ctx).join(", ") || "(none)"}.`);
   }
 
   const routeKeys = Object.keys(config.routes).filter((k) => !config.routes[k]?.default);

@@ -4,7 +4,7 @@
 
 import type { ToolSpec } from "./types.js";
 import type { NodeRunContext } from "../context.js";
-import { assertNodeTypeAllowed, nodePolicyOf } from "../node-policy.js";
+import { assertNodeTypeAllowed, assertToolAllowed, BUILTIN_TOOL_TARGETS, nodePolicyOf } from "../node-policy.js";
 import { getTool } from "./registry.js";
 import { loadResolvedSkill, runSkill } from "../nodes/skill-runner.js";
 import type { SkillDef } from "@flowgraph/skills";
@@ -71,6 +71,7 @@ export function normalizeTools(
       if (def?.schema) spec.schema = def.schema;
       specs.push(spec);
       executors.set(ref.function, async (args, ctx) => {
+        assertToolAllowed(nodePolicyOf(ctx), ref.function, `agent tool "${ref.function}"`);
         const d = getTool(ref.function);
         if (!d) throw new Error(`tool function "${ref.function}" is not registered (registerTool).`);
         return d.handler(args, ctx);
@@ -110,6 +111,7 @@ export function normalizeTools(
           };
           specs.push(spec);
           executors.set(b, async (args, ctx) => {
+            assertToolAllowed(nodePolicyOf(ctx), mapped, `agent builtin tool "${b}"`);
             const d = getTool(mapped);
             if (!d) throw new Error(`mapped builtin "${b}" → "${mapped}" is not registered.`);
             return d.handler(args, ctx);
@@ -140,13 +142,7 @@ function toolName(ref: string): string {
 }
 
 /** Map Claude/Cursor-style builtins onto registered localTools.fs handlers when present. */
-const BUILTIN_TO_FS: Record<string, string> = {
-  Read: "fs_read",
-  Write: "fs_write",
-  Edit: "fs_edit",
-  Glob: "fs_list",
-  Bash: "fs_bash",
-};
+const BUILTIN_TO_FS = BUILTIN_TOOL_TARGETS;
 
 function mapBuiltinToRegisteredTool(name: string): string | undefined {
   const mapped = BUILTIN_TO_FS[name];

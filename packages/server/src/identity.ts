@@ -98,6 +98,8 @@ export interface OidcAuthConfig {
   jwksCooldownMs?: number;
   /** How long cached JWKS keys are used before a refetch. Default 600000. */
   jwksCacheMaxAgeMs?: number;
+  /** How long a failed discovery is reused before the next request retries it. Default 5000. */
+  discoveryRetryMs?: number;
   /** Discovery / JWKS request timeout. Default 5000. */
   httpTimeoutMs?: number;
 }
@@ -282,10 +284,27 @@ export class OidcAuthenticator implements Authenticator {
       );
     }
     if (typeof doc.jwks_uri !== "string" || !doc.jwks_uri) throw new IssuerUnavailableError(`OIDC discovery at ${url} has no jwks_uri`);
+    // Keys must come over https; plain http only from the issuer's own origin
+    // (a local development issuer), never redirected elsewhere by the document.
+    let jwks: URL;
+    try {
+      jwks = new URL(doc.jwks_uri);
+    } catch {
+      throw new IssuerUnavailableError(`OIDC discovery at ${url} has an invalid jwks_uri`);
+    }
+    if (jwks.protocol !== "https:" && jwks.origin !== new URL(base).origin) {
+      throw new IssuerUnavailableError(
+        `OIDC discovery at ${url} names jwks_uri ${JSON.stringify(doc.jwks_uri)}; it must use https or the issuer's origin`,
+      );
+    }
     return doc.jwks_uri;
   }
 
-  /** Discovery runs once; a failure is retried on the next request. */
+  /**
+   * Discovery runs once. A failure is remembered for a short while
+   * (`discoveryRetryMs`, default 5 s) so requests during an issuer outage do
+   * not each refetch it; the next request after that retries.
+   */
   private getKeys(): Promise<JWTVerifyGetKey | Uint8Array> {
     if (this.config.sharedSecret) return Promise.resolve(new TextEncoder().encode(this.config.sharedSecret));
     this.keys ??= (async () => {
@@ -296,8 +315,12 @@ export class OidcAuthenticator implements Authenticator {
         cacheMaxAge: this.config.jwksCacheMaxAgeMs ?? 600_000,
       });
     })();
-    this.keys.catch(() => {
-      this.keys = undefined;
+    const keys = this.keys;
+    keys.catch(() => {
+      const retry = setTimeout(() => {
+        if (this.keys === keys) this.keys = undefined;
+      }, this.config.discoveryRetryMs ?? 5_000);
+      retry.unref?.();
     });
     return this.keys;
   }

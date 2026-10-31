@@ -16,6 +16,7 @@ import type { WorkshopAgendaItem, WorkshopContract, WorkshopResume } from "@flow
 import { applyOutput } from "./output.js";
 import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
+import { assertHostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
 
 const configSchema = WorkshopWithSchema;
@@ -144,6 +145,7 @@ async function attachDiff(
     data.diffStat = `${before.split("\n").length} → ${after.split("\n").length} lines`;
     return;
   }
+  assertHostExecAllowed(nodePolicyOf(ctx), "workshop diff (git)", `workshop node "${ctx.nodeId}"`);
   const cwdRaw = diff.cwd ? String(renderDeep(diff.cwd, scope)) : ctx.workspace;
   const cwd = path.isAbsolute(cwdRaw) ? cwdRaw : path.resolve(ctx.workspace, cwdRaw);
   const base = diff.base ? String(renderDeep(diff.base, scope)) : undefined;

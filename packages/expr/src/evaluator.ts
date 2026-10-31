@@ -14,6 +14,26 @@ export class EvalError extends Error {
   }
 }
 
+/**
+ * Names starting with this prefix in the `state` scope value are the
+ * engine's own channels (`__services`, `__worktrees`, ...). Expressions
+ * never see them: `state` evaluates to a view without them, so no form of
+ * access (`state.__x`, `state['_' + '_x']`, `keys(state)`, a bare
+ * `{{ state }}`) reads them.
+ */
+export const HIDDEN_STATE_PREFIX = "__";
+
+function visibleState(value: unknown): unknown {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return value;
+  let view: Record<string, unknown> | undefined;
+  for (const k of Object.keys(value)) {
+    if (!k.startsWith(HIDDEN_STATE_PREFIX)) continue;
+    view ??= { ...(value as Record<string, unknown>) };
+    delete view[k];
+  }
+  return view ?? value;
+}
+
 export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown {
   switch (expr.kind) {
     case "Number":
@@ -26,7 +46,7 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
       return null;
 
     case "Ident": {
-      if (expr.name in scope) return scope[expr.name];
+      if (expr.name in scope) return expr.name === "state" ? visibleState(scope[expr.name]) : scope[expr.name];
       if (strict) throw new EvalError(`Undefined identifier: ${expr.name}`);
       return null;
     }

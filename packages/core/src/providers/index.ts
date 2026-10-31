@@ -18,9 +18,14 @@ export {
   getProvider,
   hasProvider,
   listProviders,
+  providerFor,
+  providerNamesFor,
+  graphProviderList,
+  GRAPH_PROVIDERS,
   registerTool,
   getTool,
   type ToolFunctionDef,
+  type GraphProviders,
 } from "./registry.js";
 
 export { mockProvider, createScriptedProvider } from "./mock.js";

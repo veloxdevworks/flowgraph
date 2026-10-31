@@ -37,6 +37,14 @@ describe("defaultServerConfig", () => {
     expect(() => defaultServerConfig({ FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS: "http://x/" })).toThrow(/FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS/);
   });
 
+  it("reads FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS and FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS", () => {
+    expect(defaultServerConfig({}).untrustedAllowTools).toBeUndefined();
+    const c = defaultServerConfig({ FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS: " lookup_order, crm.search ", FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS: "score" });
+    expect(c.untrustedAllowTools).toEqual(["lookup_order", "crm.search"]);
+    expect(c.untrustedAllowFunctions).toEqual(["score"]);
+    expect(() => defaultServerConfig({ FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS: "a b" })).toThrow(/FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS/);
+  });
+
   it("reads FLOWGRAPH_SHUTDOWN_TIMEOUT_MS", () => {
     expect(defaultServerConfig({}).shutdownTimeoutMs).toBeUndefined();
     expect(defaultServerConfig({ FLOWGRAPH_SHUTDOWN_TIMEOUT_MS: "2500" }).shutdownTimeoutMs).toBe(2500);

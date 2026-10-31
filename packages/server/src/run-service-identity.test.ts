@@ -89,7 +89,7 @@ const dirs: string[] = [];
 const services: RunService[] = [];
 afterEach(async () => {
   for (const s of services.splice(0)) await s.close();
-  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   scopes.length = 0;
 });
 
@@ -201,6 +201,16 @@ describe("RunService with OIDC principals", () => {
     expect(scopes.at(-1)).toEqual({ value: { n: 1 }, scope: { org: "globex", project: "web", graph: "id-counter", user: "carol" } });
   });
 
+  it("admits no case or Unicode look-alike of another user's graph name", async () => {
+    const s = await service(await tmp());
+    await s.startRun({ threadId: "nm1", yaml: gate("team-flow") }, alice);
+    // Upper case, full-width "t" and Cyrillic "е" are not kebab-case names.
+    for (const lookalike of ["Team-Flow", "\uff54eam-flow", "t\u0435am-flow"]) {
+      await expect(s.startRun({ threadId: `nm-${randomUUID()}`, yaml: gate(`"${lookalike}"`) }, bob)).rejects.toThrow(/name must be kebab-case/);
+    }
+    await expect(s.startRun({ threadId: `nm-${randomUUID()}`, yaml: gate("team-flow") }, bob)).rejects.toEqual(refused("GRAPH_NAME_TAKEN", 409));
+  });
+
   it("memory refuses another principal on a bound thread even if the server record is gone", async () => {
     const dir = await tmp();
     const memory: ServerMemoryConfig = { backend: "sqlite" };
@@ -214,10 +224,26 @@ describe("RunService with OIDC principals", () => {
     const unsub = s.registry.subscribe("bound", (ev) => {
       if (ev.type === "run.error") errors.push(JSON.stringify(ev.data));
     });
-    // A same-org principal under a fresh name gets past the server checks.
+    // The thread owner is stored with the checkpoints, so the server still refuses.
     const yaml = COUNTER.replace("name: id-counter", "name: id-counter-2");
-    await expect(s.startRun({ threadId: "bound", yaml }, bob)).resolves.toMatchObject({ status: "started" });
-    expect(await settle(s, "bound", ["completed", "error"])).toBe("error");
+    await expect(s.startRun({ threadId: "bound", yaml }, bob)).rejects.toEqual(refused("THREAD_NOT_OWNED", 403));
+    // Lose the owner row too: the thread's saved checkpoints still refuse it.
+    const { openSqliteBackend } = await import("@flowgraph/checkpoint-sqlite");
+    const raw = await openSqliteBackend(path.join(dir, "memory.db"));
+    raw.db.prepare("DELETE FROM fg_thread_owners").run();
+    raw.close();
+    await expect(s.startRun({ threadId: "bound", yaml }, bob)).rejects.toMatchObject({ code: "THREAD_NOT_OWNED", message: expect.stringMatching(/saved state/) });
+    // And after a restart (in-memory checkpoints gone), a same-org principal
+    // under a fresh name gets past the server checks; memory's own thread
+    // binding refuses.
+    await s.close();
+    const s2 = await service(dir, { memory });
+    const unsub2 = s2.registry.subscribe("bound", (ev) => {
+      if (ev.type === "run.error") errors.push(JSON.stringify(ev.data));
+    });
+    await expect(s2.startRun({ threadId: "bound", yaml }, bob)).resolves.toMatchObject({ status: "started" });
+    expect(await settle(s2, "bound", ["completed", "error"])).toBe("error");
+    unsub2();
     unsub();
     expect(errors.join("\n")).toMatch(/MEMORY_SCOPE_MISMATCH|bound to a different/);
   });

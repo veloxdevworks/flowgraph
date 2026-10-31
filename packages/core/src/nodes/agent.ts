@@ -10,20 +10,16 @@ import { AgentWithSchema } from "@flowgraph/spec";
 import { renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import { getProvider, listProviders } from "../providers/registry.js";
+import { providerFor, providerNamesFor } from "../providers/registry.js";
 import { normalizeTools, mergeTools, type ToolRef, type ToolWiring } from "../providers/tools.js";
 import { expandMcpTools, requireMcpHub } from "../mcp/expand.js";
 import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
 import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
+import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
-import {
-  hydrateReplay,
-  isGraphInterrupt,
-  memoryReplayCache,
-  replayCacheKey,
-} from "../providers/replay-cache.js";
-import { REPLAY_CHANNEL, ISSUES_CHANNEL } from "../runtime/state-annotation.js";
+import { childRunConfig, isGraphInterrupt, recordedToolResult, ReplayMismatchError, ReplayStore, replayNodeKey, replayedToolResult, runScopeOf } from "../providers/replay-cache.js";
+import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
 import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
 import type { AgentMemoryConfig } from "../memory/recall.js";
@@ -53,18 +49,18 @@ export const agentNode = defineNode<Config>({
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const providerName =
           (config.hub === "deepagents" ? "deepagents" : undefined) ??
-          nodeProvider ?? ctx.config.defaults?.provider ?? defaultProviderName();
+          nodeProvider ?? ctx.config.defaults?.provider ?? defaultProviderName(ctx);
         if (!providerName) {
           throw new Error(
             `agent node "${String(nodeSpec["id"])}": no provider specified and none registered. ` +
               `Set node.provider, config.defaults.provider, or register a provider.`,
           );
         }
-        const provider = getProvider(providerName);
+        const provider = providerFor(ctx, providerName);
         if (!provider) {
           throw new Error(
             `agent node "${String(nodeSpec["id"])}": provider "${providerName}" is not registered. ` +
-              `Available: ${listProviders().join(", ") || "(none)"}.`,
+              `Available: ${providerNamesFor(ctx).join(", ") || "(none)"}.`,
           );
         }
 
@@ -74,6 +70,7 @@ export const agentNode = defineNode<Config>({
 
         let agentBody: string | undefined;
         if (config.agent) {
+          assertAgentRefAllowed(nodePolicyOf(ctx), `agent node "${String(nodeSpec["id"])}"`);
           try {
             agentBody = (await loadResolvedAgent(config.agent, ctx)).body;
           } catch (err) {
@@ -125,20 +122,23 @@ export const agentNode = defineNode<Config>({
           permission: req.permission ?? "auto",
         };
 
-        const cacheKey = replayCacheKey(ctx.meta.threadId ?? ctx.meta.runId, ctx.nodeId);
-        const persisted = (state[REPLAY_CHANNEL] as Record<string, unknown> | undefined)?.[cacheKey];
-        if (persisted && typeof persisted === "object" && !Array.isArray(persisted)) {
-          hydrateReplay(cacheKey, persisted as Record<string, unknown>);
-        }
+        // Replay entries belong to this execution of the graph (see RunScope);
+        // outside one (a node run directly), nothing is replayed across calls.
+        const runScope = runScopeOf(lgConfigOf(ctx));
+        const replayStore = runScope?.replay ?? new ReplayStore();
+        const cacheKey = replayNodeKey(runScope?.path ?? [], ctx.nodeId);
         let toolSeq = 0;
+        // A provider may hand a tool error back to the model; a replay
+        // mismatch must fail the node instead.
+        let mismatch: ReplayMismatchError | undefined;
 
         const providerCtx: ProviderRunContext = {
           node: ctx,
           signal: ctx.signal,
           emit: (type, data) => ctx.emit(`agent.${type}` as import("../events.js").EventType, data),
           replay: {
-            get: (index) => memoryReplayCache.get(cacheKey, index),
-            set: (index, value) => memoryReplayCache.set(cacheKey, index, value),
+            get: (index) => replayStore.get(cacheKey, index),
+            set: (index, value) => replayStore.set(cacheKey, index, value),
           },
           checkToolCall: (name, args) => checkToolCall(governance, name, args),
           reportToolResult: (name, args, result) => reportToolResult(governance, name, args, result),
@@ -149,15 +149,28 @@ export const agentNode = defineNode<Config>({
             // Always run permission/HITL so LangGraph interrupt indices stay aligned on replay.
             const callArgs = await checkToolCall(governance, name, args);
             const toolIndex = `tool:${toolSeq++}`;
-            const cached = memoryReplayCache.get(cacheKey, toolIndex);
-            if (cached !== undefined) return cached;
+            // A cached result is reused only for the same tool and arguments.
+            const cached = replayStore.get(cacheKey, toolIndex);
+            if (cached !== undefined) {
+              try {
+                return replayedToolResult(cached, name, args, `agent node "${ctx.nodeId}" ${toolIndex}`);
+              } catch (err) {
+                if (err instanceof ReplayMismatchError) mismatch ??= err;
+                throw err;
+              }
+            }
 
             ctx.emit("agent.tool.call", { tool: name, args: callArgs });
-            let result = await exec(callArgs, ctx, state);
+            // A node called as a tool runs one level below this agent, under
+            // this call's index, so its replay entries are its own and are
+            // saved with this agent's when it interrupts (see RunScope).
+            const lgConfig = lgConfigOf(ctx);
+            const toolCtx = lgConfig ? { ...ctx, _lgConfig: toolCallConfig(lgConfig, ctx.nodeId, toolIndex) } : ctx;
+            let result = await exec(callArgs, toolCtx, state);
             ctx.emit("agent.tool.result", { tool: name, result });
 
             result = await reportToolResult(governance, name, callArgs, result);
-            memoryReplayCache.set(cacheKey, toolIndex, result);
+            replayStore.set(cacheKey, toolIndex, recordedToolResult(name, args, result));
             return result;
           },
         };
@@ -166,6 +179,7 @@ export const agentNode = defineNode<Config>({
 
         try {
           const result = await provider.run(req, providerCtx);
+          if (mismatch) throw mismatch;
 
           if (result.stopReason === "maxSteps") {
             const maxSteps = req.maxSteps ?? 10;
@@ -188,7 +202,7 @@ export const agentNode = defineNode<Config>({
             enforceBudget(ctx, result.usage);
           }
 
-          memoryReplayCache.clear(cacheKey);
+          replayStore.clear(cacheKey);
 
           return {
             update: {
@@ -196,11 +210,10 @@ export const agentNode = defineNode<Config>({
                 nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
                 scope,
               }),
-              [REPLAY_CHANNEL]: { [cacheKey]: null },
             },
           };
         } catch (err) {
-          if (!isGraphInterrupt(err)) memoryReplayCache.clear(cacheKey);
+          if (!isGraphInterrupt(err)) replayStore.clear(cacheKey);
           throw err;
         }
       },
@@ -264,8 +277,8 @@ function reportIssueTool(): NormalizedTools {
   };
 }
 
-function defaultProviderName(): string | undefined {
-  const all = listProviders();
+function defaultProviderName(ctx: NodeRunContext): string | undefined {
+  const all = providerNamesFor(ctx);
   return all.length === 1 ? all[0] : all.includes("mock") ? "mock" : undefined;
 }
 
@@ -297,4 +310,52 @@ function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number; costU
       detail: { usedTokens: budget.usedTokens, usedUSD: budget.usedUSD },
     });
   }
+}
+
+/**
+ * The config a node called as a tool runs with: one run scope level below this
+ * agent, under the call's index, and in its own checkpoint namespace, so two
+ * subgraph calls in one task (the same subgraph twice, say) never resume each
+ * other's checkpoints. LangGraph treats `:` and `|` in a namespace as
+ * separators, so the segment uses neither.
+ *
+ * LangGraph also suffixes the namespace of the second and later subgraphs a
+ * task invokes with a per-task counter. A resumed agent skips the calls it has
+ * a cached result for, so that counter would shift and a child would open the
+ * wrong checkpoint; each call therefore counts its own subgraphs, while
+ * everything else on the task's scratchpad (interrupt counter, resume values)
+ * stays shared.
+ */
+function toolCallConfig(
+  config: { configurable?: Record<string, unknown> },
+  nodeId: string,
+  toolIndex: string,
+): { configurable?: Record<string, unknown> } {
+  const scoped = childRunConfig(childRunConfig(config, nodeId), toolIndex);
+  const prev = scoped.configurable ?? {};
+  const segment = `${nodeId}.${toolIndex.replace(":", "")}`.replace(/[:|]/g, "_");
+  const prevNs = typeof prev["checkpoint_ns"] === "string" ? prev["checkpoint_ns"] : "";
+  const configurable: Record<string, unknown> = { ...prev, checkpoint_ns: prevNs ? `${prevNs}|${segment}` : segment };
+  const scratchpad = prev[SCRATCHPAD_KEY];
+  if (scratchpad && typeof scratchpad === "object") configurable[SCRATCHPAD_KEY] = ownSubgraphCounter(scratchpad);
+  return { ...scoped, configurable };
+}
+
+/** LangGraph's per-task scratchpad key (`CONFIG_KEY_SCRATCHPAD`). */
+const SCRATCHPAD_KEY = "__pregel_scratchpad";
+
+function ownSubgraphCounter(scratchpad: object): object {
+  let subgraphCounter = 0;
+  return new Proxy(scratchpad, {
+    get: (target, key, receiver) => (key === "subgraphCounter" ? subgraphCounter : Reflect.get(target, key, receiver)),
+    set: (target, key, value, receiver) => {
+      if (key !== "subgraphCounter") return Reflect.set(target, key, value, receiver);
+      subgraphCounter = Number(value);
+      return true;
+    },
+  });
+}
+
+function lgConfigOf(ctx: unknown): { configurable?: Record<string, unknown> } | undefined {
+  return (ctx as { _lgConfig?: { configurable?: Record<string, unknown> } })._lgConfig;
 }

@@ -17,9 +17,11 @@ import { SubgraphWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { BaseStore } from "@langchain/langgraph";
+import { graphProviderList } from "../providers/registry.js";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import type { NodeRunContext } from "../context.js";
-import { assertSubgraphFileAllowed, nodePolicyOf } from "../node-policy.js";
+import { assertSubgraphFileAllowed, isReservedChannel, nodePolicyOf, withoutReservedKeys } from "../node-policy.js";
+import { childRunConfig } from "../providers/replay-cache.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
 import { applyOutput, isOutputNone } from "./output.js";
@@ -88,7 +90,9 @@ export const subgraphNode = defineNode<Config>({
 
         ctx.emit("node.output", { subgraph: label, input: Object.keys(childInput) });
 
-        const childState = await child.invoke(childInput, lgConfig);
+        // The child starts from its own engine channels (none of the parent's,
+        // none from `input`), and its run scope sits under this node.
+        const childState = await child.invoke(withoutReservedKeys(childInput), childRunConfig(lgConfig, ctx.nodeId));
         const clean = stripSubgraphState(childState);
 
         if (config.stateMap?.out) {
@@ -165,6 +169,8 @@ async function loadChild(
     sinks: [forwardSink],
     store: childStore(spec, ctx),
     ...(nodePolicyOf(ctx) ? { nodePolicy: nodePolicyOf(ctx)! } : {}),
+    // The parent's own providers, so the child answers with the same ones.
+    providers: graphProviderList(ctx),
     ...(parentMemoryRuntime(ctx) ? { memory: parentMemoryRuntime(ctx)! } : { memory: "ephemeral" as const }),
   });
 
@@ -199,10 +205,16 @@ function parentMemoryRuntime(ctx: NodeRunContext): MemoryRuntime | undefined {
   return (ctx as unknown as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
 }
 
+/**
+ * The child's state without reserved channels (every `__` name: `__once`,
+ * `__agentReplay`, `__services`, `__worktrees`, `__interrupt__`, ...). Those
+ * are the child's own bookkeeping; letting them flow into the parent would
+ * let a child write the parent's engine channels.
+ */
 function stripSubgraphState(state: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(state)) {
-    if (k === ONCE_CHANNEL || k === "__interrupt__") continue;
+    if (k === ONCE_CHANNEL || isReservedChannel(k)) continue;
     out[k] = v;
   }
   return out;
@@ -215,8 +227,11 @@ function resolveRef(
   ctx: NodeRunContext,
 ): unknown {
   if (typeof ref !== "string") return ref;
+  // stateMap refs never read reserved channels, on either side.
   if (ref.includes("{{")) {
-    return renderDeep(ref, { state: primary, result: primary, input, config: ctx.config, run: ctx.meta });
+    const visible = stripSubgraphState(primary);
+    return renderDeep(ref, { state: visible, result: visible, input, config: ctx.config, run: ctx.meta });
   }
+  if (isReservedChannel(ref.trim())) return undefined;
   return primary[ref];
 }
