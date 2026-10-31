@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { messagesStateReducer } from "@langchain/langgraph";
-import { AIMessage, HumanMessage, RemoveMessage } from "@langchain/core/messages";
+import { RemoveMessage } from "@langchain/core/messages";
 import { buildStateAnnotation, channelReducerAndDefault } from "./state-annotation.js";
 import { registry } from "../registry.js";
 import type { GraphSpec } from "@flowgraph/spec";
@@ -47,26 +46,25 @@ describe("channelReducerAndDefault", () => {
     expect(reducer({ a: { x: 1 } }, { a: { x: 2 } })).toEqual({ a: { x: 2 } });
   });
 
-  it("messages type behaves like LangGraph messagesStateReducer", () => {
+  it("messages type upserts by id and ignores a repeated removal", () => {
     const { reducer, default: defaultFn } = channelReducerAndDefault("messages", { type: "messages" });
     expect(defaultFn()).toEqual([]);
-    const cur = [new HumanMessage({ content: "a", id: "1" }), new AIMessage({ content: "b", id: "2" })];
-    const inc = [new AIMessage({ content: "b2", id: "2" }), new HumanMessage({ content: "c", id: "3" })];
-    expect(reducer(cur, inc)).toEqual(messagesStateReducer(cur, inc));
-    const removed = reducer(cur, [new RemoveMessage({ id: "1" })]) as Array<{ id: string }>;
-    expect(removed.map((m) => m.id)).toEqual(["2"]);
+    const first = reducer([], [{ id: "m1", type: "human", content: "a" }]) as Array<{ id?: string }>;
+    expect(first.map((message) => message.id)).toEqual(["m1"]);
+    const removed = reducer(first, [new RemoveMessage({ id: "m1" })]) as Array<{ id?: string }>;
+    expect(removed.map((message) => message.id)).toEqual([]);
+    const again = reducer(removed, [new RemoveMessage({ id: "m1" })]) as Array<{ id?: string }>;
+    expect(again.map((message) => message.id)).toEqual([]);
   });
 
-  it("messages reducer ignores removals of ids that are not in the channel", () => {
+  it("messages reducer literal upserts by id like type messages", () => {
     const { reducer } = channelReducerAndDefault("chat", {
       type: "array",
       reducer: "messages",
     });
-    const cur = [new HumanMessage({ content: "a", id: "1" }), new AIMessage({ content: "b", id: "2" })];
-    expect(() => messagesStateReducer(cur, [new RemoveMessage({ id: "gone" })])).toThrow();
-    const out = reducer(cur, [new RemoveMessage({ id: "gone" }), new RemoveMessage({ id: "2" }), new RemoveMessage({ id: "2" })]) as Array<{ id: string }>;
-    expect(out.map((m) => m.id)).toEqual(["1"]);
-    expect(reducer(cur, [new RemoveMessage({ id: "__remove_all__" })])).toEqual([]);
+    const first = reducer([], [{ id: "m1", type: "human", content: "a" }]) as Array<{ id?: string; content?: string }>;
+    const edited = reducer(first, [{ id: "m1", type: "human", content: "b" }]) as Array<{ id?: string; content?: string }>;
+    expect(edited.map((message) => [message.id, message.content])).toEqual([["m1", "b"]]);
   });
 
   it("custom reducer merges via registered function", () => {

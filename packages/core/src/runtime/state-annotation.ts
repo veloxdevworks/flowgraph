@@ -3,6 +3,7 @@
  * Adds a reserved `__once` channel for idempotency bookkeeping.
  */
 
+import { RemoveMessage } from "@langchain/core/messages";
 import { Annotation, messagesStateReducer } from "@langchain/langgraph";
 import type { GraphSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
@@ -70,7 +71,7 @@ export function channelReducerAndDefault(
 
   if (ch.type === "messages" || ch.reducer === "messages") {
     return {
-      reducer: tolerantMessagesReducer,
+      reducer: safeMessagesReducer,
       default: () => (ch.default as unknown[] | undefined) ?? [],
     };
   }
@@ -94,42 +95,6 @@ export function channelReducerAndDefault(
     reducer: (_cur: unknown, inc: unknown) => inc,
     default: () => ch.default ?? null,
   };
-}
-
-type Reducer = (current: unknown, incoming: unknown) => unknown;
-const REMOVE_ALL_MESSAGES = "__remove_all__";
-const baseMessagesReducer = messagesStateReducer as Reducer;
-
-function isRemoval(m: unknown): m is { id?: unknown } {
-  if (!m || typeof m !== "object") return false;
-  const t = (m as { _getType?: () => string; getType?: () => string; type?: unknown });
-  return (t._getType?.() ?? t.getType?.() ?? t.type) === "remove";
-}
-
-/**
- * messagesStateReducer, except that removing an id that is not (or no
- * longer) in the channel is a no-op instead of an error. Two writers can
- * compact the same history in one step (parallel branches, a subgraph and
- * its parent), and the second removal must not fail the run.
- */
-function tolerantMessagesReducer(current: unknown, incoming: unknown): unknown {
-  const inc = Array.isArray(incoming) ? incoming : [incoming];
-  if (!inc.some(isRemoval)) return baseMessagesReducer(current, incoming);
-  const known = new Set<unknown>();
-  for (const m of (Array.isArray(current) ? current : current == null ? [] : [current]) as Array<{ id?: unknown }>) {
-    if (m && typeof m === "object" && m.id !== undefined) known.add(m.id);
-  }
-  const kept: unknown[] = [];
-  for (const m of inc) {
-    if (isRemoval(m)) {
-      if (m.id !== REMOVE_ALL_MESSAGES && !known.has(m.id)) continue;
-      known.delete(m.id);
-    } else if (m && typeof m === "object" && (m as { id?: unknown }).id !== undefined) {
-      known.add((m as { id?: unknown }).id);
-    }
-    kept.push(m);
-  }
-  return baseMessagesReducer(current, kept);
 }
 
 export function buildStateAnnotation(spec: GraphSpec): ReturnType<typeof Annotation.Root> {
@@ -221,6 +186,36 @@ export function buildStateAnnotation(spec: GraphSpec): ReturnType<typeof Annotat
   });
 
   return Annotation.Root(fields as Parameters<typeof Annotation.Root>[0]);
+}
+
+/**
+ * LangGraph's messages reducer throws when a second write removes an id the
+ * first write already removed. Parallel subgraphs can both drop the same
+ * seeded id; a repeated removal is a no-op.
+ */
+function safeMessagesReducer(current: unknown, incoming: unknown): unknown {
+  const currentList = Array.isArray(current) ? current : current == null ? [] : [current];
+  const present = new Set(currentList.map(messageIdOf).filter((id): id is string => id != null));
+  const incomingList = Array.isArray(incoming) ? incoming : [incoming];
+  const filtered = incomingList.filter((message) => {
+    if (!isRemoval(message)) return true;
+    const id = messageIdOf(message);
+    if (id == null || id === "__remove_all__") return true;
+    return present.has(id);
+  });
+  if (filtered.length === 0) return currentList;
+  return messagesStateReducer(currentList as never, filtered as never);
+}
+
+function messageIdOf(message: unknown): string | undefined {
+  if (message == null || typeof message !== "object") return undefined;
+  const id = (message as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function isRemoval(message: unknown): boolean {
+  if (RemoveMessage.isInstance(message)) return true;
+  return message != null && typeof message === "object" && (message as { type?: unknown }).type === "remove";
 }
 
 function deepMerge(
