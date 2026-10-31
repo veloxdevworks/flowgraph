@@ -46,7 +46,7 @@ Each run on the same thread sees the earlier turns as real chat messages, the hi
 | `lastN` | `20` | For `strategy: last`: how many history and tool-loop messages to keep, besides the prompt. |
 | `toolResultMaxTokens` | none | Cut every tool result to this many tokens, with a `…[truncated: n of total tokens kept]` marker. |
 | `summarize.mode` | `model` | `model`: a model writes the summary. `extract`: a deterministic list of excerpts, with no model call. |
-| `summarize.provider` / `summarize.model` | the agent's own | Provider and model that write summaries. With neither set, the agent's own provider and model are used; a `model` alone runs on the agent's provider. Point these at a cheaper model to save cost. The provider is looked up like the agent's own, so a graph compiled with a node policy can only use the providers it was given. |
+| `summarize.provider` / `summarize.model` | the agent's own | Provider and model that write summaries. With neither set, the agent's own provider and model are used; a `model` alone runs on the agent's provider. Point these at a cheaper model to save cost. The provider is looked up like the agent's own, so a graph compiled with a node policy can only use the providers it was given; one the graph cannot use fails the node. |
 | `summarize.maxTokens` | `500` | Size of the running summary. |
 | `summarize.instructions` | none | Extra instructions for the summary model. |
 | `issuesMaxTokens` | `min(1000, ¼ of maxTokens − reserveTokens)` | Cap on the "Known issues so far" section of the system text. The newest issues are kept; a line counts the ones left out. |
@@ -67,7 +67,7 @@ Never dropped: the system text, the current prompt, and the newest tool step. Ev
 - **`none`**: send everything; only the overflow check applies.
 - **`last`**: keep the newest `lastN` messages, then trim further if still over budget.
 - **`trim`**: drop the oldest units until the call fits. A line in the system text says how many messages were left out (left out itself when only that line would push the call over budget).
-- **`summarize`**: when the call does not fit, drop the oldest units down to about 75% of the free budget and fold them into a running summary. The slack means the summarizer runs once every several calls, not every call. The summary is written by the agent's own model unless `summarize.provider` / `model` name another; if that call fails, a deterministic extract is used and a `CONTEXT_SUMMARY_FAILED` issue is recorded. With `history`, the summary is stored in the channel with id `fg-summary-<channel>-<nodeId>` and carried into later runs.
+- **`summarize`**: when the call does not fit, drop the oldest units down to about 75% of the free budget and fold them into a running summary. The slack means the summarizer runs once every several calls, not every call. The summary is written by the agent's own model unless `summarize.provider` / `model` name another; if that call fails, a deterministic extract is used and a `CONTEXT_SUMMARY_FAILED` issue is recorded. A provider the graph cannot use fails the node before its first model call. With `history`, the summary is stored in the channel with id `fg-summary-<channel>-<nodeId>` and carried into later runs.
 
 **Where the summary goes.** A summary is written from the conversation, tool output included, so it is never put in the system text. It is sent at the start of the first user turn, fenced and labelled as data:
 
@@ -145,7 +145,7 @@ Only text is counted and sent: image and other non-text message parts in a histo
 
 ## 8. Interrupt, resume and replay
 
-Fitting is deterministic: each call depends only on the history channel, the prompt and the tool loop so far. On resume the agent refits every replayed step the same way, and summaries made by a model are kept in the run's replay store under the agent's replay key, next to its cached model turns and tool results, so they are saved with an interrupt and reused on resume. A run interrupted at every tool call sends the same inputs as a straight run and does not pay for a summary twice. This also holds when the process restarts between interrupt and resume, and for an agent inside a subgraph or node called as another agent's tool.
+Fitting is deterministic: each call depends only on the history channel, the prompt and the tool loop so far. On resume the agent refits every replayed step the same way, and summaries made by a model are kept in the run's replay store under the agent's replay key, next to its cached model turns and tool results, so they are saved with an interrupt and reused on resume. Each cached summary carries a hash of everything it was made from (the previous summary, the folded messages, `summarize.maxTokens`, the estimator, and the summary provider, model and instructions), and is reused only when the resumed fit asks for the same thing. A resume that compiles a changed spec (another budget, estimator, summary settings, prompt or tools) makes those summaries again, so it folds and summarizes exactly what a straight run of the new spec does. A run interrupted at every tool call sends the same inputs as a straight run and does not pay for a summary twice. This also holds when the process restarts between interrupt and resume, and for an agent inside a subgraph or node called as another agent's tool.
 
 ## 9. Providers
 

@@ -23,7 +23,8 @@ import {
 import { summarizeWithProvider } from "../context/summarize.js";
 import { summaryBlock } from "../context/summary-block.js";
 import type { ContextMessage, ContextPolicy, ContextStats, ProviderContextManager } from "../context/types.js";
-import { providerFor } from "../providers/registry.js";
+import { providerFor, providerNamesFor } from "../providers/registry.js";
+import { cachedContextArtefact } from "./context-replay.js";
 import type { AgentRequest, AgentResult, ProviderAdapter, TokenUsage, ToolSpec } from "../providers/types.js";
 import { isGraphInterrupt, type ReplayStore } from "../providers/replay-cache.js";
 import { ISSUE_CODE } from "../runtime/run-issues.js";
@@ -57,6 +58,8 @@ interface StoredHistory {
 function isSummaryMessage(m: ContextMessage): boolean {
   return m.meta?.["summary"] === true && (m.id ?? "").startsWith(SUMMARY_ID_PREFIX);
 }
+
+const isString = (v: unknown): v is string => typeof v === "string";
 
 function summaryText(m: ContextMessage): string {
   const t = m.meta?.["text"];
@@ -132,32 +135,53 @@ export function startAgentContext(args: {
   const promptMsg: ContextMessage = { role: "user", content: args.prompt };
   const extractive = extractiveSummarizer(est);
 
+  // The summary provider is looked up before the first call, like the
+  // agent's own: one the graph cannot use fails the node instead of quietly
+  // degrading every summary to an extract.
+  const summaryProviderName =
+    policy.strategy === "summarize" && policy.summarize.mode !== "extract" ? (policy.summarize.provider ?? args.agentProvider) : undefined;
+  const summaryProvider = summaryProviderName ? providerFor(ctx, summaryProviderName) : undefined;
+  if (summaryProviderName && !summaryProvider) {
+    throw new Error(
+      `agent node "${args.nodeLabel}": with.context.summarize.provider "${summaryProviderName}" is not registered for this graph. ` +
+        `Available: ${providerNamesFor(ctx).join(", ") || "(none)"}.`,
+    );
+  }
+
   const summarizer: Summarizer | undefined =
     policy.strategy !== "summarize"
       ? undefined
       : async (r) => {
-          const idx = `ctx:summary:${r.index}`;
-          const cached = replayStore.get(cacheKey, idx);
-          if (typeof cached === "string") return cached;
-          let text: string;
           const s = policy.summarize;
           // Default: the agent's own provider and model; extract only when asked for.
           const providerName = s.mode === "extract" ? undefined : (s.provider ?? args.agentProvider);
-          if (!providerName) {
-            text = await extractive(r);
-          } else {
+          const model = s.model ?? (s.provider ? undefined : args.agentModel);
+          // Everything the summary is made from: a resume whose fit differs
+          // (budget, estimator, summary settings, prompt, tools or history)
+          // folds other messages and must not reuse this text.
+          const inputs = {
+            previous: r.previous ?? null,
+            messages: r.messages,
+            maxTokens: r.maxTokens,
+            estimator: policy.estimator ?? "bytes",
+            mode: s.mode ?? null,
+            provider: providerName ?? null,
+            model: model ?? null,
+            instructions: s.instructions ?? null,
+          };
+          return cachedContextArtefact(replayStore, cacheKey, "summary", r.index, inputs, isString, async () => {
+            if (!providerName) return extractive(r);
+            const p = summaryProvider!;
             try {
-              const p = providerFor(ctx, providerName);
-              if (!p) throw new Error(`summarize.provider "${providerName}" is not registered`);
               const res = await summarizeWithProvider(p, r, {
                 node: ctx,
-                model: s.model ?? (s.provider ? undefined : args.agentModel),
+                model,
                 instructions: s.instructions,
                 estimator: est,
                 signal: ctx.signal,
               });
-              text = res.text;
               if (res.usage) args.onUsage(res.usage);
+              return res.text;
             } catch (err) {
               if (isGraphInterrupt(err)) throw err;
               ctx.issue({
@@ -167,11 +191,9 @@ export function startAgentContext(args: {
                 impact: "The earlier-conversation summary is a list of excerpts rather than a written summary.",
                 remediation: "Check with.context.summarize.provider / model, or set summarize.mode: extract to skip the model.",
               });
-              text = await extractive(r);
+              return extractive(r);
             }
-          }
-          replayStore.set(cacheKey, idx, text);
-          return text;
+          });
         };
 
   const window = new ContextWindow({
