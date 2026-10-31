@@ -18,6 +18,7 @@ import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
 import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
+import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import { childRunConfig, isGraphInterrupt, recordedToolResult, ReplayMismatchError, ReplayStore, replayNodeKey, replayedToolResult, runScopeOf } from "../providers/replay-cache.js";
 import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
@@ -165,7 +166,17 @@ export const agentNode = defineNode<Config>({
             // this call's index, so its replay entries are its own and are
             // saved with this agent's when it interrupts (see RunScope).
             const lgConfig = lgConfigOf(ctx);
-            const toolCtx = lgConfig ? { ...ctx, _lgConfig: toolCallConfig(lgConfig, ctx.nodeId, toolIndex) } : ctx;
+            const toolLg = lgConfig ? toolCallConfig(lgConfig, ctx.nodeId, toolIndex) : undefined;
+            const toolCtx = toolLg ? { ...ctx, _lgConfig: toolLg } : ctx;
+            // This call is cached or retried as a whole. Its memory writes use
+            // the call's path, not the agent's, so a resume that skips an
+            // earlier cached call still matches this call's writes.
+            const memoryRuntime = (ctx as unknown as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
+            const toolMemory = memoryRuntime?.memoryForConfig(toolLg, ctx.nodeId, {
+              runId: ctx.meta?.runId,
+              threadId: ctx.meta?.threadId,
+            });
+            if (toolMemory) toolCtx.memory = toolMemory;
             let result = await exec(callArgs, toolCtx, state);
             ctx.emit("agent.tool.result", { tool: name, result });
 

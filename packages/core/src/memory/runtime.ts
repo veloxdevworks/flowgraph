@@ -5,6 +5,7 @@
  * root graph's scopes.
  */
 import { renderDeep } from "@flowgraph/expr";
+import { replayNodeKey, runScopeOf } from "../providers/replay-cache.js";
 import { parseDuration } from "../runtime/duration.js";
 import { createInMemoryMemoryBackend } from "./in-memory.js";
 import { createScopedMemory, defaultMemoryPolicy, type MemoryOpSource, type MemoryPolicy, type ScopedMemory } from "./handle.js";
@@ -209,10 +210,45 @@ export class MemoryRuntime {
     return (threadId ? this.bindings.get(threadId) : undefined) ?? this.baseBinding();
   }
 
+  /**
+   * Replay identity for one node attempt. A top-level node keeps its id, so
+   * records written by older builds still match. A node below another node
+   * includes the path. A tool call's path already ends in `tool:<n>`, and that
+   * path is the identity: the call is cached or retried as a whole, and two
+   * calls must not share an occurrence count.
+   */
+  static nodeIdForScope(path: readonly string[] | undefined, nodeId: string): string {
+    const p = path ?? [];
+    if (p.length === 0) return nodeId;
+    if (p[p.length - 1]?.startsWith("tool:")) return JSON.stringify(p);
+    return replayNodeKey(p, nodeId);
+  }
+
   /** `ctx.memory` for one node attempt (fresh op counter per attempt). */
   memoryFor(threadId: string | undefined, source: MemoryOpSource): ScopedMemory | undefined {
     if (!this.exposeMemory) return undefined;
     return createScopedMemory(this.backend, this.bindingFor(threadId), this.policy, { ...source, threadId });
+  }
+
+  /**
+   * `ctx.memory` for the node or tool call described by a LangGraph config.
+   * `nodeId` is the node being built; a config whose path already ends in
+   * `tool:<n>` names that tool call instead.
+   */
+  memoryForConfig(
+    lgConfig: { configurable?: Record<string, unknown> } | undefined,
+    nodeId: string,
+    meta?: { runId?: string | undefined; threadId?: string | undefined },
+  ): ScopedMemory | undefined {
+    const conf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
+    const scope = runScopeOf(lgConfig);
+    const threadId = typeof conf["thread_id"] === "string" ? conf["thread_id"] : meta?.threadId;
+    return this.memoryFor(threadId, {
+      checkpointNs: typeof conf["checkpoint_ns"] === "string" ? conf["checkpoint_ns"] : undefined,
+      taskId: typeof conf["__pregel_task_id"] === "string" ? conf["__pregel_task_id"] : undefined,
+      nodeId: MemoryRuntime.nodeIdForScope(scope?.path, nodeId),
+      runId: meta?.runId,
+    });
   }
 
   /** The graph-scoped legacy `ctx.store` view. */
