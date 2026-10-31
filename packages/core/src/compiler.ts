@@ -32,7 +32,7 @@ import {
   type RunIssue,
 } from "./runtime/run-issues.js";
 import { OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
-import { ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
+import { collectNodeWriteChannels, ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
@@ -60,8 +60,13 @@ import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMO
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
 import {
   NODE_POLICY,
+  assertGraphRuntimeAllowed,
   assertGraphToolsAllowed,
+  assertHostExecAllowed,
   assertHostProbeAllowed,
+  assertNoReservedChannels,
+  assertNoReservedInput,
+  hostExecAllowed,
   assertNodeSpecAllowed,
   assertNodeTypeAllowed,
   type NodePolicy,
@@ -344,6 +349,11 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       unregisterWebhookRoute(threadId);
     }
 
+    // Reserved channels are the engine's own bookkeeping; callers never set them.
+    if (mode === "start" && payload != null && !(payload instanceof Command)) {
+      assertNoReservedInput(payload, [...RESERVED_STATE_CHANNELS, "__interrupt__"], `graph "${graphSpec.metadata.name}" run`);
+    }
+
     // A fresh start must not replay agent LLM/tool results left behind by an
     // interrupted run on the same thread that was never resumed.
     if (mode === "start") {
@@ -352,6 +362,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const snap = await compiledLg.getState(cfg);
       await hydrateDurableRuntime(snap, threadId, graphSpec, {
         executeInvoke,
+        nodePolicy: opts.nodePolicy,
         rehydrateWebhooks: mode !== "resume",
         ...(runOpts.signal ? { signal: runOpts.signal } : {}),
         ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
@@ -472,7 +483,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             await hooks.run("run:after", { state: clean, run: runMeta, payload: { update: clean } });
           }
           events.emit("run.end", { state: clean, durationMs: Date.now() - startMs });
-          await maybeTerminateServices(graphSpec, threadId, result);
+          await maybeTerminateServices(graphSpec, threadId, result, opts.nodePolicy);
           return finish({ status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs });
         }
 
@@ -587,14 +598,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const error = err instanceof Error ? err : new Error(String(err));
       if (isAbortFailure(err, runOpts.signal)) {
         events.emit("run.aborted", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
-        await maybeTerminateServices(graphSpec, threadId);
+        await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
         return finish({ status: "aborted", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
       }
       if (hooks.has("run:error")) {
         try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
       }
       events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
-      await maybeTerminateServices(graphSpec, threadId);
+      await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
       return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
     } finally {
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
@@ -685,7 +696,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     getState: async (threadId: string) => {
       if (!checkpointer) return null;
       let snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
-      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, rehydrateWebhooks: true });
+      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, nodePolicy: opts.nodePolicy, rehydrateWebhooks: true });
       const expired = expiredWaitResume(snap);
       if (expired) {
         await executeInvoke(new Command({ resume: expired }), { threadId, resume: expired, onInterrupt: "fail" }, "resume");
@@ -762,6 +773,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   }
 
   assertGraphToolsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
+  assertGraphRuntimeAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
+  assertNoReservedChannels(
+    opts.nodePolicy,
+    [...Object.keys(spec.state?.channels ?? {}), ...spec.nodes.flatMap((n) => collectNodeWriteChannels(n))],
+    [...RESERVED_STATE_CHANNELS, "__interrupt__"],
+    `graph "${spec.metadata?.name ?? "graph"}"`,
+  );
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
   const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
   const toolWiring: ToolWiring = { mcp: mcpHub };
@@ -1533,7 +1551,13 @@ function stripReserved(state: Record<string, unknown>): Record<string, unknown> 
 }
 
 /** Tear down non-keepAlive services (and optional worktrees) when a run reaches completed/error. */
-async function maybeTerminateServices(spec: GraphSpec, threadId: string, state?: Record<string, unknown>): Promise<void> {
+/** @internal Exported for tests. */
+export async function maybeTerminateServices(
+  spec: GraphSpec,
+  threadId: string,
+  state?: Record<string, unknown>,
+  policy?: NodePolicy,
+): Promise<void> {
   const terminate = spec.runtime?.services?.terminateOnEnd ?? true;
   if (terminate) {
     try {
@@ -1542,7 +1566,8 @@ async function maybeTerminateServices(spec: GraphSpec, threadId: string, state?:
       /* best-effort cleanup — do not fail the run result */
     }
   }
-  if (spec.runtime?.worktrees?.cleanupOnEnd) {
+  // `git worktree remove` on paths from state only where worktree nodes could have made them.
+  if (spec.runtime?.worktrees?.cleanupOnEnd && hostExecAllowed(policy, "worktree")) {
     const entries = (state?.[WORKTREES_CHANNEL] as Array<{ path?: unknown; repo?: unknown }>) ?? [];
     await cleanupWorktrees(entries);
   }
@@ -1697,7 +1722,8 @@ function expiredWaitResume(snap: {
   return undefined;
 }
 
-async function hydrateDurableRuntime(
+/** @internal Exported for tests. */
+export async function hydrateDurableRuntime(
   snap: {
     values?: Record<string, unknown>;
     tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }>;
@@ -1713,6 +1739,7 @@ async function hydrateDurableRuntime(
     signal?: AbortSignal;
     sinks?: EventSink[];
     rehydrateWebhooks?: boolean;
+    nodePolicy?: NodePolicy | undefined;
   },
 ): Promise<void> {
   if (!snap) return;
@@ -1753,6 +1780,10 @@ async function hydrateDurableRuntime(
         if (current.status === "running") continue;
         const spec = raw as ServiceStartSpec;
         try {
+          // Saved state is not proof the graph may start programs: refuse
+          // under a policy that blocks service nodes or host programs.
+          assertNodeTypeAllowed(opts.nodePolicy, "service", `rehydrating service "${name}"`);
+          assertHostExecAllowed(opts.nodePolicy, `service "${name}"`, `rehydrating service "${name}"`);
           await startService(threadId, { ...spec, name });
         } catch (err) {
           (raw as Record<string, unknown>)["needsRestart"] = true;

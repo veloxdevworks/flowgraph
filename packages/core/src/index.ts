@@ -10,6 +10,7 @@ export {
 export { loadGraphImports } from "./runtime/load-imports.js";
 export type { LoadGraphImportsOptions, LoadGraphImportsResult } from "./runtime/load-imports.js";
 export {
+  collectNodeWriteChannels,
   ensureDeclaredOutputChannels,
   undeclaredOutputChannelDiagnostics,
   unconditionalFanOutDiagnostics,
@@ -31,6 +32,10 @@ export {
   assertFunctionAllowed,
   assertHostExecAllowed,
   assertNodeSpecAllowed,
+  assertGraphRuntimeAllowed,
+  assertNoReservedChannels,
+  assertNoReservedInput,
+  hostExecAllowed,
   registeredToolNamesOf,
   BUILTIN_TOOL_TARGETS,
   nodePolicyOf,

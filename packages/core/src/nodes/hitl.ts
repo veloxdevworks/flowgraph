@@ -13,6 +13,7 @@ import type { InterruptKind, NodeRunContext } from "../context.js";
 import { applyOutput } from "./output.js";
 import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
+import { assertHostExecAllowed, hostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
 
 const configSchema = HitlWithSchema;
@@ -79,7 +80,10 @@ export const hitlNode = defineNode<Config>({
             const after = config.diff.after ? String(renderDeep(config.diff.after, scope)) : "";
             data["diff"] = { before, after };
             data["diffStat"] = summarizeInlineDiff(before, after);
-          } else {
+          } else if (config.diff || hostExecAllowed(nodePolicyOf(ctx))) {
+            // An explicit git diff is refused where host programs are; a
+            // review without `diff` just skips the workspace diff there.
+            assertHostExecAllowed(nodePolicyOf(ctx), "review diff (git)", `hitl node "${String(nodeSpec["id"])}"`);
             const cwdRaw = config.diff?.cwd
               ? String(renderDeep(config.diff.cwd, scope))
               : ctx.workspace;

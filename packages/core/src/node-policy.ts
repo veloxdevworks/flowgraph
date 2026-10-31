@@ -60,7 +60,8 @@ export type NodePolicyErrorCode =
   | "HOST_PROBE_BLOCKED"
   | "TOOL_BLOCKED"
   | "FUNCTION_BLOCKED"
-  | "HOST_EXEC_BLOCKED";
+  | "HOST_EXEC_BLOCKED"
+  | "RESERVED_CHANNEL_BLOCKED";
 
 export class NodePolicyError extends Error {
   constructor(
@@ -192,11 +193,84 @@ export function assertNodeSpecAllowed(policy: NodePolicy | undefined, node: { ty
   if (type === "function" || type === "code") {
     if (typeof w.fn === "string") assertFunctionAllowed(policy, w.fn, where);
   }
-  if (type === "workshop") {
+  if (type === "workshop" || (type === "hitl" && w.mode === "review")) {
     const diff = w.diff as Record<string, unknown> | undefined;
     if (diff && typeof diff === "object" && diff.before == null && diff.after == null) {
-      assertHostExecAllowed(policy, "workshop diff (git)", where);
+      assertHostExecAllowed(policy, `${type} diff (git)`, where);
     }
+  }
+}
+
+/**
+ * Throws HOST_EXEC_BLOCKED for graph runtime settings that run host programs
+ * from saved state: `runtime.services.rehydrateOnResume` (restarts the
+ * commands recorded on `__services`) and `runtime.worktrees.cleanupOnEnd`
+ * (runs `git worktree remove` on the paths recorded on `__worktrees`).
+ */
+export function assertGraphRuntimeAllowed(
+  policy: NodePolicy | undefined,
+  graph: { runtime?: { services?: { rehydrateOnResume?: boolean | undefined } | undefined; worktrees?: { cleanupOnEnd?: boolean | undefined } | undefined } | undefined },
+  where: string,
+): void {
+  if (!policy) return;
+  const refuse = (what: string) =>
+    new NodePolicyError("HOST_EXEC_BLOCKED", `${where}: ${what} runs a program on the host, which is not allowed here${suffix(policy)}`);
+  if (graph.runtime?.services?.rehydrateOnResume && !hostExecAllowed(policy, "service")) {
+    throw refuse("runtime.services.rehydrateOnResume (restarting saved service commands)");
+  }
+  if (graph.runtime?.worktrees?.cleanupOnEnd && !hostExecAllowed(policy, "worktree")) {
+    throw refuse("runtime.worktrees.cleanupOnEnd (git worktree remove)");
+  }
+}
+
+/**
+ * Under a policy, refuse graphs that declare or write the engine's reserved
+ * state channels (service intents, worktree paths, agent replay, ...): what
+ * lands there is later acted on as if the engine had put it there.
+ */
+export function assertNoReservedChannels(
+  policy: NodePolicy | undefined,
+  channels: Iterable<string>,
+  reserved: Iterable<string>,
+  where: string,
+): void {
+  if (!policy) return;
+  const r = new Set(reserved);
+  const bad = [...new Set([...channels].filter((c) => r.has(c)))];
+  if (bad.length > 0) {
+    throw new NodePolicyError(
+      "RESERVED_CHANNEL_BLOCKED",
+      `${where}: ${bad.join(", ")} ${bad.length === 1 ? "is a reserved state channel" : "are reserved state channels"}; graphs cannot declare or write them here${suffix(policy)}`,
+    );
+  }
+}
+
+/**
+ * Whether the policy lets a run start host programs of this kind: false when
+ * it blocks host exec or blocks the node type that would normally do it.
+ */
+export function hostExecAllowed(policy: NodePolicy | undefined, nodeType?: string): boolean {
+  if (!policy) return true;
+  if (policy.blockHostExec) return false;
+  return !(nodeType && policy.blockedTypes?.includes(nodeType));
+}
+
+/**
+ * Throws RESERVED_CHANNEL_BLOCKED when caller-supplied run input sets one of
+ * the engine's reserved state channels (`__services`, `__worktrees`,
+ * `__agentReplay`, …). Those are written only by the engine; accepting them
+ * from input would let a caller plant services to restart, worktrees to
+ * remove or replayed tool results.
+ */
+export function assertNoReservedInput(input: unknown, reserved: Iterable<string>, where: string): void {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return;
+  const names = new Set(reserved);
+  const hit = Object.keys(input).filter((k) => names.has(k));
+  if (hit.length) {
+    throw new NodePolicyError(
+      "RESERVED_CHANNEL_BLOCKED",
+      `${where}: input may not set reserved state channel${hit.length > 1 ? "s" : ""} ${hit.map((h) => `"${h}"`).join(", ")}`,
+    );
   }
 }
 
