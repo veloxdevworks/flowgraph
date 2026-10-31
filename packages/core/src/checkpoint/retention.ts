@@ -352,10 +352,16 @@ export function retentionStatusForRun(
   return status === "completed" ? "finished" : "paused";
 }
 
-/** Status row saved before a run marks the thread active. */
+/** Status row seen in the same step that marks the thread active. */
 export interface SavedThreadStatus {
   status: CheckpointThreadStatus;
   updatedAt: number;
+}
+
+/** Token written by {@link CheckpointRetentionSaver.markThreadActive}, plus the row it replaced. */
+export interface ActiveThreadMark {
+  mark: string;
+  prior: SavedThreadStatus | undefined;
 }
 
 export interface CheckpointRetentionSaver {
@@ -364,13 +370,14 @@ export interface CheckpointRetentionSaver {
   /** Remember this thread's graph policy. Graph fields override the host saver. */
   noteThreadPolicy?(threadId: string, policy: ResolvedCheckpointRetention): void;
   /**
-   * Mark the thread active before the run reads checkpoint state, when thread
-   * deletion is on. Returns a token stored on that row. A later restore
-   * matches the token, so a newer row from another run is left alone.
-   * A crash after this and before the checkpoint row is written leaves the
-   * thread active until a later run or `deleteThread`.
+   * Read the thread row and mark it active in one step, when thread deletion
+   * is on. `prior` is that row (`undefined` when there was none). `mark` is
+   * the token stored on the new row. A later restore matches the token.
+   * If `prior.status` is `active`, the row is already held and must not be
+   * written back. A crash after this and before the checkpoint row is written
+   * leaves the thread active until a later run or `deleteThread`.
    */
-  markThreadActive?(threadId: string): string | undefined | Promise<string | undefined>;
+  markThreadActive?(threadId: string): ActiveThreadMark | undefined | Promise<ActiveThreadMark | undefined>;
   /** Status row for this thread, if this saver has recorded one. */
   savedThreadStatus?(threadId: string): SavedThreadStatus | undefined | Promise<SavedThreadStatus | undefined>;
   /**

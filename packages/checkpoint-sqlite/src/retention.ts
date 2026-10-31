@@ -214,13 +214,20 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
-  markThreadActive(threadId: string): string | undefined {
+  markThreadActive(threadId: string): { mark: string; prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined } | undefined {
     const policy = this.policyFor(threadId);
     if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
     this.setup();
     const mark = crypto.randomUUID();
-    this.touch(threadId, "active", Date.now(), policy, mark);
-    return mark;
+    const prior = this.sqlite.transaction(() => {
+      const row = this.sqlite
+        .prepare(`SELECT status, updated_at FROM fg_checkpoint_threads WHERE thread_id = ?`)
+        .get(threadId) as { status: CheckpointThreadStatus; updated_at: number } | undefined;
+      this.touch(threadId, "active", Date.now(), policy, mark);
+      if (!row) return undefined;
+      return { status: row.status, updatedAt: Number(row.updated_at) };
+    }).immediate();
+    return { mark, prior };
   }
 
   savedThreadStatus(threadId: string): { status: CheckpointThreadStatus; updatedAt: number } | undefined {
@@ -238,6 +245,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     activeMark: string,
   ): void {
     this.setup();
+    if (prior?.status === "active") return;
     if (!prior) {
       this.sqlite
         .prepare(`DELETE FROM fg_checkpoint_threads WHERE thread_id = ? AND status = 'active' AND active_mark = ?`)

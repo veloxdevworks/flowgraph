@@ -723,6 +723,128 @@ describe("sqlite checkpoint retention", () => {
       }
     });
   }
+
+  for (const fail of ["throw", "pruned"] as const) {
+    for (const held of ["active", "paused"] as const) {
+      it(`a ${held} thread another saver holds survives when this call ${fail === "throw" ? "throws" : "gets CHECKPOINT_PRUNED"}`, async () => {
+        const file = tmpDb();
+        const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+        const writer = createSqliteCheckpointer({ path: file, retention });
+        const other = createSqliteCheckpointer({ path: file, retention });
+        const sweeper = createSqliteCheckpointer({ path: file, retention });
+        const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+        const threadId = `${held}-${fail}`;
+        try {
+          await (writer as unknown as { put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown> }).put(
+            { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+            {
+              v: 4,
+              id: "1",
+              ts: new Date().toISOString(),
+              channel_values: { a: "keep" },
+              channel_versions: { a: 1 },
+              versions_seen: {},
+            },
+            { source: "loop", step: 1, parents: {} },
+          );
+          (writer as unknown as { noteThreadStatus(threadId: string, status: "finished", now?: number): void }).noteThreadStatus(
+            threadId,
+            "finished",
+            1,
+          );
+          // The other saver commits its status before this call's mark, and does not write again.
+          if (held === "active") {
+            (other as unknown as { markThreadActive(threadId: string): unknown }).markThreadActive(threadId);
+          } else {
+            (other as unknown as { noteThreadStatus(threadId: string, status: "paused", now?: number): void }).noteThreadStatus(
+              threadId,
+              "paused",
+              Date.now(),
+            );
+          }
+          const seen = (
+            writer as unknown as {
+              markThreadActive(threadId: string): { mark: string; prior?: { status: string } } | undefined;
+              restoreThreadStatus(threadId: string, prior: { status: string; updatedAt: number } | undefined, mark: string): void;
+            }
+          ).markThreadActive(threadId);
+          expect(seen?.prior?.status).toBe(held);
+          (writer as unknown as {
+            restoreThreadStatus(
+              threadId: string,
+              prior: { status: string; updatedAt: number } | undefined,
+              mark: string,
+            ): void;
+          }).restoreThreadStatus(threadId, seen?.prior as { status: "active" | "paused" | "finished"; updatedAt: number }, seen!.mark);
+          const compiled = await compileGraph(sqliteEarly(), { checkpointer: writer });
+          if (fail === "throw") {
+            writer.getTuple = async () => {
+              throw new Error("read failed");
+            };
+            await expect(compiled.resume({ threadId, resume: true, onInterrupt: "fail" })).rejects.toThrow(/read failed/);
+          } else {
+            const result = await compiled.resumeFrom({
+              threadId,
+              checkpointId: "bogus",
+              resume: true,
+              onInterrupt: "fail",
+            });
+            expect(result.status).toBe("error");
+            expect((result.error as { code?: string }).code).toBe(CHECKPOINT_PRUNED);
+          }
+          (sweeper as unknown as { sweep(now?: number): void }).sweep(Date.now());
+          const status = db.prepare(`SELECT status FROM fg_checkpoint_threads WHERE thread_id = ?`).get(threadId) as {
+            status: string;
+          };
+          expect(status.status).toBe(held);
+          const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+          expect(n).toBeGreaterThan(0);
+        } finally {
+          db.close();
+          (other as unknown as { db: { close(): void } }).db.close();
+          (sweeper as unknown as { db: { close(): void } }).db.close();
+        }
+      });
+    }
+  }
+
+  it("two marks on one thread each see the row the other left", async () => {
+    const file = tmpDb();
+    const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+    const writer = createSqliteCheckpointer({ path: file, retention });
+    const other = createSqliteCheckpointer({ path: file, retention });
+    const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+    const threadId = "two-marks";
+    const mark = writer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      noteThreadStatus(threadId: string, status: "finished", now?: number): void;
+      markThreadActive(threadId: string): { mark: string; prior?: { status: string; updatedAt: number } } | undefined;
+      restoreThreadStatus(threadId: string, prior: { status: string; updatedAt: number } | undefined, mark: string): void;
+    };
+    const otherMark = other as unknown as Pick<typeof mark, "markThreadActive" | "restoreThreadStatus">;
+    try {
+      await mark.put(
+        { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+        { v: 4, id: "1", ts: new Date().toISOString(), channel_values: { a: "keep" }, channel_versions: { a: 1 }, versions_seen: {} },
+        { source: "loop", step: 1, parents: {} },
+      );
+      mark.noteThreadStatus(threadId, "finished", 1);
+      const first = mark.markThreadActive(threadId);
+      const second = otherMark.markThreadActive(threadId);
+      expect([first?.prior?.status, second?.prior?.status].sort()).toEqual(["active", "finished"]);
+      for (const got of [first, second]) {
+        if (got?.prior?.status !== "active") mark.restoreThreadStatus(threadId, got?.prior, got!.mark);
+      }
+      (writer as unknown as { sweep(now?: number): void }).sweep(Date.now());
+      const status = db.prepare(`SELECT status FROM fg_checkpoint_threads WHERE thread_id = ?`).get(threadId) as { status: string };
+      expect(status.status).toBe("active");
+      const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+      expect(n).toBeGreaterThan(0);
+    } finally {
+      db.close();
+      (other as unknown as { db: { close(): void } }).db.close();
+    }
+  });
 });
 
 async function sqliteCrossSaver(

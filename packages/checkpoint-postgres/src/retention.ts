@@ -263,12 +263,34 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
-  async markThreadActive(threadId: string): Promise<string | undefined> {
+  async markThreadActive(
+    threadId: string,
+  ): Promise<{ mark: string; prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined } | undefined> {
     const policy = this.policyFor(threadId);
     if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
     const mark = crypto.randomUUID();
-    await this.touch(threadId, "active", Date.now(), policy, mark);
-    return mark;
+    const client = await this.db().connect();
+    try {
+      await client.query("BEGIN");
+      // Serialize marks for this thread, including the case where the row does not exist yet.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+        `flowgraph:checkpoint:active:${threadId}`,
+      ]);
+      const found = await client.query<{ status: CheckpointThreadStatus; updated_at: string | number }>(
+        `SELECT status, updated_at FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1 FOR UPDATE`,
+        [threadId],
+      );
+      const row = found.rows[0];
+      const prior = row ? { status: row.status, updatedAt: Number(row.updated_at) } : undefined;
+      await this.touch(threadId, "active", Date.now(), policy, mark, client);
+      await client.query("COMMIT");
+      return { mark, prior };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async savedThreadStatus(threadId: string): Promise<{ status: CheckpointThreadStatus; updatedAt: number } | undefined> {
@@ -286,6 +308,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined,
     activeMark: string,
   ): Promise<void> {
+    if (prior?.status === "active") return;
     if (!prior) {
       await this.db().query(
         `DELETE FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1 AND status = 'active' AND active_mark = $2`,
@@ -423,9 +446,10 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     now: number,
     policy: ResolvedCheckpointRetention,
     activeMark: string | null = null,
+    db: { query: pg.Pool["query"] } = this.db(),
   ): Promise<void> {
     const deletable = status === "finished" && threadDeletionRequested(policy) ? 1 : 0;
-    await this.db().query(
+    await db.query(
       `INSERT INTO ${this.q}.fg_checkpoint_threads
          (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished, active_mark)
        VALUES ($1, $2, $3, $4, $5, $6, $7)

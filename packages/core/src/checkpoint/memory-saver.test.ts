@@ -291,11 +291,25 @@ describe("thread run guard", () => {
       resolveCheckpointRetention({ finishedTtl: "1h", maxFinishedThreads: null }),
     );
     const mark = saver.markThreadActive("later");
-    expect(mark).toBeTruthy();
+    expect(mark?.mark).toBeTruthy();
     await saver.noteThreadStatus("later", "paused", 50);
-    saver.restoreThreadStatus("later", { status: "finished", updatedAt: 1 }, mark!);
+    saver.restoreThreadStatus("later", { status: "finished", updatedAt: 1 }, mark!.mark);
     const row = (saver as unknown as { threads: Map<string, { status: string }> }).threads.get("later");
     expect(row?.status).toBe("paused");
+  });
+
+  it("does not write back over a row that was already active", () => {
+    const saver = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ finishedTtl: "1h", maxFinishedThreads: null }),
+    );
+    const first = saver.markThreadActive("held");
+    const second = saver.markThreadActive("held");
+    expect(second?.prior?.status).toBe("active");
+    saver.restoreThreadStatus("held", second?.prior, second!.mark);
+    const row = (saver as unknown as { threads: Map<string, { status: string; activeMark: string | null }> }).threads.get("held");
+    expect(row?.status).toBe("active");
+    expect(row?.activeMark).toBe(second?.mark);
+    expect(row?.activeMark).not.toBe(first?.mark);
   });
 });
 

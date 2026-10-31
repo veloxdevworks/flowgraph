@@ -81,6 +81,7 @@ export {
   threadDeletionRequested,
 } from "./checkpoint/retention.js";
 export type {
+  ActiveThreadMark,
   CheckpointRetentionInput,
   CheckpointRetentionSaver,
   CheckpointThreadStatus,

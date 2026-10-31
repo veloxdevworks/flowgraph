@@ -142,12 +142,14 @@ export class FlowgraphMemorySaver extends MemorySaver {
     this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, hit[0], Date.now());
   }
 
-  markThreadActive(threadId: string): string | undefined {
+  markThreadActive(threadId: string): { mark: string; prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined } | undefined {
     const policy = this.policyFor(threadId);
     if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
+    const row = this.threads.get(threadId);
+    const prior = row ? { status: row.status, updatedAt: row.updatedAt } : undefined;
     const mark = crypto.randomUUID();
     this.touch(threadId, "active", Date.now(), policy, mark);
-    return mark;
+    return { mark, prior };
   }
 
   savedThreadStatus(threadId: string): { status: CheckpointThreadStatus; updatedAt: number } | undefined {
@@ -161,6 +163,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
     prior: { status: CheckpointThreadStatus; updatedAt: number } | undefined,
     activeMark: string,
   ): void {
+    if (prior?.status === "active") return;
     const row = this.threads.get(threadId);
     if (!row || row.status !== "active" || row.activeMark !== activeMark) return;
     if (!prior) {

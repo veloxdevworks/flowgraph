@@ -423,16 +423,13 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       runToken = retention?.beginThreadRun?.(threadId) ?? 0;
       retentionOpen = !!retention;
       try {
-        if (retention?.savedThreadStatus) {
-          priorStatus = await retention.savedThreadStatus(threadId);
-          priorRead = true;
-        }
-      } catch {
-        // A missed status read must not fail the run. An early exit then leaves the row alone.
-      }
-      try {
         const marked = await retention?.markThreadActive?.(threadId);
-        if (typeof marked === "string") activeMark = marked;
+        if (marked && typeof marked.mark === "string") {
+          activeMark = marked.mark;
+          priorStatus = marked.prior;
+          // An already-active row belongs to another run. Leave it alone.
+          priorRead = marked.prior?.status !== "active";
+        }
       } catch {
         // A missed active mark must not fail the run. The in-process hold still applies.
       }
