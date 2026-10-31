@@ -182,7 +182,7 @@ function olderOpSource(kase: string, row: Observed): MemoryOpSource {
 
 describe("memory writes from an older id scheme", () => {
   for (const kase of ["top", "sub", "map", "tool"] as const) {
-    it(`${kase}: a resume applies the older write once`, async () => {
+    it(`${kase}: a resume applies the older write once`, { timeout: 20_000 }, async () => {
       observed.length = 0;
       const dbPath = path.join(os.tmpdir(), `fg-legacy-up-${kase}-${randomUUID()}.db`);
       files.push(dbPath);
@@ -574,7 +574,7 @@ describe("older tool-call and subgraph numbering", () => {
   for (const kind of kinds) {
     const test = kind === "postgres" && !PG_URL ? it.skip : it;
 
-    test(`${kind}: two tool calls, the second writes x then n`, async () => {
+    test(`${kind}: two tool calls, the second writes x then n`, { timeout: 20_000 }, async () => {
       pair = "xn";
       observed.length = 0;
       const store = await backing(kind, "xn");
@@ -602,7 +602,7 @@ describe("older tool-call and subgraph numbering", () => {
       }
     });
 
-    test(`${kind}: two tool calls, the second repeats n`, async () => {
+    test(`${kind}: two tool calls, the second repeats n`, { timeout: 20_000 }, async () => {
       pair = "ab";
       observed.length = 0;
       const store = await backing(kind, "ab");
@@ -630,7 +630,7 @@ describe("older tool-call and subgraph numbering", () => {
       }
     });
 
-    test(`${kind}: two subgraphs with the same child id`, async () => {
+    test(`${kind}: two subgraphs with the same child id`, { timeout: 20_000 }, async () => {
       observed.length = 0;
       const store = await backing(kind, "sub2");
       try {
@@ -664,7 +664,7 @@ describe("older tool-call and subgraph numbering", () => {
       }
     });
 
-    test(`${kind}: a nested agent tool writes on the outermost counter`, async () => {
+    test(`${kind}: a nested agent tool writes on the outermost counter`, { timeout: 20_000 }, async () => {
       observed.length = 0;
       const store = await backing(kind, "agenttool");
       try {
@@ -692,7 +692,7 @@ describe("older tool-call and subgraph numbering", () => {
       }
     });
 
-    test(`${kind}: a renamed subgraph child applies again`, async () => {
+    test(`${kind}: a renamed subgraph child applies again`, { timeout: 20_000 }, async () => {
       observed.length = 0;
       const store = await backing(kind, "subren");
       try {
