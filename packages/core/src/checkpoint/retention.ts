@@ -65,6 +65,18 @@ export interface CheckpointRetentionInput {
    */
   maxFinishedThreads?: number | null | undefined;
   /**
+   * How long an `active` thread row may go without activity before a sweep
+   * treats its run as abandoned (the process stopped without recording a
+   * status). A duration string (`7d`, `12h`) or milliseconds. Default `7d`.
+   * Activity is the active mark at run start and every checkpoint the run
+   * writes, so a run that keeps checkpointing is never abandoned. An
+   * abandoned row becomes a finished thread as of its last activity, and
+   * `finishedTtl` and `maxFinishedThreads` then decide when it is deleted.
+   * Only applies when thread deletion is on. `null` keeps active rows until
+   * a later run or `deleteThread`. Must be positive.
+   */
+  activeTtl?: string | number | null | undefined;
+  /**
    * Store each channel version once (sqlite and in-memory). Postgres already
    * versions blobs; unreferenced versions are deleted on prune either way.
    * Default true.
@@ -86,9 +98,14 @@ export interface ResolvedCheckpointRetention {
   finishedTtlMs: number | null;
   /** `null` disables the count cap. */
   maxFinishedThreads: number | null;
+  /** `null` never treats an active row as abandoned. */
+  activeTtlMs: number | null;
   dedupeChannels: boolean;
   vacuum: CheckpointVacuum;
 }
+
+/** Default {@link CheckpointRetentionInput.activeTtl}: 7 days. */
+export const DEFAULT_ACTIVE_TTL_MS = 7 * 86_400_000;
 
 export const DEFAULT_CHECKPOINT_RETENTION: ResolvedCheckpointRetention = {
   enabled: true,
@@ -97,6 +114,8 @@ export const DEFAULT_CHECKPOINT_RETENTION: ResolvedCheckpointRetention = {
   /** Thread deletion is opt-in. */
   finishedTtlMs: null,
   maxFinishedThreads: null,
+  /** Well above any single checkpoint gap a live run should have. */
+  activeTtlMs: DEFAULT_ACTIVE_TTL_MS,
   dedupeChannels: true,
   vacuum: "auto",
 };
@@ -140,6 +159,46 @@ function countInt(n: unknown, name: string, min: number): number {
     );
   }
   return n;
+}
+
+/**
+ * `error.code` when a run waiting in process for an answer could not store its
+ * thread row as waiting, or as active again after the answer. The run stops
+ * rather than wait while another host's sweep could reclaim the thread.
+ */
+export const THREAD_WAIT_NOT_RECORDED = "THREAD_WAIT_NOT_RECORDED";
+
+/**
+ * `error.code` when a run waiting in process finds its thread row is no longer
+ * its own: another run took the thread over, a sweep reclaimed it, or it was
+ * deleted. The run stops instead of applying the answer.
+ */
+export const THREAD_MOVED_ON = "THREAD_MOVED_ON";
+
+export type ThreadWaitErrorCode = typeof THREAD_WAIT_NOT_RECORDED | typeof THREAD_MOVED_ON;
+
+export function threadWaitError(
+  code: ThreadWaitErrorCode,
+  threadId: string,
+  when: "before" | "after",
+  cause?: unknown,
+): Error & { code: ThreadWaitErrorCode; parkError?: unknown } {
+  const reason = cause instanceof Error ? `: ${cause.message}` : "";
+  const message =
+    code === THREAD_WAIT_NOT_RECORDED
+      ? when === "before"
+        ? `Thread "${threadId}" could not be stored as waiting before asking for an answer${reason}. ` +
+          "The run stopped so another host cannot reclaim the thread while it waits; resume it to continue."
+        : `Thread "${threadId}" could not be stored as active after the answer${reason}. ` +
+          "The run stopped without applying the answer; resume it to continue."
+      : when === "before"
+        ? `Thread "${threadId}" was taken over, reclaimed, or deleted before this run could wait for an answer. ` +
+          "The run stopped without asking."
+        : `Thread "${threadId}" was taken over, reclaimed, or deleted while this run waited for an answer. ` +
+          "The run stopped without applying the answer.";
+  const err = new Error(message, cause === undefined ? undefined : { cause }) as Error & { code: ThreadWaitErrorCode };
+  err.code = code;
+  return err;
 }
 
 /** `error.code` when resume names a checkpoint retention has already dropped. */
@@ -240,6 +299,7 @@ export function resolveCheckpointRetention(
     if (src.maxInterruptPoints !== undefined) merged.maxInterruptPoints = src.maxInterruptPoints;
     if (src.finishedTtl !== undefined) merged.finishedTtl = src.finishedTtl;
     if (src.maxFinishedThreads !== undefined) merged.maxFinishedThreads = src.maxFinishedThreads;
+    if (src.activeTtl !== undefined) merged.activeTtl = src.activeTtl;
     if (src.dedupeChannels !== undefined) merged.dedupeChannels = src.dedupeChannels;
     if (src.vacuum !== undefined) merged.vacuum = src.vacuum;
   }
@@ -256,6 +316,14 @@ export function resolveCheckpointRetention(
       : merged.maxFinishedThreads === null
         ? null
         : countInt(merged.maxFinishedThreads, "maxFinishedThreads", 0);
+  let activeTtlMs = DEFAULT_CHECKPOINT_RETENTION.activeTtlMs;
+  if (merged.activeTtl === null) activeTtlMs = null;
+  else if (merged.activeTtl !== undefined) {
+    activeTtlMs = retentionDurationMs(merged.activeTtl);
+    if (activeTtlMs <= 0) {
+      throw new Error(`Invalid activeTtl: ${JSON.stringify(merged.activeTtl)}. Expected a positive duration or null.`);
+    }
+  }
 
   return {
     enabled,
@@ -271,6 +339,7 @@ export function resolveCheckpointRetention(
     ),
     finishedTtlMs,
     maxFinishedThreads,
+    activeTtlMs,
     dedupeChannels: merged.dedupeChannels ?? DEFAULT_CHECKPOINT_RETENTION.dedupeChannels,
     vacuum: merged.vacuum ?? DEFAULT_CHECKPOINT_RETENTION.vacuum,
   };
@@ -352,6 +421,52 @@ export function retentionStatusForRun(
   return status === "completed" ? "finished" : "paused";
 }
 
+/** Policy recorded on an active row, applied if a sweep finds the run abandoned. */
+export interface ActiveRowPolicy {
+  /** `0` means the row's policy never treats it as abandoned. */
+  activeTtlMs: number;
+  finishedTtlMs: number | null;
+  maxFinishedThreads: number | null;
+}
+
+/**
+ * Whether a sweep at `now` treats an active row as abandoned, and the
+ * finished-thread policy to give it. A row stamped by this build carries its
+ * own policy. A row stamped before `activeTtl` existed (`recorded` undefined)
+ * uses the sweeping saver's policy, when that policy deletes threads.
+ * `held` is true while this process is running or parking the thread; such a
+ * row is never abandoned, however old.
+ */
+export function abandonedActivePolicy(args: {
+  updatedAt: number;
+  now: number;
+  held: boolean;
+  recorded: ActiveRowPolicy | undefined;
+  fallback: ResolvedCheckpointRetention;
+}): ActiveRowPolicy | undefined {
+  if (args.held) return undefined;
+  let policy = args.recorded;
+  if (!policy) {
+    const host = args.fallback;
+    if (!threadDeletionRequested(host) || host.activeTtlMs === null) return undefined;
+    policy = { activeTtlMs: host.activeTtlMs, finishedTtlMs: host.finishedTtlMs, maxFinishedThreads: host.maxFinishedThreads };
+  }
+  if (!Number.isFinite(policy.activeTtlMs) || policy.activeTtlMs <= 0) return undefined;
+  if (args.now - args.updatedAt < policy.activeTtlMs) return undefined;
+  return policy;
+}
+
+/**
+ * Lower bound for a sweep's scan of active rows stamped before `activeTtl`
+ * existed: they fall back to the sweeping saver's policy, so only rows at or
+ * before this time can be abandoned. Matches nothing when that policy does
+ * not reclaim. The scan narrows; {@link abandonedActivePolicy} decides.
+ */
+export function abandonedFallbackCutoff(fallback: ResolvedCheckpointRetention, now: number): number {
+  if (!threadDeletionRequested(fallback) || fallback.activeTtlMs === null) return Number.MIN_SAFE_INTEGER;
+  return now - fallback.activeTtlMs;
+}
+
 /** Status row seen in the same step that marks the thread active. */
 export interface SavedThreadStatus {
   status: CheckpointThreadStatus;
@@ -362,6 +477,8 @@ export interface SavedThreadStatus {
 export interface ActiveThreadMark {
   mark: string;
   prior: SavedThreadStatus | undefined;
+  /** `updated_at` written with the mark. A restore also matches it. */
+  markedAt?: number;
 }
 
 export interface CheckpointRetentionSaver {
@@ -374,22 +491,39 @@ export interface CheckpointRetentionSaver {
    * is on. `prior` is that row (`undefined` when there was none). `mark` is
    * the token stored on the new row. A later restore matches the token.
    * If `prior.status` is `active`, the row is already held and must not be
-   * written back. A crash after this and before the checkpoint row is written
-   * leaves the thread active until a later run or `deleteThread`.
+   * written back. If the process stops while the row is active, a sweep
+   * treats it as abandoned once its last activity (this mark or a checkpoint
+   * write) is older than `activeTtl`.
    */
   markThreadActive?(threadId: string): ActiveThreadMark | undefined | Promise<ActiveThreadMark | undefined>;
   /** Status row for this thread, if this saver has recorded one. */
   savedThreadStatus?(threadId: string): SavedThreadStatus | undefined | Promise<SavedThreadStatus | undefined>;
   /**
    * Put back the status from before {@link markThreadActive}, only when the
-   * row is still this call's active mark. `undefined` removes that row.
-   * A newer status from another run is left alone. Checkpoints stay.
+   * row is still this call's active mark. When `markedAt` is given the row
+   * must also still carry that timestamp, so a row written since the mark
+   * (a checkpoint, another writer) is not rolled back. `undefined` removes
+   * that row. A newer status from another run is left alone. Checkpoints stay.
    */
   restoreThreadStatus?(
     threadId: string,
     prior: SavedThreadStatus | undefined,
     activeMark: string,
+    markedAt?: number,
   ): void | Promise<void>;
+  /**
+   * A run is about to wait in-process for an answer (`resolveInterrupt`).
+   * Store its row as `paused`, keeping `activeMark`, so a sweep on another
+   * host does not treat the quiet row as abandoned. Only applies while the
+   * row is still active under `activeMark`. Returns whether it did.
+   */
+  noteThreadWaiting?(threadId: string, activeMark: string): boolean | Promise<boolean>;
+  /**
+   * The answer arrived. Set the row back to `active` as fresh activity, only
+   * while it is still the paused row {@link noteThreadWaiting} left under
+   * `activeMark`. Returns whether it did.
+   */
+  noteThreadAnswered?(threadId: string, activeMark: string): boolean | Promise<boolean>;
   /** Mark a thread in use. Returns a token for {@link endThreadRun}. */
   beginThreadRun?(threadId: string): number;
   /**

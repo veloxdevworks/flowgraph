@@ -41,6 +41,11 @@ export interface SqliteCheckpointerOptions {
    * keeps every checkpoint.
    */
   retention?: boolean | CheckpointRetentionInput | null;
+  /**
+   * Milliseconds since the epoch, used for retention timestamps and sweeps.
+   * Defaults to `Date.now`. Meant for tests.
+   */
+  clock?: () => number;
 }
 
 /**
@@ -57,7 +62,11 @@ export function createSqliteCheckpointer(
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  const saver = new FlowgraphSqliteSaver(openDatabase(dbPath), resolveCheckpointRetention(opts.retention));
+  const saver = new FlowgraphSqliteSaver(
+    openDatabase(dbPath),
+    resolveCheckpointRetention(opts.retention),
+    opts.clock ? { clock: opts.clock } : undefined,
+  );
   saver.prepare();
   return saver;
 }
@@ -99,7 +108,11 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
   const graphNames = createSqliteGraphNameRegistry(db);
   const threadOwners = createSqliteThreadOwnerRegistry(db);
   await maybeSweep(memory, opts.sweepIntervalMs ?? 3_600_000);
-  const saver = new FlowgraphSqliteSaver(db, resolveCheckpointRetention(opts.retention));
+  const saver = new FlowgraphSqliteSaver(
+    db,
+    resolveCheckpointRetention(opts.retention),
+    opts.clock ? { clock: opts.clock } : undefined,
+  );
   saver.prepare();
   const checkpointer = saver as unknown as BaseCheckpointSaver;
   return {
@@ -118,6 +131,7 @@ export { SqliteSaver };
 export {
   FG_CHECKPOINT_TYPE,
   FlowgraphSqliteSaver,
+  type FlowgraphSqliteSaverOptions,
   migrateSqliteCheckpointRetention,
   sqliteCheckpointStats,
   type SqliteCheckpointStats,

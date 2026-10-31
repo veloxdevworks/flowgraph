@@ -36,5 +36,9 @@ describe("runtime backend enums", () => {
     expect(RuntimeSchema.parse({ checkpoint: { retention: false } }).checkpoint?.retention).toBe(false);
     expect(RuntimeSchema.safeParse({ checkpoint: { retention: { maxCheckpoints: 0 } } }).success).toBe(false);
     expect(RuntimeSchema.safeParse({ checkpoint: { retention: { finishedTtl: "soon" } } }).success).toBe(false);
+    expect(RuntimeSchema.parse({ checkpoint: { retention: { activeTtl: "2d" } } }).checkpoint?.retention).toMatchObject({ activeTtl: "2d" });
+    expect(RuntimeSchema.parse({ checkpoint: { retention: { activeTtl: null } } }).checkpoint?.retention).toMatchObject({ activeTtl: null });
+    expect(RuntimeSchema.safeParse({ checkpoint: { retention: { activeTtl: "0h" } } }).success).toBe(false);
+    expect(RuntimeSchema.safeParse({ checkpoint: { retention: { activeTtl: "later" } } }).success).toBe(false);
   });
 });

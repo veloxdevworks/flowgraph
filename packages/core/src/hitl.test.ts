@@ -92,6 +92,25 @@ describe("hitl node", () => {
     expect((r2.state["gateResult"] as { approved: boolean }).approved).toBe(true);
   });
 
+  it("an in-process answer of false, null, or undefined denies the approval", async () => {
+    for (const answer of [false, null, undefined]) {
+      const compiled = await compileGraph(hitlGraph("approve"), {});
+      let asked = 0;
+      const r = await compiled.run({
+        threadId: `hitl-deny-${String(answer)}`,
+        onInterrupt: "prompt",
+        resolveInterrupt: async () => {
+          asked++;
+          return answer;
+        },
+      });
+      expect(r.error?.message).toBeUndefined();
+      expect(r.status).toBe("completed");
+      expect(asked).toBe(1);
+      expect((r.state["gateResult"] as { approved: boolean }).approved).toBe(false);
+    }
+  });
+
   it("choice mode maps a 1-based index to the choice string", async () => {
     const compiled = await compileGraph(hitlGraph("choice"), {});
     await compiled.run({ threadId: "hitl-idx", onInterrupt: "fail" });
@@ -181,6 +200,24 @@ describe("parallel HITL interrupts", () => {
     expect(r2.status).toBe("completed");
     expect((r2.state["gateA"] as { approved: boolean }).approved).toBe(true);
     expect((r2.state["gateB"] as { answer: string }).answer).toBe("clarified");
+  });
+
+  it("an in-process answer of false applies to every pending interrupt", async () => {
+    const compiled = await compileGraph(parallelHitlSpec(), {});
+    let asked = 0;
+    const r = await compiled.run({
+      threadId: "hitl-par-deny",
+      onInterrupt: "prompt",
+      resolveInterrupt: async (pending) => {
+        asked++;
+        expect(pending).toHaveLength(2);
+        return false;
+      },
+    });
+    expect(r.status).toBe("completed");
+    expect(asked).toBe(1);
+    expect((r.state["gateA"] as { approved: boolean }).approved).toBe(false);
+    expect(r.state["gateB"]).toBeDefined();
   });
 
   it("partial map resume re-raises the remaining interrupt", async () => {
