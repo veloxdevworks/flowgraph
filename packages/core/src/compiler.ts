@@ -893,7 +893,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const agentAliases: Record<string, string> = { ...(opts.runConfig?.agents ?? {}), ...imported.agentAliases };
   const subgraphAliases: Record<string, string> = { ...(opts.runConfig?.subgraphs ?? {}), ...imported.subgraphAliases };
 
-  const StateAnnotation = buildStateAnnotation(spec);
+  const StateAnnotation = buildStateAnnotation(spec, (msg, data) => {
+    events.emit("log", { level: "warn", msg, ...data }, {});
+  });
   const graph = new StateGraph(StateAnnotation);
 
   let budget: BudgetState | undefined;
@@ -941,6 +943,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       skills: skillAliases,
       agents: agentAliases,
       subgraphs: subgraphAliases,
+      // Parent channel reducers for subgraph merge-back. Set after
+      // ensureDeclaredOutputChannels so auto-declared targets are included.
+      channels: spec.state?.channels ?? {},
     },
     secrets: createEnvSecretProvider(),
     events,

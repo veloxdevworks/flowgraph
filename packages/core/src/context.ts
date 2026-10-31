@@ -2,6 +2,7 @@
  * RunContext — threaded through compilation and execution.
  */
 
+import type { GraphSpec } from "@flowgraph/spec";
 import type { EventBus, EventType } from "./events.js";
 import type { HookBus } from "./hooks/bus.js";
 import type { McpHub } from "./mcp/types.js";
@@ -55,6 +56,11 @@ export interface RunConfig {
   agents?: Record<string, string> | undefined;
   /** Subgraph alias map: alias → child graph path/package */
   subgraphs?: Record<string, string> | undefined;
+  /**
+   * Channel definitions for this graph. The compiler sets this so a subgraph
+   * node can apply the parent's reducer when merging child state back.
+   */
+  channels?: NonNullable<GraphSpec["state"]>["channels"] | undefined;
 }
 
 export interface BudgetState {

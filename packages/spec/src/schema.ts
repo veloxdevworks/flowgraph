@@ -641,10 +641,23 @@ export const ScriptWithSchema = BaseWithSchema.extend({
 export const SubgraphWithSchema = BaseWithSchema.extend({
   stateMap: z
     .object({
-      in: z.record(z.string()).optional(),
-      out: z.record(z.string()).optional(),
+      /** Child channel ← parent channel name or `{{ }}` expression. */
+      in: z
+        .record(z.string())
+        .optional()
+        .describe("Child channel ← parent channel or {{ }} expression"),
+      /**
+       * Parent channel ← child channel name or `{{ }}` expression.
+       * Keys are parent channels (where the value is written). Values read the child.
+       * Omit to merge channels that share a name; the parent's reducer applies.
+       */
+      out: z
+        .record(z.string())
+        .optional()
+        .describe("Parent channel ← child channel or {{ }} expression"),
     })
-    .optional(),
+    .optional()
+    .describe("Explicit projection between parent and child channels"),
 });
 
 // map node
