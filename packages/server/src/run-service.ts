@@ -145,6 +145,10 @@ export class RunService {
 
   async init(): Promise<void> {
     await this.getCheckpointer();
+    if (this.multiUser) {
+      // A failure here is not fatal: each replica still copies its own meta owners on first access.
+      await this.backfillThreadOwners().catch((err: unknown) => log("error", "thread-owners.backfill failed", errorFields(err)));
+    }
     log("info", "run-service ready", {
       database: this.config.databaseUrl ? "postgres" : "memory",
       memory: this.config.memory?.backend ?? "memory",
@@ -348,6 +352,35 @@ export class RunService {
     updateGraphMeta(this.config.graphStoreDir, threadId, patch).catch((err: unknown) => {
       log("warn", "graph meta update failed", { threadId, ...errorFields(err) });
     });
+  }
+
+  /**
+   * Copy thread owners recorded only in this replica's graph-store meta files
+   * (threads started before owners were kept with the checkpoints) into the
+   * shared thread-owner registry, so other replicas serve those threads to
+   * their owners. Idempotent: threads that already have an owner are left
+   * alone, and a meta owner that disagrees with the registry is logged, not
+   * changed. Runs from init() on multi-user servers.
+   */
+  async backfillThreadOwners(): Promise<{ claimed: number; existing: number; conflicts: number; skipped: number }> {
+    const counts = { claimed: 0, existing: 0, conflicts: 0, skipped: 0 };
+    const registry = await this.threadOwnerRegistry();
+    for (const meta of await listPersistedGraphs(this.config.graphStoreDir)) {
+      const owner = meta.owner;
+      if (!meta.threadId || !owner?.id) {
+        counts.skipped++;
+        continue;
+      }
+      const claim = await registry.claim(meta.threadId, owner.id, owner.org ?? "");
+      if (claim.created) counts.claimed++;
+      else if (claim.owner === owner.id) counts.existing++;
+      else {
+        counts.conflicts++;
+        log("warn", "thread-owners.backfill.conflict", { threadId: meta.threadId });
+      }
+    }
+    if (counts.claimed > 0 || counts.conflicts > 0) log("info", "thread-owners.backfill", counts);
+    return counts;
   }
 
   /** Run an owner lookup; any failure refuses the call rather than guessing. */

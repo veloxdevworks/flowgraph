@@ -155,6 +155,31 @@ describe.skipIf(!PG_URL)("thread ownership shared through Postgres", () => {
     }
   });
 
+  it("startup copies owners from pre-upgrade meta files so other replicas serve the owner", async () => {
+    const dir = await tmp();
+    const a = await service(dir, { databaseUrl: PG_URL! });
+    const t = `backfill-${randomUUID()}`;
+    const g = gate(`alice-${randomUUID().slice(0, 8)}`);
+    await a.startRun({ threadId: t, yaml: g, input: { secret: "bf1" } }, alice);
+    expect(await settle(a, t, ["interrupted", "error"])).toBe("interrupted");
+    await a.close();
+    // As if the thread were started before owners were kept with the checkpoints.
+    const { openPostgresBackend } = await import("@flowgraph/checkpoint-postgres");
+    const raw = await openPostgresBackend(PG_URL!);
+    await raw.pool.query(`DELETE FROM public.fg_thread_owners WHERE thread_id = $1`, [t]);
+    await raw.close();
+    // Restarting the replica that has the meta file records the owner...
+    const a2 = await service(dir, { databaseUrl: PG_URL! });
+    // ...so a replica without it serves alice and refuses bob.
+    const b = await service(await tmp(), { databaseUrl: PG_URL! });
+    expect((await b.getState(t, g, alice)).state?.values).toMatchObject({ secret: "bf1" });
+    await expectBobRefused(b, t);
+    // Running it again changes nothing.
+    const again = await a2.backfillThreadOwners();
+    expect(again.claimed).toBe(0);
+    expect(again.existing).toBeGreaterThanOrEqual(1);
+  });
+
   it("concurrent starts of one new thread id on two servers give it to exactly one user", async () => {
     const a = await service(await tmp(), { databaseUrl: PG_URL! });
     const b = await service(await tmp(), { databaseUrl: PG_URL! });
@@ -200,6 +225,25 @@ describe("thread ownership without Postgres", () => {
     s.registry.remove(t);
     await expectBobRefused(s, t);
     expect((await s.getState(t, g, alice)).state?.values).toMatchObject({ secret: "m1" });
+  });
+
+  it("backfills owners from meta files idempotently and leaves conflicting owners alone", async () => {
+    const dir = await tmp();
+    const s = await service(dir);
+    const t = `bfm-${randomUUID()}`;
+    await s.startRun({ threadId: t, yaml: gate(`alice-${randomUUID().slice(0, 8)}`), input: {} }, alice);
+    expect(await settle(s, t, ["interrupted", "error"])).toBe("interrupted");
+    const { createInMemoryThreadOwnerRegistry } = await import("@flowgraph/core");
+    const fresh = createInMemoryThreadOwnerRegistry();
+    (s as unknown as { threadOwners: unknown }).threadOwners = fresh;
+    expect(await s.backfillThreadOwners()).toMatchObject({ claimed: 1, existing: 0, conflicts: 0 });
+    expect((await fresh.get(t))?.owner).toBe(alice.id);
+    expect(await s.backfillThreadOwners()).toMatchObject({ claimed: 0, existing: 1, conflicts: 0 });
+    const other = createInMemoryThreadOwnerRegistry();
+    await other.claim(t, bob.id, "acme");
+    (s as unknown as { threadOwners: unknown }).threadOwners = other;
+    expect(await s.backfillThreadOwners()).toMatchObject({ claimed: 0, conflicts: 1 });
+    expect((await other.get(t))?.owner).toBe(bob.id);
   });
 
   it("refuses when the owner cannot be looked up", async () => {
