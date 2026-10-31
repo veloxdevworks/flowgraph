@@ -221,7 +221,7 @@ nodes:
 
 Because state lives entirely in channels, it is exactly what the checkpointer persists. On resume, channels are restored from the checkpoint and execution continues. This means:
 
-- Keep large/binary blobs **out** of state where possible (store a reference/URI); checkpoints serialize whole state per superstep.
+- Keep large/binary blobs **out** of state where possible (store a reference/URI). Each checkpoint records channel values, and a channel that changes stores a new full copy of its value. Retention (see [07 — Checkpointing](./07-runtime-and-execution.md#3-checkpointing--durability)) keeps that history bounded; it does not delta-compress a value that grows on every run.
 - Secrets are never in state, so checkpoints are safe to persist and inspect.
 - `messages` channels grow over a run; for long agent loops, prefer the agent node's internal context management over stuffing everything into a graph channel.
 
@@ -392,7 +392,7 @@ This gives the agent a `remember({ scope, key, value, attrs? })` tool. `scope` i
 
 The server's runtime `checkpoint.backend` comes from its own config, not the uploaded graph. Who memory belongs to depends on the server's auth mode ([server README](../packages/server/README.md#auth)). With OIDC, each run writes as its caller (`org` from the token, `project` from a configured claim or `FLOWGRAPH_PROJECT`, `user` = the token subject), and only that caller can resume the thread. With the single shared token, or with auth off, every run on one server shares a single identity: `FLOWGRAPH_ORG` (required; with `FLOWGRAPH_MEMORY_BACKEND=postgres` or `sqlite` and no org the server refuses to start), `FLOWGRAPH_PROJECT` (default `local`) and `FLOWGRAPH_USER`. Either way, `ctx.store` in a server run is scoped to the same identity. On the default backend, a `runtime.memory` graph fails with `MEMORY_BACKEND_UNAVAILABLE` and a pointer to `FLOWGRAPH_MEMORY_BACKEND`. None of this applies to the CLI: local runs keep memory in the checkpoint file and never need the server. Plain graphs (no `runtime.memory`) keep the in-process `ctx.store`.
 
-> **Running more than one server replica?** Use `FLOWGRAPH_MEMORY_BACKEND=postgres`. With `sqlite`, each replica writes its own local file even when checkpoints are in a shared Postgres `DATABASE_URL`, so memory silently splits per replica: a run resumed on another replica, or the next run of the same graph, does not see what the first one wrote.
+> **Running more than one server replica?** Use `FLOWGRAPH_MEMORY_BACKEND=postgres`. With `sqlite`, each replica writes its own local file even when checkpoints are in a shared Postgres `DATABASE_URL`, so memory silently splits per replica: a run resumed on another replica, or the next run of the same graph, does not see what the first one wrote. Checkpoint thread deletion on that shared database re-checks the thread is still finished before removing it, so a replica that has marked the thread active is not swept by another replica.
 
 `compileGraph` never falls back to in-memory silently: `runtime.memory` without a durable host backend is a compile error, and `flowgraph validate` reports the same problem (`MEMORY_BACKEND_UNAVAILABLE`) before you run.
 

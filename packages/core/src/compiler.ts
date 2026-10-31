@@ -3,7 +3,7 @@
  * plus run/resume/inspect with durability, HITL, and retry/timeout.
  */
 
-import { START, END, StateGraph, MemorySaver, Command, Send, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
+import { START, END, StateGraph, Command, Send, type BaseCheckpointSaver, type BaseStore, type LangGraphRunnableConfig } from "@langchain/langgraph";
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
@@ -23,6 +23,14 @@ import {
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
 import { buildStateAnnotation, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
+import {
+  checkpointPrunedError,
+  isRetentionSaver,
+  resolveCheckpointRetention,
+  retentionStatusForRun,
+  type CheckpointRetentionInput,
+} from "./checkpoint/retention.js";
 import {
   appendRunIssue,
   issueDedupeKey,
@@ -86,6 +94,13 @@ export interface CompileOptions {
   sinks?: EventSink[];
   runConfig?: RunConfig;
   checkpointer?: "memory" | "none" | BaseCheckpointSaver;
+  /**
+   * Retention for the in-memory checkpointer this compile creates. Host
+   * fields override `runtime.checkpoint.retention`. Ignored when `checkpointer`
+   * is an instance — that saver already has its own policy. `false` keeps
+   * every checkpoint.
+   */
+  checkpointRetention?: boolean | CheckpointRetentionInput | null;
   /**
    * Legacy `ctx.store`. A BaseStore instance is used as-is and is NOT scoped
    * (every graph sharing it sees every key). "none" disables ctx.store; the
@@ -325,6 +340,17 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   ): Promise<RunResult> => {
     const startMs = Date.now();
     const threadId = runOpts.threadId ?? `thread-${runId}`;
+    const graphRetention = graphSpec.runtime?.checkpoint?.retention;
+    if (
+      checkpointer &&
+      isRetentionSaver(checkpointer) &&
+      (graphRetention !== undefined || opts.checkpointRetention !== undefined)
+    ) {
+      checkpointer.noteThreadPolicy?.(
+        threadId,
+        resolveCheckpointRetention(graphRetention, opts.checkpointRetention),
+      );
+    }
     clearWaitTimeoutTimer(waitTimers, threadId);
     const startedAt = new Date().toISOString();
     const runMeta: RunMeta = { runId, graph: graphSpec.metadata.name, startedAt, threadId };
@@ -342,12 +368,36 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
     if (overrides.singleStep) cfg["interruptAfter"] = "*";
     const workspace = (baseCtx as RunContext).workspace;
-    const finish = (r: RunResult): RunResult => {
+    const retention = checkpointer && isRetentionSaver(checkpointer) ? checkpointer : undefined;
+    let retentionOpen = false;
+    let runToken = 0;
+    const resumedRun = () => mode === "resume" || mode === "continue";
+    const finish = async (r: RunResult, bookkeeping = true, resumed?: boolean): Promise<RunResult> => {
       try {
         const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
         if (issues.length > 0) r.issues = issues;
       } catch {
         /* ignore unreadable issue logs */
+      }
+      if (retentionOpen) {
+        retentionOpen = false;
+        try {
+          if (bookkeeping) {
+            retention?.endThreadRun?.(threadId, retentionStatusForRun(r.status), runToken, resumed ?? resumedRun());
+          } else {
+            // This run never started. Drop its token and do not park it.
+            retention?.endThreadRun?.(threadId, "active", runToken, false, true);
+          }
+        } catch {
+          /* bookkeeping must not hide the run result */
+        }
+      }
+      if (retention && bookkeeping) {
+        try {
+          await retention.noteThreadStatus(threadId, retentionStatusForRun(r.status));
+        } catch {
+          // Retention bookkeeping must not fail a run that already finished.
+        }
       }
       return r;
     };
@@ -361,6 +411,28 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     if (mode === "start" && payload != null && !(payload instanceof Command)) {
       assertNoReservedInput(payload, `graph "${graphSpec.metadata.name}" run`);
     }
+
+    // Hold the thread and mark it active before any read, so a sweep in the
+    // window before the first checkpoint write cannot delete it. If the run
+    // stops before it starts, put the saved status back and drop the token.
+    let enteredRun = false;
+    let priorRead = false;
+    let priorStatus: { status: "active" | "paused" | "finished"; updatedAt: number } | undefined;
+    let activeMark: string | undefined;
+    try {
+      runToken = retention?.beginThreadRun?.(threadId) ?? 0;
+      retentionOpen = !!retention;
+      try {
+        const marked = await retention?.markThreadActive?.(threadId);
+        if (marked && typeof marked.mark === "string") {
+          activeMark = marked.mark;
+          priorStatus = marked.prior;
+          // An already-active row belongs to another run. Leave it alone.
+          priorRead = marked.prior?.status !== "active";
+        }
+      } catch {
+        // A missed active mark must not fail the run. The in-process hold still applies.
+      }
 
     // Agent replay entries belong to this execution only. A fresh start begins
     // empty; resume/continue load the snapshots the engine attached to this
@@ -396,6 +468,24 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       graphName: graphSpec.metadata.name,
     });
 
+    const requestedCheckpoint = (runOpts as ResumeOptions).checkpointId;
+    if (requestedCheckpoint && checkpointer) {
+      const found = await checkpointer.getTuple({
+        configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: requestedCheckpoint },
+      });
+      if (!found) {
+        const retentionOn =
+          !!retention &&
+          "retention" in retention &&
+          (retention as { retention?: { enabled?: boolean } }).retention?.enabled !== false;
+        const error = checkpointPrunedError(threadId, requestedCheckpoint, { retention: retentionOn });
+        events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
+        // Do not record this as a pause. The outer exit restores the saved status.
+        return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs }, false, false);
+      }
+    }
+
+    enteredRun = true;
     try {
       let current: Record<string, unknown> | Command | null = payload;
 
@@ -627,6 +717,27 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
       return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
     } finally {
+      delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
+      for (const u of unsubs) u();
+    }
+    } finally {
+      if (!enteredRun) {
+        if (retentionOpen) {
+          retentionOpen = false;
+          try {
+            retention?.endThreadRun?.(threadId, "active", runToken, false, true);
+          } catch {
+            /* releasing the guard must not hide the original error */
+          }
+        }
+        if (priorRead && activeMark) {
+          try {
+            await retention?.restoreThreadStatus?.(threadId, priorStatus, activeMark);
+          } catch {
+            /* restoring status must not hide the original error */
+          }
+        }
+      }
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       for (const u of unsubs) u();
     }
@@ -1279,6 +1390,12 @@ function buildInvokeConfig(
   };
 }
 
+function memoryCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpointSaver {
+  return new FlowgraphMemorySaver(
+    resolveCheckpointRetention(spec.runtime?.checkpoint?.retention, opts.checkpointRetention),
+  );
+}
+
 function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpointSaver | undefined {
   // Explicit object instance wins
   if (opts.checkpointer && typeof opts.checkpointer === "object") {
@@ -1288,15 +1405,15 @@ function resolveCheckpointer(spec: GraphSpec, opts: CompileOptions): BaseCheckpo
   if (!enabled) return undefined;
   if (opts.checkpointer === "none") return undefined;
   // An explicit caller choice of "memory" (tests, ephemeral runs) is not a silent fallback.
-  if (opts.checkpointer === "memory") return new MemorySaver();
+  if (opts.checkpointer === "memory") return memoryCheckpointer(spec, opts);
 
   const backend = spec.runtime?.checkpoint?.backend ?? "memory";
-  if (backend === "memory") return new MemorySaver();
+  if (backend === "memory") return memoryCheckpointer(spec, opts);
   if (backend === "postgres" || backend === "sqlite") {
     throw new Error(
       `runtime.checkpoint.backend "${backend}" requires passing a checkpointer instance to compileGraph ` +
         `(the CLI wires sqlite/postgres from runtime.checkpoint.path / DATABASE_URL). ` +
-        `Silent MemorySaver fallback is not allowed.`,
+        `Silent in-memory fallback is not allowed.`,
     );
   }
   throw new Error(`Unknown checkpoint backend "${String(backend)}".`);

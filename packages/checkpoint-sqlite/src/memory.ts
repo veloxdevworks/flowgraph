@@ -450,6 +450,12 @@ export async function maybeSweep(backend: SqliteMemoryBackend, intervalMs: numbe
 
 export function openDatabase(dbPath: string, busyTimeoutMs = 5_000): SqliteDatabase {
   const db = new Database(dbPath);
+  // Must be set before the header is rewritten (journal_mode) and before any
+  // table exists, or incremental_vacuum cannot give free pages back.
+  const tables = db
+    .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+    .get() as { n: number } | undefined;
+  if ((tables?.n ?? 0) === 0) db.pragma("auto_vacuum = INCREMENTAL");
   db.pragma(`busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))}`);
   if (dbPath !== ":memory:") db.pragma("journal_mode = WAL");
   return db;

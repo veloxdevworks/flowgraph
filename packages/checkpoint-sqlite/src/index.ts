@@ -14,7 +14,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
-import type { GraphNameRegistry, ThreadOwnerRegistry } from "@flowgraph/core";
+import {
+  resolveCheckpointRetention,
+  type CheckpointRetentionInput,
+  type GraphNameRegistry,
+  type ThreadOwnerRegistry,
+} from "@flowgraph/core";
 import {
   createSqliteMemoryBackend,
   createSqliteGraphNameRegistry,
@@ -24,10 +29,18 @@ import {
   type SqliteDatabase,
   type SqliteMemoryBackend,
 } from "./memory.js";
+import { FlowgraphSqliteSaver } from "./retention.js";
 
 export interface SqliteCheckpointerOptions {
   /** Path to the .db file, or ":memory:" for an in-process DB. Default: ".flowgraph/checkpoints.db" */
   path?: string;
+  /**
+   * How much checkpoint history to keep. Default keeps the newest 40
+   * checkpoints on each branch and a few interrupt points. Finished threads
+   * are kept unless `finishedTtl` or `maxFinishedThreads` is set. `false`
+   * keeps every checkpoint.
+   */
+  retention?: boolean | CheckpointRetentionInput | null;
 }
 
 /**
@@ -36,17 +49,17 @@ export interface SqliteCheckpointerOptions {
 export function createSqliteCheckpointer(
   pathOrOptions: string | SqliteCheckpointerOptions = {},
 ): BaseCheckpointSaver {
-  const dbPath =
-    typeof pathOrOptions === "string"
-      ? pathOrOptions
-      : pathOrOptions.path ?? ".flowgraph/checkpoints.db";
+  const opts: SqliteCheckpointerOptions = typeof pathOrOptions === "string" ? { path: pathOrOptions } : pathOrOptions;
+  const dbPath = opts.path ?? ".flowgraph/checkpoints.db";
 
   if (dbPath !== ":memory:") {
     const dir = path.dirname(path.resolve(dbPath));
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  return SqliteSaver.fromConnString(dbPath) as unknown as BaseCheckpointSaver;
+  const saver = new FlowgraphSqliteSaver(openDatabase(dbPath), resolveCheckpointRetention(opts.retention));
+  saver.prepare();
+  return saver;
 }
 
 export interface SqliteBackendOptions extends SqliteCheckpointerOptions {
@@ -86,7 +99,9 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
   const graphNames = createSqliteGraphNameRegistry(db);
   const threadOwners = createSqliteThreadOwnerRegistry(db);
   await maybeSweep(memory, opts.sweepIntervalMs ?? 3_600_000);
-  const checkpointer = new SqliteSaver(db as never) as unknown as BaseCheckpointSaver;
+  const saver = new FlowgraphSqliteSaver(db, resolveCheckpointRetention(opts.retention));
+  saver.prepare();
+  const checkpointer = saver as unknown as BaseCheckpointSaver;
   return {
     db,
     checkpointer,
@@ -100,6 +115,13 @@ export async function openSqliteBackend(pathOrOptions: string | SqliteBackendOpt
 }
 
 export { SqliteSaver };
+export {
+  FG_CHECKPOINT_TYPE,
+  FlowgraphSqliteSaver,
+  migrateSqliteCheckpointRetention,
+  sqliteCheckpointStats,
+  type SqliteCheckpointStats,
+} from "./retention.js";
 export {
   createSqliteMemoryBackend,
   createSqliteGraphNameRegistry,

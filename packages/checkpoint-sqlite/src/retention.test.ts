@@ -1,0 +1,974 @@
+import { describe, expect, it, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { CHECKPOINT_PRUNED, compileGraph, createScopedMemory, defaultMemoryPolicy, registerFunction, type GraphSpec } from "@flowgraph/core";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { createSqliteCheckpointer, FG_CHECKPOINT_TYPE, openSqliteBackend, sqliteCheckpointStats, type SqliteBackend } from "./index.js";
+
+registerFunction("sqlRet", () => "done");
+registerFunction("sqlBump", (input) => {
+  const raw = (input as { n?: unknown } | undefined)?.n;
+  const n = typeof raw === "number" ? raw : Number(raw ?? 0);
+  return Number.isFinite(n) ? n + 1 : 1;
+});
+registerFunction("sqlFan", () => ({}));
+const sqlSideHits: string[] = [];
+registerFunction("sqlSide", () => {
+  sqlSideHits.push("S");
+  return "S";
+});
+
+const tmpFiles: string[] = [];
+const open: SqliteBackend[] = [];
+afterEach(() => {
+  for (const backend of open.splice(0)) backend.close();
+  for (const file of tmpFiles.splice(0)) fs.rmSync(file, { force: true });
+});
+
+function tmpDb(): string {
+  const file = path.join(os.tmpdir(), `fg-ret-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  tmpFiles.push(file);
+  return file;
+}
+
+function parallelSpec(warm: number): GraphSpec {
+  return {
+    metadata: { name: "sqlite-parallel-side" },
+    state: { channels: { n: { type: "number" }, sideOut: { type: "string" }, gate: { type: "object" } } },
+    nodes: [
+      { id: "bump", type: "function", with: { fn: "sqlBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } },
+      { id: "fan", type: "function", with: { fn: "sqlFan" } },
+      { id: "effect", type: "function", with: { fn: "sqlSide", output: { to: "sideOut" } } },
+      { id: "ask", type: "hitl", with: { mode: "approve", message: "approve the side effect?", output: { to: "gate" } } },
+    ],
+    edges: [
+      { from: "START", to: "bump" },
+      {
+        from: "bump",
+        branch: [
+          { when: `{{ state.n < ${warm} }}`, to: "bump" },
+          { default: true, to: "fan" },
+        ],
+      },
+      { from: "fan", to: ["effect", "ask"] },
+      { from: "effect", to: "END" },
+      { from: "ask", to: "END" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+function mapSpec(warm: number): GraphSpec {
+  const bump = warm > 0
+    ? [{ id: "bump", type: "function", with: { fn: "sqlBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } }]
+    : [];
+  return {
+    metadata: { name: "sqlite-map-items" },
+    state: { channels: { n: { type: "number" }, numbers: { type: "array" }, out: { type: "array" } } },
+    nodes: [
+      ...bump,
+      {
+        id: "map-items",
+        type: "map",
+        with: {
+          over: "{{ state.numbers }}",
+          as: "n",
+          concurrency: 2,
+          node: {
+            type: "hitl",
+            with: { mode: "approve", message: "Approve {{ item.n }}", output: { to: "itemResult" } },
+          },
+          collect: { to: "out" },
+        },
+      },
+    ],
+    edges: warm > 0
+      ? [
+          { from: "START", to: "bump" },
+          {
+            from: "bump",
+            branch: [
+              { when: `{{ state.n < ${warm} }}`, to: "bump" },
+              { default: true, to: "map-items" },
+            ],
+          },
+          { from: "map-items", to: "END" },
+        ]
+      : [
+          { from: "START", to: "map-items" },
+          { from: "map-items", to: "END" },
+        ],
+  } as unknown as GraphSpec;
+}
+
+async function drive(
+  checkpointer: ReturnType<typeof createSqliteCheckpointer>,
+  spec: GraphSpec,
+  input: Record<string, unknown>,
+) {
+  sqlSideHits.length = 0;
+  const compiled = await compileGraph(spec, { checkpointer });
+  const threadId = `live-${Math.random().toString(36).slice(2)}`;
+  let result = await compiled.run({ threadId, input, onInterrupt: "fail" });
+  let resumes = 0;
+  while (result.status === "interrupted" && resumes < 8) {
+    resumes += 1;
+    result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
+  }
+  return {
+    status: result.status,
+    resumes,
+    hits: [...sqlSideHits],
+    out: result.state["out"],
+    gate: result.state["gate"],
+    side: result.state["sideOut"],
+  };
+}
+
+const interruptSpec = {
+  metadata: { name: "sqlite-retain" },
+  state: { channels: { tag: { type: "string" } } },
+  nodes: [
+    { id: "gate", type: "wait", with: { signal: "go" } },
+    { id: "a", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } },
+    { id: "b", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } },
+    { id: "c", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } },
+    { id: "d", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } },
+  ],
+  edges: [
+    { from: "START", to: "gate" },
+    { from: "gate", to: "a" },
+    { from: "a", to: "b" },
+    { from: "b", to: "c" },
+    { from: "c", to: "d" },
+    { from: "d", to: "END" },
+  ],
+} as unknown as GraphSpec;
+
+describe("sqlite checkpoint retention", () => {
+  it("resumes a paused thread after pruning and keeps the interrupt checkpoint", async () => {
+    const dbPath = tmpDb();
+    const retention = { maxCheckpoints: 2, maxInterruptPoints: 4, finishedTtl: null, maxFinishedThreads: null };
+    const threadId = "sqlite-resume";
+    const first = createSqliteCheckpointer({ path: dbPath, retention });
+    const compiled = await compileGraph(interruptSpec, { checkpointer: first });
+    const paused = await compiled.run({ threadId, onInterrupt: "fail" });
+    expect(paused.status).toBe("interrupted");
+    const interruptId = (await compiled.getState(threadId))?.checkpointId;
+    expect(interruptId).toBeTruthy();
+
+    const resumed = await compiled.resume({ threadId, resume: { go: true }, onInterrupt: "fail" });
+    expect(resumed.status).toBe("completed");
+    expect(resumed.state["tag"]).toBe("done");
+    const history = await compiled.getStateHistory(threadId);
+    expect(history.some((item) => item.checkpointId === interruptId)).toBe(true);
+    expect(history.length).toBeLessThanOrEqual(6);
+    (first as unknown as { db: { close(): void } }).db.close();
+
+    const second = createSqliteCheckpointer({ path: dbPath, retention });
+    const recompiled = await compileGraph(interruptSpec, { checkpointer: second });
+    const again = await recompiled.resumeFrom({
+      threadId,
+      checkpointId: interruptId!,
+      resume: { go: true },
+      onInterrupt: "fail",
+    });
+    expect(again.status).toBe("completed");
+    expect(again.state["tag"]).toBe("done");
+    (second as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("deletes finished threads and leaves fg_memory rows in place", async () => {
+    const dbPath = tmpDb();
+    const backend = await openSqliteBackend({
+      path: dbPath,
+      retention: { maxCheckpoints: 2, maxFinishedThreads: 0, finishedTtl: null },
+    });
+    open.push(backend);
+    const memory = createScopedMemory(
+      backend.memory,
+      { org: "o", project: "p", graph: "g", user: "" },
+      defaultMemoryPolicy(),
+      { threadId: "mem" },
+    );
+    await memory.put("graph", "keep-me", { v: 1 });
+    backend.db
+      .prepare(
+        `INSERT INTO fg_memory_threads
+           (thread_id, org, project, graph, usr, subject_type, subject_key, created_at)
+         VALUES ('short-1', 'o', 'p', 'g', '', '', '', 1)`,
+      )
+      .run();
+    backend.db
+      .prepare(`INSERT INTO fg_thread_owners (thread_id, owner, org, created_at) VALUES ('short-1', 'iss|alice', 'acme', 1)`)
+      .run();
+    backend.db
+      .prepare(`INSERT INTO fg_memory_ops (op_id, version, value, applied_at) VALUES ('op-short-1', 1, '{"ok":true}', 1)`)
+      .run();
+    const before = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_items`).get() as { n: number };
+    expect(before.n).toBe(1);
+
+    const spec = {
+      metadata: { name: "sqlite-finished" },
+      state: { channels: { tag: { type: "string" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(spec, { checkpointer: backend.checkpointer });
+    const result = await compiled.run({ threadId: "short-1", onInterrupt: "fail" });
+    expect(result.status).toBe("completed");
+
+    const stats = sqliteCheckpointStats(backend.db);
+    expect(stats.checkpoints).toBe(0);
+    const after = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_items`).get() as { n: number };
+    expect(after.n).toBe(1);
+    const got = await memory.get("keep-me");
+    expect(got?.value).toEqual({ v: 1 });
+    const binding = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_threads`).get() as { n: number };
+    expect(binding.n).toBe(0);
+    const owner = backend.db.prepare(`SELECT owner FROM fg_thread_owners WHERE thread_id = 'short-1'`).get() as { owner: string } | undefined;
+    expect(owner?.owner).toBe("iss|alice");
+    const ops = backend.db.prepare(`SELECT COUNT(*) AS n FROM fg_memory_ops WHERE op_id = 'op-short-1'`).get() as { n: number };
+    expect(ops.n).toBe(1);
+  });
+
+  it("keeps a single blob for a channel version that does not change", async () => {
+    const dbPath = tmpDb();
+    const backend = await openSqliteBackend({
+      path: dbPath,
+      retention: { maxCheckpoints: 20, finishedTtl: null, maxFinishedThreads: null },
+    });
+    open.push(backend);
+    const saver = backend.checkpointer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown, versions?: unknown): Promise<unknown>;
+      getTuple(config: unknown): Promise<{ checkpoint: { channel_values: Record<string, unknown> } } | undefined>;
+    };
+    const pad = "z".repeat(8000);
+    const base = {
+      v: 4,
+      ts: new Date().toISOString(),
+      versions_seen: {},
+    };
+    await saver.put(
+      { configurable: { thread_id: "blob", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { pad, n: 1 }, channel_versions: { pad: 1, n: 1 } },
+      { source: "loop", step: 1, parents: {} },
+      { pad: 1, n: 1 },
+    );
+    await saver.put(
+      { configurable: { thread_id: "blob", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "2", channel_values: { pad, n: 2 }, channel_versions: { pad: 1, n: 2 } },
+      { source: "loop", step: 2, parents: {} },
+      { n: 2 },
+    );
+    const stats = sqliteCheckpointStats(backend.db);
+    const padRows = backend.db
+      .prepare(`SELECT COUNT(*) AS n FROM fg_checkpoint_blobs WHERE channel = 'pad'`)
+      .get() as { n: number };
+    expect(padRows.n).toBe(1);
+    expect(stats.blobs).toBe(1);
+    const tuple = await saver.getTuple({ configurable: { thread_id: "blob", checkpoint_ns: "" } });
+    expect(tuple?.checkpoint.channel_values["pad"]).toBe(pad);
+    expect(tuple?.checkpoint.channel_values["n"]).toBe(2);
+    const stamped = backend.db.prepare(`SELECT type FROM checkpoints WHERE checkpoint_id = '2'`).get() as { type: string };
+    expect(stamped.type).toBe(FG_CHECKPOINT_TYPE);
+    const writes = backend.db.prepare(`SELECT COUNT(*) AS n FROM writes WHERE thread_id = 'blob'`).get() as { n: number };
+    expect(writes.n).toBe(0);
+  });
+
+  it("reads deduped checkpoints when dedupe or retention is turned off, and a stock saver refuses externalized rows", async () => {
+    const dbPath = tmpDb();
+    const threadId = "dedupe-read";
+    const spec = {
+      metadata: { name: "dedupe-read" },
+      state: { channels: { tag: { type: "string" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const first = createSqliteCheckpointer({ path: dbPath });
+    const started = await compileGraph(spec, { checkpointer: first });
+    const ran = await started.run({ threadId, onInterrupt: "fail" });
+    expect(ran.status).toBe("completed");
+    expect(ran.state["tag"]).toBe("done");
+    (first as unknown as { db: { close(): void } }).db.close();
+
+    for (const retention of [{ dedupeChannels: false }, false] as const) {
+      const again = createSqliteCheckpointer({ path: dbPath, retention });
+      const compiled = await compileGraph(spec, { checkpointer: again });
+      const snap = await compiled.getState(threadId);
+      expect(snap?.values["tag"]).toBe("done");
+      (again as unknown as { db: { close(): void } }).db.close();
+    }
+
+    const raw = SqliteSaver.fromConnString(dbPath);
+    const plain = await raw.getTuple({ configurable: { thread_id: threadId, checkpoint_ns: "" } });
+    expect(plain?.checkpoint.channel_values["tag"]).toBe("done");
+    raw.db.close();
+
+    const big = "b".repeat(8000);
+    const seeded = createSqliteCheckpointer({ path: dbPath });
+    const seededSaver = seeded as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      db: { close(): void };
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    await seededSaver.put(
+      { configurable: { thread_id: "big", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { pad: big }, channel_versions: { pad: 1 } },
+      { source: "loop", step: 1, parents: {} },
+    );
+    await seededSaver.put(
+      { configurable: { thread_id: "big", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "2", channel_values: { pad: big }, channel_versions: { pad: 1 } },
+      { source: "loop", step: 2, parents: {} },
+    );
+    seededSaver.db.close();
+    const stock = SqliteSaver.fromConnString(dbPath);
+    await expect(stock.getTuple({ configurable: { thread_id: "big", checkpoint_ns: "", checkpoint_id: "2" } })).rejects.toThrow(
+      /serialization type/,
+    );
+    stock.db.close();
+    const reread = createSqliteCheckpointer({ path: dbPath, retention: { dedupeChannels: false } });
+    const loaded = await (reread as unknown as {
+      getTuple(config: unknown): Promise<{ checkpoint: { channel_values: Record<string, unknown> } } | undefined>;
+    }).getTuple({ configurable: { thread_id: "big", checkpoint_ns: "" } });
+    expect(loaded?.checkpoint.channel_values["pad"]).toBe(big);
+    (reread as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("does not delete checkpoints it never recorded, even when thread deletion is on", async () => {
+    const dbPath = tmpDb();
+    const spec = {
+      metadata: { name: "untracked" },
+      state: { channels: { tag: { type: "string" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const writer = createSqliteCheckpointer({ path: dbPath, retention: false });
+    const compiled = await compileGraph(spec, { checkpointer: writer });
+    expect((await compiled.run({ threadId: "old", onInterrupt: "fail" })).status).toBe("completed");
+    const before = sqliteCheckpointStats((writer as unknown as { db: SqliteBackend["db"] }).db).checkpoints;
+    (writer as unknown as { db: { close(): void } }).db.close();
+
+    const reader = createSqliteCheckpointer({
+      path: dbPath,
+      retention: { finishedTtl: "1ms", maxFinishedThreads: 0 },
+    });
+    const after = sqliteCheckpointStats((reader as unknown as { db: SqliteBackend["db"] }).db).checkpoints;
+    expect(after).toBe(before);
+    expect(after).toBeGreaterThan(0);
+    (reader as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("drops superseded pending writes and reclaims sqlite pages", async () => {
+    const dbPath = tmpDb();
+    const saver = createSqliteCheckpointer({ path: dbPath });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    expect(db.pragma("auto_vacuum", { simple: true })).toBe(2);
+    const put = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    const big = "w".repeat(100);
+    await put.put(
+      { configurable: { thread_id: "w", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: 1 } },
+      { source: "loop", step: 1, parents: {} },
+    );
+    await put.putWrites({ configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "1" } }, [["n", big]], "task");
+    await put.put(
+      { configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "2", channel_values: { n: 2 }, channel_versions: { n: 2 } },
+      { source: "loop", step: 2, parents: {} },
+    );
+    const left = db.prepare(`SELECT checkpoint_id FROM writes WHERE thread_id = 'w'`).all() as { checkpoint_id: string }[];
+    expect(left.map((row) => row.checkpoint_id)).not.toContain("1");
+    expect(Number(db.pragma("freelist_count", { simple: true }))).toBe(0);
+  });
+
+  it("keeps pending writes that arrive before the checkpoint row", async () => {
+    const dbPath = tmpDb();
+    const saver = createSqliteCheckpointer({ path: dbPath });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const put = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+      getTuple(config: unknown): Promise<{ pendingWrites?: [string, string, unknown][] } | undefined>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    await put.putWrites(
+      { configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "future" } },
+      [["__interrupt__", { reason: "wait" }]],
+      "task",
+    );
+    await put.put(
+      { configurable: { thread_id: "w", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: 1 } },
+      { source: "loop", step: 1, parents: {} },
+    );
+    await put.put(
+      { configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "future", channel_values: { n: 2 }, channel_versions: { n: 2 } },
+      { source: "loop", step: 2, parents: {} },
+    );
+    const tuple = await put.getTuple({ configurable: { thread_id: "w", checkpoint_ns: "", checkpoint_id: "future" } });
+    expect(tuple?.pendingWrites?.some((write) => write[1] === "__interrupt__")).toBe(true);
+    db.close();
+  });
+
+  it("keeps an interrupt's replay snapshot after a successor checkpoint is stored", async () => {
+    const dbPath = tmpDb();
+    const saver = createSqliteCheckpointer({ path: dbPath });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const put = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+      getTuple(config: unknown): Promise<{ pendingWrites?: [string, string, unknown][] } | undefined>;
+    };
+    const replay = { node: '["gate"]', entries: { "0": { answer: "keep" } } };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    await put.put(
+      { configurable: { thread_id: "replay", checkpoint_ns: "" } },
+      { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: 1 } },
+      { source: "loop", step: 1, parents: {} },
+    );
+    await put.putWrites(
+      { configurable: { thread_id: "replay", checkpoint_ns: "", checkpoint_id: "1" } },
+      [["__interrupt__", { value: { data: { __agentReplay: replay } } }]],
+      "task",
+    );
+    await put.put(
+      { configurable: { thread_id: "replay", checkpoint_ns: "", checkpoint_id: "1" } },
+      { ...base, id: "2", channel_values: { n: 2 }, channel_versions: { n: 2 } },
+      { source: "loop", step: 2, parents: {} },
+    );
+    const tuple = await put.getTuple({ configurable: { thread_id: "replay", checkpoint_ns: "", checkpoint_id: "1" } });
+    const interrupt = tuple?.pendingWrites?.find((write) => write[1] === "__interrupt__");
+    const data = (interrupt?.[2] as { value?: { data?: { __agentReplay?: unknown } } } | undefined)?.value?.data;
+    expect(data?.__agentReplay).toEqual(replay);
+    db.close();
+  });
+
+  it("keeps pending writes that were stored before their checkpoint once the window is exceeded", async () => {
+    const dbPath = tmpDb();
+    const saver = createSqliteCheckpointer({
+      path: dbPath,
+      retention: { maxCheckpoints: 1, maxInterruptPoints: 0, finishedTtl: null },
+    });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const put = saver as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      putWrites(config: unknown, writes: [string, unknown][], taskId: string): Promise<void>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    const cp = (id: string, parent?: string) =>
+      put.put(
+        { configurable: { thread_id: "gap", checkpoint_ns: "", ...(parent ? { checkpoint_id: parent } : {}) } },
+        { ...base, id, channel_values: { n: id }, channel_versions: { n: id } },
+        { source: "loop", step: 1, parents: {} },
+      );
+    await cp("1");
+    await cp("2", "1");
+    await put.putWrites(
+      { configurable: { thread_id: "gap", checkpoint_ns: "", checkpoint_id: "future" } },
+      [["side", "S"], ["__interrupt__", { reason: "wait" }]],
+      "task",
+    );
+    await cp("3", "2");
+    const writes = db.prepare(`SELECT channel FROM writes WHERE thread_id = 'gap' AND checkpoint_id = 'future'`).all() as { channel: string }[];
+    expect(writes.map((row) => row.channel).sort()).toEqual(["__interrupt__", "side"]);
+    db.close();
+  });
+
+  it("refuses a checkpoint schema newer than this build", () => {
+    const dbPath = tmpDb();
+    const first = createSqliteCheckpointer({ path: dbPath, retention: false });
+    const db = (first as unknown as { db: SqliteBackend["db"] }).db;
+    db.prepare(`INSERT INTO fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 99, 1)`).run();
+    db.close();
+    expect(() => createSqliteCheckpointer({ path: dbPath })).toThrow(/newer than this flowgraph/);
+  });
+
+  it("a thread past the window still runs a parallel interrupt and its side effect once", async () => {
+    const off = createSqliteCheckpointer({ path: tmpDb(), retention: false });
+    const on = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { maxCheckpoints: 3, maxInterruptPoints: 8, finishedTtl: null },
+    });
+    const spec = parallelSpec(8);
+    const plain = await drive(off, spec, { n: 0 });
+    const kept = await drive(on, spec, { n: 0 });
+    expect(kept).toEqual(plain);
+    expect(plain.hits).toEqual(["S"]);
+    expect(plain.status).toBe("completed");
+    (off as unknown as { db: { close(): void } }).db.close();
+    (on as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("a thread past the window resumes a map interrupt the same way as retention off", async () => {
+    const off = createSqliteCheckpointer({ path: tmpDb(), retention: false });
+    const on = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { maxCheckpoints: 3, maxInterruptPoints: 8, finishedTtl: null },
+    });
+    const spec = mapSpec(8);
+    const plain = await drive(off, spec, { n: 0, numbers: [1, 2] });
+    const kept = await drive(on, spec, { n: 0, numbers: [1, 2] });
+    expect(kept).toEqual(plain);
+    expect(plain.status).toBe("completed");
+    expect(plain.out).toHaveLength(2);
+    (off as unknown as { db: { close(): void } }).db.close();
+    (on as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("map interrupts with maxCheckpoints 1 match retention off", async () => {
+    const off = createSqliteCheckpointer({ path: tmpDb(), retention: false });
+    const on = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { maxCheckpoints: 1, maxInterruptPoints: 8, finishedTtl: null },
+    });
+    const spec = mapSpec(0);
+    const plain = await drive(off, spec, { numbers: [1, 2] });
+    const kept = await drive(on, spec, { numbers: [1, 2] });
+    expect(kept).toEqual(plain);
+    expect(plain.status).toBe("completed");
+    (off as unknown as { db: { close(): void } }).db.close();
+    (on as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("deleteThread removes a parked thread with retention on and off", async () => {
+    for (const retention of [{ maxFinishedThreads: 0, finishedTtl: null } as const, false as const]) {
+      const saver = createSqliteCheckpointer({ path: tmpDb(), retention });
+      const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+      const api = saver as unknown as {
+        put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+        beginThreadRun(threadId: string): number;
+        endThreadRun(threadId: string, status: "paused" | "finished", token?: number, resumed?: boolean): void;
+        deleteThread(threadId: string): Promise<void>;
+      };
+      await api.put(
+        { configurable: { thread_id: "parked", checkpoint_ns: "" } },
+        { v: 4, id: "1", ts: new Date().toISOString(), channel_values: { n: 1 }, channel_versions: { n: 1 }, versions_seen: {} },
+        { source: "loop", step: 1, parents: {} },
+      );
+      const token = api.beginThreadRun("parked");
+      api.endThreadRun("parked", "paused", token);
+      await api.deleteThread("parked");
+      expect((db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'parked'`).get() as { n: number }).n).toBe(0);
+      db.close();
+    }
+  });
+
+  it("a second saver does not sweep a thread the first has marked active", async () => {
+    const path = tmpDb();
+    const retention = { maxFinishedThreads: 0, finishedTtl: null } as const;
+    const writer = createSqliteCheckpointer({ path, retention });
+    const sweeper = createSqliteCheckpointer({ path, retention });
+    const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+    db.prepare(
+      `INSERT INTO fg_checkpoint_threads (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished)
+       VALUES ('shared', 'finished', 1, 1, NULL, 0)`,
+    ).run();
+    const put = writer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    let lost = 0;
+    for (let i = 0; i < 30; i++) {
+      const id = `c${i}`;
+      await Promise.all([
+        put.put(
+          { configurable: { thread_id: "shared", checkpoint_ns: "" } },
+          { ...base, id, channel_values: { n: i }, channel_versions: { n: i } },
+          { source: "loop", step: i, parents: {} },
+        ),
+        (sweeper as unknown as { sweep(now?: number): void }).sweep(Date.now()),
+      ]);
+      const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'shared' AND checkpoint_id = ?`).get(id) as { n: number }).n;
+      if (n === 0) lost += 1;
+    }
+    expect(lost).toBe(0);
+    db.close();
+    (sweeper as unknown as { db: { close(): void } }).db.close();
+  });
+
+  for (const gates of [2, 3]) {
+    it(`a ${gates}-gate thread is swept after it finishes`, async () => {
+      const saver = createSqliteCheckpointer({
+        path: tmpDb(),
+        retention: { finishedTtl: "1h", maxFinishedThreads: null },
+      });
+      const compiled = await compileGraph(sqliteGates(gates), { checkpointer: saver });
+      const threadId = `gates-${gates}`;
+      await finishSqliteGates(compiled, threadId, gates);
+      (saver as unknown as { sweep(now?: number): void }).sweep(Date.now() + 2 * 60 * 60 * 1000);
+      const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+      const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+      expect(n).toBe(0);
+      db.close();
+    });
+  }
+
+  it("a sweep in the read window keeps a thread that was marked active", async () => {
+    const path = tmpDb();
+    const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+    const writer = createSqliteCheckpointer({ path, retention });
+    const sweeper = createSqliteCheckpointer({ path, retention });
+    const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+    const api = writer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      noteThreadStatus(threadId: string, status: "finished", now?: number): void;
+      markThreadActive(threadId: string): void;
+      getTuple(config: unknown): Promise<{ checkpoint: { channel_values: Record<string, unknown> } } | undefined>;
+    };
+    await api.put(
+      { configurable: { thread_id: "window", checkpoint_ns: "" } },
+      { v: 4, id: "1", ts: new Date().toISOString(), channel_values: { a: "keep" }, channel_versions: { a: 1 }, versions_seen: {} },
+      { source: "loop", step: 1, parents: {} },
+    );
+    api.noteThreadStatus("window", "finished", 1);
+    api.markThreadActive("window");
+    (sweeper as unknown as { sweep(now?: number): void }).sweep(Date.now());
+    const tuple = await api.getTuple({ configurable: { thread_id: "window", checkpoint_ns: "" } });
+    expect(tuple?.checkpoint.channel_values["a"]).toBe("keep");
+    db.close();
+    (sweeper as unknown as { db: { close(): void } }).db.close();
+  });
+
+  it("a bogus resumeFrom on a finished thread is still swept", async () => {
+    const saver = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { finishedTtl: "1h", maxFinishedThreads: null },
+    });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const compiled = await compileGraph(sqliteEarly(), { checkpointer: saver });
+    const threadId = "sqlite-bogus";
+    await compiled.run({ threadId, onInterrupt: "fail" });
+    const missing = await compiled.resumeFrom({
+      threadId,
+      checkpointId: "bogus",
+      resume: true,
+      onInterrupt: "fail",
+    });
+    expect(missing.status).toBe("error");
+    expect((missing.error as { code?: string }).code).toBe(CHECKPOINT_PRUNED);
+    const status = db.prepare(`SELECT status FROM fg_checkpoint_threads WHERE thread_id = ?`).get(threadId) as { status: string };
+    expect(status.status).toBe("finished");
+    (saver as unknown as { sweep(now?: number): void }).sweep(Date.now() + 2 * 60 * 60 * 1000);
+    const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+    expect(n).toBe(0);
+    db.close();
+  });
+
+  it("a throwing checkpoint read on a finished thread is still swept", async () => {
+    const saver = createSqliteCheckpointer({
+      path: tmpDb(),
+      retention: { finishedTtl: "1h", maxFinishedThreads: null },
+    });
+    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+    const compiled = await compileGraph(sqliteEarly(), { checkpointer: saver });
+    const threadId = "sqlite-throw";
+    await compiled.run({ threadId, onInterrupt: "fail" });
+    const keptId = (await compiled.getState(threadId))?.checkpointId;
+    expect(keptId).toBeTruthy();
+    const orig = saver.getTuple.bind(saver);
+    let lookups = 0;
+    saver.getTuple = async (config) => {
+      lookups += 1;
+      const id = config.configurable?.checkpoint_id;
+      if (lookups > 1 && id === keptId) throw new Error("tuple failed");
+      return orig(config);
+    };
+    await expect(
+      compiled.resumeFrom({ threadId, checkpointId: keptId!, resume: true, onInterrupt: "fail" }),
+    ).rejects.toThrow(/tuple failed/);
+    const status = db.prepare(`SELECT status FROM fg_checkpoint_threads WHERE thread_id = ?`).get(threadId) as { status: string };
+    expect(status.status).toBe("finished");
+    saver.getTuple = orig;
+    (saver as unknown as { sweep(now?: number): void }).sweep(Date.now() + 2 * 60 * 60 * 1000);
+    const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+    expect(n).toBe(0);
+    db.close();
+  });
+
+  for (const fail of ["throw", "pruned"] as const) {
+    it(`another saver's thread survives when this call ${fail === "throw" ? "throws" : "gets CHECKPOINT_PRUNED"}`, async () => {
+      const path = tmpDb();
+      const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+      const writer = createSqliteCheckpointer({ path, retention });
+      const other = createSqliteCheckpointer({ path, retention });
+      const sweeper = createSqliteCheckpointer({ path, retention });
+      const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+      const note = other as unknown as {
+        put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+        noteThreadStatus(threadId: string, status: "paused" | "finished", now?: number): void;
+      };
+      try {
+        await sqliteCrossSaver(fail, writer, note, sweeper, db, "kept", true);
+        await sqliteCrossSaver(fail, writer, note, sweeper, db, "fresh", false);
+      } finally {
+        db.close();
+        (other as unknown as { db: { close(): void } }).db.close();
+        (sweeper as unknown as { db: { close(): void } }).db.close();
+      }
+    });
+  }
+
+  for (const fail of ["throw", "pruned"] as const) {
+    for (const held of ["active", "paused"] as const) {
+      it(`a ${held} thread another saver holds survives when this call ${fail === "throw" ? "throws" : "gets CHECKPOINT_PRUNED"}`, async () => {
+        const file = tmpDb();
+        const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+        const writer = createSqliteCheckpointer({ path: file, retention });
+        const other = createSqliteCheckpointer({ path: file, retention });
+        const sweeper = createSqliteCheckpointer({ path: file, retention });
+        const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+        const threadId = `${held}-${fail}`;
+        try {
+          await (writer as unknown as { put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown> }).put(
+            { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+            {
+              v: 4,
+              id: "1",
+              ts: new Date().toISOString(),
+              channel_values: { a: "keep" },
+              channel_versions: { a: 1 },
+              versions_seen: {},
+            },
+            { source: "loop", step: 1, parents: {} },
+          );
+          (writer as unknown as { noteThreadStatus(threadId: string, status: "finished", now?: number): void }).noteThreadStatus(
+            threadId,
+            "finished",
+            1,
+          );
+          // The other saver commits its status before this call's mark, and does not write again.
+          if (held === "active") {
+            (other as unknown as { markThreadActive(threadId: string): unknown }).markThreadActive(threadId);
+          } else {
+            (other as unknown as { noteThreadStatus(threadId: string, status: "paused", now?: number): void }).noteThreadStatus(
+              threadId,
+              "paused",
+              Date.now(),
+            );
+          }
+          const seen = (
+            writer as unknown as {
+              markThreadActive(threadId: string): { mark: string; prior?: { status: string } } | undefined;
+              restoreThreadStatus(threadId: string, prior: { status: string; updatedAt: number } | undefined, mark: string): void;
+            }
+          ).markThreadActive(threadId);
+          expect(seen?.prior?.status).toBe(held);
+          (writer as unknown as {
+            restoreThreadStatus(
+              threadId: string,
+              prior: { status: string; updatedAt: number } | undefined,
+              mark: string,
+            ): void;
+          }).restoreThreadStatus(threadId, seen?.prior as { status: "active" | "paused" | "finished"; updatedAt: number }, seen!.mark);
+          const compiled = await compileGraph(sqliteEarly(), { checkpointer: writer });
+          if (fail === "throw") {
+            writer.getTuple = async () => {
+              throw new Error("read failed");
+            };
+            await expect(compiled.resume({ threadId, resume: true, onInterrupt: "fail" })).rejects.toThrow(/read failed/);
+          } else {
+            const result = await compiled.resumeFrom({
+              threadId,
+              checkpointId: "bogus",
+              resume: true,
+              onInterrupt: "fail",
+            });
+            expect(result.status).toBe("error");
+            expect((result.error as { code?: string }).code).toBe(CHECKPOINT_PRUNED);
+          }
+          (sweeper as unknown as { sweep(now?: number): void }).sweep(Date.now());
+          const status = db.prepare(`SELECT status FROM fg_checkpoint_threads WHERE thread_id = ?`).get(threadId) as {
+            status: string;
+          };
+          expect(status.status).toBe(held);
+          const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+          expect(n).toBeGreaterThan(0);
+        } finally {
+          db.close();
+          (other as unknown as { db: { close(): void } }).db.close();
+          (sweeper as unknown as { db: { close(): void } }).db.close();
+        }
+      });
+    }
+  }
+
+  it("two marks on one thread each see the row the other left", async () => {
+    const file = tmpDb();
+    const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+    const writer = createSqliteCheckpointer({ path: file, retention });
+    const other = createSqliteCheckpointer({ path: file, retention });
+    const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+    const threadId = "two-marks";
+    const mark = writer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      noteThreadStatus(threadId: string, status: "finished", now?: number): void;
+      markThreadActive(threadId: string): { mark: string; prior?: { status: string; updatedAt: number } } | undefined;
+      restoreThreadStatus(threadId: string, prior: { status: string; updatedAt: number } | undefined, mark: string): void;
+    };
+    const otherMark = other as unknown as Pick<typeof mark, "markThreadActive" | "restoreThreadStatus">;
+    try {
+      await mark.put(
+        { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+        { v: 4, id: "1", ts: new Date().toISOString(), channel_values: { a: "keep" }, channel_versions: { a: 1 }, versions_seen: {} },
+        { source: "loop", step: 1, parents: {} },
+      );
+      mark.noteThreadStatus(threadId, "finished", 1);
+      const first = mark.markThreadActive(threadId);
+      const second = otherMark.markThreadActive(threadId);
+      expect([first?.prior?.status, second?.prior?.status].sort()).toEqual(["active", "finished"]);
+      for (const got of [first, second]) {
+        if (got?.prior?.status !== "active") mark.restoreThreadStatus(threadId, got?.prior, got!.mark);
+      }
+      (writer as unknown as { sweep(now?: number): void }).sweep(Date.now());
+      const status = db.prepare(`SELECT status FROM fg_checkpoint_threads WHERE thread_id = ?`).get(threadId) as { status: string };
+      expect(status.status).toBe("active");
+      const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+      expect(n).toBeGreaterThan(0);
+    } finally {
+      db.close();
+      (other as unknown as { db: { close(): void } }).db.close();
+    }
+  });
+});
+
+async function sqliteCrossSaver(
+  fail: "throw" | "pruned",
+  writer: ReturnType<typeof createSqliteCheckpointer>,
+  other: {
+    put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+    noteThreadStatus(threadId: string, status: "paused" | "finished", now?: number): void;
+  },
+  sweeper: ReturnType<typeof createSqliteCheckpointer>,
+  db: SqliteBackend["db"],
+  threadId: string,
+  seedFinished: boolean,
+) {
+  const checkpoint = {
+    v: 4,
+    id: "1",
+    ts: new Date().toISOString(),
+    channel_values: { a: "keep" },
+    channel_versions: { a: 1 },
+    versions_seen: {},
+  };
+  const putConfig = { configurable: { thread_id: threadId, checkpoint_ns: "" } };
+  if (seedFinished) {
+    await (writer as unknown as { put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown> }).put(
+      putConfig,
+      checkpoint,
+      { source: "loop", step: 1, parents: {} },
+    );
+    (writer as unknown as { noteThreadStatus(threadId: string, status: "finished", now?: number): void }).noteThreadStatus(
+      threadId,
+      "finished",
+      1,
+    );
+  }
+  const compiled = await compileGraph(sqliteEarly(), { checkpointer: writer });
+  let release!: () => void;
+  const otherDone = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let opened!: () => void;
+  const marked = new Promise<void>((resolve) => {
+    opened = resolve;
+  });
+  const orig = writer.getTuple.bind(writer);
+  let calls = 0;
+  writer.getTuple = async (config) => {
+    calls += 1;
+    if (calls === 1) {
+      opened();
+      await otherDone;
+      if (fail === "throw") throw new Error("read failed");
+    }
+    if (fail === "pruned") return undefined;
+    return orig(config);
+  };
+  const pending =
+    fail === "throw"
+      ? compiled.resume({ threadId, resume: true, onInterrupt: "fail" })
+      : compiled.resumeFrom({ threadId, checkpointId: "bogus", resume: true, onInterrupt: "fail" });
+  await marked;
+  if (!seedFinished) {
+    await other.put(putConfig, checkpoint, { source: "loop", step: 1, parents: {} });
+  }
+  other.noteThreadStatus(threadId, "paused", Date.now());
+  release();
+  if (fail === "throw") {
+    await expect(pending).rejects.toThrow(/read failed/);
+  } else {
+    const result = await pending;
+    expect(result.status).toBe("error");
+    expect((result.error as { code?: string }).code).toBe(CHECKPOINT_PRUNED);
+  }
+  writer.getTuple = orig;
+  (sweeper as unknown as { sweep(now?: number): void }).sweep(Date.now());
+  const status = db.prepare(`SELECT status FROM fg_checkpoint_threads WHERE thread_id = ?`).get(threadId) as {
+    status: string;
+  };
+  expect(status.status).toBe("paused");
+  const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+  expect(n).toBeGreaterThan(0);
+}
+
+function sqliteEarly(): GraphSpec {
+  return {
+    metadata: { name: "sqlite-early" },
+    state: { channels: { tag: { type: "string" } } },
+    nodes: [{ id: "a", type: "function", with: { fn: "sqlRet", output: { to: "tag" } } }],
+    edges: [
+      { from: "START", to: "a" },
+      { from: "a", to: "END" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+function sqliteGates(gates: number): GraphSpec {
+  const nodes = Array.from({ length: gates }, (_, i) => ({
+    id: `g${i}`,
+    type: "hitl",
+    with: { mode: "approve", message: `gate ${i}`, output: { to: `r${i}` } },
+  }));
+  const channels: Record<string, { type: "object" }> = {};
+  for (let i = 0; i < gates; i++) channels[`r${i}`] = { type: "object" };
+  return {
+    metadata: { name: `sqlite-gates-${gates}` },
+    state: { channels },
+    nodes,
+    edges: [
+      { from: "START", to: "g0" },
+      ...Array.from({ length: gates - 1 }, (_, i) => ({ from: `g${i}`, to: `g${i + 1}` })),
+      { from: `g${gates - 1}`, to: "END" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+async function finishSqliteGates(
+  compiled: Awaited<ReturnType<typeof compileGraph>>,
+  threadId: string,
+  gates: number,
+) {
+  let result = await compiled.run({ threadId, onInterrupt: "fail" });
+  for (let i = 0; i < gates; i++) {
+    expect(result.status).toBe("interrupted");
+    result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
+  }
+  expect(result.status).toBe("completed");
+}

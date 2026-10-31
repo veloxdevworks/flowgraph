@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph";
+import type { BaseCheckpointSaver } from "@langchain/langgraph";
+import { FlowgraphMemorySaver } from "@flowgraph/core";
 import {
   compileGraph,
   createInMemoryMemoryBackend,
@@ -377,12 +378,15 @@ export class RunService {
    * shared thread-owner registry, so other replicas serve those threads to
    * their owners. Idempotent: threads that already have an owner are left
    * alone, and a meta owner that disagrees with the registry is logged, not
-   * changed. Runs from init() on multi-user servers.
+   * changed. Runs from init() on multi-user servers. A meta file that cannot
+   * be read is counted as `unreadable`, not as a thread without an owner;
+   * access to that thread is refused until the file can be read.
    */
-  async backfillThreadOwners(): Promise<{ claimed: number; existing: number; conflicts: number; skipped: number }> {
-    const counts = { claimed: 0, existing: 0, conflicts: 0, skipped: 0 };
+  async backfillThreadOwners(): Promise<{ claimed: number; existing: number; conflicts: number; skipped: number; unreadable: number }> {
+    const counts = { claimed: 0, existing: 0, conflicts: 0, skipped: 0, unreadable: 0 };
     const registry = await this.threadOwnerRegistry();
-    for (const meta of await listPersistedGraphs(this.config.graphStoreDir)) {
+    const onUnreadable = () => void counts.unreadable++;
+    for (const meta of await listPersistedGraphs(this.config.graphStoreDir, { onUnreadable })) {
       const owner = meta.owner;
       if (!meta.threadId || !owner?.id) {
         counts.skipped++;
@@ -396,7 +400,7 @@ export class RunService {
         log("warn", "thread-owners.backfill.conflict", { threadId: meta.threadId });
       }
     }
-    if (counts.claimed > 0 || counts.conflicts > 0) log("info", "thread-owners.backfill", counts);
+    if (counts.claimed > 0 || counts.conflicts > 0 || counts.unreadable > 0) log("info", "thread-owners.backfill", counts);
     return counts;
   }
 
@@ -485,7 +489,10 @@ export class RunService {
         if (memBackend === "sqlite") {
           const sqlite = await loadSqlite();
           const file = this.config.memory?.sqlitePath ?? path.join(this.config.graphStoreDir, "memory.db");
-          const b = await sqlite.openSqliteBackend(file);
+          const b = await sqlite.openSqliteBackend({
+            path: file,
+            ...(this.config.checkpointRetention !== undefined ? { retention: this.config.checkpointRetention } : {}),
+          });
           this.closers.push(() => b.close());
           this.useDurableMemory(b.memory);
           this.graphNames = b.graphNames;
@@ -498,6 +505,7 @@ export class RunService {
           const pg = await openPostgresBackend({
             connectionString: this.config.databaseUrl,
             ...(this.config.setupLockTimeoutMs !== undefined ? { setupLockTimeoutMs: this.config.setupLockTimeoutMs } : {}),
+            ...(this.config.checkpointRetention !== undefined ? { retention: this.config.checkpointRetention } : {}),
             onPoolError: (err) => log("warn", "postgres idle connection error", errorFields(err)),
           });
           this.closers.push(() => pg.close());
@@ -511,10 +519,10 @@ export class RunService {
           this.checkpointer = pg.checkpointer;
           return pg.checkpointer;
         }
-        // One MemorySaver shared by every compile. Letting compileGraph create its own
+        // One saver shared by every compile. Letting compileGraph create its own
         // per call gave each start/resume/getState an empty saver, so HITL resume
         // "completed" without running the remaining nodes.
-        const cp = new MemorySaver();
+        const cp = new FlowgraphMemorySaver(this.config.checkpointRetention);
         this.checkpointer = cp;
         return cp;
       })();
@@ -587,6 +595,7 @@ export class RunService {
       cwd,
       graphPath,
       checkpointer,
+      ...(this.config.checkpointRetention !== undefined ? { checkpointRetention: this.config.checkpointRetention } : {}),
       legacyStoreBackend: this.legacyStoreBackend,
       ...(identity ? { memoryIdentity: identity } : {}),
       ...(principal.trusted ? {} : { nodePolicy: untrustedNodePolicy(this.uploadOptions) }),
