@@ -78,12 +78,28 @@ describe("reserved reads in templated node fields", () => {
     expect(reservedTemplateRefs(node({ prompt: "fix __init__.py using {{ state.out }}" }))).toEqual([]);
   });
 
+  it("finds reads spelled with escapes or built from constant pieces", () => {
+    const refs = (prompt: string) => reservedTemplateRefs({ with: { prompt } });
+    for (const t of [
+      "{{ state['_' + '_x'] }}",
+      '{{ state["_" + "_x"] |> upper }}',
+      "{{ state['\\_\\_x'] }}",
+      "{{ state['\\u005f\\u005fx'] }}",
+      "{{ state['\u005f\u005fx'] }}",
+      "{{ len(state[true ? '__x' : 'y']) }}",
+    ]) {
+      expect(refs(t), t).toEqual(["with.prompt"]);
+    }
+    for (const t of ["{{ state['_' + 'x'] }}", "{{ state[input.k] }}", "{{ '_' + '_x' }}", "{{ state['a'] }}"]) expect(refs(t), t).toEqual([]);
+  });
+
   it("refuses them under the policy, and an unrefused read still sees no engine channel", async () => {
     const hitl = (message: string) => graph([{ id: "a", type: "hitl", with: { mode: "approve", message } }]);
     expect(await codeOf(compileGraph(hitl("{{ state.__services }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
     expect(await codeOf(compileGraph(hitl("{{ state['\u200B__services'] }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
-    // Concatenation is not a literal read; the render hides `__` keys instead.
-    const g = await compileGraph(hitl("[{{ state['_' + '_agentReplay'] }}|{{ keys(state) }}]"), { nodePolicy: POLICY, checkpointer: new MemorySaver() });
+    expect(await codeOf(compileGraph(hitl("{{ state['_' + '_services'] }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
+    // An index computed at run time is not followed; the render hides `__` keys instead.
+    const g = await compileGraph(hitl("[{{ state[lower('_') + '_agentReplay'] }}|{{ keys(state) }}]"), { nodePolicy: POLICY, checkpointer: new MemorySaver() });
     const res = await g.run({ input: {}, threadId: `rt-${randomUUID()}` });
     const shown = JSON.stringify(res.interrupts ?? []);
     expect(shown).toContain("[|");

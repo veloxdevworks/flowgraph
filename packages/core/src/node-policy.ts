@@ -7,6 +7,7 @@
  * that skipped the host's upload check still cannot run a blocked node.
  */
 
+import { evalExpr, parseExpr, type Expr } from "@flowgraph/expr";
 import type { NodeRunContext } from "./context.js";
 import type { OutboundHttpPolicy } from "./outbound-http.js";
 
@@ -316,13 +317,98 @@ const RESERVED_REF = { test: (text: string): boolean => RESERVED_REF_RE.test(fol
 /** `{{ ... }}` expressions inside a template string. */
 const TEMPLATE_EXPR = /\{\{([\s\S]*?)\}\}/g;
 
+/** `\uXXXX` sequences as the characters they spell. */
+function decodeUnicodeEscapes(text: string): string {
+  return text.replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+/** Whether an expression contains no names or calls, so it can be evaluated now. */
+function isConstantExpr(expr: Expr, depth = 0): boolean {
+  if (depth > 64) return false;
+  switch (expr.kind) {
+    case "Number":
+    case "String":
+    case "Bool":
+    case "Null":
+      return true;
+    case "Unary":
+      return isConstantExpr(expr.operand, depth + 1);
+    case "Binary":
+    case "Nullish":
+      return isConstantExpr(expr.left, depth + 1) && isConstantExpr(expr.right, depth + 1);
+    case "Ternary":
+      return [expr.condition, expr.consequent, expr.alternate].every((e) => isConstantExpr(e, depth + 1));
+    default:
+      return false;
+  }
+}
+
+/** Sub-expressions of an expression. */
+function childExprs(expr: Expr): Expr[] {
+  switch (expr.kind) {
+    case "Member":
+      return [expr.object];
+    case "Index":
+      return [expr.object, expr.index];
+    case "Call":
+      return expr.args;
+    case "Unary":
+      return [expr.operand];
+    case "Binary":
+    case "Nullish":
+      return [expr.left, expr.right];
+    case "Ternary":
+      return [expr.condition, expr.consequent, expr.alternate];
+    case "Pipe":
+      return [expr.left, ...expr.args];
+    case "Array":
+      return expr.elements;
+    case "Object":
+      return expr.entries.map((e) => e.value);
+    default:
+      return [];
+  }
+}
+
+/** Whether an index in the expression is a constant that spells a `__` name (`'_' + '_x'`, `'\_\_x'`). */
+function hasReservedConstantIndex(expr: Expr, depth = 0): boolean {
+  if (depth > 64) return false;
+  if (expr.kind === "Index" && isConstantExpr(expr.index)) {
+    let key: unknown;
+    try {
+      key = evalExpr(expr.index, {});
+    } catch {
+      key = undefined;
+    }
+    if (typeof key === "string" && isReservedChannel(key)) return true;
+  }
+  return childExprs(expr).some((e) => hasReservedConstantIndex(e, depth + 1));
+}
+
+/**
+ * Whether a template expression names a `__` channel: as written, with
+ * look-alike characters or `\uXXXX` sequences, or through a constant index
+ * built from pieces (`state['_' + '_x']`, `state['\_\_x']`).
+ */
+function refersToReservedInExpr(text: string): boolean {
+  if (RESERVED_REF.test(text) || RESERVED_REF.test(decodeUnicodeEscapes(text))) return true;
+  let expr: Expr;
+  try {
+    expr = parseExpr(text.trim());
+  } catch {
+    return false;
+  }
+  return hasReservedConstantIndex(expr);
+}
+
 /**
  * Template expressions in a node's `with` block (prompts, messages, URLs,
  * conditions, at any depth) that name a `__` channel, as `with.<path>`
  * paths. Only `{{ }}` expressions are checked, so text such as
  * `__init__.py` in a prompt is not. `stateMap` (see
  * {@link reservedStateMapRefs}) and a map's inner node (checked on its own)
- * are skipped. This is a compile-time diagnostic: expressions cannot read
+ * are skipped. Indexes computed at run time (`state[input.k]`) are not
+ * followed. This is a compile-time diagnostic only: expressions cannot read
  * `__` channels in any form, because `state` evaluates without them.
  */
 export function reservedTemplateRefs(node: { with?: unknown }): string[] {
@@ -333,7 +419,7 @@ export function reservedTemplateRefs(node: { with?: unknown }): string[] {
     if (depth > 32) return;
     if (typeof value === "string") {
       for (const m of value.matchAll(TEMPLATE_EXPR)) {
-        if (RESERVED_REF.test(m[1] ?? "")) {
+        if (refersToReservedInExpr(m[1] ?? "")) {
           out.push(at);
           return;
         }
