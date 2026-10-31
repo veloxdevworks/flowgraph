@@ -544,6 +544,10 @@ The child graph runs with its own channels. `stateMap.in` seeds the child (omit 
 
 `output: none` writes nothing. `output.to` / `output.map` (with no `stateMap.out`) is the ordinary node projection of the whole child state.
 
+A delta is applied only when the parent channel being written is the same channel that seeded the child. `in: { draft: "{{ state.input }}" }` and `out: { result: draft }` still copies `draft` into `result` when the child does not change it. Message channels keep edits to an existing id and send a removal for an id the child dropped, including a `RemoveMessage` the child returned.
+
+**Limits.** `append` cannot delete: a child that shortens a list leaves the missing items on the parent, and items it still contains are not appended again. A `custom:` reducer receives the child's full value, so an additive reducer counts a seeded value twice (`5` seeded, child stores `8`, parent becomes `13`). Return only the delta from the child, or write a last-write channel. An unchanged last-write value is not written back, so a parallel sibling that does write that channel wins.
+
 Inside `map`, the subgraph's update is the per-item value (`collect` merges those in input order). A single changed channel, or a single `stateMap.out` entry, becomes that item; several changed channels become one object.
 
 Child events are nested under the parent's span. The parent must use checkpointing (`runtime.checkpoint`) for nested HITL inside the child to pause and resume correctly — the child inherits the parent's LangGraph checkpointer. The merge into the parent happens when the child finishes, so a resume sees the seeded parent value plus everything the child produced, once.

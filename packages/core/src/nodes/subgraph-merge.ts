@@ -5,11 +5,13 @@
  * child channel or a `{{ }}` expression over the child state. With no
  * `stateMap.out`, channels that share a name are merged.
  *
- * The value handed to the parent is a reducer input. When the child was
- * seeded with the parent's current value, only the new portion is returned
- * (append suffix, merge diff) so the parent's reducer does not apply twice.
+ * The value handed to the parent is a reducer input. A delta (append suffix,
+ * merge diff, message edits) is sent only when this parent channel is the one
+ * that seeded the child value. Copying that same value onto a different
+ * parent channel passes it through whole.
  */
 
+import { RemoveMessage } from "@langchain/core/messages";
 import { parseExpr, type Expr } from "@flowgraph/expr";
 import { OUTPUTS_CHANNEL } from "../runtime/apply-output.js";
 import { RESERVED_STATE_CHANNELS } from "../runtime/state-annotation.js";
@@ -122,21 +124,32 @@ function collectStateRoots(node: Expr, out: Set<string>): void {
   }
 }
 
+/** A value copied into a child channel, and which parent channel it came from. */
+export interface ChannelSeed {
+  value: unknown;
+  /**
+   * Set when `value` is a whole copy of this parent channel (`log` or
+   * `{{ state.log }}`). Absent for computed expressions and node `input`.
+   */
+  fromParent?: string;
+}
+
 export function projectSubgraphInput(opts: {
   stateMapIn: Record<string, string> | undefined;
   parentState: Record<string, unknown>;
   nodeInput: Record<string, unknown>;
   childChannels: readonly string[];
   resolve: (ref: string) => unknown;
-}): { input: Record<string, unknown>; seeds: Record<string, unknown> } {
+}): { input: Record<string, unknown>; seeds: Record<string, ChannelSeed> } {
   const input: Record<string, unknown> = {};
-  const seeds: Record<string, unknown> = {};
+  const seeds: Record<string, ChannelSeed> = {};
 
   if (opts.stateMapIn) {
     for (const [childChannel, parentExpr] of Object.entries(opts.stateMapIn)) {
       const value = opts.resolve(parentExpr);
       input[childChannel] = value;
-      seeds[childChannel] = value;
+      const fromParent = typeof parentExpr === "string" ? outputSourceChannel(parentExpr) : undefined;
+      seeds[childChannel] = fromParent ? { value, fromParent } : { value };
     }
   } else {
     const parentKeys = new Set(Object.keys(opts.parentState));
@@ -145,13 +158,15 @@ export function projectSubgraphInput(opts: {
       if (!parentKeys.has(channel)) continue;
       const value = opts.parentState[channel];
       input[channel] = value;
-      seeds[channel] = value;
+      seeds[channel] = { value, fromParent: channel };
     }
   }
 
   for (const [key, value] of Object.entries(opts.nodeInput)) {
     input[key] = value;
-    seeds[key] = value;
+    const prev = seeds[key];
+    if (prev && deepEqual(prev.value, value)) continue;
+    seeds[key] = { value };
   }
 
   return { input, seeds };
@@ -160,19 +175,23 @@ export function projectSubgraphInput(opts: {
 export function projectExplicitOutput(opts: {
   out: Record<string, string>;
   childState: Record<string, unknown>;
-  seeds: Record<string, unknown>;
+  seeds: Record<string, ChannelSeed>;
   parentChannels: Record<string, ChannelMergeDef>;
   resolve: (ref: string) => unknown;
 }): Record<string, unknown> {
   const update: Record<string, unknown> = {};
   for (const [parentChannel, childExpr] of Object.entries(opts.out)) {
     const source = outputSourceChannel(childExpr);
-    const seeded = source != null && Object.prototype.hasOwnProperty.call(opts.seeds, source);
+    const seed = source != null ? opts.seeds[source] : undefined;
+    // Delta only when this parent channel is the one that seeded the child
+    // value. `in: { draft: input }, out: { result: draft }` must still write
+    // `result` when the child leaves `draft` unchanged.
+    const sameChannel = seed?.fromParent != null && seed.fromParent === parentChannel;
     const value = opts.resolve(childExpr);
     const projected = reducerInput(
       opts.parentChannels[parentChannel],
-      seeded,
-      seeded ? opts.seeds[source!] : undefined,
+      sameChannel,
+      sameChannel ? seed!.value : undefined,
       value,
     );
     if (projected.omit) continue;
@@ -183,7 +202,7 @@ export function projectExplicitOutput(opts: {
 
 export function projectMatchingOutput(opts: {
   childState: Record<string, unknown>;
-  seeds: Record<string, unknown>;
+  seeds: Record<string, ChannelSeed>;
   parentChannels: Record<string, ChannelMergeDef>;
 }): Record<string, unknown> {
   const update: Record<string, unknown> = {};
@@ -191,9 +210,16 @@ export function projectMatchingOutput(opts: {
 
   for (const [channel, value] of Object.entries(opts.childState)) {
     if (isSkippedMergeChannel(channel)) continue;
-    const seeded = Object.prototype.hasOwnProperty.call(opts.seeds, channel);
+    const seed = opts.seeds[channel];
+    const seeded = seed != null;
     if (parentNames.has(channel)) {
-      const projected = reducerInput(opts.parentChannels[channel], seeded, seeded ? opts.seeds[channel] : undefined, value);
+      const sameChannel = seed?.fromParent === channel;
+      const projected = reducerInput(
+        opts.parentChannels[channel],
+        sameChannel,
+        sameChannel ? seed!.value : undefined,
+        value,
+      );
       if (projected.omit) continue;
       update[channel] = projected.value;
       continue;
@@ -201,7 +227,7 @@ export function projectMatchingOutput(opts: {
     // Not a parent channel. Still return it so a subgraph inside `map` can
     // be unwrapped as the item result. LangGraph drops it on a top-level node.
     if (seeded) {
-      if (deepEqual(opts.seeds[channel], value)) continue;
+      if (deepEqual(seed!.value, value)) continue;
       update[channel] = value;
       continue;
     }
@@ -225,10 +251,10 @@ export function reducerInput(
   const type = channel?.type;
 
   if (reducer === "append" || reducer === "concat") {
-    if (Array.isArray(seed) && Array.isArray(next) && arrayStartsWith(seed, next)) {
-      const suffix = next.slice(seed.length);
-      if (suffix.length === 0) return { omit: true };
-      return { omit: false, value: suffix };
+    if (Array.isArray(seed) && Array.isArray(next)) {
+      const extra = appendExtra(seed, next);
+      if (extra.length === 0) return { omit: true };
+      return { omit: false, value: extra };
     }
     return { omit: false, value: next };
   }
@@ -248,15 +274,60 @@ export function reducerInput(
   return { omit: false, value: next };
 }
 
+/**
+ * Items in `next` that are not already in `seed`.
+ * A longer list that starts with `seed` contributes its suffix.
+ * A shorter or overlapping list contributes only values the seed does not
+ * already contain, so a truncated `[b]` is not appended onto `[a, b]`.
+ * `append` cannot delete: dropped items stay on the parent.
+ */
+function appendExtra(seed: unknown[], next: unknown[]): unknown[] {
+  if (arrayStartsWith(seed, next)) return next.slice(seed.length);
+  const pool = [...seed];
+  const extra: unknown[] = [];
+  for (const item of next) {
+    const idx = pool.findIndex((candidate) => deepEqual(candidate, item));
+    if (idx >= 0) pool.splice(idx, 1);
+    else extra.push(item);
+  }
+  return extra;
+}
+
 function messageDelta(seed: unknown, next: unknown): unknown {
   if (!Array.isArray(seed) || !Array.isArray(next)) return next;
-  if (arrayStartsWith(seed, next)) return next.slice(seed.length);
-  const seedIds = new Set(seed.map(messageId).filter((id): id is string => id != null));
-  if (seedIds.size === 0) return next;
-  return next.filter((message) => {
+  const seedById = new Map<string, unknown>();
+  for (const message of seed) {
     const id = messageId(message);
-    return id == null || !seedIds.has(id);
-  });
+    if (id) seedById.set(id, message);
+  }
+  if (seedById.size === 0) return next;
+
+  const seen = new Set<string>();
+  const delta: unknown[] = [];
+  for (const message of next) {
+    const id = messageId(message);
+    if (id == null) {
+      delta.push(message);
+      continue;
+    }
+    seen.add(id);
+    if (isRemoveMessage(message)) {
+      delta.push(message);
+      continue;
+    }
+    if (!seedById.has(id) || !deepEqual(seedById.get(id), message)) delta.push(message);
+  }
+  for (const id of seedById.keys()) {
+    if (!seen.has(id)) delta.push(new RemoveMessage({ id }));
+  }
+  return delta;
+}
+
+function isRemoveMessage(message: unknown): boolean {
+  if (RemoveMessage.isInstance(message)) return true;
+  if (message == null || typeof message !== "object") return false;
+  const rec = message as { type?: unknown; id?: unknown };
+  return rec.type === "remove" && typeof rec.id === "string" && rec.id.length > 0;
 }
 
 function messageId(message: unknown): string | undefined {

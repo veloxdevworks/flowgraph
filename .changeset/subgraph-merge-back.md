@@ -1,6 +1,16 @@
 ---
-"@flowgraph/core": patch
-"@flowgraph/spec": patch
+"@flowgraph/core": minor
+"@flowgraph/spec": minor
 ---
 
-Subgraph nodes merge child results by an explicit `stateMap.out` (parent channel ← child channel or expression), or by channels that share a name. The parent's reducer combines only the child's new values, so `append` and `merge` no longer replay state the child was seeded with. Parallel subgraph writes merge in node-id order, and a child that interrupts then resumes merges its finished state once. Validate reports `stateMap.out` keys that are not parent channels and values that name a missing child channel.
+Subgraph merge-back is explicit and uses the parent's reducer on the child's new values. This is a breaking change for graphs that relied on copying the child's whole state into the parent.
+
+### What to change
+
+- `stateMap.out` keys are parent channels and values are child channels (`result: draft` writes the child's `draft` into the parent's `result`). If validate reports `UNDECLARED_OUTPUT_CHANNEL` on the name you meant as the child channel, swap the pair.
+- With no `stateMap.out`, only channels that share a name merge. The child's `outputs` bag and child-only channels are not copied. Name the channel on the parent, or map it in `stateMap.out`.
+- Inside `map`, the item is the value the child produced (one changed channel, or an object of them), not the whole child state. Point `collect` at that value.
+- `append`, `merge`, and `messages` receive only what the child added or edited. A list that used to repeat the parent's seed will not. An unchanged copy is still written when `stateMap.out` targets a different parent channel than the one that seeded the child.
+- An unchanged last-write value is not written back, so a parallel sibling that writes the same channel wins. Use `append` or `merge` when both branches must keep a contribution.
+- `append` cannot drop items. A child that shortens a list leaves the missing entries in place, and does not append the entries it kept.
+- A `custom:` reducer still receives the child's full value. If that value already includes the seed, an additive reducer counts the seed twice. Return only the delta from the child, or map the result onto a last-write channel.

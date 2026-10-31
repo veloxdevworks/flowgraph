@@ -101,7 +101,7 @@ export const subgraphNode = defineNode<Config>({
         const clean = stripSubgraphState(childState);
 
         // Explicit parent ← child mapping. The parent's reducer sees a delta
-        // when the mapped child channel was seeded from the parent.
+        // only when this parent channel is the one that seeded the child value.
         if (config.stateMap?.out) {
           return {
             update: projectExplicitOutput({
