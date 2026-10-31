@@ -4,6 +4,7 @@ import {
   compileGraph,
   registerFunction,
   resolveCheckpointRetention,
+  THREAD_MOVED_ON,
   type CheckpointRetentionInput,
 } from "@flowgraph/core";
 import { openPostgresBackend } from "./index.js";
@@ -336,4 +337,29 @@ describe.skipIf(!DB)("postgres run waiting for an answer", () => {
       expect((await b.saver.savedThreadStatus(threadId))?.status).toBe("finished");
     });
   }
+
+  it("a run whose thread another host took over while it waited stops without applying the answer", async () => {
+    const retention = { finishedTtl: "1h" } as const;
+    const schema = schemaName();
+    const a = await saverAt(retention, schema);
+    const b = await saverAt(retention, schema);
+    b.clock.now = T0 + 1;
+    const threadId = "taken-over";
+    observe = undefined;
+    seenInPost.length = 0;
+    const graph = await compileGraph(gatedSpec("approval"), { checkpointer: a.saver as never });
+    const result = await graph.run({
+      threadId,
+      input: {},
+      onInterrupt: "prompt",
+      resolveInterrupt: async () => {
+        await b.saver.markThreadActive(threadId);
+        return { approved: true };
+      },
+    });
+    expect(result.status).toBe("error");
+    expect((result.error as { code?: string }).code).toBe(THREAD_MOVED_ON);
+    expect(seenInPost).toEqual([]);
+    expect(await b.saver.savedThreadStatus(threadId)).toEqual({ status: "active", updatedAt: T0 + 1 });
+  });
 });

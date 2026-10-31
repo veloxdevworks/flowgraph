@@ -161,6 +161,46 @@ function countInt(n: unknown, name: string, min: number): number {
   return n;
 }
 
+/**
+ * `error.code` when a run waiting in process for an answer could not store its
+ * thread row as waiting, or as active again after the answer. The run stops
+ * rather than wait while another host's sweep could reclaim the thread.
+ */
+export const THREAD_WAIT_NOT_RECORDED = "THREAD_WAIT_NOT_RECORDED";
+
+/**
+ * `error.code` when a run waiting in process finds its thread row is no longer
+ * its own: another run took the thread over, a sweep reclaimed it, or it was
+ * deleted. The run stops instead of applying the answer.
+ */
+export const THREAD_MOVED_ON = "THREAD_MOVED_ON";
+
+export type ThreadWaitErrorCode = typeof THREAD_WAIT_NOT_RECORDED | typeof THREAD_MOVED_ON;
+
+export function threadWaitError(
+  code: ThreadWaitErrorCode,
+  threadId: string,
+  when: "before" | "after",
+  cause?: unknown,
+): Error & { code: ThreadWaitErrorCode } {
+  const reason = cause instanceof Error ? `: ${cause.message}` : "";
+  const message =
+    code === THREAD_WAIT_NOT_RECORDED
+      ? when === "before"
+        ? `Thread "${threadId}" could not be stored as waiting before asking for an answer${reason}. ` +
+          "The run stopped so another host cannot reclaim the thread while it waits; resume it to continue."
+        : `Thread "${threadId}" could not be stored as active after the answer${reason}. ` +
+          "The run stopped without applying the answer; resume it to continue."
+      : when === "before"
+        ? `Thread "${threadId}" was taken over, reclaimed, or deleted before this run could wait for an answer. ` +
+          "The run stopped without asking."
+        : `Thread "${threadId}" was taken over, reclaimed, or deleted while this run waited for an answer. ` +
+          "The run stopped without applying the answer.";
+  const err = new Error(message, cause === undefined ? undefined : { cause }) as Error & { code: ThreadWaitErrorCode };
+  err.code = code;
+  return err;
+}
+
 /** `error.code` when resume names a checkpoint retention has already dropped. */
 export const CHECKPOINT_PRUNED = "CHECKPOINT_PRUNED";
 

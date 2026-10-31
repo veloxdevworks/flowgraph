@@ -6,6 +6,8 @@ import { registerFunction } from "../nodes/function.js";
 import { FlowgraphMemorySaver } from "./memory-saver.js";
 import {
   DEFAULT_ACTIVE_TTL_MS,
+  THREAD_MOVED_ON,
+  THREAD_WAIT_NOT_RECORDED,
   abandonedActivePolicy,
   resolveCheckpointRetention,
   type CheckpointRetentionInput,
@@ -255,4 +257,133 @@ describe("FlowgraphMemorySaver run waiting for an answer", () => {
     saver.restoreThreadStatus("untouched", undefined, other.mark, other.markedAt);
     expect(saver.savedThreadStatus("untouched")).toBeUndefined();
   });
+
+  it("stops the run before asking when the row cannot be stored as waiting", async () => {
+    const { saver, clock } = faultySaverAt();
+    saver.failWaiting = true;
+    postSaver = saver;
+    postThread = "wait-write-fails";
+    seenInPost.length = 0;
+    const graph = await compileGraph(gatedSpec("approval"), { checkpointer: saver });
+    let asked = 0;
+    const result = await graph.run({
+      threadId: postThread,
+      input: {},
+      onInterrupt: "prompt",
+      resolveInterrupt: async () => {
+        asked++;
+        return { approved: true };
+      },
+    });
+    expect(result.status).toBe("error");
+    expect((result.error as { code?: string }).code).toBe(THREAD_WAIT_NOT_RECORDED);
+    expect(result.error?.message).toMatch(/could not be stored as waiting before asking.*disk full/);
+    expect(asked).toBe(0);
+    expect(seenInPost).toEqual([]);
+    // The errored run left the thread paused: a later sweep keeps it, and it resumes.
+    expect(saver.savedThreadStatus(postThread)?.status).toBe("paused");
+    clock.now = T0 + 8 * DAY;
+    await saver.sweep();
+    saver.failWaiting = false;
+    const resumed = await graph.resume({ threadId: postThread, resume: { approved: true }, onInterrupt: "fail" });
+    expect(resumed.status).toBe("completed");
+    expect(resumed.state["b"]).toBe("post");
+    expect(seenInPost).toEqual(["active"]);
+  });
+
+  it("stops the run without applying the answer when the row cannot be stored as active again", async () => {
+    const { saver } = faultySaverAt();
+    saver.failAnswered = true;
+    postSaver = saver;
+    postThread = "answer-write-fails";
+    seenInPost.length = 0;
+    const graph = await compileGraph(gatedSpec("approval"), { checkpointer: saver });
+    const result = await graph.run({
+      threadId: postThread,
+      input: {},
+      onInterrupt: "prompt",
+      resolveInterrupt: async () => ({ approved: true }),
+    });
+    expect(result.status).toBe("error");
+    expect((result.error as { code?: string }).code).toBe(THREAD_WAIT_NOT_RECORDED);
+    expect(result.error?.message).toMatch(/could not be stored as active after the answer/);
+    expect(seenInPost).toEqual([]);
+    expect(saver.savedThreadStatus(postThread)?.status).toBe("paused");
+  });
+
+  it("stops the run before asking when the row is no longer the run's own", async () => {
+    const { saver } = faultySaverAt();
+    saver.lostBeforeWait = true;
+    postSaver = saver;
+    postThread = "lost-before-wait";
+    seenInPost.length = 0;
+    const graph = await compileGraph(gatedSpec("breakpoint"), { checkpointer: saver });
+    let asked = 0;
+    const result = await graph.run({
+      threadId: postThread,
+      input: {},
+      onInterrupt: "prompt",
+      resolveInterrupt: async () => {
+        asked++;
+        return true;
+      },
+    });
+    expect(result.status).toBe("error");
+    expect((result.error as { code?: string }).code).toBe(THREAD_MOVED_ON);
+    expect(result.error?.message).toMatch(/before this run could wait for an answer/);
+    expect(asked).toBe(0);
+    expect(seenInPost).toEqual([]);
+  });
+
+  for (const moved of ["taken over", "deleted"] as const) {
+    it(`stops the run without applying the answer when the thread was ${moved} while it waited`, async () => {
+      const { saver, clock } = saverAt({ finishedTtl: "1h", activeTtl: "1d" });
+      postSaver = saver;
+      postThread = `moved-on-${moved.replace(" ", "-")}`;
+      seenInPost.length = 0;
+      const graph = await compileGraph(gatedSpec("approval"), { checkpointer: saver });
+      const result = await graph.run({
+        threadId: postThread,
+        input: {},
+        onInterrupt: "prompt",
+        resolveInterrupt: async () => {
+          clock.now = T0 + 1;
+          if (moved === "taken over") saver.markThreadActive(postThread);
+          else await saver.deleteThread(postThread);
+          return { approved: true };
+        },
+      });
+      expect(result.status).toBe("error");
+      expect((result.error as { code?: string }).code).toBe(THREAD_MOVED_ON);
+      expect(result.error?.message).toMatch(/while this run waited for an answer/);
+      expect(seenInPost).toEqual([]);
+      // The stopped run does not write its status over the thread's new owner.
+      if (moved === "taken over") expect(saver.savedThreadStatus(postThread)).toEqual({ status: "active", updatedAt: T0 + 1 });
+      else expect(saver.savedThreadStatus(postThread)).toBeUndefined();
+    });
+  }
 });
+
+class FaultyMemorySaver extends FlowgraphMemorySaver {
+  failWaiting = false;
+  failAnswered = false;
+  /** Act as if the row stopped being this run's just before the wait. */
+  lostBeforeWait = false;
+  override noteThreadWaiting(threadId: string, activeMark: string): boolean {
+    if (this.failWaiting) throw new Error("disk full");
+    if (this.lostBeforeWait) return false;
+    return super.noteThreadWaiting(threadId, activeMark);
+  }
+  override noteThreadAnswered(threadId: string, activeMark: string): boolean {
+    if (this.failAnswered) throw new Error("disk full");
+    return super.noteThreadAnswered(threadId, activeMark);
+  }
+}
+
+function faultySaverAt() {
+  const clock = { now: T0 };
+  const saver = new FaultyMemorySaver(resolveCheckpointRetention({ finishedTtl: "1h", activeTtl: "1d" }), undefined, {
+    clock: () => clock.now,
+  });
+  return { saver, clock };
+}

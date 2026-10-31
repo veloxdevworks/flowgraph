@@ -26,6 +26,9 @@ import { buildStateAnnotation, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANN
 import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 import {
   checkpointPrunedError,
+  THREAD_MOVED_ON,
+  THREAD_WAIT_NOT_RECORDED,
+  threadWaitError,
   isRetentionSaver,
   resolveCheckpointRetention,
   retentionStatusForRun,
@@ -424,26 +427,38 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // While this run waits in-process for an answer it writes nothing, so its
     // row would look abandoned to a sweep on another host. Store it as paused
     // for the wait and set it back to active under the same mark afterwards.
+    // If either write fails, or the row is no longer this run's, stop the run
+    // instead of waiting unprotected or applying the answer to a thread that
+    // moved on.
     const awaitAnswer = async <T>(wait: () => Promise<T> | T): Promise<T> => {
-      let waiting = false;
-      if (activeMark && retention?.noteThreadWaiting) {
-        try {
-          waiting = await retention.noteThreadWaiting(threadId, activeMark);
-        } catch {
-          // Missing this only leaves the row active, as before.
-        }
-      }
+      const mark = activeMark;
+      if (!mark || !retention?.noteThreadWaiting) return await wait();
+      let waiting: boolean;
       try {
-        return await wait();
-      } finally {
-        if (waiting && activeMark) {
-          try {
-            await retention?.noteThreadAnswered?.(threadId, activeMark);
-          } catch {
-            // The run's next checkpoint write refreshes the row as active.
-          }
-        }
+        waiting = await retention.noteThreadWaiting(threadId, mark);
+      } catch (err) {
+        throw threadWaitError(THREAD_WAIT_NOT_RECORDED, threadId, "before", err);
       }
+      if (!waiting) throw threadWaitError(THREAD_MOVED_ON, threadId, "before");
+      let answer: T;
+      try {
+        answer = await wait();
+      } catch (err) {
+        try {
+          await retention.noteThreadAnswered?.(threadId, mark);
+        } catch {
+          // The row stays paused; the answer's own error is the one to report.
+        }
+        throw err;
+      }
+      let answered = true;
+      try {
+        answered = (await retention.noteThreadAnswered?.(threadId, mark)) ?? true;
+      } catch (err) {
+        throw threadWaitError(THREAD_WAIT_NOT_RECORDED, threadId, "after", err);
+      }
+      if (!answered) throw threadWaitError(THREAD_MOVED_ON, threadId, "after");
+      return answer;
     };
     try {
       runToken = retention?.beginThreadRun?.(threadId) ?? 0;
@@ -731,7 +746,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         }
 
         events.emit("interrupt.resumed", { resume: resumeValue });
-        current = new Command({ resume: resumeValue });
+        current = resumeCommand(resumeValue, interrupts);
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -745,7 +760,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
       events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
       await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
-      return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
+      // A thread that moved on belongs to someone else now: release this run
+      // without writing its status over theirs.
+      const movedOn = (err as { code?: unknown } | null)?.code === THREAD_MOVED_ON;
+      return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs }, !movedOn);
     } finally {
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       for (const u of unsubs) u();
@@ -1645,6 +1663,20 @@ function isAbortFailure(err: unknown, signal?: AbortSignal): boolean {
     if (name === "AbortError") return true;
   }
   return false;
+}
+
+/**
+ * Resume the pending interrupts with one answer. LangGraph drops a falsy
+ * `resume` (`false`, `0`, `""`, `null`, `undefined`) as empty input, so a
+ * falsy answer is sent per interrupt id instead, which it applies as given.
+ */
+function resumeCommand(value: unknown, pending: InterruptInfo[]): Command {
+  if (value) return new Command({ resume: value });
+  const ids = pending.map((it) => it.id);
+  if (ids.length > 0 && ids.every((id) => /^[0-9a-f]{32}$/.test(id))) {
+    return new Command({ resume: Object.fromEntries(ids.map((id) => [id, value])) });
+  }
+  return new Command({ resume: value });
 }
 
 function extractInterrupts(result: Record<string, unknown>): InterruptInfo[] {
