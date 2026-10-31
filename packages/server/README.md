@@ -84,7 +84,10 @@ A graph uploaded by a caller who is not a trusted author is checked when it is u
 | `UPLOAD_ENV_PLACEHOLDER_BLOCKED` / `UPLOAD_SECRET_REFERENCE_BLOCKED` | `${VAR}` placeholders and `{{ secrets.* }}` templates, which would read the server's environment |
 | `UPLOAD_HOST_PATH_BLOCKED` | node `workspace`, `runtime.workspace`, `runtime.worktrees.root`, and workshop or `hitl` `mode: review` `with.diff` that runs `git diff` on the server (a `before` / `after` diff is allowed; a review with no `diff` shows none) |
 | `UPLOAD_RUNTIME_HOST_EXEC_BLOCKED` | `runtime.services.rehydrateOnResume` (restarts saved service commands on resume) and `runtime.worktrees.cleanupOnEnd` (runs `git worktree remove`) |
-| `UPLOAD_RESERVED_CHANNEL_BLOCKED` | declaring, writing (`output.to`) or giving a default `input` for the engine's own state channels (`__services`, `__worktrees`, `__agentReplay`, `__once`, `__mapCollect`, `__mapTask`, `__issues`, `__interrupt__`) |
+| `UPLOAD_RESERVED_CHANNEL_BLOCKED` | declaring, writing (`output.to`), giving a default `input` for, or naming in a subgraph `stateMap.in` / `stateMap.out` (keys or values) any state channel whose name starts with `__`; that prefix is the engine's own (`__services`, `__worktrees`, `__agentReplay`, `__once`, `__mapCollect`, `__mapTask`, `__issues`, `__interrupt__`, and any it adds later) |
+| `UPLOAD_AGENT_REF_BLOCKED` | agents with `with.agent`, which loads an agent definition from the server's disk or an installed package |
+| `UPLOAD_IMPORTS_BLOCKED` | graph `imports`, at the top level or in inline subgraphs and `map` inners (they load modules on the server; uploads strip them for every caller, see below) |
+| `UPLOAD_INBOUND_WEBHOOK_BLOCKED` | `wait` nodes with `with.webhook` and `runtime.webhookServer`, which listen on a port on the server |
 | `UPLOAD_AGENT_SKILL_TOOL_BLOCKED` | agents given the `skill` tool |
 | `UPLOAD_AGENT_TOOL_BLOCKED` | agent tools that run on the host: `start_service`, `stop_service`, `restart_service`, the file tools (`Read`, `Write`, `Edit`, `Glob`, `Bash`, `fs_*`) and any other registered function tool. `ask_human`, `list_services` and `service_status` stay allowed, plus `FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS` |
 | `UPLOAD_FUNCTION_BLOCKED` | `function` / `code` nodes, which call functions registered in the server process, unless listed in `FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS` |
@@ -95,7 +98,7 @@ A graph uploaded by a caller who is not a trusted author is checked when it is u
 | `UPLOAD_LOCAL_TOOLS_BLOCKED` | `localTools`, which run file tools on the server |
 | `UPLOAD_HOST_PROBE_BLOCKED` | `with.requires`, which checks which programs are installed on the server |
 
-At run time the engine enforces the same limits again (`NODE_TYPE_BLOCKED`, `SUBGRAPH_FILE_BLOCKED`, `SECRET_REFERENCE_BLOCKED`, `MCP_BLOCKED`, `LOCAL_TOOLS_BLOCKED`, `HOST_PROBE_BLOCKED`, `TOOL_BLOCKED`, `FUNCTION_BLOCKED`, `HOST_EXEC_BLOCKED`, `RESERVED_CHANNEL_BLOCKED`; saved service and worktree entries are not restarted or removed for such a graph; the service tools refuse to start, stop or restart anything for a graph whose policy blocks `service` nodes; the MCP hub is never handed to an untrusted graph), and building providers refuses `ollama` and `baseUrl` with 403 `PROVIDER_ENDPOINT_BLOCKED`. Trusted authors are `oidc` callers with a trusted role or team, every `token` caller, and `none` mode only with `FLOWGRAPH_INSECURE_DEV=1`.
+At run time the engine enforces the same limits again (`NODE_TYPE_BLOCKED`, `SUBGRAPH_FILE_BLOCKED`, `SECRET_REFERENCE_BLOCKED`, `MCP_BLOCKED`, `LOCAL_TOOLS_BLOCKED`, `HOST_PROBE_BLOCKED`, `TOOL_BLOCKED`, `FUNCTION_BLOCKED`, `HOST_EXEC_BLOCKED`, `RESERVED_CHANNEL_BLOCKED`, `AGENT_REF_BLOCKED`, `IMPORTS_BLOCKED`, `INBOUND_WEBHOOK_BLOCKED`; an untrusted graph sees only the providers it declares, never ones registered by the server or by other graphs; saved service and worktree entries are not restarted or removed for such a graph; the service tools refuse to start, stop or restart anything for a graph whose policy blocks `service` nodes; the MCP hub is never handed to an untrusted graph), and building providers refuses `ollama` and `baseUrl` with 403 `PROVIDER_ENDPOINT_BLOCKED`. Trusted authors are `oidc` callers with a trusted role or team, every `token` caller, and `none` mode only with `FLOWGRAPH_INSECURE_DEV=1`.
 
 **Outbound requests.** `http` and `webhook` nodes in untrusted graphs may reach only public addresses. Templated URLs are checked when the request is made: the host is resolved and every address it resolves to is checked before connecting (so DNS rebinding to an inner address is refused), and redirects are followed by hand with the same check on every hop; a redirect to a blocked address is never followed. Refusals name the address and the reason (`OUTBOUND_ADDRESS_BLOCKED`; `OUTBOUND_URL_BLOCKED` for non-http schemes). Each request, redirects and body included, has 30 s (`OUTBOUND_TIMEOUT`) and reads at most 10 MiB of response (`OUTBOUND_RESPONSE_TOO_LARGE`). To let untrusted graphs call specific inner services, list them:
 
@@ -135,8 +138,11 @@ These changes can stop an existing deployment or graph until you act:
    - `function` / `code` nodes (`UPLOAD_FUNCTION_BLOCKED`): list safe functions in `FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS`;
    - workshop or `hitl` review `diff` with `cwd` / `base` / `paths` (`UPLOAD_HOST_PATH_BLOCKED`): pass `diff: { before, after }` text instead, or leave `diff` out;
    - `runtime.services.rehydrateOnResume` or `runtime.worktrees.cleanupOnEnd` (`UPLOAD_RUNTIME_HOST_EXEC_BLOCKED`): remove them; untrusted graphs cannot start services or worktrees anyway;
-   - reserved `__*` state channels in `state.channels`, `output.to` or `input` (`UPLOAD_RESERVED_CHANNEL_BLOCKED`): rename the channel.
-4. **Run input may not set `__*` engine channels** (`__services`, `__worktrees`, `__agentReplay`, …), from any caller: 403 `RESERVED_CHANNEL_BLOCKED`. Remove those keys from `input`.
+   - state channels starting with `__` in `state.channels`, `output.to`, `input` or a subgraph `stateMap` (`UPLOAD_RESERVED_CHANNEL_BLOCKED`): rename the channel;
+   - agents with `with.agent` (`UPLOAD_AGENT_REF_BLOCKED`): inline the agent's prompt and tools in the node;
+   - `imports` anywhere in the graph (`UPLOAD_IMPORTS_BLOCKED`): remove them; they were never run on the server;
+   - `wait` nodes with `with.webhook`, or `runtime.webhookServer` (`UPLOAD_INBOUND_WEBHOOK_BLOCKED`): resume the thread through the server's API instead.
+4. **Run input may not set any key starting with `__`** (`__services`, `__worktrees`, `__agentReplay`, …), from any caller: 403 `RESERVED_CHANNEL_BLOCKED`. Remove those keys from `input`.
 5. **Thread owners move into the checkpoint store.** Start every replica once after upgrading so it copies the owners in its graph store's meta files (see *Runs* above); until a replica has done so, its pre-upgrade threads are refused on other replicas.
 
 Also: reusing a thread id for a different graph is a 409 `THREAD_ID_CONFLICT`, and stored graph YAML is now kept as uploaded (see *Stored graphs* above). The `flowgraph` CLI runs graphs locally and is unaffected by all of this.
@@ -238,7 +244,7 @@ Pass `certificate_arn` to Terraform to terminate HTTPS on the ALB (HTTP redirect
 ## v1 graph-source constraints
 
 - Clients upload graph YAML in the start request; it is persisted under `FLOWGRAPH_GRAPH_STORE`.
-- Client `imports` (custom nodes/providers/reducers modules) are **stripped** and not executed.
+- Client `imports` (custom nodes/providers/reducers modules) are **stripped** and not executed, including `imports` inside inline subgraphs and `map` inners at any depth.
 - Only built-in node types + YAML `providers:` with `kind: langchain` (including `vendor: bedrock`) are supported.
 - Client-supplied provider secrets in `env` are **rejected**. Use the task IAM role for Bedrock and Secrets Manager / task env for API keys.
 

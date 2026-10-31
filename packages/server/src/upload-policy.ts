@@ -9,11 +9,13 @@
  */
 
 import {
-  RESERVED_STATE_CHANNELS,
+  RESERVED_CHANNEL_PREFIX,
   classifyAddress,
   collectNodeWriteChannels,
   hostIsAllowListed,
+  isReservedChannel,
   registeredToolNamesOf,
+  reservedStateMapRefs,
   walkNodes,
   type NodePolicy,
 } from "@flowgraph/core";
@@ -69,10 +71,13 @@ export type UploadViolationCode =
   | "UPLOAD_HOST_PROBE_BLOCKED"
   | "UPLOAD_HOST_PATH_BLOCKED"
   | "UPLOAD_RUNTIME_HOST_EXEC_BLOCKED"
-  | "UPLOAD_RESERVED_CHANNEL_BLOCKED";
+  | "UPLOAD_RESERVED_CHANNEL_BLOCKED"
+  | "UPLOAD_AGENT_REF_BLOCKED"
+  | "UPLOAD_IMPORTS_BLOCKED"
+  | "UPLOAD_INBOUND_WEBHOOK_BLOCKED";
 
-/** Engine bookkeeping channels (service intents, worktree paths, agent replay, ...). */
-const RESERVED_CHANNELS: ReadonlySet<string> = new Set([...RESERVED_STATE_CHANNELS, "__interrupt__"]);
+/** Why a reserved name is refused (every `__` name belongs to the engine: service intents, worktree paths, agent replay, ...). */
+const RESERVED_WHY = `names starting with "${RESERVED_CHANNEL_PREFIX}" are reserved state channels`;
 
 export interface UploadViolation {
   severity: "error";
@@ -95,6 +100,9 @@ export const UNTRUSTED_NODE_POLICY: NodePolicy = {
   allowedTools: UNTRUSTED_ALLOWED_TOOLS,
   allowedFunctions: [],
   blockHostExec: true,
+  blockAgentRefs: true,
+  blockImports: true,
+  blockInboundWebhooks: true,
   reason: REASON,
 };
 
@@ -170,6 +178,15 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
       add("UPLOAD_HOST_PATH_BLOCKED", `${path}.workspace`, "a node workspace is a path on the server");
     }
     const w = (n.with ?? {}) as Record<string, unknown>;
+    if ((type === "agent" || type === "intelligent") && w.agent !== undefined) {
+      add("UPLOAD_AGENT_REF_BLOCKED", `${path}.with.agent`, "with.agent loads an AGENT.md from a path or package on the server; put the instructions in with.system instead");
+    }
+    if (type === "wait" && w.webhook) {
+      add("UPLOAD_INBOUND_WEBHOOK_BLOCKED", `${path}.with.webhook`, "an inbound webhook listens on a port on the server; use a signal wait and resume the run instead");
+    }
+    for (const ref of reservedStateMapRefs(n)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.with.${ref}`, `${ref} names a reserved state channel (${RESERVED_WHY})`);
+    }
     if ((type === "agent" || type === "intelligent") && Array.isArray(w.tools)) {
       w.tools.forEach((t, i) => {
         if (t && typeof t === "object" && "skill" in t) {
@@ -205,8 +222,8 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
       add("UPLOAD_HOST_PATH_BLOCKED", `${path}.with.diff`, `${diffNode} diff runs git in a directory on the server; pass before/after text instead`);
     }
     for (const channel of collectNodeWriteChannels(node as Parameters<typeof collectNodeWriteChannels>[0])) {
-      if (RESERVED_CHANNELS.has(channel)) {
-        add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.with.output`, `"${channel}" is a reserved state channel`);
+      if (isReservedChannel(channel)) {
+        add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.with.output`, `"${channel}": ${RESERVED_WHY}`);
       }
     }
   });
@@ -229,16 +246,24 @@ function checkGraphLevel(
     add("UPLOAD_PROVIDER_ENDPOINT_BLOCKED", `${where}config.defaults.provider`, `vendor "${defaultProvider}" talks to a model server on the host`);
   }
   for (const channel of Object.keys(graph.state?.channels ?? {})) {
-    if (RESERVED_CHANNELS.has(channel)) {
-      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}state.channels.${channel}`, `"${channel}" is a reserved state channel`);
+    if (isReservedChannel(channel)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}state.channels.${channel}`, `"${channel}": ${RESERVED_WHY}`);
     }
   }
   for (const key of Object.keys((graph as { input?: Record<string, unknown> }).input ?? {})) {
-    if (RESERVED_CHANNELS.has(key)) {
-      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}input.${key}`, `"${key}" is a reserved state channel`);
+    if (isReservedChannel(key)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}input.${key}`, `"${key}": ${RESERVED_WHY}`);
     }
   }
+  // Parsing strips imports; a spec handed over some other way is checked here.
+  const imports = (graph as { imports?: unknown }).imports;
+  if (Array.isArray(imports) && imports.length > 0) {
+    add("UPLOAD_IMPORTS_BLOCKED", `${where}imports`, "imports load modules on the server and register them for the whole process");
+  }
   const runtime = (graph.runtime ?? {}) as Record<string, unknown>;
+  if (runtime.webhookServer !== undefined) {
+    add("UPLOAD_INBOUND_WEBHOOK_BLOCKED", `${where}runtime.webhookServer`, "runtime.webhookServer listens on a port on the server");
+  }
   const services = runtime.services as { rehydrateOnResume?: unknown } | undefined;
   if (services?.rehydrateOnResume) {
     add(
