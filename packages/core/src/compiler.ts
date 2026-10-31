@@ -726,7 +726,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const agentAliases: Record<string, string> = { ...(opts.runConfig?.agents ?? {}), ...imported.agentAliases };
   const subgraphAliases: Record<string, string> = { ...(opts.runConfig?.subgraphs ?? {}), ...imported.subgraphAliases };
 
-  const StateAnnotation = buildStateAnnotation(spec);
+  const StateAnnotation = buildStateAnnotation(spec, (msg, data) => {
+    events.emit("log", { level: "warn", msg, ...data }, {});
+  });
   const graph = new StateGraph(StateAnnotation);
 
   let budget: BudgetState | undefined;

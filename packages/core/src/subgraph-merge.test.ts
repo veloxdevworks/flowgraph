@@ -803,6 +803,61 @@ describe("subgraph message channel types", () => {
     expect(byId.get("m2")).toBe("two");
     expect(byId.get("m1")).toBe("EDITED");
   });
+
+  it("lets the later sibling win when one edits an id and the other removes it", async () => {
+    const remover = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "child-remover" },
+      state: { channels: { messages: { type: "array" } } },
+      nodes: [
+        {
+          id: "drop",
+          type: "function",
+          with: {
+            fn: "subgraphMergeDropM1",
+            output: { map: { messages: "{{ result.messages }}" } },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "drop" },
+        { from: "drop", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+    const editor = {
+      ...remover,
+      metadata: { name: "child-editor" },
+      nodes: [
+        {
+          id: "edit",
+          type: "function",
+          with: {
+            fn: "subgraphMergeEditM1",
+            output: { map: { messages: "{{ result.messages }}" } },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "edit" },
+        { from: "edit", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(
+      threadParent(remover, [
+        { id: "branch-a", type: "subgraph", spec: editor },
+        { id: "branch-b", type: "subgraph", spec: remover },
+      ]),
+      { checkpointer: "none" },
+    );
+    const result = await compiled.run(seeded);
+    expect(result.status).toBe("completed");
+    const messages = result.state["messages"] as Array<{ id?: string; content?: unknown }>;
+    const byId = new Map(messages.map((message) => [message.id, message.content]));
+    expect(byId.has("m1")).toBe(false);
+    expect(byId.get("m2")).toBe("two");
+  });
 });
 
 describe("subgraph output mapping lint", () => {

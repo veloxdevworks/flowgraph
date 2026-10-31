@@ -172,6 +172,8 @@ state:
 
 If `state` is omitted, a default single `messages` channel is assumed (chat-style graph).
 
+A `messages` channel appends messages and updates or deletes them by id. A `RemoveMessage` whose id is not in the channel does nothing — it used to throw — and the run emits a warning log. An id added earlier in the same write still counts, so `[m3, Remove(m3)]` removes `m3`. A repeated removal of an id that is already gone is ignored.
+
 ## 5. `nodes`
 
 Each node has a stable `id`, a `type` (resolved via the registry), and type-specific config under `with`. Common fields apply to every node regardless of type.
