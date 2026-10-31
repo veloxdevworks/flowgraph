@@ -5,10 +5,18 @@ import { checkUntrustedUpload, findEnvPlaceholder } from "./upload-policy.js";
 const TWO_MB = 2 * 1024 * 1024;
 const fill = (unit: string) => unit.repeat(Math.ceil(TWO_MB / unit.length));
 
+/**
+ * The fastest of three runs, in ms. A shared CI runner can stall one run on
+ * GC or a busy neighbour; quadratic work stays slow on every run.
+ */
 function timed(fn: () => void): number {
-  const t = performance.now();
-  fn();
-  return performance.now() - t;
+  let best = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const t = performance.now();
+    fn();
+    best = Math.min(best, performance.now() - t);
+  }
+  return best;
 }
 
 /** A one-node graph whose hitl message is `message`, as raw YAML. */
@@ -37,7 +45,9 @@ function check(message: string): { ms: number; codes: string[] } {
   return { ms, codes };
 }
 
-describe("checkUntrustedUpload on slow input", () => {
+// Each timing is the best of three runs over several 2 MB graphs, so allow
+// more than the default per-test timeout for the whole case.
+describe("checkUntrustedUpload on slow input", { timeout: 30_000 }, () => {
   it("checks 2 MB of unclosed, repeated and nested braces in well under a second", () => {
     const messages = [fill("{{ "), fill("{{"), fill("{{ a }}"), `{{${fill(" {{")}}}`, fill("{{ a }} {{ "), fill("${a:-"), fill("${")];
     for (const message of messages) {

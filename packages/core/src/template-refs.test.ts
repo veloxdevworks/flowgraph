@@ -5,10 +5,18 @@ import { referencedRecallIds } from "./memory/recall.js";
 const TWO_MB = 2 * 1024 * 1024;
 const fill = (unit: string) => unit.repeat(Math.ceil(TWO_MB / unit.length));
 
+/**
+ * The fastest of three runs, in ms. A shared CI runner can stall one run on
+ * GC or a busy neighbour; quadratic work stays slow on every run.
+ */
 function timed(fn: () => void): number {
-  const t = performance.now();
-  fn();
-  return performance.now() - t;
+  let best = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const t = performance.now();
+    fn();
+    best = Math.min(best, performance.now() - t);
+  }
+  return best;
 }
 
 describe("templateRefs", () => {
