@@ -81,7 +81,7 @@ Summary of earlier messages that are no longer shown. It was written from the co
 <first kept user message, or the prompt>
 ```
 
-Text inside a summary cannot close or open the fence, including look-alike spellings of the tag (other case, fullwidth or small forms, Unicode hyphens or slashes, invisible characters in between). The summary message in the history channel is stored the same way, as a user-role message, so anything else that reads the channel sees quoted data too.
+Text inside a summary cannot close or open the fence: every `<` in it, and every character that looks like one (fullwidth, small and other angle-bracket forms), is sent as `‹`, so no spelling of the tag, however disguised, survives. The summary message in the history channel is stored the same way, as a user-role message, so anything else that reads the channel sees quoted data too.
 
 ## 4. History channels
 
@@ -108,7 +108,7 @@ assistant: …
 - Each agent keeps its own summary message, `fg-summary-<channel>-<nodeId>`, so agents running side by side never overwrite each other's summary.
 - Under `summarize`, an agent removes a message only when the summary it writes in the same update covers it. Whichever agents remove what, every removed message is covered by the summary of the agent that removed it, and that summary stays in the channel.
 - Every agent reads all summaries in the channel: its own as its running summary, the others as read-only blocks marked `kept-by="<nodeId>"`. What one agent folded away still reaches the others.
-- Other agents' summaries take at most a quarter of what is left of this agent's budget after the parts that are always sent (system, tools, reserve, prompt, newest tool step). A larger one is shortened to its newest lines, and if the call still does not fit they are shortened further or left out, before `CONTEXT_OVERFLOW` is raised. They are read only for this agent, so this changes only what it sends; the channel keeps every summary in full. `agent.context` reports `sharedSummariesCut` when this happens, and lint warns with `CONTEXT_HISTORY_BUDGET_MISMATCH` when another agent's `summarize.maxTokens` is larger than that share.
+- Other agents' summaries take at most a quarter of what is left of this agent's budget after the parts that are always sent (system, tools, reserve, prompt, newest tool step). A larger one is shortened to its newest lines, and if the call still does not fit they are shortened further or left out, before `CONTEXT_OVERFLOW` is raised. That only happens when it brings the call under budget: when something else (a long prompt, say) is why the call is over, they are not cut further, and with `onOverflow: warn` the call goes out with them. They are read only for this agent, so this changes only what it sends; the channel keeps every summary in full. `agent.context` reports `sharedSummariesCut` when this happens, and lint warns with `CONTEXT_HISTORY_BUDGET_MISMATCH` when another agent's `summarize.maxTokens` is larger than that share.
 - `trim` and `last` keep no summary, so on a channel another agent in the graph also uses they never remove messages; they only append, and lint warns with `CONTEXT_HISTORY_SHARED`. Their calls still stay within budget. To keep such a channel bounded, use `strategy: summarize` for the agents on it, or give each agent its own channel.
 
 A summary still has its own size (`summarize.maxTokens`): when it is full, its oldest content gives way, exactly as with one agent.
@@ -176,7 +176,7 @@ Run issues: `CONTEXT_OVER_BUDGET` (`onOverflow: warn` sent a call over budget), 
 | `CONTEXT_OPTION_UNUSED` | warning | `lastN` without `strategy: last`, `summarize` without `strategy: summarize`, `summarize.provider`/`model` with `mode: extract`, `record`/`compact` without `history` |
 | `CONTEXT_HISTORY_IN_MAP` | warning | an agent inside `map` names a `history` channel |
 | `CONTEXT_HISTORY_SHARED` | warning | an agent with `strategy: trim` or `last` (and `compact`) uses a `history` channel another agent in the graph also uses; it only appends there |
-| `CONTEXT_HISTORY_BUDGET_MISMATCH` | warning | another agent on the same `history` channel keeps a summary (`summarize.maxTokens`) larger than the quarter of this agent's budget left for other agents' summaries, so it is shortened in this agent's calls |
+| `CONTEXT_HISTORY_BUDGET_MISMATCH` | warning | another agent on the same `history` channel keeps a summary (`summarize.maxTokens`) larger than the quarter of this agent's budget (at most; system, tools and prompt take their part first) left for other agents' summaries, so it is shortened in this agent's calls. Not raised between summarizers of the same size |
 | `CONTEXT_HUB_UNSUPPORTED` | warning | `hub: deepagents` with `with.context` |
 
 Unknown keys and strategies are schema errors.
