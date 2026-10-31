@@ -50,10 +50,10 @@ describe("RunService", () => {
   });
 
   afterEach(async () => {
-    // The run writes its meta file after startRun returns. Close first so
-    // that write finishes before the directory is removed.
+    // The run writes its meta file after startRun returns. close() waits for
+    // every pending meta write, so the directory is empty of writers here.
     await service?.close();
-    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await fs.rm(dir, { recursive: true, force: true });
   });
 
   it("rejects client secrets", async () => {
