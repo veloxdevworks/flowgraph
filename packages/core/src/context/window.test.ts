@@ -279,6 +279,45 @@ describe("ContextWindow", () => {
     expect(w.summaryChanged).toBe(false);
   });
 
+  it("leaves the omitted marker out rather than overflow at an exact budget", async () => {
+    const prompt = user("p".repeat(400));
+    const fixed = est("sys") + messageTokens(prompt, est);
+    const w = new ContextWindow({
+      policy: policy({ maxTokens: fixed, reserveTokens: 0, onOverflow: "error" }),
+      system: "sys",
+      history: turns(3),
+      prompt,
+    });
+    const f = await w.fit();
+    expect(f.stats.overBudget).toBe(false);
+    expect(f.stats.total).toBe(fixed);
+    expect(f.system).toBe("sys");
+    expect(f.messages).toEqual([prompt]);
+    // with room for it, the marker is still added
+    const roomy = new ContextWindow({
+      policy: policy({ maxTokens: fixed + 40, reserveTokens: 0, onOverflow: "error" }),
+      system: "sys",
+      history: turns(3),
+      prompt,
+    });
+    expect((await roomy.fit()).system).toContain(omittedMarker(6));
+  });
+
+  it("pairs two tool calls that share an id with both their results", () => {
+    const twin: ContextMessage = {
+      role: "assistant",
+      content: "",
+      toolCalls: [
+        { id: "lookup", name: "lookup", args: { q: 1 } },
+        { id: "lookup", name: "lookup", args: { q: 2 } },
+      ],
+    };
+    const { units, invalid } = toUnits([user("go"), twin, result("lookup"), result("lookup"), result("lookup")]);
+    expect(units.map((u) => u.length)).toEqual([1, 3]);
+    expect(invalid).toHaveLength(1);
+    expect(toUnits([twin, result("lookup")]).units).toHaveLength(0);
+  });
+
   it("summary text cannot close its fence, and other agents' summaries are quoted too", async () => {
     const w = new ContextWindow({
       policy: policy({ strategy: "summarize", maxTokens: 5000 }),

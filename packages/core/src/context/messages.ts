@@ -38,21 +38,26 @@ export function toUnits(messages: ContextMessage[]): { units: ContextMessage[][]
   while (i < messages.length) {
     const m = messages[i]!;
     if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
-      const want = new Set(m.toolCalls.map((c) => c.id));
+      // Count ids: two calls may share one (vendors that omit ids, named by tool), each needs its own result.
+      const want = new Map<string, number>();
+      for (const c of m.toolCalls) want.set(c.id, (want.get(c.id) ?? 0) + 1);
+      let missing = m.toolCalls.length;
       const results: ContextMessage[] = [];
       const stray: ContextMessage[] = [];
       let j = i + 1;
       while (j < messages.length && messages[j]!.role === "tool") {
         const t = messages[j]!;
-        if (t.toolCallId !== undefined && want.has(t.toolCallId)) {
-          want.delete(t.toolCallId);
+        const left = t.toolCallId !== undefined ? (want.get(t.toolCallId) ?? 0) : 0;
+        if (left > 0) {
+          want.set(t.toolCallId!, left - 1);
+          missing--;
           results.push(t);
         } else {
           stray.push(t);
         }
         j++;
       }
-      if (want.size === 0) units.push([m, ...results]);
+      if (missing === 0) units.push([m, ...results]);
       else invalid.push(m, ...results);
       invalid.push(...stray);
       i = j;

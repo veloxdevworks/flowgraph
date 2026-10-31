@@ -172,9 +172,9 @@ export class ContextWindow {
     return b ? this.est(`${b}\n\n`) + 4 : 0;
   }
 
-  private systemText(droppedMsgs: number, summary: string | undefined): string | undefined {
+  private systemText(droppedMsgs: number, summary: string | undefined, marker = true): string | undefined {
     const parts = [...this.baseSystem];
-    const sec = this.section(droppedMsgs, summary);
+    const sec = marker ? this.section(droppedMsgs, summary) : undefined;
     if (sec) parts.push(sec);
     return parts.length ? parts.join("\n\n") : undefined;
   }
@@ -253,10 +253,19 @@ export class ContextWindow {
     const keptHistory = this.history.slice(Math.min(this.droppedUnits, this.history.length));
     const keptLoop = kept.slice(keptHistory.length);
     const summary = p.strategy === "summarize" ? this.summaryText : undefined;
-    const sectionTok = this.sectionTokens(this.droppedMsgs, summary);
+    let sectionTok = this.sectionTokens(this.droppedMsgs, summary);
     const historyTok = keptHistory.reduce((a, u) => a + this.unitTokens(u), 0);
     const loopTok = keptLoop.reduce((a, u) => a + this.unitTokens(u), 0);
-    const total = fixed + historyTok + loopTok + sectionTok;
+    let total = fixed + historyTok + loopTok + sectionTok;
+    // The omitted-messages marker is a courtesy: leave it out rather than
+    // overflow when the call fits without it.
+    let marker = true;
+    const markerTok = sectionTok - this.blockTokens(summary);
+    if (markerTok > 0 && total > p.maxTokens && total - markerTok <= p.maxTokens) {
+      marker = false;
+      sectionTok -= markerTok;
+      total -= markerTok;
+    }
     const stats: ContextStats = {
       budget: p.maxTokens,
       total,
@@ -292,7 +301,7 @@ export class ContextWindow {
       }
       else messages.unshift({ role: "user", content: block });
     }
-    return { system: this.systemText(this.droppedMsgs, summary), messages, stats };
+    return { system: this.systemText(this.droppedMsgs, summary, marker), messages, stats };
   }
 
   /** Apply toolResultMaxTokens to one tool result. */

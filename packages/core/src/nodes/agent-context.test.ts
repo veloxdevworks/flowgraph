@@ -713,3 +713,29 @@ describe("agent with.context summary placement", () => {
     expect(chat.filter((m) => kind(m) === "system")).toHaveLength(0);
   });
 });
+
+describe("agent with.context tool calls without ids", () => {
+  it("sends every result with its call", async () => {
+    const fm = fakeModel((i) =>
+      i === 0
+        ? new AIMessage({
+            content: "",
+            tool_calls: [
+              { name: "ctx_logs", args: { page: 1 } },
+              { name: "ctx_logs", args: { page: 2 } },
+            ] as never,
+          })
+        : new AIMessage({ content: "done" }),
+    );
+    const g = await compileGraph(toolGraph("ctx-noid", "lc-noid", { maxTokens: 30000, toolResultMaxTokens: 200 }), {
+      providers: [createLangChainProvider(fm.model, { name: "lc-noid" })],
+    });
+    const r = await g.run({ threadId: "noid" });
+    expect(r.status).toBe("completed");
+    const second = fm.calls[1]!;
+    expect(pairError(second)).toBeNull();
+    expect(second.filter((m) => kind(m) === "tool")).toHaveLength(2);
+    const ai = second.find((m) => kind(m) === "ai") as AIMessage;
+    expect(new Set(ai.tool_calls!.map((c) => c.id)).size).toBe(2);
+  });
+});

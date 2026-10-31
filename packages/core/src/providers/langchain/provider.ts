@@ -214,30 +214,33 @@ async function runWithContext(
     final = ai;
     accumulateUsage(usage, ai);
     const toolCalls = (ai.tool_calls ?? []) as Array<{ name: string; args: unknown; id?: string }>;
+    // Every call needs an id its result can answer; give id-less calls distinct, replay-stable ones.
+    const callIds = toolCalls.map((c, k) => c.id || `${c.name}_${step}_${k}`);
     const aiMsg: ContextMessage = {
       role: "assistant",
       content: extractText(ai),
       ...(typeof ai.id === "string" ? { id: ai.id } : {}),
       ...(toolCalls.length
-        ? { toolCalls: toolCalls.map((c) => ({ id: c.id ?? c.name, name: c.name, args: c.args })) }
+        ? { toolCalls: toolCalls.map((c, k) => ({ id: callIds[k]!, name: c.name, args: c.args })) }
         : {}),
     };
     loop.push(aiMsg);
-    lcOf.set(aiMsg, ai);
+    // Send the vendor's own message unless ids were filled in (then send the calls with those ids).
+    if (toolCalls.every((c) => !!c.id)) lcOf.set(aiMsg, ai);
     if (toolCalls.length === 0) {
       stopReason = "done";
       break;
     }
 
-    for (const call of toolCalls) {
+    for (const [k, call] of toolCalls.entries()) {
       ctx.emit("tool.call", { tool: call.name, args: call.args });
       const result = await ctx.invokeTool(call.name, call.args);
       ctx.emit("tool.result", { tool: call.name, result });
       steps.push({ type: "tool_call", tool: call.name, args: call.args, result });
       const content = cm.capToolResult(typeof result === "string" ? result : JSON.stringify(result));
-      const toolMsg: ContextMessage = { role: "tool", content, toolCallId: call.id ?? call.name };
+      const toolMsg: ContextMessage = { role: "tool", content, toolCallId: callIds[k]! };
       loop.push(toolMsg);
-      lcOf.set(toolMsg, new ToolMessage({ content, tool_call_id: call.id ?? call.name }));
+      lcOf.set(toolMsg, new ToolMessage({ content, tool_call_id: callIds[k]! }));
     }
 
     if (step === maxSteps - 1) stopReason = "maxSteps";
