@@ -39,7 +39,7 @@ const dirs: string[] = [];
 const services: RunService[] = [];
 afterEach(async () => {
   for (const s of services.splice(0)) await s.close();
-  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true });
   seen.length = 0;
 });
 

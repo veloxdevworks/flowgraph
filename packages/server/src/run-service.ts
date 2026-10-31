@@ -116,6 +116,14 @@ export class RunService {
    * the previous write is still replacing.
    */
   private readonly metaWrites = new Map<string, Promise<void>>();
+  /**
+   * Every meta write not yet settled, with its thread id, whether or not
+   * its caller waits for it (resume and continue start theirs without
+   * waiting). close() waits for them (up to `closeTimeoutMs`), so once it
+   * resolves only a run that never settled after the abort grace can still
+   * write to the graph store.
+   */
+  private readonly pendingMetaWrites = new Map<Promise<void>, string>();
 
   /** Resolves callers to principals (OIDC, the legacy token, or none), built from config.auth. */
   get authenticator(): Authenticator {
@@ -164,8 +172,10 @@ export class RunService {
   /**
    * Shut down: refuse new runs (503 SERVER_CLOSING), wait up to
    * `shutdownTimeoutMs` for requests and runs in flight, abort what is still
-   * running and give it a moment to settle, then stop the memory sweeper and
-   * close durable memory and database pools. Safe to call more than once.
+   * running and give it a moment to settle, wait for pending graph-store meta
+   * writes, then close durable memory and database pools (the memory sweeper
+   * stops first). Once it resolves nothing more is written to the graph
+   * store. Safe to call more than once.
    */
   close(): Promise<void> {
     this.closed ??= this.shutdown();
@@ -186,6 +196,9 @@ export class RunService {
       }
     }
     const closeMs = this.config.closeTimeoutMs ?? SHUTDOWN_CLOSE_TIMEOUT_MS;
+    if (!(await this.settleMetaWrites(closeMs))) {
+      log("warn", "shutdown.meta_writes_timeout", { pending: this.pendingMetaWrites.size, threadIds: [...new Set(this.pendingMetaWrites.values())], timeoutMs: closeMs });
+    }
     for (const c of this.closers.splice(0).reverse()) {
       let timer: NodeJS.Timeout | undefined;
       const outcome = await Promise.race([
@@ -216,6 +229,29 @@ export class RunService {
       let timer: NodeJS.Timeout | undefined;
       const timedOut = await Promise.race([
         Promise.allSettled([...this.inFlight]).then(() => false),
+        new Promise<boolean>((r) => {
+          timer = setTimeout(() => r(true), left);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (timedOut) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Wait for every pending meta write, including ones queued while waiting
+   * (an aborted run records its final status). False when some are still
+   * pending after `ms`. Meta writes never reject: patchMeta logs failures.
+   */
+  private async settleMetaWrites(ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (this.pendingMetaWrites.size > 0) {
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = await Promise.race([
+        Promise.allSettled([...this.pendingMetaWrites.keys()]).then(() => false),
         new Promise<boolean>((r) => {
           timer = setTimeout(() => r(true), left);
         }),
@@ -350,26 +386,35 @@ export class RunService {
 
   /**
    * Persist a meta patch. The file can be gone (a wiped graph store, or a
-   * test removing its directory); that must not become an unhandled rejection.
+   * test removing its directory); a failed write is logged and the returned
+   * promise still resolves, so it never becomes an unhandled rejection.
    * Patches for one thread run in order. Callers that publish a status wait
    * for the returned promise, so a reader that sees the status opens the
-   * finished file.
+   * finished file. Every patch is tracked until it settles and close() waits
+   * for it, including patches whose caller does not wait.
    */
   private patchMeta(threadId: string, patch: Parameters<typeof updateGraphMeta>[2]): Promise<void> {
     const prev = this.metaWrites.get(threadId) ?? Promise.resolve();
-    const done = prev.catch(() => undefined).then(() =>
-      updateGraphMeta(this.config.graphStoreDir, threadId, patch).then(
+    const done = prev
+      .then(() => this.writeMeta(threadId, patch))
+      .then(
         () => undefined,
         (err: unknown) => {
           log("warn", "graph meta update failed", { threadId, ...errorFields(err) });
         },
-      ),
-    );
+      );
     this.metaWrites.set(threadId, done);
+    this.pendingMetaWrites.set(done, threadId);
     void done.then(() => {
+      this.pendingMetaWrites.delete(done);
       if (this.metaWrites.get(threadId) === done) this.metaWrites.delete(threadId);
     });
     return done;
+  }
+
+  /** Apply one meta patch to the graph store. */
+  private async writeMeta(threadId: string, patch: Parameters<typeof updateGraphMeta>[2]): Promise<void> {
+    await updateGraphMeta(this.config.graphStoreDir, threadId, patch);
   }
 
   /**
@@ -797,6 +842,8 @@ export class RunService {
     session.runId = compiled.runId;
     session.dryRun = dryRun;
     this.registry.setStatus(req.threadId, "running");
+    // Not awaited: the run starts now. close() still waits for this write,
+    // and the run's final status patch is queued after it.
     void this.patchMeta(req.threadId, { status: "running" });
 
     // Fire-and-forget like start/continue — resumed execution can be long-running.
@@ -837,10 +884,26 @@ export class RunService {
     };
   }
 
-  async cancelRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+  /**
+   * Cancel a thread's run. Refused with 503 SERVER_CLOSING once close() has
+   * started, and tracked like resume and continue, so close() waits for a
+   * call that was already under way. A run that has completed stays
+   * completed: the call changes nothing and answers with its status.
+   */
+  cancelRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.cancelRunNow(threadId, caller));
+  }
+
+  private async cancelRunNow(threadId: string, caller?: Principal): Promise<ControlResult> {
     await this.checkThreadAccess(threadId, this.principalFor(caller), { mustExist: true });
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
+    if (session.status === "completed") return { threadId, runId: session.runId, status: "completed" };
     session.abort.abort();
     await this.patchMeta(threadId, { status: "cancelled" });
     this.registry.setStatus(threadId, "cancelled");
@@ -848,10 +911,21 @@ export class RunService {
     return { threadId, runId: session.runId, status: "cancelled" };
   }
 
-  async pauseRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+  /** Pause a thread's run; refused, tracked and a no-op on a completed run, like {@link cancelRun}. */
+  pauseRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.pauseRunNow(threadId, caller));
+  }
+
+  private async pauseRunNow(threadId: string, caller?: Principal): Promise<ControlResult> {
     await this.checkThreadAccess(threadId, this.principalFor(caller), { mustExist: true });
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
+    if (session.status === "completed") return { threadId, runId: session.runId, status: "completed" };
     session.pause.abort();
     await this.patchMeta(threadId, { status: "paused" });
     return { threadId, runId: session.runId, status: "started" };
@@ -902,6 +976,8 @@ export class RunService {
     session.runId = compiled.runId;
     session.dryRun = dryRun;
     this.registry.setStatus(threadId, "running");
+    // Not awaited: the run starts now. close() still waits for this write,
+    // and the run's final status patch is queued after it.
     void this.patchMeta(threadId, { status: "running" });
 
     // Fire-and-forget like start (continue can be long-running)

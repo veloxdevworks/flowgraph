@@ -2,8 +2,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { registerFunction } from "@flowgraph/core";
+import { parseGraphYaml, persistGraph, readGraphMeta } from "./graph-source.js";
 import { RunService } from "./run-service.js";
 import type { ServerConfig, ServerMemoryConfig } from "./types.js";
 
@@ -36,6 +37,8 @@ beforeAll(() => {
     finished++;
     return value;
   });
+  // Returns at once.
+  registerFunction("shutdownQuick", async () => ({ n: 1 }));
   // Runs until the run is aborted.
   registerFunction("shutdownStuck", async (_input, ctx) => {
     await new Promise<void>((resolve, reject) => {
@@ -55,7 +58,7 @@ afterAll(() => {
 
 const dirs: string[] = [];
 afterEach(async () => {
-  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  for (const d of dirs.splice(0)) await fs.rm(d, { recursive: true, force: true });
   finished = 0;
   unhandled.length = 0;
 });
@@ -70,6 +73,42 @@ async function service(extra: Partial<ServerConfig> = {}): Promise<RunService> {
 
 /** Let any late rejection surface before checking for it. */
 const flush = () => new Promise((r) => setTimeout(r, 50));
+
+type MetaPatch = { status?: string };
+/** The service's meta write path, reached the way the run paths reach it. */
+interface MetaWrites {
+  patchMeta(threadId: string, patch: MetaPatch): Promise<void>;
+  writeMeta(threadId: string, patch: MetaPatch): Promise<void>;
+}
+
+/** Store a thread's graph and meta file directly, with no run in flight. */
+async function storeThread(s: RunService, threadId: string): Promise<void> {
+  const yaml = graph("stored", "shutdownSlow");
+  await persistGraph(s.config.graphStoreDir, threadId, yaml, parseGraphYaml(yaml).spec!, { status: "running" });
+}
+
+/** A run that stops at an approval step and waits there, out of flight. */
+const APPROVAL = `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: approval }
+state:
+  channels:
+    approval: { type: object }
+nodes:
+  - { id: gate, type: hitl, with: { mode: approve, message: "ok?", output: { to: approval } } }
+edges:
+  - { from: START, to: gate }
+  - { from: gate, to: END }
+`;
+
+/** Wait until the service has no request or run in flight, without closing it. */
+async function waitForRuns(s: RunService): Promise<void> {
+  expect(await (s as unknown as { drain(ms: number): Promise<boolean> }).drain(4_000)).toBe(true);
+}
+
+/** One event-loop turn: pending promise callbacks and unhandled-rejection reports run first; no timers. */
+const settle = () => new Promise((r) => setImmediate(r));
 
 describe("RunService.close", () => {
   it("refuses new runs, waits for runs in flight, then closes", async () => {
@@ -126,6 +165,144 @@ describe("RunService.close", () => {
     await expect(s.startRun({ threadId: "bad", yaml: bad })).rejects.toThrow(/MEMORY_BACKEND_UNAVAILABLE/);
     expect(s.registry.get("bad")).toBeUndefined();
     await s.close();
+  });
+
+  it("waits for a meta write nobody awaits, then the store directory removes cleanly", async () => {
+    const s = await service();
+    const dir = s.config.graphStoreDir;
+    await storeThread(s, "held");
+    const hooked = s as unknown as MetaWrites;
+    const write = hooked.writeMeta.bind(s);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const started = new Promise<void>((r) => (entered = r));
+    hooked.writeMeta = async (threadId, patch) => {
+      entered();
+      await gate;
+      await write(threadId, patch);
+    };
+
+    // Like resume and continue, start the write without waiting for it.
+    void hooked.patchMeta("held", { status: "completed" });
+    await started;
+    let closed = false;
+    const closing = s.close().then(() => {
+      closed = true;
+    });
+    await settle();
+    expect(closed).toBe(false);
+
+    release();
+    await closing;
+    expect((await readGraphMeta(dir, "held"))?.status).toBe("completed");
+    // No retries: nothing writes to the directory once close() resolves.
+    await fs.rm(dir, { recursive: true });
+    await expect(fs.stat(dir)).rejects.toMatchObject({ code: "ENOENT" });
+    await settle();
+    expect(unhandled).toEqual([]);
+  });
+
+  it("logs a failed meta write and still closes, with no unhandled rejection", async () => {
+    const s = await service();
+    await storeThread(s, "fails");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const hooked = s as unknown as MetaWrites;
+      let fail!: (err: Error) => void;
+      const failing = new Promise<void>((_, reject) => (fail = reject));
+      hooked.writeMeta = () => failing;
+      void hooked.patchMeta("fails", { status: "completed" });
+      const closing = s.close();
+      fail(new Error("disk full"));
+      await closing;
+      const lines = warn.mock.calls.map((c) => JSON.parse(String(c[0])) as { msg: string; threadId?: string; message?: string });
+      expect(lines).toContainEqual(expect.objectContaining({ msg: "graph meta update failed", threadId: "fails", message: "disk full" }));
+    } finally {
+      warn.mockRestore();
+    }
+    await settle();
+    expect(unhandled).toEqual([]);
+  });
+
+  for (const control of ["cancelRun", "pauseRun"] as const) {
+    it(`refuses ${control} after close and leaves the stored status alone`, async () => {
+      const s = await service();
+      await s.startRun({ threadId: "done", yaml: graph("quick", "shutdownQuick") });
+      // close() waits for the run, so it has completed when close resolves.
+      await s.close();
+      expect(s.registry.get("done")?.status).toBe("completed");
+      expect((await readGraphMeta(s.config.graphStoreDir, "done"))?.status).toBe("completed");
+      await expect(s[control]("done")).rejects.toMatchObject({ status: 503, code: "SERVER_CLOSING" });
+      expect((await readGraphMeta(s.config.graphStoreDir, "done"))?.status).toBe("completed");
+      expect(s.registry.get("done")?.status).toBe("completed");
+    });
+  }
+
+  for (const control of ["cancelRun", "pauseRun"] as const) {
+    const written = control === "cancelRun" ? "cancelled" : "paused";
+    it(`waits for a ${control} that began before close`, async () => {
+      const s = await service();
+      const dir = s.config.graphStoreDir;
+      await s.startRun({ threadId: "waiting", yaml: APPROVAL });
+      await waitForRuns(s);
+      expect(s.registry.get("waiting")?.status).toBe("interrupted");
+      // The pools close last, so this records what the call had done by then.
+      let atClose: { settled: boolean; status: string | undefined } | undefined;
+      let settled = false;
+      (s as unknown as { closers: Array<() => Promise<void>> }).closers.push(async () => {
+        atClose = { settled, status: (await readGraphMeta(dir, "waiting"))?.status };
+      });
+      // Started and not awaited: it is still reading the thread's meta file when close() begins.
+      const call = s[control]("waiting").then((r) => {
+        settled = true;
+        return r;
+      });
+      await s.close();
+      expect(atClose).toEqual({ settled: true, status: written });
+      await expect(call).resolves.toMatchObject({ threadId: "waiting" });
+      expect((await readGraphMeta(dir, "waiting"))?.status).toBe(written);
+      await fs.rm(dir, { recursive: true });
+      await settle();
+      expect(unhandled).toEqual([]);
+    });
+
+    it(`leaves a completed run completed on ${control}`, async () => {
+      const s = await service();
+      await s.startRun({ threadId: "done", yaml: graph("quick", "shutdownQuick") });
+      await waitForRuns(s);
+      expect(s.registry.get("done")?.status).toBe("completed");
+      await expect(s[control]("done")).resolves.toMatchObject({ threadId: "done", status: "completed" });
+      expect(s.registry.get("done")?.status).toBe("completed");
+      expect((await readGraphMeta(s.config.graphStoreDir, "done"))?.status).toBe("completed");
+      await s.close();
+    });
+  }
+
+  it("names the threads whose meta writes are still pending when the wait times out", async () => {
+    const s = await service({ closeTimeoutMs: 0 });
+    await storeThread(s, "held");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const hooked = s as unknown as MetaWrites;
+    const write = hooked.writeMeta.bind(s);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    hooked.writeMeta = async (threadId, patch) => {
+      await gate;
+      await write(threadId, patch);
+    };
+    try {
+      const pending = hooked.patchMeta("held", { status: "completed" });
+      // With no time left to wait, close() gives up on the write at once and says which thread it was.
+      await s.close();
+      const lines = warn.mock.calls.map((c) => JSON.parse(String(c[0])) as { msg: string; threadIds?: string[]; pending?: number });
+      expect(lines).toContainEqual(expect.objectContaining({ msg: "shutdown.meta_writes_timeout", pending: 1, threadIds: ["held"] }));
+      release();
+      await pending;
+    } finally {
+      warn.mockRestore();
+    }
+    expect((await readGraphMeta(s.config.graphStoreDir, "held"))?.status).toBe("completed");
   });
 
   it.skipIf(!PG_URL)("with postgres, closes pools only after runs in flight finish, with no unhandled rejection", async () => {
