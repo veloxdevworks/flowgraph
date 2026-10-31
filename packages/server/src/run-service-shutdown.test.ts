@@ -87,6 +87,26 @@ async function storeThread(s: RunService, threadId: string): Promise<void> {
   await persistGraph(s.config.graphStoreDir, threadId, yaml, parseGraphYaml(yaml).spec!, { status: "running" });
 }
 
+/** A run that stops at an approval step and waits there, out of flight. */
+const APPROVAL = `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: approval }
+state:
+  channels:
+    approval: { type: object }
+nodes:
+  - { id: gate, type: hitl, with: { mode: approve, message: "ok?", output: { to: approval } } }
+edges:
+  - { from: START, to: gate }
+  - { from: gate, to: END }
+`;
+
+/** Wait until the service has no request or run in flight, without closing it. */
+async function waitForRuns(s: RunService): Promise<void> {
+  expect(await (s as unknown as { drain(ms: number): Promise<boolean> }).drain(4_000)).toBe(true);
+}
+
 /** One event-loop turn: pending promise callbacks and unhandled-rejection reports run first; no timers. */
 const settle = () => new Promise((r) => setImmediate(r));
 
@@ -216,6 +236,46 @@ describe("RunService.close", () => {
       await expect(s[control]("done")).rejects.toMatchObject({ status: 503, code: "SERVER_CLOSING" });
       expect((await readGraphMeta(s.config.graphStoreDir, "done"))?.status).toBe("completed");
       expect(s.registry.get("done")?.status).toBe("completed");
+    });
+  }
+
+  for (const control of ["cancelRun", "pauseRun"] as const) {
+    const written = control === "cancelRun" ? "cancelled" : "paused";
+    it(`waits for a ${control} that began before close`, async () => {
+      const s = await service();
+      const dir = s.config.graphStoreDir;
+      await s.startRun({ threadId: "waiting", yaml: APPROVAL });
+      await waitForRuns(s);
+      expect(s.registry.get("waiting")?.status).toBe("interrupted");
+      // The pools close last, so this records what the call had done by then.
+      let atClose: { settled: boolean; status: string | undefined } | undefined;
+      let settled = false;
+      (s as unknown as { closers: Array<() => Promise<void>> }).closers.push(async () => {
+        atClose = { settled, status: (await readGraphMeta(dir, "waiting"))?.status };
+      });
+      // Started and not awaited: it is still reading the thread's meta file when close() begins.
+      const call = s[control]("waiting").then((r) => {
+        settled = true;
+        return r;
+      });
+      await s.close();
+      expect(atClose).toEqual({ settled: true, status: written });
+      await expect(call).resolves.toMatchObject({ threadId: "waiting" });
+      expect((await readGraphMeta(dir, "waiting"))?.status).toBe(written);
+      await fs.rm(dir, { recursive: true });
+      await settle();
+      expect(unhandled).toEqual([]);
+    });
+
+    it(`leaves a completed run completed on ${control}`, async () => {
+      const s = await service();
+      await s.startRun({ threadId: "done", yaml: graph("quick", "shutdownQuick") });
+      await waitForRuns(s);
+      expect(s.registry.get("done")?.status).toBe("completed");
+      await expect(s[control]("done")).resolves.toMatchObject({ threadId: "done", status: "completed" });
+      expect(s.registry.get("done")?.status).toBe("completed");
+      expect((await readGraphMeta(s.config.graphStoreDir, "done"))?.status).toBe("completed");
+      await s.close();
     });
   }
 

@@ -884,11 +884,26 @@ export class RunService {
     };
   }
 
-  async cancelRun(threadId: string, caller?: Principal): Promise<ControlResult> {
-    this.assertOpen();
+  /**
+   * Cancel a thread's run. Refused with 503 SERVER_CLOSING once close() has
+   * started, and tracked like resume and continue, so close() waits for a
+   * call that was already under way. A run that has completed stays
+   * completed: the call changes nothing and answers with its status.
+   */
+  cancelRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.cancelRunNow(threadId, caller));
+  }
+
+  private async cancelRunNow(threadId: string, caller?: Principal): Promise<ControlResult> {
     await this.checkThreadAccess(threadId, this.principalFor(caller), { mustExist: true });
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
+    if (session.status === "completed") return { threadId, runId: session.runId, status: "completed" };
     session.abort.abort();
     await this.patchMeta(threadId, { status: "cancelled" });
     this.registry.setStatus(threadId, "cancelled");
@@ -896,11 +911,21 @@ export class RunService {
     return { threadId, runId: session.runId, status: "cancelled" };
   }
 
-  async pauseRun(threadId: string, caller?: Principal): Promise<ControlResult> {
-    this.assertOpen();
+  /** Pause a thread's run; refused, tracked and a no-op on a completed run, like {@link cancelRun}. */
+  pauseRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.pauseRunNow(threadId, caller));
+  }
+
+  private async pauseRunNow(threadId: string, caller?: Principal): Promise<ControlResult> {
     await this.checkThreadAccess(threadId, this.principalFor(caller), { mustExist: true });
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
+    if (session.status === "completed") return { threadId, runId: session.runId, status: "completed" };
     session.pause.abort();
     await this.patchMeta(threadId, { status: "paused" });
     return { threadId, runId: session.runId, status: "started" };
