@@ -67,6 +67,8 @@ const SUMMARIZE_KEEP_RATIO = 0.75;
 export const SHARED_SUMMARY_SHARE = 0.25;
 /** A shortened summary of another agent below this size is left out instead. */
 const MIN_SHARED_SUMMARY_TOKENS = 24;
+/** Tries at a smaller cap for other agents' summaries before leaving them all out. */
+const MAX_SHARED_CUT_TRIES = 3;
 
 /** Keep the newest lines of a summary that fit in maxTokens, marking the cut. */
 function keepNewest(text: string, maxTokens: number, est: TokenEstimator): string {
@@ -74,6 +76,7 @@ function keepNewest(text: string, maxTokens: number, est: TokenEstimator): strin
   const head = "…\n";
   const budget = maxTokens - est(head);
   const lines = text.split("\n");
+  while (lines.length > 1 && lines.at(-1)!.trim() === "") lines.pop();
   const out: string[] = [];
   let used = 0;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -156,6 +159,12 @@ export class ContextWindow {
   private fitShared(cap: number): void {
     const n = this.shared.length;
     if (n === 0) return;
+    if (!(cap > 0)) {
+      // no room (or a NaN cap): send none, whatever they measure
+      this.sent = [];
+      this.sharedCut = n;
+      return;
+    }
     const order = this.sharedTokens.map((_, i) => i).sort((a, b) => this.sharedTokens[a]! - this.sharedTokens[b]! || a - b);
     const alloc = new Array<number>(n).fill(0);
     let left = Math.max(0, Math.floor(cap));
@@ -177,8 +186,8 @@ export class ContextWindow {
     });
   }
 
-  private sentSharedTokens(): number {
-    return this.sent.reduce((a, s) => a + this.est(s.text), 0);
+  private sentSharedTokens(sent = this.sent): number {
+    return sent.reduce((a, s) => a + this.est(s.text), 0);
   }
 
   /** History messages that were not sent because a tool call and its result were not both present. */
@@ -281,7 +290,10 @@ export class ContextWindow {
     // Other agents' summaries get at most a share of what is left after the
     // parts that are always sent, so they can never make this call overflow.
     const pinnedTok = pinnedTail ? this.unitTokens(all[all.length - 1]!) : 0;
-    this.fitShared(Math.max(0, p.maxTokens - fixed - pinnedTok) * SHARED_SUMMARY_SHARE);
+    const room = p.maxTokens - fixed - pinnedTok;
+    // With no room at all the call is over budget whatever is done here; under
+    // onOverflow: warn they are then sent whole, since they are not the cause.
+    this.fitShared(room > 0 || p.onOverflow !== "warn" ? Math.max(0, room) * SHARED_SUMMARY_SHARE : Number.POSITIVE_INFINITY);
     // suffix sums: tokens/messages of units k..end
     const sufTok = new Array<number>(all.length + 1).fill(0);
     const sufLen = new Array<number>(all.length + 1).fill(0);
@@ -354,10 +366,35 @@ export class ContextWindow {
     };
     let { sectionTok, total, marker } = measure();
     // Still over: shorten other agents' summaries further, down to none,
-    // before reporting an overflow.
-    for (let tries = 0; total > p.maxTokens && this.sent.length > 0; tries++) {
-      const cap = tries < 3 ? this.sentSharedTokens() - (total - p.maxTokens) - 8 : 0;
-      this.fitShared(cap);
+    // before reporting an overflow. Only when that brings the call under
+    // budget, though: otherwise they are not the cause and are sent as they
+    // were (onOverflow: warn). A bounded number of tries, each with a
+    // strictly smaller cap, then none.
+    if (total > p.maxTokens && this.sent.length > 0) {
+      const before = { sent: this.sent, cut: this.sharedCut, tokens: this.sentSharedTokens() };
+      this.fitShared(0);
+      const without = measure();
+      if (without.total > p.maxTokens) {
+        this.sent = before.sent;
+        this.sharedCut = before.cut;
+      } else {
+        let fits = false;
+        let last = { total, tokens: before.tokens };
+        let prevCap = Number.POSITIVE_INFINITY;
+        for (let tries = 0; tries < MAX_SHARED_CUT_TRIES; tries++) {
+          const cap = Math.min(prevCap - 1, last.tokens - (last.total - p.maxTokens) - 8);
+          if (!(cap > 0)) break;
+          prevCap = cap;
+          this.fitShared(cap);
+          const m = measure();
+          if (m.total <= p.maxTokens) {
+            fits = true;
+            break;
+          }
+          last = { total: m.total, tokens: this.sentSharedTokens() };
+        }
+        if (!fits) this.fitShared(0);
+      }
       ({ sectionTok, total, marker } = measure());
     }
     const stats: ContextStats = {

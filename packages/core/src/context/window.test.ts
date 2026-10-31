@@ -358,6 +358,83 @@ describe("ContextWindow", () => {
     expect(summaryBlock("- user: a < b, earlier-conversation notes")!.split("\n")[2]).toBe("- user: a < b, earlier-conversation notes");
   });
 
+describe("other agents' summaries", () => {
+  /** An estimator that fails the test instead of letting a fit loop spin. */
+  const guarded = (inner: (t: string) => number, limit = 100_000) => {
+    let calls = 0;
+    return (t: string) => {
+      if (++calls > limit) throw new Error("estimator called too often: a fit loop did not end");
+      return inner(t);
+    };
+  };
+  const floorEst = (t: string) => Math.floor(t.length / 4);
+
+  it("a summary that measures 0 tokens cannot keep the fit from ending", { timeout: 5000 }, async () => {
+    for (const strategy of ["trim", "last", "summarize", "none"] as const) {
+      const w = new ContextWindow({
+        policy: policy({ maxTokens: 100, strategy, summarize: { mode: "extract" } }),
+        sharedSummaries: [{ node: "o", text: "ok" }, { node: "p", text: "x" }],
+        history: [user("hi"), { role: "assistant", content: "yo" }],
+        prompt: user("p".repeat(2000)),
+        estimator: guarded(floorEst),
+      });
+      await expect(w.fit(), strategy).rejects.toThrow(/CONTEXT_OVERFLOW/);
+    }
+  });
+
+  it("with a zero-measuring summary and room to spare, the fit still returns", { timeout: 5000 }, async () => {
+    const w = new ContextWindow({
+      policy: policy({ maxTokens: 1000, strategy: "trim" }),
+      sharedSummaries: [{ node: "o", text: "ok" }],
+      history: [],
+      prompt: user("now"),
+      estimator: guarded(floorEst),
+    });
+    const f = await w.fit();
+    expect(f.stats.overBudget).toBe(false);
+  });
+
+  it("onOverflow: warn keeps them when they are not why the call is over", async () => {
+    const w = new ContextWindow({
+      policy: policy({ maxTokens: 500, strategy: "trim", onOverflow: "warn" }),
+      sharedSummaries: [{ node: "o", text: "- user: small note" }],
+      history: [],
+      prompt: user("p".repeat(4000)),
+    });
+    const f = await w.fit();
+    expect(f.stats.overBudget).toBe(true);
+    expect(f.stats.sharedSummariesCut).toBeUndefined();
+    expect(f.messages[0]!.content).toContain('kept-by="o"');
+  });
+
+  it("they are cut when that is what brings the call under budget", async () => {
+    const big = Array.from({ length: 300 }, (_, i) => `- user: line ${i} ${"z".repeat(40)}`).join("\n");
+    for (const onOverflow of ["warn", "error"] as const) {
+      const w = new ContextWindow({
+        policy: policy({ maxTokens: 900, strategy: "trim", onOverflow }),
+        sharedSummaries: [{ node: "o", text: big }],
+        history: [],
+        prompt: user("p".repeat(2000)),
+      });
+      const f = await w.fit();
+      expect(f.stats.overBudget).toBe(false);
+      expect(f.stats.sharedSummariesCut).toBe(1);
+    }
+  });
+
+  it("a cut summary ending in a newline still keeps its newest text", async () => {
+    const w = new ContextWindow({
+      policy: policy({ maxTokens: 600, strategy: "trim" }),
+      sharedSummaries: [{ node: "o", text: `- tool result: ${"w".repeat(3000)} newest\n\n` }],
+      history: [],
+      prompt: user("now"),
+    });
+    const f = await w.fit();
+    expect(f.stats.sharedSummariesCut).toBe(1);
+    expect(f.messages[0]!.content).toMatch(/w+ newest\n<\/earlier-conversation-summary>/);
+  });
+});
+
   it("extractive summarizer is deterministic and bounded", async () => {
     const s = extractiveSummarizer(est);
     const msgs = turns(30, 300);
