@@ -17,6 +17,7 @@
  * state.
  */
 
+import { createHash } from "node:crypto";
 import { AIMessage } from "@langchain/core/messages";
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -158,6 +159,15 @@ export interface RunScope {
   readonly replay: ReplayStore;
   /** Ids of the subgraph nodes between the top graph and the current graph. */
   readonly path: readonly string[];
+  /**
+   * Replay key of the top-level node this scope runs below (the LangGraph
+   * task that is executing), set by {@link childRunConfig} when a scope
+   * first moves below a top-level node. An interrupt raised at any depth
+   * below it (a subgraph child, a map item, a node an agent called as a
+   * tool, in any nesting) saves every entry under this key, because a resume
+   * re-runs that whole task. Unset for top-level nodes themselves.
+   */
+  readonly root?: string | undefined;
   /** Run metadata of the top graph; embedded subgraphs report the same run and thread. */
   readonly meta?: { runId: string; threadId?: string | undefined; startedAt: string; graph: string } | undefined;
 }
@@ -175,7 +185,7 @@ export function runScopeOf(config: unknown): RunScope | undefined {
 export function childRunConfig<C extends { configurable?: Record<string, unknown> }>(config: C, nodeId: string): C {
   const scope = runScopeOf(config);
   if (!scope) return config;
-  const child: RunScope = { ...scope, path: [...scope.path, nodeId] };
+  const child: RunScope = { ...scope, path: [...scope.path, nodeId], root: scope.root ?? replayNodeKey(scope.path, nodeId) };
   return { ...config, configurable: { ...(config.configurable ?? {}), [RUN_SCOPE_KEY]: child } };
 }
 
@@ -186,6 +196,11 @@ export function childRunConfig<C extends { configurable?: Record<string, unknown
  * node, in one turn or across turns, never share entries.
  */
 const TOOL_SEGMENT = /^tool:[0-9]+$/;
+/** A node id, or a map item (`<mapId>[<index>]`). */
+// eslint-disable-next-line no-control-regex
+const ID_SEGMENT = /^[^[\]\u0000-\u001f]+(?:\[[0-9]+\])?$/;
+const MAX_PATH_DEPTH = 64;
+const MAX_SEGMENT_LENGTH = 256;
 
 function parseNodeKey(key: unknown): string[] | undefined {
   if (typeof key !== "string") return undefined;
@@ -199,11 +214,30 @@ function parseNodeKey(key: unknown): string[] | undefined {
   return path as string[];
 }
 
-/** `path` is `owner` followed by one or more `tool:<n>`, node id pairs. */
-function isToolCallBelow(path: readonly string[], owner: readonly string[]): boolean {
-  if (path.length <= owner.length || (path.length - owner.length) % 2 !== 0) return false;
-  for (let i = 0; i < owner.length; i++) if (path[i] !== owner[i]) return false;
-  for (let i = owner.length; i < path.length; i += 2) if (!TOOL_SEGMENT.test(path[i]!)) return false;
+/**
+ * Whether `path` has the shape of a key the engine builds: node ids (a
+ * top-level or subgraph child node, or a map item `id[n]`), where each
+ * `tool:<n>` segment sits between the agent that made the call and the node
+ * it called. A tool segment never starts or ends a path or follows another.
+ */
+function isEnginePath(path: readonly string[]): boolean {
+  if (path.length === 0 || path.length > MAX_PATH_DEPTH) return false;
+  for (let i = 0; i < path.length; i++) {
+    const seg = path[i]!;
+    if (seg.length > MAX_SEGMENT_LENGTH) return false;
+    if (TOOL_SEGMENT.test(seg)) {
+      if (i === 0 || i === path.length - 1 || TOOL_SEGMENT.test(path[i - 1]!)) return false;
+    } else if (!ID_SEGMENT.test(seg) || seg.startsWith("tool:")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** `path` equals `root` or extends it. */
+function isAtOrBelow(path: readonly string[], root: readonly string[]): boolean {
+  if (path.length < root.length) return false;
+  for (let i = 0; i < root.length; i++) if (path[i] !== root[i]) return false;
   return true;
 }
 
@@ -215,48 +249,122 @@ export interface ReplayLoadOptions {
    * thread and the interrupt's own `__nodeId`.
    */
   threadId?: string | undefined;
+  /**
+   * Per interrupt (same order as the values), whether a node id is the
+   * top-level node of the LangGraph task that holds the interrupt. When
+   * given, a snapshot is loaded only if its root passes.
+   */
+  taskRoots?: ReadonlyArray<((nodeId: string) => boolean) | undefined> | undefined;
 }
 
 /**
  * Build the replay store for an execution that continues a thread's
  * checkpoint from the snapshot the engine attached to each of its pending
  * interrupts (pass only the interrupts of the snapshot read for that
- * thread). An interrupt restores the entries of the node that raised it
- * (the key must end with its engine-set `__nodeId`) and of nodes it called
- * as tools (keys that extend that key with `tool:<n>`, node id pairs).
- * Anything else in the payload is ignored.
+ * thread). A snapshot names its root (the top-level node whose task raised
+ * it, which must match the task) and the node that raised it (`at`, at or
+ * below the root and ending with the engine-set `__nodeId`); it restores the
+ * entries of keys at or below the root whose shape the engine could have
+ * built. Anything else in the payload is ignored.
  */
 export function replayStoreFromInterrupts(interruptValues: Iterable<unknown>, opts: ReplayLoadOptions = {}): ReplayStore {
   const store = new ReplayStore();
+  let index = -1;
   for (const value of interruptValues) {
+    index++;
     if (!isPlainObject(value)) continue;
     const data = value["data"];
     if (!isPlainObject(data)) continue;
     const blob = data["__agentReplay"];
     const nodeId = data["__nodeId"];
     if (!isPlainObject(blob) || typeof nodeId !== "string" || !nodeId) continue;
+    const taskRoot = opts.taskRoots?.[index];
+    if (opts.taskRoots && !taskRoot) continue;
     const key = blob["node"];
     const entries = blob["entries"];
-    const owner = parseNodeKey(key);
-    if (owner && owner[owner.length - 1] === nodeId) {
+    const root = parseNodeKey(key);
+    if (root && isEnginePath(root) && (!taskRoot || taskRoot(root[0]!))) {
+      const at = blob["at"] === undefined ? root : parseNodeKey(blob["at"]);
+      if (!at || !isEnginePath(at) || !isAtOrBelow(at, root) || at[at.length - 1] !== nodeId) continue;
       if (isPlainObject(entries)) store.load(key as string, entries);
       const nested = blob["nested"];
       if (Array.isArray(nested)) {
         for (const item of nested) {
           if (!isPlainObject(item) || !isPlainObject(item["entries"])) continue;
           const path = parseNodeKey(item["node"]);
-          if (path && isToolCallBelow(path, owner)) store.load(item["node"] as string, item["entries"]);
+          if (path && path.length > root.length && isEnginePath(path) && isAtOrBelow(path, root)) {
+            store.load(item["node"] as string, item["entries"]);
+          }
         }
       }
       continue;
     }
     // Saved by an earlier release: read-only, top-level node, this thread only.
     const legacyKey = blob["key"];
-    if (opts.threadId && key === undefined && legacyKey === `${opts.threadId}:${nodeId}` && isPlainObject(entries)) {
+    if (
+      opts.threadId &&
+      key === undefined &&
+      legacyKey === `${opts.threadId}:${nodeId}` &&
+      isPlainObject(entries) &&
+      (!taskRoot || taskRoot(nodeId))
+    ) {
       store.load(replayNodeKey([], nodeId), entries);
     }
   }
   return store;
+}
+
+/** JSON with object keys sorted, so equal arguments give equal text. */
+function stableJson(value: unknown, depth = 0): string {
+  if (depth > 64) return '"…"';
+  if (Array.isArray(value)) return `[${value.map((v) => stableJson(v, depth + 1)).join(",")}]`;
+  if (isPlainObject(value)) {
+    const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(value[k], depth + 1)}`).join(",")}}`;
+  }
+  const text = JSON.stringify(value);
+  return text === undefined ? "null" : text;
+}
+
+/** Hash of a tool call's arguments, stored with its cached result. */
+export function toolArgsHash(args: unknown): string {
+  return createHash("sha256").update(stableJson(args)).digest("hex").slice(0, 32);
+}
+
+/** Marker key of a cached tool result recorded with the call it answers. */
+const TOOL_CALL_MARK = "__fgToolCall";
+
+/** A cached tool result, with the tool name and argument hash of its call. */
+export function recordedToolResult(tool: string, args: unknown, result: unknown): Record<string, unknown> {
+  return { [TOOL_CALL_MARK]: { tool, args: toolArgsHash(args) }, result };
+}
+
+/** Raised when a replayed tool result was recorded for a different call. */
+export class ReplayMismatchError extends Error {
+  readonly code = "REPLAY_MISMATCH";
+  constructor(message: string) {
+    super(message);
+    this.name = "ReplayMismatchError";
+  }
+}
+
+/**
+ * The result to reuse for tool call `tool(args)` from a cached entry. A
+ * result recorded for another tool or other arguments is refused with
+ * {@link ReplayMismatchError} rather than given to this call. Entries saved
+ * by earlier releases (a bare result) are reused as they are.
+ */
+export function replayedToolResult(cached: unknown, tool: string, args: unknown, where: string): unknown {
+  if (!isPlainObject(cached) || !isPlainObject(cached[TOOL_CALL_MARK])) return cached;
+  const mark = cached[TOOL_CALL_MARK];
+  const hash = toolArgsHash(args);
+  if (mark["tool"] !== tool || mark["args"] !== hash) {
+    throw new ReplayMismatchError(
+      `${where}: the saved result of this tool call belongs to ${String(mark["tool"])} (args ${String(mark["args"]).slice(0, 12)}), ` +
+        `but the call being resumed is ${tool} (args ${hash.slice(0, 12)}). Refusing to reuse it; the run cannot be resumed safely.`,
+    );
+  }
+  return cached["result"];
 }
 
 export function isGraphInterrupt(err: unknown): boolean {

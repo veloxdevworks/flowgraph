@@ -368,7 +368,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const snap = await compiledLg.getState(cfg);
       // `threadId` lets interrupts saved by earlier releases (keyed
       // `<threadId>:<nodeId>`) resume without re-running approved tools.
-      replay = replayStoreFromInterrupts(pendingInterruptValues(snap), { threadId });
+      const pending = pendingInterrupts(snap);
+      replay = replayStoreFromInterrupts(pending.values, { threadId, taskRoots: pending.taskRoots });
       await hydrateDurableRuntime(snap, threadId, graphSpec, {
         executeInvoke,
         nodePolicy: opts.nodePolicy,
@@ -950,7 +951,8 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       // Graceful pause: park before this node so continueRun can resume it.
       const pauseSignal = (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       if (pauseSignal?.aborted) {
-        lgInterrupt({ reason: "paused", __flowgraphPause: true });
+        const data = withReplayData(undefined, runScopeOf(lgConfig), nodeSpec.id);
+        lgInterrupt({ reason: "paused", __flowgraphPause: true, ...(data !== undefined ? { data } : {}) });
       }
 
       // `when` guard
@@ -981,7 +983,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
           const data = c.payload && typeof c.payload === "object" && !Array.isArray(c.payload)
             ? withoutReservedKeys(c.payload as Record<string, unknown>)
             : c.payload;
-          lgInterrupt({ reason: c.reason, data });
+          lgInterrupt({ reason: c.reason, data: withReplayData(data, runScopeOf(lgConfig), nodeSpec.id) });
         }
         inputOverride = r.payload.input as Record<string, unknown> | undefined;
       }
@@ -1073,6 +1075,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   // its input against the calling agent's state snapshot. Returns the node's
   // raw result (the outputs slug) so the LLM sees clean data, not the update envelope.
   toolWiring.invokeNode = async (id, args, ctx, state = {}) => {
+    if (spec.nodes.find((n) => n.id === id)?.type === "map") {
+      throw new Error(`node-as-tool: map node "${id}" cannot be called as a tool; put it in a subgraph and call that instead.`);
+    }
     const target = compiledNodes.get(id);
     if (!target) throw new Error(`node-as-tool: no node "${id}" in this graph.`);
     // Model-chosen arguments become the node's input (and a subgraph's input state).
@@ -1728,23 +1733,8 @@ function buildNodeCtx(
         payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
           ? { ...withoutReservedKeys(payload.data as Record<string, unknown>), __nodeId: nodeId }
           : { ...(payload.data !== undefined ? { value: payload.data } : {}), __nodeId: nodeId };
-      // This node's replay entries in the current execution, and those of
-      // nodes it called as tools (an agent tool node that interrupts raises
-      // through this closure), so a resume, possibly in another process, can
-      // rebuild them from the checkpoint.
-      if (runScope) {
-        const node = replayNodeKey(runScope.path, nodeId);
-        const saved = runScope.replay.snapshotUnder(node);
-        const own = saved.find((s) => s.node === node);
-        const nested = saved.filter((s) => s.node !== node);
-        if (saved.length > 0) {
-          (data as Record<string, unknown>)["__agentReplay"] = {
-            node,
-            entries: own?.entries ?? {},
-            ...(nested.length > 0 ? { nested } : {}),
-          };
-        }
-      }
+      const replay = replayAttachment(runScope, nodeId);
+      if (replay) (data as Record<string, unknown>)["__agentReplay"] = replay;
       const tagged = { ...payload, data };
       events.emit("interrupt.raised", { reason: tagged.reason, data: tagged.data }, { nodeId, nodeType });
       return lgInterrupt(tagged) as T;
@@ -1818,14 +1808,68 @@ function expiredWaitResume(snap: {
 }
 
 /** Values of the pending interrupts in a thread snapshot (engine-written payloads). */
-function pendingInterruptValues(snap: {
-  tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ value?: unknown }> }>;
-} | null | undefined): unknown[] {
-  const out: unknown[] = [];
+/**
+ * The replay entries to attach to an interrupt raised by node `nodeId` in
+ * the current execution: everything under the top-level node whose task is
+ * running (the scope's root, or the node itself at the top level), since a
+ * resume re-runs that whole task. That covers the node, the nodes it called
+ * as tools, and the agents above it when it runs inside a node tool (a
+ * subgraph, map item or hitl node reached through tool calls, at any depth).
+ */
+function replayAttachment(runScope: RunScope | undefined, nodeId: string): Record<string, unknown> | undefined {
+  if (!runScope) return undefined;
+  const at = replayNodeKey(runScope.path, nodeId);
+  const root = runScope.root ?? at;
+  const saved = runScope.replay.snapshotUnder(root);
+  if (saved.length === 0) return undefined;
+  const own = saved.find((s) => s.node === root);
+  const nested = saved.filter((s) => s.node !== root);
+  return {
+    node: root,
+    ...(at !== root ? { at } : {}),
+    entries: own?.entries ?? {},
+    ...(nested.length > 0 ? { nested } : {}),
+  };
+}
+
+/**
+ * Interrupt data for an interrupt the engine raises around a node (pause,
+ * `node:before` hook): `data` unchanged unless entries must be saved (the
+ * node runs below a top-level node, e.g. inside a subgraph called as an
+ * agent tool), in which case they are attached as for `ctx.interrupt`.
+ */
+function withReplayData(data: unknown, runScope: RunScope | undefined, nodeId: string): unknown {
+  const replay = replayAttachment(runScope, nodeId);
+  if (!replay) return data;
+  const base = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : data === undefined ? {} : { value: data };
+  return { ...base, __nodeId: nodeId, __agentReplay: replay };
+}
+
+/**
+ * Pending interrupt values of a thread snapshot, with, per value, a check
+ * that a node id is the top-level node of the task holding it (the task's
+ * own node, or an item of the map whose worker it is).
+ */
+function pendingInterrupts(snap: {
+  tasks?: ReadonlyArray<{ name?: string; interrupts?: ReadonlyArray<{ value?: unknown }> }>;
+} | null | undefined): { values: unknown[]; taskRoots: Array<((nodeId: string) => boolean) | undefined> } {
+  const values: unknown[] = [];
+  const taskRoots: Array<((nodeId: string) => boolean) | undefined> = [];
   for (const task of snap?.tasks ?? []) {
-    for (const it of task.interrupts ?? []) out.push(it.value);
+    const name = task.name;
+    const isRoot = name
+      ? (nodeId: string) => {
+          if (nodeId === name) return true;
+          const item = /^(.+)\[[0-9]+\]$/.exec(nodeId);
+          return item !== null && mapSyntheticIds(item[1]!).workerId === name;
+        }
+      : undefined;
+    for (const it of task.interrupts ?? []) {
+      values.push(it.value);
+      taskRoots.push(isRoot);
+    }
   }
-  return out;
+  return { values, taskRoots };
 }
 
 /** @internal Exported for tests. */

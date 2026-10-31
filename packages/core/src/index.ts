@@ -94,7 +94,7 @@ export {
   ISSUES_CHANNEL,
   RESERVED_STATE_CHANNELS,
 } from "./runtime/state-annotation.js";
-export { ReplayStore, replayNodeKey, runScopeOf, type RunScope } from "./providers/replay-cache.js";
+export { ReplayMismatchError, ReplayStore, replayNodeKey, runScopeOf, type RunScope } from "./providers/replay-cache.js";
 export { parseDuration, sleep } from "./runtime/duration.js";
 export { runWithPolicy, isTimeoutError } from "./runtime/retry.js";
 export type { RetryConfig } from "./runtime/retry.js";

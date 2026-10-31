@@ -18,7 +18,7 @@ import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
 import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
-import { childRunConfig, isGraphInterrupt, ReplayStore, replayNodeKey, runScopeOf } from "../providers/replay-cache.js";
+import { childRunConfig, isGraphInterrupt, recordedToolResult, ReplayMismatchError, ReplayStore, replayNodeKey, replayedToolResult, runScopeOf } from "../providers/replay-cache.js";
 import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
 import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
@@ -128,6 +128,9 @@ export const agentNode = defineNode<Config>({
         const replayStore = runScope?.replay ?? new ReplayStore();
         const cacheKey = replayNodeKey(runScope?.path ?? [], ctx.nodeId);
         let toolSeq = 0;
+        // A provider may hand a tool error back to the model; a replay
+        // mismatch must fail the node instead.
+        let mismatch: ReplayMismatchError | undefined;
 
         const providerCtx: ProviderRunContext = {
           node: ctx,
@@ -146,21 +149,28 @@ export const agentNode = defineNode<Config>({
             // Always run permission/HITL so LangGraph interrupt indices stay aligned on replay.
             const callArgs = await checkToolCall(governance, name, args);
             const toolIndex = `tool:${toolSeq++}`;
+            // A cached result is reused only for the same tool and arguments.
             const cached = replayStore.get(cacheKey, toolIndex);
-            if (cached !== undefined) return cached;
+            if (cached !== undefined) {
+              try {
+                return replayedToolResult(cached, name, args, `agent node "${ctx.nodeId}" ${toolIndex}`);
+              } catch (err) {
+                if (err instanceof ReplayMismatchError) mismatch ??= err;
+                throw err;
+              }
+            }
 
             ctx.emit("agent.tool.call", { tool: name, args: callArgs });
             // A node called as a tool runs one level below this agent, under
             // this call's index, so its replay entries are its own and are
             // saved with this agent's when it interrupts (see RunScope).
-            const toolCtx = runScope
-              ? { ...ctx, _lgConfig: childRunConfig(childRunConfig(lgConfigOf(ctx)!, ctx.nodeId), toolIndex) }
-              : ctx;
+            const lgConfig = lgConfigOf(ctx);
+            const toolCtx = lgConfig ? { ...ctx, _lgConfig: toolCallConfig(lgConfig, ctx.nodeId, toolIndex) } : ctx;
             let result = await exec(callArgs, toolCtx, state);
             ctx.emit("agent.tool.result", { tool: name, result });
 
             result = await reportToolResult(governance, name, callArgs, result);
-            replayStore.set(cacheKey, toolIndex, result);
+            replayStore.set(cacheKey, toolIndex, recordedToolResult(name, args, result));
             return result;
           },
         };
@@ -169,6 +179,7 @@ export const agentNode = defineNode<Config>({
 
         try {
           const result = await provider.run(req, providerCtx);
+          if (mismatch) throw mismatch;
 
           if (result.stopReason === "maxSteps") {
             const maxSteps = req.maxSteps ?? 10;
@@ -299,6 +310,50 @@ function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number; costU
       detail: { usedTokens: budget.usedTokens, usedUSD: budget.usedUSD },
     });
   }
+}
+
+/**
+ * The config a node called as a tool runs with: one run scope level below this
+ * agent, under the call's index, and in its own checkpoint namespace, so two
+ * subgraph calls in one task (the same subgraph twice, say) never resume each
+ * other's checkpoints. LangGraph treats `:` and `|` in a namespace as
+ * separators, so the segment uses neither.
+ *
+ * LangGraph also suffixes the namespace of the second and later subgraphs a
+ * task invokes with a per-task counter. A resumed agent skips the calls it has
+ * a cached result for, so that counter would shift and a child would open the
+ * wrong checkpoint; each call therefore counts its own subgraphs, while
+ * everything else on the task's scratchpad (interrupt counter, resume values)
+ * stays shared.
+ */
+function toolCallConfig(
+  config: { configurable?: Record<string, unknown> },
+  nodeId: string,
+  toolIndex: string,
+): { configurable?: Record<string, unknown> } {
+  const scoped = childRunConfig(childRunConfig(config, nodeId), toolIndex);
+  const prev = scoped.configurable ?? {};
+  const segment = `${nodeId}.${toolIndex.replace(":", "")}`.replace(/[:|]/g, "_");
+  const prevNs = typeof prev["checkpoint_ns"] === "string" ? prev["checkpoint_ns"] : "";
+  const configurable: Record<string, unknown> = { ...prev, checkpoint_ns: prevNs ? `${prevNs}|${segment}` : segment };
+  const scratchpad = prev[SCRATCHPAD_KEY];
+  if (scratchpad && typeof scratchpad === "object") configurable[SCRATCHPAD_KEY] = ownSubgraphCounter(scratchpad);
+  return { ...scoped, configurable };
+}
+
+/** LangGraph's per-task scratchpad key (`CONFIG_KEY_SCRATCHPAD`). */
+const SCRATCHPAD_KEY = "__pregel_scratchpad";
+
+function ownSubgraphCounter(scratchpad: object): object {
+  let subgraphCounter = 0;
+  return new Proxy(scratchpad, {
+    get: (target, key, receiver) => (key === "subgraphCounter" ? subgraphCounter : Reflect.get(target, key, receiver)),
+    set: (target, key, value, receiver) => {
+      if (key !== "subgraphCounter") return Reflect.set(target, key, value, receiver);
+      subgraphCounter = Number(value);
+      return true;
+    },
+  });
 }
 
 function lgConfigOf(ctx: unknown): { configurable?: Record<string, unknown> } | undefined {

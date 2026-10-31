@@ -7,8 +7,12 @@ import {
   deserializeReplayValue,
   isGraphInterrupt,
   replayNodeKey,
+  recordedToolResult,
+  ReplayMismatchError,
+  replayedToolResult,
   replayStoreFromInterrupts,
   runScopeOf,
+  toolArgsHash,
   serializeReplayValue,
 } from "./replay-cache.js";
 
@@ -109,14 +113,28 @@ describe("replay entries of nodes called as tools", () => {
     expect(store.snapshotUnder(owner).map((s) => s.node).sort()).toEqual([owner, below("tool:0", "h"), below("tool:0", "h", "tool:1", "g")].sort());
   });
 
-  it("loads nested entries only below the interrupting node, through tool call segments", () => {
-    const ok = [below("tool:0", "h"), below("tool:3", "h", "tool:0", "g")];
+  it("loads nested entries below the replay root whose path the engine could produce", () => {
+    const ok = [
+      below("tool:0", "h"),
+      below("tool:3", "h", "tool:0", "g"),
+      below("tool:0", "sg", "a"),
+      below("tool:1", "sg", "m[2]", "a", "tool:0", "t", "b"),
+      below("sg", "a"),
+      below("m[0]"),
+    ];
     const bad = [
       JSON.stringify(["p", "tool:0", "h"]),
-      below("h"),
       below("tool:0"),
+      below("tool:0", "tool:1", "h"),
       below("tool:x", "h"),
-      below("sg", "a"),
+      below("tool:01x", "h"),
+      below("a[x]"),
+      below("a]"),
+      below("a\u0001"),
+      below(""),
+      below("x".repeat(257)),
+      below(...Array.from({ length: 64 }, () => "s")),
+      JSON.stringify(["o", 1]),
       JSON.stringify(["o"]),
       "not json",
     ];
@@ -128,6 +146,64 @@ describe("replay entries of nodes called as tools", () => {
     for (const k of ok) expect(store.has(k), k).toBe(true);
     for (const k of [...bad.filter((k) => k !== JSON.stringify(["o"])), below("tool:9", "z")]) expect(store.has(k), k).toBe(false);
   });
+
+  it("loads a root saved by an interrupt raised below it, where the raising node is", () => {
+    const raised = (at: unknown, nodeId = "a", node: unknown = owner) => ({ data: { __nodeId: nodeId, __agentReplay: { node, at, entries } } });
+    expect(replayStoreFromInterrupts([raised(below("tool:0", "sg", "a"))]).has(owner)).toBe(true);
+    for (const value of [
+      raised(below("tool:0", "sg", "b")),
+      raised(JSON.stringify(["p", "tool:0", "a"])),
+      raised(below("tool:0", "tool:1", "a")),
+      raised("not json"),
+      raised(below("tool:0", "sg", "a"), "a", JSON.stringify(["tool:0", "a"])),
+      raised(below("tool:0", "sg", "a"), "a", JSON.stringify(["o", "tool:0"])),
+    ]) {
+      expect(replayStoreFromInterrupts([value]).has(owner), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it("loads a snapshot only under the task that raised the interrupt", () => {
+    const value = (node: string, nodeId: string) => ({ data: { __nodeId: nodeId, __agentReplay: { node, entries } } });
+    const map = replayNodeKey([], "m[1]");
+    const tasks = (name: string) => [(root: string) => root === name];
+    expect(replayStoreFromInterrupts([value(owner, "o")], { taskRoots: tasks("o") }).has(owner)).toBe(true);
+    expect(replayStoreFromInterrupts([value(owner, "o")], { taskRoots: tasks("other") }).has(owner)).toBe(false);
+    expect(replayStoreFromInterrupts([value(owner, "o")], { taskRoots: [] }).has(owner)).toBe(false);
+    expect(replayStoreFromInterrupts([value(map, "m[1]")], { taskRoots: tasks("m[1]") }).has(map)).toBe(true);
+  });
+});
+
+describe("cached tool results", () => {
+  it("hashes arguments independently of key order", () => {
+    expect(toolArgsHash({ a: 1, b: [1, { c: 2, d: 3 }] })).toBe(toolArgsHash({ b: [1, { d: 3, c: 2 }], a: 1 }));
+    expect(toolArgsHash({ a: 1 })).not.toBe(toolArgsHash({ a: 2 }));
+    expect(toolArgsHash({ a: 1 })).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("returns a result recorded for the same call and refuses one recorded for another", () => {
+    const cached = recordedToolResult("lookup", { q: "x" }, { hit: 1 });
+    expect(replayedToolResult(cached, "lookup", { q: "x" }, "agent node \"a\" tool:0")).toEqual({ hit: 1 });
+    for (const [tool, args] of [["lookup", { q: "y" }], ["other", { q: "x" }]] as const) {
+      let err: unknown;
+      try {
+        replayedToolResult(cached, tool, args, "agent node \"a\" tool:0");
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(ReplayMismatchError);
+      expect((err as ReplayMismatchError).code).toBe("REPLAY_MISMATCH");
+      expect((err as Error).message).toContain("agent node \"a\" tool:0");
+    }
+  });
+
+  it("reuses a bare result saved by an earlier release as it is", () => {
+    expect(replayedToolResult({ hit: 1 }, "lookup", { q: "x" }, "a")).toEqual({ hit: 1 });
+    expect(replayedToolResult("text", "lookup", {}, "a")).toBe("text");
+  });
+});
+
+describe("replay snapshots saved by an earlier release", () => {
+  const entries = { "llm:0": { text: "cached" } };
 
   it("loads an interrupt saved by an earlier release for its own thread and node only", () => {
     const legacy = (key: string, nodeId = "a") => ({ data: { __nodeId: nodeId, __agentReplay: { key, entries } } });
