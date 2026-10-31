@@ -110,6 +110,11 @@ export class RunService {
   private closed: Promise<void> | undefined;
   /** Requests being set up and runs executing, which close() waits for. */
   private readonly inFlight = new Set<Promise<unknown>>();
+  /**
+   * Meta writes for one thread, chained so a later patch never reads a file
+   * the previous write is still replacing.
+   */
+  private readonly metaWrites = new Map<string, Promise<void>>();
 
   /** Resolves callers to principals (OIDC, the legacy token, or none), built from config.auth. */
   get authenticator(): Authenticator {
@@ -343,14 +348,27 @@ export class RunService {
   }
 
   /**
-   * Update a thread's meta file in the background. The file can be gone (a
-   * wiped graph store, or a test removing its directory); that must not
-   * become an unhandled rejection.
+   * Persist a meta patch. The file can be gone (a wiped graph store, or a
+   * test removing its directory); that must not become an unhandled rejection.
+   * Patches for one thread run in order. Callers that publish a status wait
+   * for the returned promise, so a reader that sees the status opens the
+   * finished file.
    */
-  private patchMeta(threadId: string, patch: Parameters<typeof updateGraphMeta>[2]): void {
-    updateGraphMeta(this.config.graphStoreDir, threadId, patch).catch((err: unknown) => {
-      log("warn", "graph meta update failed", { threadId, ...errorFields(err) });
+  private patchMeta(threadId: string, patch: Parameters<typeof updateGraphMeta>[2]): Promise<void> {
+    const prev = this.metaWrites.get(threadId) ?? Promise.resolve();
+    const done = prev.catch(() => undefined).then(() =>
+      updateGraphMeta(this.config.graphStoreDir, threadId, patch).then(
+        () => undefined,
+        (err: unknown) => {
+          log("warn", "graph meta update failed", { threadId, ...errorFields(err) });
+        },
+      ),
+    );
+    this.metaWrites.set(threadId, done);
+    void done.then(() => {
+      if (this.metaWrites.get(threadId) === done) this.metaWrites.delete(threadId);
     });
+    return done;
   }
 
   /**
@@ -633,7 +651,7 @@ export class RunService {
     } catch (err) {
       // Don't leave a "running" placeholder behind for a run that never started.
       if (this.registry.get(req.threadId) === placeholder) this.registry.remove(req.threadId);
-      this.patchMeta(req.threadId, { status: "error" });
+      await this.patchMeta(req.threadId, { status: "error" });
       throw err;
     }
 
@@ -670,12 +688,12 @@ export class RunService {
           signal: placeholder.abort.signal,
           pauseSignal: placeholder.pause.signal,
         });
-        this.applyResult(req.threadId, result);
+        await this.applyResult(req.threadId, result);
       } catch (err) {
         log("error", "run.error", { threadId: req.threadId, ...errorFields(err) });
+        await this.patchMeta(req.threadId, { status: "error" });
         this.registry.setStatus(req.threadId, "error");
         this.metrics.recordResult("error");
-        this.patchMeta(req.threadId, { status: "error" });
         const message = err instanceof Error ? err.message : String(err);
         this.registry.pushEvent(req.threadId, {
           id: `err-${Date.now()}`,
@@ -699,7 +717,7 @@ export class RunService {
     };
   }
 
-  private applyResult(threadId: string, result: RunResult): void {
+  private async applyResult(threadId: string, result: RunResult): Promise<void> {
     const status =
       result.status === "interrupted"
         ? "interrupted"
@@ -710,10 +728,14 @@ export class RunService {
             : result.status === "aborted"
               ? "cancelled"
               : "completed";
+    // The graph-store file is what later calls use to tell two thread ids
+    // that share a filename apart. Publish the status only after that write
+    // finishes, so a waiter that sees "interrupted" does not read a file
+    // that is still being replaced.
+    await this.patchMeta(threadId, { status });
     this.registry.setStatus(threadId, status);
     this.metrics.recordResult(result.status);
     log("info", "run.end", { threadId, status: result.status, runId: result.runId });
-    this.patchMeta(threadId, { status });
   }
 
   resumeRun(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
@@ -766,7 +788,7 @@ export class RunService {
     session.runId = compiled.runId;
     session.dryRun = dryRun;
     this.registry.setStatus(req.threadId, "running");
-    this.patchMeta(req.threadId, { status: "running" });
+    void this.patchMeta(req.threadId, { status: "running" });
 
     // Fire-and-forget like start/continue — resumed execution can be long-running.
     void this.track((async () => {
@@ -778,12 +800,12 @@ export class RunService {
           signal: abort.signal,
           pauseSignal: pause.signal,
         });
-        this.applyResult(req.threadId, result);
+        await this.applyResult(req.threadId, result);
       } catch (err) {
         log("error", "resume.error", { threadId: req.threadId, ...errorFields(err) });
+        await this.patchMeta(req.threadId, { status: "error" });
         this.registry.setStatus(req.threadId, "error");
         this.metrics.recordResult("error");
-        this.patchMeta(req.threadId, { status: "error" });
         const message = err instanceof Error ? err.message : String(err);
         this.registry.pushEvent(req.threadId, {
           id: `err-${Date.now()}`,
@@ -811,9 +833,9 @@ export class RunService {
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
     session.abort.abort();
+    await this.patchMeta(threadId, { status: "cancelled" });
     this.registry.setStatus(threadId, "cancelled");
     this.metrics.recordResult("cancelled");
-    this.patchMeta(threadId, { status: "cancelled" });
     return { threadId, runId: session.runId, status: "cancelled" };
   }
 
@@ -822,7 +844,7 @@ export class RunService {
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
     session.pause.abort();
-    this.patchMeta(threadId, { status: "paused" });
+    await this.patchMeta(threadId, { status: "paused" });
     return { threadId, runId: session.runId, status: "started" };
   }
 
@@ -871,7 +893,7 @@ export class RunService {
     session.runId = compiled.runId;
     session.dryRun = dryRun;
     this.registry.setStatus(threadId, "running");
-    this.patchMeta(threadId, { status: "running" });
+    void this.patchMeta(threadId, { status: "running" });
 
     // Fire-and-forget like start (continue can be long-running)
     void this.track((async () => {
@@ -882,12 +904,12 @@ export class RunService {
           signal: abort.signal,
           pauseSignal: pause.signal,
         });
-        this.applyResult(threadId, result);
+        await this.applyResult(threadId, result);
       } catch (err) {
         log("error", "continue.error", { threadId, ...errorFields(err) });
+        await this.patchMeta(threadId, { status: "error" });
         this.registry.setStatus(threadId, "error");
         this.metrics.recordResult("error");
-        this.patchMeta(threadId, { status: "error" });
       }
     })());
 
