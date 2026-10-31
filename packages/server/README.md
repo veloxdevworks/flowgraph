@@ -110,6 +110,8 @@ At run time the engine enforces the same limits again (`NODE_TYPE_BLOCKED`, `SUB
 
 **Stored graphs.** The graph store (`{threadId}.graph.yaml`), the live session and `GET /runs/:id` keep the YAML as it was uploaded. `${VAR}` placeholders in a trusted author's graph are filled from the server environment each time it runs and are never written back; an untrusted author cannot upload them, and a stored placeholder is refused if its author has since lost trust. Files stored by servers before 0.2 hold YAML that was expanded at upload; they are read as they are and never expanded again.
 
+A new thread's meta file (`{threadId}.graph.yaml.meta.json`) is created exclusively, so when two servers share one graph store and both start the same new thread id (or two ids that share a file name, such as `a/b` and `a_b`), one stores it and the other gets 409 `THREAD_ID_CONFLICT` without changing either file. The file is written in full and flushed before it appears (a hard link from a temporary file), so a reader never sees it half-written; on a filesystem without hard links it is created with an exclusive open instead, and a reader that catches it mid-write gets a retryable 503 `THREAD_META_UNREADABLE`. If storing the graph fails after the meta file was created, the meta file stays: the thread remains its owner's, and the owner's next upload stores the graph.
+
 ### Auth errors
 
 Errors are JSON `{ "error", "code" }`; 401s also send `WWW-Authenticate: Bearer`.
@@ -124,7 +126,8 @@ Errors are JSON `{ "error", "code" }`; 401s also send `WWW-Authenticate: Bearer`
 | 503 | `THREAD_OWNER_UNAVAILABLE` | The thread's owner could not be looked up (database unavailable) |
 | 403 | `THREAD_NOT_OWNED` | Another principal's thread |
 | 404 | `THREAD_NOT_FOUND` | Unknown thread |
-| 409 | `THREAD_ID_CONFLICT` / `GRAPH_NAME_TAKEN` | Thread id used for a different graph / graph name owned by someone else |
+| 409 | `THREAD_ID_CONFLICT` / `GRAPH_NAME_TAKEN` | Thread id used for a different graph, or created at the same moment by another server sharing the graph store / graph name owned by someone else |
+| 400 | `INVALID_THREAD_ID` | Empty thread id, or longer than 234 characters (the graph store keeps one file per thread id) |
 | 403 | `RESERVED_CHANNEL_BLOCKED` | Run `input` sets an engine state channel (`__services`, `__worktrees`, `__agentReplay`, …). Refused for every caller and in every mode |
 
 ### Upgrading from 0.1
