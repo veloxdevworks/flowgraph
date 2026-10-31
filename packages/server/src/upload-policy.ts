@@ -17,6 +17,7 @@ import {
   registeredToolNamesOf,
   reservedInputRefs,
   reservedStateMapRefs,
+  reservedTemplateRefs,
   walkNodes,
   type NodePolicy,
 } from "@flowgraph/core";
@@ -189,6 +190,9 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
     // subgraph, the child's input state.
     for (const ref of reservedInputRefs(n)) {
       add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.${ref}`, `${ref} sets or reads a reserved state channel (${RESERVED_WHY})`);
+    }
+    for (const ref of reservedTemplateRefs(n)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.${ref}`, `${ref} reads a reserved state channel (${RESERVED_WHY})`);
     }
     for (const ref of reservedStateMapRefs(n)) {
       add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.with.${ref}`, `${ref} names a reserved state channel (${RESERVED_WHY})`);

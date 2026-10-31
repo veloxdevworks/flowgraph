@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { createLangChainProvider } from "./index.js";
-import { NodePolicyError, assertNoReservedInput, isReservedChannel, reservedStateMapRefs, type NodePolicy } from "./node-policy.js";
+import { NodePolicyError, assertNoReservedInput, isReservedChannel, reservedStateMapRefs, reservedTemplateRefs, type NodePolicy } from "./node-policy.js";
 import { registerFunction } from "./nodes/function.js";
 import { unwrapUpdate } from "./nodes/map.js";
 import { registerProvider } from "./providers/registry.js";
@@ -70,10 +70,32 @@ afterEach(() => {
   for (const p of cleanup.splice(0)) fs.rmSync(p, { recursive: true, force: true });
 });
 
+describe("reserved reads in templated node fields", () => {
+  it("finds {{ }} reads of __ channels in any with field, not plain text", () => {
+    const node = (w: Record<string, unknown>) => ({ id: "a", type: "agent", with: w }) as never;
+    expect(reservedTemplateRefs(node({ prompt: "{{ state.__services }}" }))).toEqual(["with.prompt"]);
+    expect(reservedTemplateRefs(node({ tools: [{ args: { q: "{{ state['\uFF3F\uFF3Fx'] }}" } }] })).length).toBe(1);
+    expect(reservedTemplateRefs(node({ prompt: "fix __init__.py using {{ state.out }}" }))).toEqual([]);
+  });
+
+  it("refuses them under the policy, and an unrefused read still sees no engine channel", async () => {
+    const hitl = (message: string) => graph([{ id: "a", type: "hitl", with: { mode: "approve", message } }]);
+    expect(await codeOf(compileGraph(hitl("{{ state.__services }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
+    expect(await codeOf(compileGraph(hitl("{{ state['\u200B__services'] }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
+    // Concatenation is not a literal read; the render hides `__` keys instead.
+    const g = await compileGraph(hitl("[{{ state['_' + '_agentReplay'] }}|{{ keys(state) }}]"), { nodePolicy: POLICY, checkpointer: new MemorySaver() });
+    const res = await g.run({ input: {}, threadId: `rt-${randomUUID()}` });
+    const shown = JSON.stringify(res.interrupts ?? []);
+    expect(shown).toContain("[|");
+    expect(shown).not.toMatch(/"__(services|agentReplay|worktrees)"/);
+  });
+});
+
 describe("reserved channel names", () => {
   it("every __ name is reserved, known or not", () => {
     for (const n of ["__services", "__agentReplay", "__interrupt__", "__future", "__"]) expect(isReservedChannel(n)).toBe(true);
     for (const n of ["services", "_x", "a__b"]) expect(isReservedChannel(n)).toBe(false);
+    for (const n of ["\uFF3F\uFF3Fservices", "\u200B__services", "\uFEFF__x", " __x"]) expect(isReservedChannel(n), JSON.stringify(n)).toBe(true);
     expect(() => assertNoReservedInput({ ok: 1, __future: 1 }, "run input")).toThrow(/__future/);
     expect(() => assertNoReservedInput({ ok: 1 }, "run input")).not.toThrow();
   });

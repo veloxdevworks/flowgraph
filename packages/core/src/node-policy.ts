@@ -208,7 +208,7 @@ export function assertNodeSpecAllowed(policy: NodePolicy | undefined, node: { ty
     if (w.agent !== undefined) assertAgentRefAllowed(policy, where);
   }
   if (type === "wait" && w.webhook) assertInboundWebhookAllowed(policy, `${where} with.webhook`);
-  const reservedRefs = [...reservedInputRefs(node), ...reservedStateMapRefs(node)];
+  const reservedRefs = [...reservedInputRefs(node), ...reservedStateMapRefs(node), ...reservedTemplateRefs(node)];
   if (reservedRefs.length > 0) {
     throw new NodePolicyError(
       "RESERVED_CHANNEL_BLOCKED",
@@ -291,13 +291,69 @@ export function assertImportsAllowed(policy: NodePolicy | undefined, spec: unkno
 /** State channel names starting with this belong to the engine (`__services`, `__agentReplay`, ...). */
 export const RESERVED_CHANNEL_PREFIX = "__";
 
-/** Whether `name` is in the engine's reserved channel namespace (any `__` prefix, known or not). */
+/**
+ * `text` with look-alike forms folded (NFKC, so a fullwidth `＿` is `_`) and
+ * invisible format characters (zero-width spaces, joiners, bidi marks)
+ * removed, so a name cannot pass a prefix check by looking different.
+ */
+function foldLookalikes(text: string): string {
+  return text.normalize("NFKC").replace(/\p{Cf}/gu, "");
+}
+
+/**
+ * Whether `name` is in the engine's reserved channel namespace (any `__`
+ * prefix, known or not). Leading white space, look-alike underscores and
+ * invisible characters count: `＿＿x` and `\u200b__x` are reserved too.
+ */
 export function isReservedChannel(name: string): boolean {
-  return name.startsWith(RESERVED_CHANNEL_PREFIX);
+  return name.startsWith(RESERVED_CHANNEL_PREFIX) || foldLookalikes(name).trimStart().startsWith(RESERVED_CHANNEL_PREFIX);
 }
 
 /** A `__name` used as a whole reference or inside a `{{ }}` expression (`state.__x`, `state['__x']`). */
-const RESERVED_REF = /(?:^|[^A-Za-z0-9_$])__[A-Za-z0-9_$]/;
+const RESERVED_REF_RE = /(?:^|[^A-Za-z0-9_$])__[A-Za-z0-9_$]/;
+const RESERVED_REF = { test: (text: string): boolean => RESERVED_REF_RE.test(foldLookalikes(text)) };
+
+/** `{{ ... }}` expressions inside a template string. */
+const TEMPLATE_EXPR = /\{\{([\s\S]*?)\}\}/g;
+
+/**
+ * Template expressions in a node's `with` block (prompts, messages, URLs,
+ * conditions, at any depth) that name a `__` channel, as `with.<path>`
+ * paths. Only `{{ }}` expressions are checked, so text such as
+ * `__init__.py` in a prompt is not. `stateMap` (see
+ * {@link reservedStateMapRefs}) and a map's inner node (checked on its own)
+ * are skipped. This is a compile-time diagnostic: expressions cannot read
+ * `__` channels in any form, because `state` evaluates without them.
+ */
+export function reservedTemplateRefs(node: { with?: unknown }): string[] {
+  const w = node.with;
+  if (!w || typeof w !== "object" || Array.isArray(w)) return [];
+  const out: string[] = [];
+  const visit = (value: unknown, at: string, depth: number): void => {
+    if (depth > 32) return;
+    if (typeof value === "string") {
+      for (const m of value.matchAll(TEMPLATE_EXPR)) {
+        if (RESERVED_REF.test(m[1] ?? "")) {
+          out.push(at);
+          return;
+        }
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((v, i) => visit(v, `${at}.${i}`, depth + 1));
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) visit(v, `${at}.${k}`, depth + 1);
+    }
+  };
+  for (const [k, v] of Object.entries(w as Record<string, unknown>)) {
+    if (k === "stateMap" || k === "node") continue;
+    visit(v, `with.${k}`, 0);
+  }
+  return out;
+}
 
 /**
  * Reserved channel names a subgraph `stateMap` reads or writes: `in` keys

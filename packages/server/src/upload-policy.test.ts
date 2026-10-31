@@ -258,6 +258,15 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
     expect(codesOf(graph(nested))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.subgraph.b.input.__agentReplay"]);
   });
 
+  it("refuses __ reads in any templated node field, lookalike spellings included", () => {
+    const msg = (m: string) => graph(`  - { id: a, type: hitl, with: { mode: approve, message: ${JSON.stringify(m)} } }`);
+    expect(codesOf(msg("{{ state.__services }}"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.message"]);
+    expect(codesOf(msg("{{ state['\uFF3F\uFF3Fservices'] }}"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.message"]);
+    expect(codesOf(msg("{{ state['\u200B__services'] }}"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.message"]);
+    // Text outside {{ }} is not a read.
+    expect(codesOf(msg("edit __init__.py? {{ state.out }}"))).toEqual([]);
+  });
+
   it("refuses any __ name, known or not, as a channel, output or graph input", () => {
     expect(codesOf(graph(hitl).replace("out: { type: string }", "out: { type: string }\n    __future: { type: string }"))).toEqual([
       "UPLOAD_RESERVED_CHANNEL_BLOCKED state.channels.__future",

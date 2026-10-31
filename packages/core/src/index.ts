@@ -42,6 +42,7 @@ export {
   isReservedChannel,
   reservedStateMapRefs,
   reservedInputRefs,
+  reservedTemplateRefs,
   RESERVED_CHANNEL_PREFIX,
   hostExecAllowed,
   registeredToolNamesOf,
