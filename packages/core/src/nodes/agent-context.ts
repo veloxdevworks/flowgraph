@@ -23,7 +23,7 @@ import {
 import { summarizeWithProvider } from "../context/summarize.js";
 import { summaryBlock } from "../context/summary-block.js";
 import type { ContextMessage, ContextPolicy, ContextStats, ProviderContextManager } from "../context/types.js";
-import { getProvider } from "../providers/registry.js";
+import { providerFor } from "../providers/registry.js";
 import type { AgentRequest, AgentResult, ProviderAdapter, TokenUsage, ToolSpec } from "../providers/types.js";
 import { isGraphInterrupt, type ReplayStore } from "../providers/replay-cache.js";
 import { ISSUE_CODE } from "../runtime/run-issues.js";
@@ -147,7 +147,7 @@ export function startAgentContext(args: {
             text = await extractive(r);
           } else {
             try {
-              const p = getProvider(providerName);
+              const p = providerFor(ctx, providerName);
               if (!p) throw new Error(`summarize.provider "${providerName}" is not registered`);
               const res = await summarizeWithProvider(p, r, {
                 node: ctx,
