@@ -319,25 +319,46 @@ function decodeUnicodeEscapes(text: string): string {
   return text.replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
 }
 
-/** Whether an expression contains no names or calls, so it can be evaluated now. */
-function isConstantExpr(expr: Expr, depth = 0): boolean {
-  if (depth > 64) return false;
-  switch (expr.kind) {
-    case "Number":
-    case "String":
-    case "Bool":
-    case "Null":
-      return true;
-    case "Unary":
-      return isConstantExpr(expr.operand, depth + 1);
-    case "Binary":
-    case "Nullish":
-      return isConstantExpr(expr.left, depth + 1) && isConstantExpr(expr.right, depth + 1);
-    case "Ternary":
-      return [expr.condition, expr.consequent, expr.alternate].every((e) => isConstantExpr(e, depth + 1));
-    default:
-      return false;
+/**
+ * Functions a constant index may call (`'_' |> trim`, `upper('_')`). Each
+ * returns a string at most a few times longer than its input, so evaluating
+ * nested calls stays proportional to the expression's length; functions
+ * that can grow a string much more (`replace`, `join`, `format`) or build
+ * large values (`range`) leave the index unevaluated.
+ */
+const CONSTANT_FUNCTIONS: ReadonlySet<string> = new Set(["lower", "upper", "trim", "slice", "string", "default", "coalesce"]);
+
+/** Whether an expression contains no names and only calls {@link CONSTANT_FUNCTIONS}, so it can be evaluated now. */
+function isConstantExpr(root: Expr): boolean {
+  const stack: Expr[] = [root];
+  while (stack.length > 0) {
+    const expr = stack.pop()!;
+    switch (expr.kind) {
+      case "Number":
+      case "String":
+      case "Bool":
+      case "Null":
+        break;
+      case "Unary":
+      case "Binary":
+      case "Nullish":
+      case "Ternary":
+      case "Array":
+        stack.push(...childExprs(expr));
+        break;
+      case "Pipe":
+        if (!CONSTANT_FUNCTIONS.has(expr.fn)) return false;
+        stack.push(...childExprs(expr));
+        break;
+      case "Call":
+        if (!CONSTANT_FUNCTIONS.has(expr.callee)) return false;
+        stack.push(...childExprs(expr));
+        break;
+      default:
+        return false;
+    }
   }
+  return true;
 }
 
 /** Sub-expressions of an expression. */
@@ -367,19 +388,29 @@ function childExprs(expr: Expr): Expr[] {
   }
 }
 
-/** Whether an index in the expression is a constant that spells a `__` name (`'_' + '_x'`, `'\_\_x'`). */
-function hasReservedConstantIndex(expr: Expr, depth = 0): boolean {
-  if (depth > 64) return false;
-  if (expr.kind === "Index" && isConstantExpr(expr.index)) {
-    let key: unknown;
-    try {
-      key = evalExpr(expr.index, {});
-    } catch {
-      key = undefined;
+/**
+ * Whether an index anywhere in the expression is a constant that spells a
+ * `__` name (`'_' + '_x'`, `'\_\_x'`, `('_' |> trim) + '_x'`). Walks the
+ * tree without recursion, so nesting depth does not limit it.
+ */
+function hasReservedConstantIndex(root: Expr): boolean {
+  const stack: Expr[] = [root];
+  while (stack.length > 0) {
+    const expr = stack.pop()!;
+    if (expr.kind === "Index" && isConstantExpr(expr.index)) {
+      let key: unknown;
+      try {
+        key = evalExpr(expr.index, {});
+      } catch (err) {
+        // Nested too deeply to evaluate here: count it rather than miss it.
+        if (err instanceof RangeError) return true;
+        key = undefined;
+      }
+      if (typeof key === "string" && isReservedChannel(key)) return true;
     }
-    if (typeof key === "string" && isReservedChannel(key)) return true;
+    stack.push(...childExprs(expr));
   }
-  return childExprs(expr).some((e) => hasReservedConstantIndex(e, depth + 1));
+  return false;
 }
 
 /**
@@ -398,7 +429,9 @@ interface ParseBudget {
 /**
  * Whether a template expression names a `__` channel: as written, with
  * look-alike characters or `\uXXXX` sequences, or through a constant index
- * built from pieces (`state['_' + '_x']`, `state['\_\_x']`).
+ * (see {@link hasReservedConstantIndex}). An expression the parser cannot
+ * read (a syntax error, or nesting deep enough to exhaust the stack) is
+ * only checked as text; it fails the same way when the node renders it.
  */
 function refersToReservedInExpr(text: string, budget: ParseBudget): boolean {
   if (RESERVED_REF.test(text) || RESERVED_REF.test(decodeUnicodeEscapes(text))) return true;
@@ -457,8 +490,9 @@ export function templateRefs(text: string): TemplateRefs {
  * paths. Only `{{ }}` expressions are checked, so text such as
  * `__init__.py` in a prompt is not. `stateMap` (see
  * {@link reservedStateMapRefs}) and a map's inner node (checked on its own)
- * are skipped. Indexes computed at run time (`state[input.k]`) are not
- * followed. This is a compile-time diagnostic only: expressions cannot read
+ * are skipped. Constant indexes are evaluated (see
+ * {@link hasReservedConstantIndex}); indexes computed at run time
+ * (`state[input.k]`) or calling other functions are not followed. This is a compile-time diagnostic only: expressions cannot read
  * `__` channels in any form, because `state` evaluates without them.
  */
 export function reservedTemplateRefs(node: { with?: unknown }): string[] {
@@ -526,7 +560,8 @@ export function withoutReservedKeys<T extends Record<string, unknown>>(value: T)
 }
 
 /**
- * `__` keys a node's `input` block sets and `__` names its values refer to,
+ * `__` keys a node's `input` block sets and `__` names its values refer to
+ * (a bare `__name`, or a `{{ }}` read checked like {@link reservedTemplateRefs}),
  * as `input.<key>` paths. `input` becomes the node's input and, for a
  * subgraph without `stateMap.in`, part of the child's input state.
  */
@@ -541,7 +576,7 @@ export function reservedInputRefs(node: { input?: unknown }): string[] {
 }
 
 function refersToReserved(value: unknown): boolean {
-  if (typeof value === "string") return RESERVED_REF.test(value.trim());
+  if (typeof value === "string") return RESERVED_REF.test(value.trim()) || templateRefs(value).reserved;
   if (Array.isArray(value)) return value.some(refersToReserved);
   if (value && typeof value === "object") {
     return Object.entries(value as Record<string, unknown>).some(([k, v]) => isReservedChannel(k) || refersToReserved(v));

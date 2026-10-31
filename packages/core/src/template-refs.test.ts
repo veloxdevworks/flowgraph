@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reservedTemplateRefs, templateRefs } from "./index.js";
+import { reservedInputRefs, reservedTemplateRefs, templateRefs } from "./index.js";
 import { referencedRecallIds } from "./memory/recall.js";
 
 const TWO_MB = 2 * 1024 * 1024;
@@ -56,5 +56,41 @@ describe("referencedRecallIds", () => {
     expect(timed(() => (ids = referencedRecallIds([fill("{{ memory.a ")])))).toBeLessThan(1000);
     expect(ids.size).toBe(0);
     expect(referencedRecallIds(["{{ memory.a }} {{ memory.b"])).toEqual(new Set(["a"]));
+  });
+});
+
+describe("constant indexes", () => {
+  const reads = (expr: string) => templateRefs(`{{ ${expr} }}`).reserved;
+
+  it("follows the string functions a constant index may call", () => {
+    expect(reads("state[('_' |> trim) + '_x']")).toBe(true);
+    expect(reads("state[upper('_') + '_x']")).toBe(true);
+    expect(reads("state[coalesce(null, '__x')]")).toBe(true);
+    expect(reads("state['x__y' |> slice(1)]")).toBe(true);
+    expect(reads("state['a' |> upper]")).toBe(false);
+    // Functions that can grow a string are not evaluated.
+    expect(reads("state['a' |> replace('a', '_' + '_')]")).toBe(false);
+  });
+
+  it("finds a constant index at any nesting depth", () => {
+    let expr = "state['_' + '_x']";
+    for (let i = 0; i < 200; i++) expr = `a[${expr}]`;
+    expect(reads(expr)).toBe(true);
+    let key = "'_x'";
+    for (let i = 0; i < 200; i++) key = `('' + ${key})`;
+    expect(reads(`state['_' + ${key}]`)).toBe(true);
+  });
+});
+
+describe("reservedInputRefs", () => {
+  it("checks templates in input values like with fields", () => {
+    const input = {
+      a: "{{ state['\\u005f\\u005fx'] }}",
+      b: "{{ state['_' + '_x'] }}",
+      c: ["{{ state[('_' |> trim) + '_x'] }}"],
+      d: "__x",
+      e: "{{ state.x }}",
+    };
+    expect(reservedInputRefs({ input })).toEqual(["input.a", "input.b", "input.c", "input.d"]);
   });
 });

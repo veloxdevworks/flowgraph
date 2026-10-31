@@ -98,8 +98,9 @@ describe("reserved reads in templated node fields", () => {
     expect(await codeOf(compileGraph(hitl("{{ state.__services }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
     expect(await codeOf(compileGraph(hitl("{{ state['\u200B__services'] }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
     expect(await codeOf(compileGraph(hitl("{{ state['_' + '_services'] }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
-    // An index computed at run time is not followed; the render hides `__` keys instead.
-    const g = await compileGraph(hitl("[{{ state[lower('_') + '_agentReplay'] }}|{{ keys(state) }}]"), { nodePolicy: POLICY, checkpointer: new MemorySaver() });
+    expect(await codeOf(compileGraph(hitl("{{ state[lower('_') + '_services'] }}"), { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
+    // An index that calls a function the check does not evaluate is not followed; the render hides `__` keys instead.
+    const g = await compileGraph(hitl("[{{ state[('a' |> replace('a', '_')) + '_agentReplay'] }}|{{ keys(state) }}]"), { nodePolicy: POLICY, checkpointer: new MemorySaver() });
     const res = await g.run({ input: {}, threadId: `rt-${randomUUID()}` });
     const shown = JSON.stringify(res.interrupts ?? []);
     expect(shown).toContain("[|");
