@@ -38,8 +38,10 @@ export interface ContextWindowInit {
   system?: string | undefined;
   /** Other system messages found in the history channel, kept verbatim. */
   systemNotes?: string[];
-  /** Running summary already stored in the history channel. */
+  /** This agent's running summary already stored in the history channel. */
   summary?: string | undefined;
+  /** Summaries other agents keep in the same history channel (read only, sent as they are). */
+  sharedSummaries?: Array<{ node: string; text: string }>;
   /** History (no system messages), oldest first. */
   history?: ContextMessage[];
   prompt: ContextMessage;
@@ -62,6 +64,7 @@ export class ContextWindow {
   readonly policy: ContextPolicy;
   private readonly est: TokenEstimator;
   private readonly baseSystem: string[];
+  private readonly shared: Array<{ node: string; text: string }>;
   private readonly prompt: ContextMessage;
   private readonly history: ContextMessage[][];
   private readonly invalidHistory: ContextMessage[];
@@ -87,6 +90,7 @@ export class ContextWindow {
     this.policy = init.policy;
     this.est = init.estimator ?? getTokenEstimator(init.policy.estimator);
     this.baseSystem = [init.system, ...(init.systemNotes ?? [])].filter((s): s is string => !!s && s.length > 0);
+    this.shared = (init.sharedSummaries ?? []).filter((x) => x.text.length > 0);
     this.prompt = init.prompt;
     const { units, invalid } = toUnits(init.history ?? []);
     this.history = units;
@@ -107,6 +111,11 @@ export class ContextWindow {
   /** History units left out by the latest fit. */
   droppedHistory(): ContextMessage[] {
     return this.history.slice(0, Math.min(this.droppedUnits, this.history.length)).flat();
+  }
+
+  /** History messages folded into this run's summary (strategy: summarize). */
+  summarizedHistory(): ContextMessage[] {
+    return this.history.slice(0, Math.min(this.summarizedUnits, this.history.length)).flat();
   }
 
   /** Tool-loop messages left out by the latest fit (by identity). */
@@ -149,11 +158,17 @@ export class ContextWindow {
 
   /** The extra system section for the current state. */
   private section(droppedMsgs: number, summary: string | undefined): string | undefined {
-    if (this.policy.strategy === "summarize" && summary) {
-      return `${SUMMARY_HEADING}\n${summary}`;
+    const own = this.policy.strategy === "summarize" && summary ? summary : undefined;
+    const parts: string[] = [];
+    if (!own && droppedMsgs > 0) parts.push(omittedMarker(droppedMsgs));
+    if (own || this.shared.length > 0) {
+      const body = [
+        ...(own ? [own] : []),
+        ...this.shared.map((x) => `(kept by ${x.node})\n${x.text}`),
+      ];
+      parts.push(`${SUMMARY_HEADING}\n${body.join("\n\n")}`);
     }
-    if (droppedMsgs > 0) return omittedMarker(droppedMsgs);
-    return undefined;
+    return parts.length ? parts.join("\n\n") : undefined;
   }
 
   private systemText(droppedMsgs: number, summary: string | undefined): string | undefined {
@@ -201,7 +216,7 @@ export class ContextWindow {
     if (p.strategy === "trim" || p.strategy === "last") {
       while (k < maxDrop && totalAt(k, undefined) > p.maxTokens) k++;
     } else if (p.strategy === "summarize" && totalAt(k, this.summaryText) > p.maxTokens) {
-      const free = p.maxTokens - fixed - p.summarize.maxTokens - this.est(`\n\n${SUMMARY_HEADING}\n`);
+      const free = p.maxTokens - fixed - p.summarize.maxTokens - this.sectionTokens(0, " ");
       const target = Math.floor(Math.max(0, free) * SUMMARIZE_KEEP_RATIO);
       while (k < maxDrop && sufTok[k]! > target) k++;
     }

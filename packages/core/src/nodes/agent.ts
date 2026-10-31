@@ -191,6 +191,7 @@ export const agentNode = defineNode<Config>({
               agentProvider: providerName,
               agentModel: req.model,
               cacheKey,
+              sharedHistory: !!contextPolicy.history && !!buildCtx.sharedHistoryChannels?.has(contextPolicy.history),
               system,
               prompt,
               tools: specs,

@@ -4,6 +4,7 @@
 import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { MEMORY_RECALL_DEFAULT_TOKENS } from "../memory/types.js";
 import { resolveContextPolicy } from "./policy.js";
+import { sharedHistoryChannels } from "./shared.js";
 import type { ContextConfigInput } from "./types.js";
 
 type Channels = Record<string, { type?: string; reducer?: string }>;
@@ -66,6 +67,38 @@ function unusedDiagnostics(cfg: ContextConfigInput, strategy: string, path: stri
   }
   if (cfg.summarize !== undefined && strategy !== "summarize") {
     out.push({ severity: "warning", code: "CONTEXT_OPTION_UNUSED", message: `summarize only applies to strategy: summarize (strategy is ${strategy})`, path: `${path}.summarize` });
+  }
+}
+
+/**
+ * trim and last have no summary to keep what they leave out, so on a history
+ * channel another agent also uses they never remove messages (they only append).
+ */
+function sharedHistoryDiagnostics(spec: GraphSpec, defaults: ContextConfigInput | undefined, out: Diagnostic[]): void {
+  const nodes = spec.nodes as unknown as Array<Record<string, unknown>>;
+  const shared = sharedHistoryChannels(nodes);
+  if (shared.size === 0) return;
+  for (const node of nodes) {
+    if (node["type"] !== "agent") continue;
+    const w = (node["with"] ?? {}) as Record<string, unknown>;
+    const cfg = w["context"] as ContextConfigInput | undefined;
+    if (!cfg?.history || !shared.has(cfg.history)) continue;
+    const outputMax = typeof w["maxTokens"] === "number" ? (w["maxTokens"] as number) : 0;
+    const policy = resolveContextPolicy(defaults, cfg, { outputMaxTokens: outputMax })!;
+    if (!policy.compact || policy.strategy === "summarize") continue;
+    const others = nodes
+      .filter((n) => n !== node && n["type"] === "agent")
+      .filter((n) => ((n["with"] as { context?: { history?: unknown } } | undefined)?.context?.history) === cfg.history)
+      .map((n) => String(n["id"]));
+    out.push({
+      severity: "warning",
+      code: "CONTEXT_HISTORY_SHARED",
+      message:
+        `with.context.history "${cfg.history}" is also used by ${others.map((o) => `"${o}"`).join(", ")}; ` +
+        `with strategy: ${policy.strategy} this agent only appends to it and never removes messages. ` +
+        `Use strategy: summarize, or give each agent its own history channel, to keep the channel bounded.`,
+      path: `nodes.${String(node["id"])}.with.context.history`,
+    });
   }
 }
 
@@ -165,5 +198,6 @@ export function contextLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     }
   };
   visit(spec.nodes as unknown as Array<Record<string, unknown>>, (spec.state?.channels ?? {}) as Channels, "nodes", false, defaults);
+  sharedHistoryDiagnostics(spec, defaults, out);
   return out;
 }

@@ -212,10 +212,22 @@ export function collectNodeWriteChannels(node: GraphSpec["nodes"][number]): stri
     return [...names];
   }
 
+  // Agents also write their with.context.history channel.
+  const history = historyChannelOf(node);
+  if (history) names.add(history);
+
   // Ordinary nodes: always write state.outputs.<nodeId> unless output: none.
   if (!isOutputNone(output)) names.add(OUTPUTS_CHANNEL);
 
   return [...names];
+}
+
+/** The with.context.history channel of an agent node, if it names one. */
+export function historyChannelOf(node: GraphSpec["nodes"][number]): string | undefined {
+  if (node.type !== "agent") return undefined;
+  const ctx = ((node.with ?? {}) as { context?: { history?: unknown } }).context;
+  const h = ctx?.history;
+  return typeof h === "string" && h.trim() ? h : undefined;
 }
 
 /** Channel def used when auto-declaring the reserved per-node outputs bag. */
@@ -239,7 +251,12 @@ export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {
   for (const node of spec.nodes) {
     for (const name of collectNodeWriteChannels(node)) {
       if (name in existing) continue;
-      existing[name] = name === OUTPUTS_CHANNEL ? { ...OUTPUTS_CHANNEL_DEF } : { type: "any" };
+      existing[name] =
+        name === OUTPUTS_CHANNEL
+          ? { ...OUTPUTS_CHANNEL_DEF }
+          : name === historyChannelOf(node)
+            ? { type: "messages" }
+            : { type: "any" };
       changed = true;
     }
   }
@@ -280,6 +297,8 @@ export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[
 
   for (const node of spec.nodes) {
     for (const channel of collectNodeWriteChannels(node)) {
+      // An undeclared history channel is reported as CONTEXT_HISTORY_CHANNEL.
+      if (channel === historyChannelOf(node)) continue;
       const withBlock = (node.with ?? {}) as Record<string, unknown>;
       let path = `nodes.${node.id}.with.output`;
       if (

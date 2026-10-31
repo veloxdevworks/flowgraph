@@ -280,7 +280,7 @@ describe("agent with.context.history", () => {
     let r;
     for (let n = 0; n < 20; n++) r = await g.run({ threadId: "chat-sum", input: { q: `question ${n} ${"q".repeat(400)}` } });
     const chat = r!.state["chat"] as BaseMessage[];
-    const summary = chat.find((m) => m.id === "fg-summary-chat");
+    const summary = chat.find((m) => m.id === "fg-summary-chat-support");
     expect(summary && kind(summary)).toBe("system");
     expect(String(summary!.content)).toMatch(/question \d+/);
     expect(chat.length).toBeLessThanOrEqual(20);

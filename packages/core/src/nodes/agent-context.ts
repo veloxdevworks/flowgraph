@@ -17,6 +17,7 @@ import {
   removeMessage,
   renderTranscript,
   summaryMessageId,
+  SUMMARY_ID_PREFIX,
   toLangChainMessage,
 } from "../context/messages.js";
 import { summarizeWithProvider } from "../context/summarize.js";
@@ -45,23 +46,34 @@ export function inSubgraph(ctx: NodeRunContext): boolean {
 interface StoredHistory {
   history: ContextMessage[];
   systemNotes: string[];
+  /** This agent's own running summary. */
   summary?: ContextMessage | undefined;
+  /** Summaries other agents keep in the same channel. */
+  shared: Array<{ node: string; text: string }>;
   lastId: string;
 }
 
-function readHistory(state: Record<string, unknown>, policy: ContextPolicy, nodeId: string): StoredHistory {
+function isSummaryMessage(m: ContextMessage): boolean {
+  return m.role === "system" && m.meta?.["summary"] === true && (m.id ?? "").startsWith(SUMMARY_ID_PREFIX);
+}
+
+function readHistory(state: Record<string, unknown>, policy: ContextPolicy, nodeLabel: string, nodeId: string): StoredHistory {
   const channel = policy.history;
-  if (!channel) return { history: [], systemNotes: [], lastId: "" };
+  if (!channel) return { history: [], systemNotes: [], shared: [], lastId: "" };
   const raw = state[channel];
   if (raw !== undefined && raw !== null && !Array.isArray(raw)) {
     throw new Error(
-      `agent node "${nodeId}": with.context.history "${channel}" must be a type: messages channel (found ${typeof raw})`,
+      `agent node "${nodeLabel}": with.context.history "${channel}" must be a type: messages channel (found ${typeof raw})`,
     );
   }
   const stored = ((raw as unknown[] | undefined) ?? []).map(fromStoredMessage).filter((m): m is ContextMessage => !!m);
-  const sid = summaryMessageId(channel);
-  const summary = stored.find((m) => m.role === "system" && m.id === sid);
-  const systemNotes = stored.filter((m) => m.role === "system" && m.id !== sid).map((m) => m.content);
+  const sid = summaryMessageId(channel, nodeId);
+  const summaries = stored.filter(isSummaryMessage);
+  const summary = summaries.find((m) => m.id === sid);
+  const shared = summaries
+    .filter((m) => m !== summary)
+    .map((m) => ({ node: typeof m.meta?.["node"] === "string" ? (m.meta["node"] as string) : (m.id ?? ""), text: m.content }));
+  const systemNotes = stored.filter((m) => m.role === "system" && !isSummaryMessage(m)).map((m) => m.content);
   let history = stored.filter((m) => m.role !== "system");
   // With compact: false the summarized messages stay in the channel; skip what the summary covers.
   const covers = summary?.meta?.["coversThroughId"];
@@ -70,7 +82,7 @@ function readHistory(state: Record<string, unknown>, policy: ContextPolicy, node
     if (at >= 0) history = history.slice(at + 1);
   }
   const lastId = stored.length ? (stored[stored.length - 1]!.id ?? String(stored.length)) : "";
-  return { history, systemNotes, summary, lastId };
+  return { history, systemNotes, summary, shared, lastId };
 }
 
 function outputText(output: unknown): string {
@@ -99,6 +111,8 @@ export function startAgentContext(args: {
   agentProvider: string;
   agentModel?: string | undefined;
   cacheKey: string;
+  /** Another agent in this graph uses the same history channel. */
+  sharedHistory?: boolean;
   system?: string | undefined;
   prompt: string;
   tools: ToolSpec[];
@@ -106,7 +120,7 @@ export function startAgentContext(args: {
 }): AgentContextSession {
   const { policy, ctx, state, cacheKey } = args;
   const est = getTokenEstimator(policy.estimator);
-  const stored = readHistory(state, policy, args.nodeLabel);
+  const stored = readHistory(state, policy, args.nodeLabel, ctx.nodeId);
   const promptMsg: ContextMessage = { role: "user", content: args.prompt };
   const extractive = extractiveSummarizer(est);
 
@@ -157,6 +171,7 @@ export function startAgentContext(args: {
     system: args.system,
     systemNotes: stored.systemNotes,
     summary: stored.summary?.content,
+    sharedSummaries: stored.shared,
     history: stored.history,
     prompt: promptMsg,
     toolsTokens: args.tools.length ? est(JSON.stringify(args.tools)) : 0,
@@ -227,25 +242,34 @@ export function startAgentContext(args: {
       const nested = inSubgraph(ctx);
       const compact = policy.compact && !nested;
       const out: BaseMessage[] = [];
+      // A message is removed only when this agent's own summary, written in
+      // the same update, covers it (summarize), or when no other agent in
+      // the graph uses the channel (trim / last). Each agent keeps its own
+      // summary id, so agents running side by side never undo each other.
+      let removals: ContextMessage[] = [];
       if (compact) {
-        for (const m of window.droppedHistory()) if (m.id) out.push(removeMessage(m.id));
+        if (policy.strategy === "summarize") removals = window.summarizedHistory();
+        else if (!args.sharedHistory) removals = window.droppedHistory();
       }
-      if (!nested && policy.strategy === "summarize" && window.summaryChanged && window.summary) {
-        const dropped = window.droppedHistory();
+      const writeSummary =
+        !nested && policy.strategy === "summarize" && !!window.summary && (window.summaryChanged || removals.length > 0);
+      for (const m of removals) if (m.id) out.push(removeMessage(m.id));
+      if (writeSummary) {
+        const folded = window.summarizedHistory();
         const prevCovers = stored.summary?.meta?.["coversThroughId"];
-        const coversThroughId = policy.compact ? undefined : (dropped[dropped.length - 1]?.id ?? prevCovers);
+        const coversThroughId = policy.compact ? undefined : (folded[folded.length - 1]?.id ?? prevCovers);
         out.push(
           toLangChainMessage({
             role: "system",
-            id: summaryMessageId(channel),
-            content: window.summary,
-            meta: { summary: true, ...(typeof coversThroughId === "string" ? { coversThroughId } : {}) },
+            id: summaryMessageId(channel, ctx.nodeId),
+            content: window.summary!,
+            meta: { summary: true, node: ctx.nodeId, ...(typeof coversThroughId === "string" ? { coversThroughId } : {}) },
           }),
         );
       }
       let turn: ContextMessage[];
       if (policy.record === "all" && result.turn && result.turn.length > 0) {
-        const droppedLoop = compact ? window.droppedLoop() : new Set<ContextMessage>();
+        const droppedLoop = compact && (policy.strategy === "summarize" || !args.sharedHistory) ? window.droppedLoop() : new Set<ContextMessage>();
         turn = [promptMsg, ...result.turn.filter((m) => !droppedLoop.has(m))];
       } else {
         turn = [promptMsg, { role: "assistant", content: outputText(result.output) }];

@@ -38,6 +38,8 @@ export interface BuildContext {
   resolveSubgraph?: (uses: string) => Promise<unknown>;
   /** `runtime.context`: graph-wide context budget defaults for agent nodes. */
   contextDefaults?: ContextConfigInput;
+  /** History channels that more than one agent in this graph uses (with.context.history). */
+  sharedHistoryChannels?: ReadonlySet<string>;
   /** Wiring for node-as-tool execution, populated by the compiler. */
   toolWiring?: {
     invokeNode?: (

@@ -14,11 +14,15 @@ import {
 } from "@langchain/core/messages";
 import type { ContextMessage } from "./types.js";
 
-/** Id prefix of the running-summary message an agent keeps in its history channel. */
+/** Id prefix of the running-summary messages agents keep in a history channel. */
 export const SUMMARY_ID_PREFIX = "fg-summary-";
 
-export function summaryMessageId(channel: string): string {
-  return `${SUMMARY_ID_PREFIX}${channel}`;
+/**
+ * Id of one agent's running summary in a history channel. Each agent keeps
+ * its own, so agents sharing a channel never overwrite each other's summary.
+ */
+export function summaryMessageId(channel: string, nodeId: string): string {
+  return `${SUMMARY_ID_PREFIX}${channel}-${nodeId}`;
 }
 
 /**
