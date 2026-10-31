@@ -149,13 +149,14 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     metadata: Parameters<PostgresSaver["put"]>[2],
     newVersions: Parameters<PostgresSaver["put"]>[3],
   ): Promise<Awaited<ReturnType<PostgresSaver["put"]>>> {
-    const result = await super.put(config, checkpoint, metadata, newVersions);
     const threadId = config.configurable?.thread_id;
-    if (typeof threadId !== "string") return result;
-    const policy = this.policyFor(threadId);
-    if (!policy.enabled) return result;
+    const policy = typeof threadId === "string" ? this.policyFor(threadId) : this.retention;
+    if (typeof threadId === "string" && policy.enabled && threadDeletionRequested(policy)) {
+      await this.touch(threadId, "active", Date.now(), policy);
+    }
+    const result = await super.put(config, checkpoint, metadata, newVersions);
+    if (typeof threadId !== "string" || !policy.enabled) return result;
     const ns = config.configurable?.checkpoint_ns ?? "";
-    if (threadDeletionRequested(policy)) await this.touch(threadId, "active", Date.now(), policy);
     const deleted = await this.pruneNamespace(threadId, ns, policy);
     const droppedWrites = await this.compactWrites(threadId, ns);
     await this.maybeVacuum(deleted + droppedWrites, policy);
@@ -178,7 +179,6 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
   }
 
   override async deleteThread(threadId: string): Promise<void> {
-    if (this.runs.held(threadId)) return;
     const counted = await this.db().query<{ n: string }>(
       `SELECT COUNT(*) AS n FROM ${this.q}.checkpoints WHERE thread_id = $1`,
       [threadId],
@@ -187,7 +187,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     const pool = this.db();
     await pool.query(`DELETE FROM ${this.q}.fg_checkpoint_pins WHERE thread_id = $1`, [threadId]);
     await pool.query(`DELETE FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1`, [threadId]);
-    await pool.query(`DELETE FROM ${this.q}.fg_memory_threads WHERE thread_id = $1`).catch((err: { code?: string }) => {
+    await pool.query(`DELETE FROM ${this.q}.fg_memory_threads WHERE thread_id = $1`, [threadId]).catch((err: { code?: string }) => {
       if (err.code !== "42P01") throw err;
     });
     // fg_thread_owners and fg_memory_ops are left in place. Ownership outlives
@@ -195,16 +195,51 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     await this.maybeVacuum(Number(counted.rows[0]?.n ?? 0), this.retention);
   }
 
+  /**
+   * Sweep path. One transaction re-reads the thread row and deletes only if
+   * it is still that finished record. A run that marked the thread active
+   * first is left alone, including from another saver on this database.
+   */
+  private async deleteFinishedIfUnchanged(threadId: string, updatedAt: number): Promise<void> {
+    if (this.runs.held(threadId)) return;
+    const client = await this.db().connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<{ status: string; updated_at: string; deletable: number }>(
+        `SELECT status, updated_at, deletable FROM ${this.q}.fg_checkpoint_threads
+         WHERE thread_id = $1 FOR UPDATE`,
+        [threadId],
+      );
+      const row = locked.rows[0];
+      if (!row || row.status !== "finished" || Number(row.deletable) !== 1 || Number(row.updated_at) !== updatedAt) {
+        await client.query("COMMIT");
+        return;
+      }
+      for (const table of ["checkpoints", "checkpoint_blobs", "checkpoint_writes", "fg_checkpoint_pins", "fg_checkpoint_threads"]) {
+        await client.query(`DELETE FROM ${this.q}.${table} WHERE thread_id = $1`, [threadId]);
+      }
+      await client.query(`DELETE FROM ${this.q}.fg_memory_threads WHERE thread_id = $1`, [threadId]).catch((err: { code?: string }) => {
+        if (err.code !== "42P01") throw err;
+      });
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
     this.threadPolicy.set(threadId, policy);
   }
 
-  beginThreadRun(threadId: string): void {
-    this.runs.begin(threadId);
+  beginThreadRun(threadId: string): number {
+    return this.runs.begin(threadId);
   }
 
-  endThreadRun(threadId: string, status: CheckpointThreadStatus): void {
-    this.runs.end(threadId, status);
+  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false): void {
+    this.runs.end(threadId, status, token, resumed);
   }
 
   async noteThreadStatus(threadId: string, status: CheckpointThreadStatus, now = Date.now()): Promise<void> {
@@ -239,7 +274,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     for (const row of aged.rows) {
       const ttl = Number(row.finished_ttl_ms);
       if (!Number.isFinite(ttl) || now - Number(row.updated_at) < ttl) continue;
-      await this.deleteThread(row.thread_id);
+      await this.deleteFinishedIfUnchanged(row.thread_id, Number(row.updated_at));
     }
     const capped = await this.db().query<ThreadRow>(
       `SELECT thread_id, status, updated_at, finished_ttl_ms, max_finished, deletable
@@ -261,7 +296,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
       for (const row of rows) {
         if (removed >= need) break;
         if (this.runs.held(row.thread_id)) continue;
-        await this.deleteThread(row.thread_id);
+        await this.deleteFinishedIfUnchanged(row.thread_id, Number(row.updated_at));
         removed += 1;
       }
     }

@@ -209,12 +209,12 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
-  beginThreadRun(threadId: string): void {
-    this.runs.begin(threadId);
+  beginThreadRun(threadId: string): number {
+    return this.runs.begin(threadId);
   }
 
-  endThreadRun(threadId: string, status: CheckpointThreadStatus): void {
-    this.runs.end(threadId, status);
+  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false): void {
+    this.runs.end(threadId, status, token, resumed);
   }
 
   override async getTuple(config: Parameters<SqliteSaver["getTuple"]>[0]): Promise<CheckpointTuple | undefined> {
@@ -245,6 +245,10 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     const policy = typeof threadId === "string" ? this.policyFor(threadId) : this.retention;
     let stored = checkpoint;
     let deduped = false;
+    if (policy.enabled && typeof threadId === "string" && threadDeletionRequested(policy)) {
+      this.setup();
+      this.touch(threadId, "active", Date.now(), policy);
+    }
     if (policy.enabled && policy.dedupeChannels && typeof threadId === "string") {
       this.setup();
       stored = copyCheckpoint(checkpoint);
@@ -260,7 +264,6 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
         .run(FG_CHECKPOINT_TYPE, threadId, ns, checkpoint.id);
     }
     if (policy.enabled && typeof threadId === "string") {
-      if (threadDeletionRequested(policy)) this.touch(threadId, "active", Date.now(), policy);
       const deleted = await this.pruneNamespace(threadId, ns, policy);
       const droppedWrites = this.compactWrites(threadId, ns);
       this.maybeVacuum(deleted + droppedWrites, policy);
@@ -333,7 +336,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     for (const row of aged) {
       const ttl = Number(row.finished_ttl_ms);
       if (!Number.isFinite(ttl) || now - row.updated_at < ttl) continue;
-      deleted += this.deleteThreadSync(row.thread_id);
+      deleted += this.deleteFinishedIfUnchanged(row.thread_id, Number(row.updated_at));
     }
     const capped = asRows<ThreadRow>(
       this.sqlite
@@ -359,7 +362,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
       for (const row of rows) {
         if (removed >= need) break;
         if (this.runs.held(row.thread_id)) continue;
-        deleted += this.deleteThreadSync(row.thread_id);
+        deleted += this.deleteFinishedIfUnchanged(row.thread_id, Number(row.updated_at));
         removed += 1;
       }
     }
@@ -426,26 +429,47 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
   }
 
   private deleteThreadSync(threadId: string): number {
+    return this.sqlite.transaction(() => this.eraseThread(threadId))();
+  }
+
+  /**
+   * Sweep path. Deletes only when the thread is still the finished row the
+   * sweep listed, in one write transaction, so a run that marked it active
+   * is left alone. An explicit {@link deleteThread} does not use this.
+   */
+  private deleteFinishedIfUnchanged(threadId: string, updatedAt: number): number {
     if (this.runs.held(threadId)) return 0;
+    return this.sqlite.transaction(() => {
+      const row = asRow<{ status: string; updated_at: number; deletable: number }>(
+        this.sqlite
+          .prepare(`SELECT status, updated_at, deletable FROM fg_checkpoint_threads WHERE thread_id = ?`)
+          .get(threadId),
+      );
+      if (!row || row.status !== "finished" || Number(row.deletable) !== 1 || Number(row.updated_at) !== updatedAt) {
+        return 0;
+      }
+      return this.eraseThread(threadId);
+    }).immediate();
+  }
+
+  private eraseThread(threadId: string): number {
     const n = Number(
       asRow<{ n: number }>(this.sqlite.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId))
         ?.n ?? 0,
     );
-    this.sqlite.transaction(() => {
-      this.sqlite.prepare(`DELETE FROM checkpoints WHERE thread_id = ?`).run(threadId);
-      this.sqlite.prepare(`DELETE FROM writes WHERE thread_id = ?`).run(threadId);
-      this.sqlite.prepare(`DELETE FROM fg_checkpoint_blobs WHERE thread_id = ?`).run(threadId);
-      this.sqlite.prepare(`DELETE FROM fg_checkpoint_pins WHERE thread_id = ?`).run(threadId);
-      this.sqlite.prepare(`DELETE FROM fg_checkpoint_threads WHERE thread_id = ?`).run(threadId);
-      // The scope binding is only meaningful while this thread's checkpoints
-      // exist. Thread ownership and memory replay records are not checkpoint
-      // history: fg_thread_owners stays so another caller cannot claim the id,
-      // and fg_memory_ops stays for the memory sweeper.
-      const memoryThreads = this.sqlite
-        .prepare(`SELECT 1 AS n FROM sqlite_master WHERE type = 'table' AND name = 'fg_memory_threads'`)
-        .get();
-      if (memoryThreads) this.sqlite.prepare(`DELETE FROM fg_memory_threads WHERE thread_id = ?`).run(threadId);
-    })();
+    this.sqlite.prepare(`DELETE FROM checkpoints WHERE thread_id = ?`).run(threadId);
+    this.sqlite.prepare(`DELETE FROM writes WHERE thread_id = ?`).run(threadId);
+    this.sqlite.prepare(`DELETE FROM fg_checkpoint_blobs WHERE thread_id = ?`).run(threadId);
+    this.sqlite.prepare(`DELETE FROM fg_checkpoint_pins WHERE thread_id = ?`).run(threadId);
+    this.sqlite.prepare(`DELETE FROM fg_checkpoint_threads WHERE thread_id = ?`).run(threadId);
+    // The scope binding is only meaningful while this thread's checkpoints
+    // exist. Thread ownership and memory replay records are not checkpoint
+    // history: fg_thread_owners stays so another caller cannot claim the id,
+    // and fg_memory_ops stays for the memory sweeper.
+    const memoryThreads = this.sqlite
+      .prepare(`SELECT 1 AS n FROM sqlite_master WHERE type = 'table' AND name = 'fg_memory_threads'`)
+      .get();
+    if (memoryThreads) this.sqlite.prepare(`DELETE FROM fg_memory_threads WHERE thread_id = ?`).run(threadId);
     return n;
   }
 

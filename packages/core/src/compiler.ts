@@ -370,7 +370,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const workspace = (baseCtx as RunContext).workspace;
     const retention = checkpointer && isRetentionSaver(checkpointer) ? checkpointer : undefined;
     let retentionOpen = false;
-    const finish = async (r: RunResult): Promise<RunResult> => {
+    let runToken = 0;
+    const resumedRun = () => mode === "resume" || mode === "continue";
+    const finish = async (r: RunResult, bookkeeping = true): Promise<RunResult> => {
       try {
         const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
         if (issues.length > 0) r.issues = issues;
@@ -380,12 +382,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (retentionOpen) {
         retentionOpen = false;
         try {
-          retention?.endThreadRun?.(threadId, retentionStatusForRun(r.status));
+          retention?.endThreadRun?.(threadId, retentionStatusForRun(r.status), runToken, resumedRun());
         } catch {
           /* bookkeeping must not hide the run result */
         }
       }
-      if (retention) {
+      if (retention && bookkeeping) {
         try {
           await retention.noteThreadStatus(threadId, retentionStatusForRun(r.status));
         } catch {
@@ -445,15 +447,20 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: requestedCheckpoint },
       });
       if (!found) {
-        const error = checkpointPrunedError(threadId, requestedCheckpoint);
+        const retentionOn =
+          !!retention &&
+          "retention" in retention &&
+          (retention as { retention?: { enabled?: boolean } }).retention?.enabled !== false;
+        const error = checkpointPrunedError(threadId, requestedCheckpoint, { retention: retentionOn });
         events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
-        return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
+        // Do not record this as a pause. The thread's status stays whatever it was.
+        return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs }, false);
       }
     }
 
     try {
-      retention?.beginThreadRun?.(threadId);
-      retentionOpen = true;
+      runToken = retention?.beginThreadRun?.(threadId) ?? 0;
+      retentionOpen = !!retention;
       let current: Record<string, unknown> | Command | null = payload;
 
       if (mode === "start" && current != null && !(current instanceof Command) && hooks.has("run:before")) {

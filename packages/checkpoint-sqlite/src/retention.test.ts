@@ -546,35 +546,59 @@ describe("sqlite checkpoint retention", () => {
     (on as unknown as { db: { close(): void } }).db.close();
   });
 
-  it("does not delete a thread another run has left waiting at an interrupt", () => {
-    const saver = createSqliteCheckpointer({
-      path: tmpDb(),
-      retention: { maxFinishedThreads: 0, finishedTtl: null },
-    });
-    const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
-    const api = saver as unknown as {
-      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
-      beginThreadRun(threadId: string): void;
-      endThreadRun(threadId: string, status: "paused" | "finished"): void;
-      noteThreadStatus(threadId: string, status: "paused" | "finished"): void;
-    };
-    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
-    const put = (threadId: string) =>
-      api.put(
-        { configurable: { thread_id: threadId, checkpoint_ns: "" } },
-        { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: 1 } },
+  it("deleteThread removes a parked thread with retention on and off", async () => {
+    for (const retention of [{ maxFinishedThreads: 0, finishedTtl: null } as const, false as const]) {
+      const saver = createSqliteCheckpointer({ path: tmpDb(), retention });
+      const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+      const api = saver as unknown as {
+        put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+        beginThreadRun(threadId: string): number;
+        endThreadRun(threadId: string, status: "paused" | "finished", token?: number, resumed?: boolean): void;
+        deleteThread(threadId: string): Promise<void>;
+      };
+      await api.put(
+        { configurable: { thread_id: "parked", checkpoint_ns: "" } },
+        { v: 4, id: "1", ts: new Date().toISOString(), channel_values: { n: 1 }, channel_versions: { n: 1 }, versions_seen: {} },
         { source: "loop", step: 1, parents: {} },
       );
-    return put("waiting").then(async () => {
-      api.beginThreadRun("waiting");
-      api.noteThreadStatus("waiting", "finished");
-      expect((db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'waiting'`).get() as { n: number }).n).toBeGreaterThan(0);
-      api.endThreadRun("waiting", "paused");
-      await put("other");
-      api.noteThreadStatus("other", "finished");
-      expect((db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'waiting'`).get() as { n: number }).n).toBeGreaterThan(0);
-      expect((db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'other'`).get() as { n: number }).n).toBe(0);
+      const token = api.beginThreadRun("parked");
+      api.endThreadRun("parked", "paused", token);
+      await api.deleteThread("parked");
+      expect((db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'parked'`).get() as { n: number }).n).toBe(0);
       db.close();
-    });
+    }
+  });
+
+  it("a second saver does not sweep a thread the first has marked active", async () => {
+    const path = tmpDb();
+    const retention = { maxFinishedThreads: 0, finishedTtl: null } as const;
+    const writer = createSqliteCheckpointer({ path, retention });
+    const sweeper = createSqliteCheckpointer({ path, retention });
+    const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+    db.prepare(
+      `INSERT INTO fg_checkpoint_threads (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished)
+       VALUES ('shared', 'finished', 1, 1, NULL, 0)`,
+    ).run();
+    const put = writer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    let lost = 0;
+    for (let i = 0; i < 30; i++) {
+      const id = `c${i}`;
+      await Promise.all([
+        put.put(
+          { configurable: { thread_id: "shared", checkpoint_ns: "" } },
+          { ...base, id, channel_values: { n: i }, channel_versions: { n: i } },
+          { source: "loop", step: i, parents: {} },
+        ),
+        (sweeper as unknown as { sweep(now?: number): void }).sweep(Date.now()),
+      ]);
+      const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 'shared' AND checkpoint_id = ?`).get(id) as { n: number }).n;
+      if (n === 0) lost += 1;
+    }
+    expect(lost).toBe(0);
+    db.close();
+    (sweeper as unknown as { db: { close(): void } }).db.close();
   });
 });

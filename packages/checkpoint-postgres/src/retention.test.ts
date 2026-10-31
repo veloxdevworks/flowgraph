@@ -246,6 +246,71 @@ describe.skipIf(!DB)("postgres checkpoint retention", () => {
     expect(kept).toEqual(plain);
     expect(plain.status).toBe("completed");
   });
+
+  it("deleteThread removes a parked thread with retention on and off", async () => {
+    for (const retention of [{ maxFinishedThreads: 0, finishedTtl: null } as const, false as const]) {
+      const schema = schemaName();
+      const backend = await openPostgresBackend({ connectionString: DB!, schema, retention });
+      open.push(backend);
+      schemas.push(schema);
+      const api = backend.checkpointer as unknown as {
+        put(config: unknown, checkpoint: unknown, metadata: unknown, versions: unknown): Promise<unknown>;
+        beginThreadRun(threadId: string): number;
+        endThreadRun(threadId: string, status: "paused" | "finished", token?: number): void;
+        deleteThread(threadId: string): Promise<void>;
+      };
+      const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+      await api.put(
+        { configurable: { thread_id: "parked", checkpoint_ns: "" } },
+        { ...base, id: "1", channel_values: { n: 1 }, channel_versions: { n: "1" } },
+        { source: "loop", step: 1, parents: {} },
+        { n: "1" },
+      );
+      const token = api.beginThreadRun("parked");
+      api.endThreadRun("parked", "paused", token);
+      await api.deleteThread("parked");
+      const left = await backend.pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM "${schema}".checkpoints WHERE thread_id = 'parked'`,
+      );
+      expect(Number(left.rows[0]?.n)).toBe(0);
+    }
+  });
+
+  it("a second saver does not sweep a thread the first has marked active", async () => {
+    const schema = schemaName();
+    const retention = { maxFinishedThreads: 0, finishedTtl: null } as const;
+    const writer = await openPostgresBackend({ connectionString: DB!, schema, retention });
+    const sweeper = await openPostgresBackend({ connectionString: DB!, schema, retention, setup: false });
+    open.push(writer, sweeper);
+    schemas.push(schema);
+    await writer.pool.query(
+      `INSERT INTO "${schema}".fg_checkpoint_threads (thread_id, status, updated_at, deletable, finished_ttl_ms, max_finished)
+       VALUES ('shared', 'finished', 1, 1, NULL, 0)`,
+    );
+    const put = writer.checkpointer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown, versions: unknown): Promise<unknown>;
+    };
+    const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+    let lost = 0;
+    for (let i = 0; i < 30; i++) {
+      const id = `c${i}`;
+      await Promise.all([
+        put.put(
+          { configurable: { thread_id: "shared", checkpoint_ns: "" } },
+          { ...base, id, channel_values: { n: i }, channel_versions: { n: String(i) } },
+          { source: "loop", step: i, parents: {} },
+          { n: String(i) },
+        ),
+        (sweeper.checkpointer as unknown as { sweep(now?: number): Promise<void> }).sweep(Date.now()),
+      ]);
+      const n = await writer.pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM "${schema}".checkpoints WHERE thread_id = 'shared' AND checkpoint_id = $1`,
+        [id],
+      );
+      if (Number(n.rows[0]?.n) === 0) lost += 1;
+    }
+    expect(lost).toBe(0);
+  });
 });
 
 function pgParallel(warm: number): GraphSpec {

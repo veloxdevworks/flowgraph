@@ -110,6 +110,9 @@ export class FlowgraphMemorySaver extends MemorySaver {
     const ns = config.configurable?.checkpoint_ns ?? "";
     const policy = typeof threadId === "string" ? this.policyFor(threadId) : this.retention;
     let stored: Checkpoint = checkpoint;
+    if (policy.enabled && typeof threadId === "string" && threadDeletionRequested(policy)) {
+      this.touch(threadId, "active", Date.now(), policy);
+    }
     if (policy.enabled && policy.dedupeChannels && typeof threadId === "string") {
       stored = copyCheckpoint(checkpoint);
       const parentId = config.configurable?.checkpoint_id;
@@ -117,7 +120,6 @@ export class FlowgraphMemorySaver extends MemorySaver {
     }
     const result = await super.put(config, stored, metadata);
     if (policy.enabled && typeof threadId === "string") {
-      if (threadDeletionRequested(policy)) this.touch(threadId, "active", Date.now(), policy);
       await this.pruneNamespace(threadId, ns, policy);
       this.compactWrites(threadId, ns);
     }
@@ -139,16 +141,15 @@ export class FlowgraphMemorySaver extends MemorySaver {
     this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, hit[0], Date.now());
   }
 
-  beginThreadRun(threadId: string): void {
-    this.runs.begin(threadId);
+  beginThreadRun(threadId: string): number {
+    return this.runs.begin(threadId);
   }
 
-  endThreadRun(threadId: string, status: CheckpointThreadStatus): void {
-    this.runs.end(threadId, status);
+  endThreadRun(threadId: string, status: CheckpointThreadStatus, token = 0, resumed = false): void {
+    this.runs.end(threadId, status, token, resumed);
   }
 
   override async deleteThread(threadId: string): Promise<void> {
-    if (this.runs.held(threadId)) return;
     delete this.blobs[threadId];
     this.threads.delete(threadId);
     this.pins.delete(threadId);
@@ -177,9 +178,15 @@ export class FlowgraphMemorySaver extends MemorySaver {
 
   async sweep(now = Date.now()): Promise<void> {
     this.lastSweepAt = now;
+    const stillFinished = (threadId: string, seenUpdatedAt: number): boolean => {
+      if (this.runs.held(threadId)) return false;
+      const live = this.threads.get(threadId);
+      return !!live && live.deletable && live.status === "finished" && live.updatedAt === seenUpdatedAt;
+    };
     for (const [threadId, row] of [...this.threads]) {
       if (!row.deletable || row.status !== "finished" || row.finishedTtlMs === null) continue;
       if (now - row.updatedAt < row.finishedTtlMs) continue;
+      if (!stillFinished(threadId, row.updatedAt)) continue;
       await this.deleteThread(threadId);
     }
     const groups = new Map<number, [string, ThreadRec][]>();
@@ -193,7 +200,7 @@ export class FlowgraphMemorySaver extends MemorySaver {
     for (const [cap, rows] of groups) {
       rows.sort((a, b) => a[1].updatedAt - b[1].updatedAt || (a[0] < b[0] ? -1 : 1));
       while (rows.length > cap) {
-        const idx = rows.findIndex(([id]) => !this.runs.held(id));
+        const idx = rows.findIndex(([id, rec]) => stillFinished(id, rec.updatedAt));
         if (idx < 0) break;
         const next = rows.splice(idx, 1)[0];
         if (!next) break;

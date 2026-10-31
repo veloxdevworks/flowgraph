@@ -132,16 +132,12 @@ export function retentionDurationMs(value: string | number): number {
   }
 }
 
-function nonNegativeInt(n: number, name: string): number {
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`Invalid ${name}: ${n}. Expected a non-negative integer or null.`);
-  }
-  return n;
-}
-
-function positiveInt(n: number, name: string): number {
-  if (!Number.isInteger(n) || n < 1) {
-    throw new Error(`Invalid ${name}: ${n}. Expected a positive integer.`);
+function countInt(n: unknown, name: string, min: number): number {
+  const bound = min === 1 ? "a positive integer" : "a non-negative integer";
+  if (typeof n !== "number" || !Number.isSafeInteger(n) || n < min) {
+    throw new Error(
+      `Invalid ${name}: ${JSON.stringify(n)}. Expected ${bound} up to ${Number.MAX_SAFE_INTEGER}.`,
+    );
   }
   return n;
 }
@@ -149,36 +145,63 @@ function positiveInt(n: number, name: string): number {
 /** `error.code` when resume names a checkpoint retention has already dropped. */
 export const CHECKPOINT_PRUNED = "CHECKPOINT_PRUNED";
 
-export function checkpointPrunedError(threadId: string, checkpointId: string): Error & { code: typeof CHECKPOINT_PRUNED } {
+export function checkpointPrunedError(
+  threadId: string,
+  checkpointId: string,
+  opts?: { retention?: boolean },
+): Error & { code: typeof CHECKPOINT_PRUNED } {
+  const why = opts?.retention
+    ? " Retention pruned it; resume from a checkpoint that is still kept."
+    : "";
   const err = new Error(
-    `Checkpoint "${checkpointId}" for thread "${threadId}" is not available. Retention may have pruned it; resume from a checkpoint that is still kept.`,
+    `Checkpoint "${checkpointId}" for thread "${threadId}" is not available.${why}`,
   ) as Error & { code: typeof CHECKPOINT_PRUNED };
   err.code = CHECKPOINT_PRUNED;
   return err;
 }
 
 /**
- * In-process guard so a run that finishes cannot delete a thread another run
- * is still executing or has left waiting at an interrupt.
+ * In-process guard so a sweep cannot delete a thread this process is running
+ * or has left waiting at an interrupt. Parking is per run: one run finishing
+ * does not clear another run's interrupt. Explicit `deleteThread` does not
+ * consult this guard.
  */
 export class ThreadRunGuard {
-  private readonly inFlight = new Map<string, number>();
-  private readonly parked = new Set<string>();
+  private seq = 0;
+  private readonly inFlight = new Map<string, Set<number>>();
+  private readonly parked = new Map<string, Set<number>>();
 
-  begin(threadId: string): void {
-    this.inFlight.set(threadId, (this.inFlight.get(threadId) ?? 0) + 1);
+  begin(threadId: string): number {
+    const token = ++this.seq;
+    const live = this.inFlight.get(threadId) ?? new Set<number>();
+    live.add(token);
+    this.inFlight.set(threadId, live);
+    return token;
   }
 
-  end(threadId: string, status: CheckpointThreadStatus): void {
-    const next = (this.inFlight.get(threadId) ?? 0) - 1;
-    if (next <= 0) this.inFlight.delete(threadId);
-    else this.inFlight.set(threadId, next);
-    if (status === "paused") this.parked.add(threadId);
-    else if (status === "finished") this.parked.delete(threadId);
+  /**
+   * @param resumed True when this run continued an interrupt. A finished
+   * resume clears one parked interrupt. Any other finish clears only its own token.
+   */
+  end(threadId: string, status: CheckpointThreadStatus, token: number, resumed = false): void {
+    const live = this.inFlight.get(threadId);
+    live?.delete(token);
+    if (live && live.size === 0) this.inFlight.delete(threadId);
+    const parks = this.parked.get(threadId) ?? new Set<number>();
+    if (status === "paused") parks.add(token);
+    else {
+      parks.delete(token);
+      if (status === "finished" && resumed) {
+        const other = parks.values().next().value;
+        if (other !== undefined) parks.delete(other);
+      }
+    }
+    if (parks.size === 0) this.parked.delete(threadId);
+    else this.parked.set(threadId, parks);
   }
 
   held(threadId: string): boolean {
-    return this.parked.has(threadId) || (this.inFlight.get(threadId) ?? 0) > 0;
+    return (this.inFlight.get(threadId)?.size ?? 0) > 0 || (this.parked.get(threadId)?.size ?? 0) > 0;
   }
 }
 
@@ -224,17 +247,19 @@ export function resolveCheckpointRetention(
       ? DEFAULT_CHECKPOINT_RETENTION.maxFinishedThreads
       : merged.maxFinishedThreads === null
         ? null
-        : nonNegativeInt(merged.maxFinishedThreads, "maxFinishedThreads");
+        : countInt(merged.maxFinishedThreads, "maxFinishedThreads", 0);
 
   return {
     enabled,
-    maxCheckpoints: positiveInt(
+    maxCheckpoints: countInt(
       merged.maxCheckpoints ?? DEFAULT_CHECKPOINT_RETENTION.maxCheckpoints,
       "maxCheckpoints",
+      1,
     ),
-    maxInterruptPoints: nonNegativeInt(
+    maxInterruptPoints: countInt(
       merged.maxInterruptPoints ?? DEFAULT_CHECKPOINT_RETENTION.maxInterruptPoints,
       "maxInterruptPoints",
+      0,
     ),
     finishedTtlMs,
     maxFinishedThreads,
@@ -324,10 +349,13 @@ export interface CheckpointRetentionSaver {
   sweep(now?: number): Promise<void> | void;
   /** Remember this thread's graph policy. Graph fields override the host saver. */
   noteThreadPolicy?(threadId: string, policy: ResolvedCheckpointRetention): void;
-  /** Mark a thread in use so a finishing run cannot delete it. */
-  beginThreadRun?(threadId: string): void;
-  /** Pair with {@link beginThreadRun}. `paused` parks the thread at an interrupt. */
-  endThreadRun?(threadId: string, status: CheckpointThreadStatus): void;
+  /** Mark a thread in use. Returns a token for {@link endThreadRun}. */
+  beginThreadRun?(threadId: string): number;
+  /**
+   * Pair with {@link beginThreadRun}. `paused` parks this run's token.
+   * `resumed` lets a finished resume clear one other parked interrupt, not every one.
+   */
+  endThreadRun?(threadId: string, status: CheckpointThreadStatus, token?: number, resumed?: boolean): void;
 }
 
 export function isRetentionSaver(saver: unknown): saver is CheckpointRetentionSaver {

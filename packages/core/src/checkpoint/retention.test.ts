@@ -101,6 +101,9 @@ describe("resolveCheckpointRetention", () => {
     expect(() => resolveCheckpointRetention({ maxInterruptPoints: 1.5 })).toThrow(/maxInterruptPoints/);
     expect(resolveCheckpointRetention({ maxInterruptPoints: 0 }).maxInterruptPoints).toBe(0);
     expect(resolveCheckpointRetention({ maxCheckpoints: 1 }).maxCheckpoints).toBe(1);
+    expect(() => resolveCheckpointRetention({ maxCheckpoints: "40" as unknown as number })).toThrow(/"40"/);
+    expect(() => resolveCheckpointRetention({ maxCheckpoints: 1e300 })).toThrow(/maxCheckpoints/);
+    expect(() => resolveCheckpointRetention({ maxInterruptPoints: 1e300 })).toThrow(/maxInterruptPoints/);
   });
 });
 

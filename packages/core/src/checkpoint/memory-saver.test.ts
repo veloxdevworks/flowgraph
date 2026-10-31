@@ -208,21 +208,63 @@ describe("resume after checkpoint pruning", () => {
       onInterrupt: "fail",
     });
     expect(again.status).toBe("error");
-    expect((again.error as { code?: string } | undefined)?.code).toBe(CHECKPOINT_PRUNED);
+    expect((again.error as { code?: string; message?: string } | undefined)?.code).toBe(CHECKPOINT_PRUNED);
+    expect((again.error as { message?: string } | undefined)?.message).toMatch(/Retention/);
+    const row = (saver as unknown as { threads: Map<string, { status: string }> }).threads.get(threadId);
+    expect(row?.status).not.toBe("paused");
+  });
+
+  it("does not mention retention when a missing checkpoint is resumed with retention off", async () => {
+    const saver = new FlowgraphMemorySaver(false);
+    const spec = {
+      metadata: { name: "pruned-off" },
+      state: { channels: { n: { type: "number" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "retTag", output: { to: "n" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(spec, { checkpointer: saver });
+    const missing = await compiled.resumeFrom({
+      threadId: "absent",
+      checkpointId: "missing",
+      resume: true,
+      onInterrupt: "fail",
+    });
+    expect(missing.status).toBe("error");
+    expect((missing.error as { code?: string; message?: string }).code).toBe(CHECKPOINT_PRUNED);
+    expect((missing.error as { message?: string }).message).not.toMatch(/[Rr]etention/);
   });
 });
 
 describe("thread run guard", () => {
-  it("a finishing run does not delete a thread that is waiting at an interrupt", async () => {
+  it("a sweep skips a parked interrupt, and deleteThread still removes it", async () => {
+    for (const retention of [resolveCheckpointRetention({ maxFinishedThreads: 0, finishedTtl: null }), false as const]) {
+      const saver = new FlowgraphMemorySaver(retention);
+      await saver.put(config("waiting"), checkpoint("1", { n: 1 }, { n: 1 }), meta(1));
+      const parked = saver.beginThreadRun("waiting");
+      saver.endThreadRun("waiting", "paused", parked);
+      const other = saver.beginThreadRun("waiting");
+      saver.endThreadRun("waiting", "finished", other, false);
+      expect(saver.storage["waiting"]).toBeDefined();
+      await saver.deleteThread("waiting");
+      expect(saver.storage["waiting"]).toBeUndefined();
+    }
+  });
+
+  it("a finishing run does not clear another run's parked interrupt", async () => {
     const saver = new FlowgraphMemorySaver(
       resolveCheckpointRetention({ maxFinishedThreads: 0, finishedTtl: null }),
     );
     await saver.put(config("waiting"), checkpoint("1", { n: 1 }, { n: 1 }), meta(1));
-    saver.beginThreadRun("waiting");
+    const parked = saver.beginThreadRun("waiting");
+    saver.endThreadRun("waiting", "paused", parked);
     await saver.noteThreadStatus("waiting", "finished");
     expect(saver.storage["waiting"]).toBeDefined();
-    saver.endThreadRun("waiting", "paused");
     await saver.put(config("other"), checkpoint("1", { n: 1 }, { n: 1 }), meta(1));
+    const finished = saver.beginThreadRun("other");
+    saver.endThreadRun("other", "finished", finished, false);
     await saver.noteThreadStatus("other", "finished");
     expect(saver.storage["waiting"]).toBeDefined();
     expect(saver.storage["other"]).toBeUndefined();
