@@ -222,6 +222,42 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
     expect(codesOf(withX(graph(sg("{ in: { x: out }, out: { out: x } }"))))).toEqual([]);
   });
 
+  it("refuses __ keys and __ reads in node input, on map inners and in inline subgraphs", () => {
+    const sgInput = (input: string) => `  - id: a
+    type: subgraph
+    input: ${input}
+    spec:
+      apiVersion: flowgraph/v1
+      kind: Graph
+      metadata: { name: child }
+      nodes:
+        - { id: w, type: wait, with: { duration: "1ms" } }
+      edges:
+        - { from: START, to: w }
+        - { from: w, to: END }`;
+    expect(codesOf(graph(sgInput('{ __agentReplay: "{{ state.out }}" }')))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.input.__agentReplay"]);
+    expect(codesOf(graph(sgInput('{ x: "{{ state.__services }}" }')))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.input.x"]);
+    expect(codesOf(graph(sgInput('{ x: "{{ state.out }}" }')))).toEqual([]);
+    const mapInner = `  - id: a
+    type: map
+    with:
+      over: "{{ state.out }}"
+      node: { type: hitl, input: { __services: "{{ item.item }}" }, with: { mode: approve, message: "ok?" } }`;
+    expect(codesOf(graph(mapInner))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.map.?.input.__services"]);
+    const nested = `  - id: a
+    type: subgraph
+    spec:
+      apiVersion: flowgraph/v1
+      kind: Graph
+      metadata: { name: child }
+      nodes:
+        - { id: b, type: hitl, input: { __agentReplay: x }, with: { mode: approve, message: "ok?" } }
+      edges:
+        - { from: START, to: b }
+        - { from: b, to: END }`;
+    expect(codesOf(graph(nested))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.subgraph.b.input.__agentReplay"]);
+  });
+
   it("refuses any __ name, known or not, as a channel, output or graph input", () => {
     expect(codesOf(graph(hitl).replace("out: { type: string }", "out: { type: string }\n    __future: { type: string }"))).toEqual([
       "UPLOAD_RESERVED_CHANNEL_BLOCKED state.channels.__future",

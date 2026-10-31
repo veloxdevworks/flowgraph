@@ -15,6 +15,7 @@ import {
   hostIsAllowListed,
   isReservedChannel,
   registeredToolNamesOf,
+  reservedInputRefs,
   reservedStateMapRefs,
   walkNodes,
   type NodePolicy,
@@ -183,6 +184,11 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
     }
     if (type === "wait" && w.webhook) {
       add("UPLOAD_INBOUND_WEBHOOK_BLOCKED", `${path}.with.webhook`, "an inbound webhook listens on a port on the server; use a signal wait and resume the run instead");
+    }
+    // A node's input (map inner nodes included) becomes its input and, for a
+    // subgraph, the child's input state.
+    for (const ref of reservedInputRefs(n)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.${ref}`, `${ref} sets or reads a reserved state channel (${RESERVED_WHY})`);
     }
     for (const ref of reservedStateMapRefs(n)) {
       add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.with.${ref}`, `${ref} names a reserved state channel (${RESERVED_WHY})`);
