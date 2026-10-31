@@ -668,7 +668,7 @@ describe("agent with.context summary placement", () => {
     const { ToolMessage } = await import("@langchain/core/messages");
     let last: AgentRequest | undefined;
     const p = createScriptedProvider(
-      "ctx-p8",
+      "ctx-summary-fence",
       (req) => {
         last = req;
         return { output: { text: "ok" }, stopReason: "done" };
@@ -687,13 +687,13 @@ describe("agent with.context summary placement", () => {
       new AIMessage({ id: "h5", content: "you are welcome" }),
     ];
     const spec = {
-      metadata: { name: "ctx-p8" },
+      metadata: { name: "ctx-summary-fence" },
       state: { channels: { chat: { type: "messages" } } },
       nodes: [
         {
           id: "a",
           type: "agent",
-          provider: "ctx-p8",
+          provider: "ctx-summary-fence",
           with: { system: "You are careful.", prompt: "go", context: { history: "chat", maxTokens: 600, strategy: "summarize", summarize: { mode: "extract", maxTokens: 300 } } },
         },
       ],
@@ -703,7 +703,7 @@ describe("agent with.context summary placement", () => {
       ],
     } as unknown as GraphSpec;
     const g = await compileGraph(spec, { providers: [p] });
-    const r = await g.run({ threadId: "ctx-p8", input: { chat: hist } });
+    const r = await g.run({ threadId: "ctx-summary-fence", input: { chat: hist } });
     expect(r.status).toBe("completed");
     expect(last!.system).toBe("You are careful.");
     const first = last!.messages![0]!;
