@@ -21,6 +21,7 @@ import {
   toLangChainMessage,
 } from "../context/messages.js";
 import { summarizeWithProvider } from "../context/summarize.js";
+import { summaryBlock } from "../context/summary-block.js";
 import type { ContextMessage, ContextPolicy, ContextStats, ProviderContextManager } from "../context/types.js";
 import { getProvider } from "../providers/registry.js";
 import type { AgentRequest, AgentResult, ProviderAdapter, TokenUsage, ToolSpec } from "../providers/types.js";
@@ -54,7 +55,12 @@ interface StoredHistory {
 }
 
 function isSummaryMessage(m: ContextMessage): boolean {
-  return m.role === "system" && m.meta?.["summary"] === true && (m.id ?? "").startsWith(SUMMARY_ID_PREFIX);
+  return m.meta?.["summary"] === true && (m.id ?? "").startsWith(SUMMARY_ID_PREFIX);
+}
+
+function summaryText(m: ContextMessage): string {
+  const t = m.meta?.["text"];
+  return typeof t === "string" ? t : m.content;
 }
 
 function readHistory(state: Record<string, unknown>, policy: ContextPolicy, nodeLabel: string, nodeId: string): StoredHistory {
@@ -72,9 +78,9 @@ function readHistory(state: Record<string, unknown>, policy: ContextPolicy, node
   const summary = summaries.find((m) => m.id === sid);
   const shared = summaries
     .filter((m) => m !== summary)
-    .map((m) => ({ node: typeof m.meta?.["node"] === "string" ? (m.meta["node"] as string) : (m.id ?? ""), text: m.content }));
+    .map((m) => ({ node: typeof m.meta?.["node"] === "string" ? (m.meta["node"] as string) : (m.id ?? ""), text: summaryText(m) }));
   const systemNotes = stored.filter((m) => m.role === "system" && !isSummaryMessage(m)).map((m) => m.content);
-  let history = stored.filter((m) => m.role !== "system");
+  let history = stored.filter((m) => m.role !== "system" && !isSummaryMessage(m));
   // With compact: false the summarized messages stay in the channel; skip what the summary covers.
   const covers = summary?.meta?.["coversThroughId"];
   if (typeof covers === "string") {
@@ -170,7 +176,7 @@ export function startAgentContext(args: {
     policy,
     system: args.system,
     systemNotes: stored.systemNotes,
-    summary: stored.summary?.content,
+    summary: stored.summary ? summaryText(stored.summary) : undefined,
     sharedSummaries: stored.shared,
     history: stored.history,
     prompt: promptMsg,
@@ -216,11 +222,16 @@ export function startAgentContext(args: {
     async prepare(req, provider) {
       const f = await manager.fit([]);
       req.system = f.system;
+      // The last message is the prompt (it carries the summary block when no history is kept).
       const history = f.messages.slice(0, -1);
+      const prompt = f.messages[f.messages.length - 1]!.content;
       if (provider.capabilities.contextMessages) {
         req.messages = history;
+        req.prompt = prompt;
       } else if (history.length > 0) {
-        req.prompt = `${TRANSCRIPT_HEADER}\n${renderTranscript(history)}\n\n---\n\n${args.prompt}`;
+        req.prompt = `${TRANSCRIPT_HEADER}\n${renderTranscript(history)}\n\n---\n\n${prompt}`;
+      } else {
+        req.prompt = prompt;
       }
     },
     historyUpdate(result) {
@@ -259,11 +270,18 @@ export function startAgentContext(args: {
         const prevCovers = stored.summary?.meta?.["coversThroughId"];
         const coversThroughId = policy.compact ? undefined : (folded[folded.length - 1]?.id ?? prevCovers);
         out.push(
+          // Stored as a fenced user-role message, so whatever reads the
+          // channel sees quoted data rather than a system instruction.
           toLangChainMessage({
-            role: "system",
+            role: "user",
             id: summaryMessageId(channel, ctx.nodeId),
-            content: window.summary!,
-            meta: { summary: true, node: ctx.nodeId, ...(typeof coversThroughId === "string" ? { coversThroughId } : {}) },
+            content: summaryBlock(window.summary!)!,
+            meta: {
+              summary: true,
+              node: ctx.nodeId,
+              text: window.summary!,
+              ...(typeof coversThroughId === "string" ? { coversThroughId } : {}),
+            },
           }),
         );
       }

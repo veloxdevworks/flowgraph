@@ -124,11 +124,9 @@ export function fromStoredMessage(raw: unknown): ContextMessage | undefined {
     }));
   }
   if (role === "tool" && typeof m.tool_call_id === "string") out.toolCallId = m.tool_call_id;
-  if (role === "system") {
-    const kw = m.additional_kwargs as Record<string, unknown> | undefined;
-    const meta = kw?.["flowgraph"];
-    if (meta && typeof meta === "object") out.meta = meta as Record<string, unknown>;
-  }
+  const kw = m.additional_kwargs as Record<string, unknown> | undefined;
+  const meta = kw?.["flowgraph"];
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) out.meta = meta as Record<string, unknown>;
   return out;
 }
 
@@ -145,7 +143,12 @@ export function toLangChainMessage(m: ContextMessage): BaseMessage {
         ...(m.meta ? { additional_kwargs: { flowgraph: m.meta } } : {}),
       });
     case "user":
-      return new HumanMessage({ content: m.content, ...id, ...name });
+      return new HumanMessage({
+        content: m.content,
+        ...id,
+        ...name,
+        ...(m.meta ? { additional_kwargs: { flowgraph: m.meta } } : {}),
+      });
     case "assistant":
       return new AIMessage({
         content: m.content,

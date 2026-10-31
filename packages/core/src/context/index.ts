@@ -14,7 +14,6 @@ export {
   capToolResult,
   extractiveSummarizer,
   omittedMarker,
-  SUMMARY_HEADING,
   type ContextWindowInit,
   type SummarizeRequest,
   type Summarizer,
@@ -28,6 +27,7 @@ export {
   renderTranscript,
   contentText,
 } from "./messages.js";
+export { summaryBlock, SUMMARY_LABEL, SUMMARY_TAG } from "./summary-block.js";
 export { summarizeWithProvider, summaryInstructions, summaryPrompt } from "./summarize.js";
 export {
   ContextOverflowError,

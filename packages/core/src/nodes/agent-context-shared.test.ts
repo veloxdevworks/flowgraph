@@ -91,7 +91,8 @@ describe("agents sharing a history channel", () => {
     const seen: AgentRequest[] = [];
     const chat = await runOnce(spec, "sh-s", "sh-s", seeds, (r) => seen.push(r));
     expect(chat.map((m) => m.id)).toContain("fg-summary-chat-first");
-    const firstSummary = String(chat.find((m) => m.id === "fg-summary-chat-first")!.content);
+    const stored = chat.find((m) => m.id === "fg-summary-chat-first")!;
+    const firstSummary = String((stored.additional_kwargs["flowgraph"] as { text: string }).text);
     // what "first" removed reaches "second" through first's summary
     expect(JSON.stringify(seen[1])).toContain(JSON.stringify(firstSummary).slice(1, -1));
     expect(seen[1]!.messages!.some((m) => m.id === "seed-u0")).toBe(false);

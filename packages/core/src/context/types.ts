@@ -79,9 +79,12 @@ export interface ContextStats {
 
 /** What to send for one model call. */
 export interface FittedContext {
-  /** System text: the rendered system prompt plus any earlier-conversation summary or marker. */
+  /** System text: the rendered system prompt plus the omitted-messages marker, if any. */
   system?: string | undefined;
-  /** History, then the current prompt, then this run's kept tool loop, in order. */
+  /**
+   * History, then the current prompt, then this run's kept tool loop, in order.
+   * Summaries go, fenced as data, at the start of the first user message.
+   */
   messages: ContextMessage[];
   stats: ContextStats;
 }

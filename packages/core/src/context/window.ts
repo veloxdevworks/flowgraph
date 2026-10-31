@@ -12,6 +12,7 @@
  */
 import { getTokenEstimator, messageTokens, truncateToTokens, type TokenEstimator } from "./estimator.js";
 import { toUnits } from "./messages.js";
+import { summaryBlock } from "./summary-block.js";
 import {
   ContextOverflowError,
   type ContextMessage,
@@ -50,8 +51,6 @@ export interface ContextWindowInit {
   summarizer?: Summarizer | undefined;
   estimator?: TokenEstimator;
 }
-
-export const SUMMARY_HEADING = "## Earlier conversation (summary)";
 
 export function omittedMarker(n: number): string {
   return `[${n} earlier message${n === 1 ? " was" : "s were"} left out to fit the context budget.]`;
@@ -156,19 +155,21 @@ export class ContextWindow {
     return t;
   }
 
-  /** The extra system section for the current state. */
+  /** The omitted-messages marker added to the system text, if any. */
   private section(droppedMsgs: number, summary: string | undefined): string | undefined {
     const own = this.policy.strategy === "summarize" && summary ? summary : undefined;
-    const parts: string[] = [];
-    if (!own && droppedMsgs > 0) parts.push(omittedMarker(droppedMsgs));
-    if (own || this.shared.length > 0) {
-      const body = [
-        ...(own ? [own] : []),
-        ...this.shared.map((x) => `(kept by ${x.node})\n${x.text}`),
-      ];
-      parts.push(`${SUMMARY_HEADING}\n${body.join("\n\n")}`);
-    }
-    return parts.length ? parts.join("\n\n") : undefined;
+    return !own && droppedMsgs > 0 ? omittedMarker(droppedMsgs) : undefined;
+  }
+
+  /** The summaries, fenced as data, sent at the start of the first user turn. */
+  private block(summary: string | undefined): string | undefined {
+    return summaryBlock(this.policy.strategy === "summarize" ? summary : undefined, this.shared);
+  }
+
+  private blockTokens(summary: string | undefined): number {
+    const b = this.block(summary);
+    // the "\n\n" joiner, plus a message's overhead in case it goes in its own turn
+    return b ? this.est(`${b}\n\n`) + 4 : 0;
   }
 
   private systemText(droppedMsgs: number, summary: string | undefined): string | undefined {
@@ -178,11 +179,12 @@ export class ContextWindow {
     return parts.length ? parts.join("\n\n") : undefined;
   }
 
+  /** Tokens of the marker and the summary block together. */
   private sectionTokens(droppedMsgs: number, summary: string | undefined): number {
     const sec = this.section(droppedMsgs, summary);
-    if (!sec) return 0;
-    // the "\n\n" joiner plus the section itself
-    return this.baseSystem.length ? this.est(`\n\n${sec}`) : this.est(sec);
+    // the "\n\n" joiner plus the marker itself
+    const marker = !sec ? 0 : this.baseSystem.length ? this.est(`\n\n${sec}`) : this.est(sec);
+    return marker + this.blockTokens(summary);
   }
 
   /** Fit the history, the prompt, and the loop so far into the budget. */
@@ -280,11 +282,17 @@ export class ContextWindow {
         stats,
       );
     }
-    return {
-      system: this.systemText(this.droppedMsgs, summary),
-      messages: [...keptHistory.flat(), this.prompt, ...keptLoop.flat()],
-      stats,
-    };
+    const messages = [...keptHistory.flat(), this.prompt, ...keptLoop.flat()];
+    const block = this.block(summary);
+    if (block) {
+      const first = messages[0]!;
+      if (first.role === "user") {
+        const { meta: _meta, ...rest } = first;
+        messages[0] = { ...rest, content: `${block}\n\n${first.content}` };
+      }
+      else messages.unshift({ role: "user", content: block });
+    }
+    return { system: this.systemText(this.droppedMsgs, summary), messages, stats };
   }
 
   /** Apply toolResultMaxTokens to one tool result. */
