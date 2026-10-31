@@ -802,6 +802,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       channels.push(...collectNodeWriteChannels(n as NodeSpec));
       const inline = (n as { spec?: GraphSpec }).spec;
       if (inline && typeof inline === "object") channels.push(...Object.keys(inline.state?.channels ?? {}));
+      assertReplaySafeNodeId((n as { id?: unknown }).id);
       assertNodeSpecAllowed(opts.nodePolicy, n as { type?: unknown; with?: unknown }, `node "${String((n as { id?: unknown }).id ?? "?")}"`);
     });
     assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
@@ -1843,6 +1844,25 @@ function withReplayData(data: unknown, runScope: RunScope | undefined, nodeId: s
   if (!replay) return data;
   const base = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : data === undefined ? {} : { value: data };
   return { ...base, __nodeId: nodeId, __agentReplay: replay };
+}
+
+/**
+ * Refuse a node id the engine's own keys could not tell apart from another
+ * node: an id shaped like a map item (`m[0]`), or one with a comma, colon or
+ * control character (replay keys, checkpoint namespaces and the keys saved by
+ * earlier releases are built from ids with these). Specs loaded from YAML
+ * already allow only letters, digits, `_` and `-`; this covers graphs built
+ * in code.
+ */
+function assertReplaySafeNodeId(id: unknown): void {
+  if (id === undefined) return;
+  if (typeof id !== "string" || id === "") throw new Error(`Node id ${JSON.stringify(id)} must be a non-empty string.`);
+  // eslint-disable-next-line no-control-regex
+  if (/[,:\u0000-\u001f\u007f-\u009f]/.test(id) || /\[[0-9]+\]$/.test(id)) {
+    throw new Error(
+      `Node id ${JSON.stringify(id)} cannot contain ",", ":" or control characters or end in "[<number>]" (the form of a map item); use letters, digits, "_" and "-".`,
+    );
+  }
 }
 
 /** The Send index of a task LangGraph runs for a `Send` (`path` `["__pregel_push", n]`), or undefined. */
