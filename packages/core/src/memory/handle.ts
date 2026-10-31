@@ -147,16 +147,25 @@ export interface MemoryOpSource {
   runId?: string | undefined;
   /**
    * Namespace and node id an older build used for this attempt's positional
-   * ids. A tool call was stored on the calling agent's namespace and node id.
+   * ids. A tool call was stored on the outermost agent's namespace and node id.
    */
   legacyCheckpointNs?: string | undefined;
   legacyNodeId?: string | undefined;
   /**
    * Write numbers for an older build, shared by every tool call of one agent
-   * attempt and counted in call order. Each call's own handle starts at zero;
-   * this cursor does not.
+   * attempt and counted in call order. A nested agent reuses the enclosing
+   * call's cursor. Each call's own handle starts at zero; this cursor does not.
    */
   legacyCursor?: LegacyWriteCursor | undefined;
+}
+
+/** Legacy numbering an enclosing tool call hands to a nested agent. */
+export const LEGACY_TOOL_SCOPE: unique symbol = Symbol.for("flowgraph.legacyToolScope");
+
+export interface LegacyToolScope {
+  checkpointNs: string;
+  nodeId: string;
+  cursor: LegacyWriteCursor;
 }
 
 /**
@@ -322,6 +331,10 @@ export function createScopedMemory(
     // Once this attempt has seen no positional rows, later writes skip that read.
     // A shared cursor numbers every tool call of the agent attempt the way an
     // older build did, and adopts only that exact row.
+    // An older build took the next number before the scope check, so a write
+    // that threw there still consumed a number. This one takes the number only
+    // after that check. An idempotencyKey write takes no number; an older
+    // build had no such option and would have numbered that call.
     if (mode === "content" && !skipLegacy) {
       assigned.legacyOpIdAt = legacyOpIdAt;
       assigned.legacyClaim = claimLegacy;

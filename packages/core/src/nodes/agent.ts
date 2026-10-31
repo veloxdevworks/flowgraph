@@ -18,7 +18,7 @@ import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
 import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
-import { createLegacyWriteCursor } from "../memory/handle.js";
+import { createLegacyWriteCursor, LEGACY_TOOL_SCOPE, type LegacyToolScope } from "../memory/handle.js";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import { childRunConfig, isGraphInterrupt, recordedToolResult, ReplayMismatchError, ReplayStore, replayNodeKey, replayedToolResult, runScopeOf, toolArgsHash } from "../providers/replay-cache.js";
 import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
@@ -130,10 +130,12 @@ export const agentNode = defineNode<Config>({
         const replayStore = runScope?.replay ?? new ReplayStore();
         const cacheKey = replayNodeKey(runScope?.path ?? [], ctx.nodeId);
         let toolSeq = 0;
-        // Older builds counted every tool write on the agent's handle, in call
-        // order. A fresh cursor per execution matches that numbering, including
-        // a resume that skips calls whose results are already cached.
-        const legacyWrites = createLegacyWriteCursor();
+        // Older builds counted every tool write on the outermost agent's
+        // handle, in call order. A nested agent reuses that cursor, namespace
+        // and node id. A fresh cursor per outermost execution matches that
+        // numbering, including a resume that skips calls already cached.
+        const inherited = (ctx as unknown as Record<symbol, unknown>)[LEGACY_TOOL_SCOPE] as LegacyToolScope | undefined;
+        const legacyWrites = inherited?.cursor ?? createLegacyWriteCursor();
         // A provider may hand a tool error back to the model; a replay
         // mismatch must fail the node instead.
         let mismatch: ReplayMismatchError | undefined;
@@ -177,10 +179,17 @@ export const agentNode = defineNode<Config>({
             // call's path plus the tool and its arguments, so a resume that
             // skips an earlier cached call still matches this call, and a
             // different call at the same index does not. Older builds recorded
-            // the write on the agent's attempt, so the positional id uses that
-            // namespace and node id.
+            // the write on the outermost agent's attempt, so the positional id
+            // uses that namespace, node id and shared counter. A nested agent
+            // reads the same scope off this context.
             const memoryRuntime = (ctx as unknown as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
             const parentConf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
+            const legacyScope: LegacyToolScope = inherited ?? {
+              checkpointNs: typeof parentConf["checkpoint_ns"] === "string" ? parentConf["checkpoint_ns"] : "",
+              nodeId: ctx.nodeId,
+              cursor: legacyWrites,
+            };
+            (toolCtx as unknown as Record<symbol, unknown>)[LEGACY_TOOL_SCOPE] = legacyScope;
             const toolMemory = memoryRuntime?.memoryForConfig(
               toolLg,
               ctx.nodeId,
@@ -188,11 +197,7 @@ export const agentNode = defineNode<Config>({
                 runId: ctx.meta?.runId,
                 threadId: ctx.meta?.threadId,
               },
-              {
-                checkpointNs: typeof parentConf["checkpoint_ns"] === "string" ? parentConf["checkpoint_ns"] : "",
-                nodeId: ctx.nodeId,
-                cursor: legacyWrites,
-              },
+              legacyScope,
               { name, argsHash: toolArgsHash(callArgs) },
             );
             if (toolMemory) toolCtx.memory = toolMemory;

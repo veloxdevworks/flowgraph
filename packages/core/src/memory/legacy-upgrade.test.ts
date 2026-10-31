@@ -34,7 +34,7 @@ async function openDb(dbPath: string): Promise<{
 
 /**
  * What one bump observed. Older builds keyed positional ids from these, except
- * a tool call, which was stored on the calling agent's namespace and node id.
+ * a tool call, which was stored on the outermost agent's namespace and node id.
  */
 interface Observed {
   nodeId: string;
@@ -375,6 +375,27 @@ beforeAll(() => {
     note(n.deduped);
     return n.value;
   });
+  const noteWrite = (ctx: NodeRunContext, deduped: boolean) => {
+    const conf = ((ctx as { _lgConfig?: { configurable?: Record<string, unknown> } })._lgConfig?.configurable ?? {}) as Record<string, unknown>;
+    observed.push({
+      nodeId: ctx.nodeId,
+      checkpointNs: typeof conf["checkpoint_ns"] === "string" ? conf["checkpoint_ns"] : "",
+      taskId: typeof conf["__pregel_task_id"] === "string" ? conf["__pregel_task_id"] : "",
+      threadId: typeof conf["thread_id"] === "string" ? conf["thread_id"] : "",
+      deduped,
+    });
+  };
+  registerFunction("upgradeNestA", async (_i, ctx: NodeRunContext) => {
+    const r = await ctx.memory!.increment("graph", "n", "");
+    noteWrite(ctx, r.deduped);
+    return r.value;
+  });
+  registerFunction("upgradeNestNI", async (_i, ctx: NodeRunContext) => {
+    const r = await ctx.memory!.increment("graph", "n", "");
+    noteWrite(ctx, r.deduped);
+    ctx.interrupt({ reason: "hold inner" });
+    return r.value;
+  });
 });
 
 function pairModel() {
@@ -425,6 +446,73 @@ function pairSpec(shape: string): GraphSpec {
       { from: "gate", to: "a" },
       { from: "a", to: "b" },
       { from: "b", to: "END" },
+    ],
+    runtime: { memory: {} },
+  } as unknown as GraphSpec;
+}
+
+function nestModel(which: "outer" | "inner") {
+  return createLangChainProvider(
+    {
+      invoke: async (msgs: Array<{ _getType?: () => string; constructor?: { name?: string } }>) => {
+        const ai = msgs.filter((m) => (m._getType?.() ?? m.constructor?.name) === "ai" || m.constructor?.name === "AIMessage").length;
+        if (which === "inner") {
+          return ai > 0
+            ? new AIMessage({ content: "inner done" })
+            : new AIMessage({ content: "", tool_calls: [{ name: "ni", id: "i0", args: {} }] });
+        }
+        return ai > 0
+          ? new AIMessage({ content: "done" })
+          : new AIMessage({
+              content: "",
+              tool_calls: [
+                { name: "a", id: "c0", args: {} },
+                { name: "inner", id: "c1", args: {} },
+              ],
+            });
+      },
+      bindTools() {
+        return this;
+      },
+    } as never,
+    { name: which === "inner" ? "legacy-inner-llm" : "legacy-outer-llm" },
+  );
+}
+
+function agentToolSpec(): GraphSpec {
+  const fn = (id: string, name: string) => ({ id, type: "function", when: "false", with: { fn: name } });
+  const nodes = [
+    {
+      id: "o",
+      type: "agent",
+      provider: "legacy-outer-llm",
+      with: { prompt: "go", tools: [{ node: "a" }, { node: "inner" }], output: { to: "out" } },
+    },
+    {
+      id: "inner",
+      type: "agent",
+      when: "false",
+      provider: "legacy-inner-llm",
+      with: { prompt: "in", tools: [{ node: "ni" }] },
+    },
+    fn("gate", "upgradeNestA"),
+    fn("a", "upgradeNestA"),
+    fn("ni", "upgradeNestNI"),
+  ];
+  return {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: "legacy-agenttool" },
+    state: { channels: { out: { type: "object" } } },
+    nodes,
+    edges: [
+      { from: "START", to: "o" },
+      { from: "o", to: "END" },
+      { from: "START", to: "gate" },
+      ...["a", "inner", "ni"].flatMap((id) => [
+        { from: "gate", to: id },
+        { from: id, to: "END" },
+      ]),
     ],
     runtime: { memory: {} },
   } as unknown as GraphSpec;
@@ -570,6 +658,34 @@ describe("older tool-call and subgraph numbering", () => {
         const second = await finish(compile, threadId);
         expect(second.status).toBe("completed");
         expect(observed.every((r) => r.deduped)).toBe(true);
+        expect(await store.items()).toMatchObject({ n: 2 });
+      } finally {
+        await store.close();
+      }
+    });
+
+    test(`${kind}: a nested agent tool writes on the outermost counter`, async () => {
+      observed.length = 0;
+      const store = await backing(kind, "agenttool");
+      try {
+        const identity = { org: "acme", project: "web", user: "dev@acme.test" };
+        const providers = [nestModel("outer"), nestModel("inner")];
+        const compile = () =>
+          compileGraph(agentToolSpec(), {
+            checkpointer: store.checkpointer as never,
+            providers: providers as never,
+            memory: { backend: store.memory, identity },
+          });
+        const threadId = "legacy-agenttool";
+        const first = await (await compile()).run({ threadId, onInterrupt: "fail" });
+        expect(first.status).toBe("interrupted");
+        expect(observed.map((r) => r.deduped)).toEqual([false, false]);
+        const outer = agentLegacy(observed[0]!);
+        await installOlder(store, [outer, outer], (i) => i);
+        observed.length = 0;
+        const second = await finish(compile, threadId);
+        expect(second.status).toBe("completed");
+        expect(observed.map((r) => r.deduped)).toEqual([true]);
         expect(await store.items()).toMatchObject({ n: 2 });
       } finally {
         await store.close();
