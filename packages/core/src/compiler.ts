@@ -1845,23 +1845,45 @@ function withReplayData(data: unknown, runScope: RunScope | undefined, nodeId: s
   return { ...base, __nodeId: nodeId, __agentReplay: replay };
 }
 
+/** The Send index of a task LangGraph runs for a `Send` (`path` `["__pregel_push", n]`), or undefined. */
+function pushIndexOf(task: { path?: ReadonlyArray<unknown> }): number | undefined {
+  const path = task.path;
+  if (!Array.isArray(path) || path.length !== 2 || path[0] !== "__pregel_push") return undefined;
+  const index = path[1];
+  return typeof index === "number" && Number.isInteger(index) && index >= 0 ? index : undefined;
+}
+
 /**
  * Pending interrupt values of a thread snapshot, with, per value, a check
- * that a node id is the top-level node of the task holding it (the task's
- * own node, or an item of the map whose worker it is).
+ * that a node id is the top-level node of the task holding it: the task's
+ * own node, or, for a map worker task, that task's own item. A map sends
+ * all its items from one node in item order, so they are consecutive
+ * `Send`s and an item's index is its task's Send index less the smallest
+ * Send index of the same worker (other nodes' Sends in the same step come
+ * before or after them). The snapshot lists every task of the step,
+ * finished ones too, so that smallest index is the map's item 0.
+ *
+ * @internal Exported for tests.
  */
-function pendingInterrupts(snap: {
-  tasks?: ReadonlyArray<{ name?: string; interrupts?: ReadonlyArray<{ value?: unknown }> }>;
+export function pendingInterrupts(snap: {
+  tasks?: ReadonlyArray<{ name?: string; path?: ReadonlyArray<unknown>; interrupts?: ReadonlyArray<{ value?: unknown }> }>;
 } | null | undefined): { values: unknown[]; taskRoots: Array<((nodeId: string) => boolean) | undefined> } {
   const values: unknown[] = [];
   const taskRoots: Array<((nodeId: string) => boolean) | undefined> = [];
+  const firstSend = new Map<string, number>();
+  for (const task of snap?.tasks ?? []) {
+    const index = pushIndexOf(task);
+    if (task.name && index !== undefined) firstSend.set(task.name, Math.min(firstSend.get(task.name) ?? index, index));
+  }
   for (const task of snap?.tasks ?? []) {
     const name = task.name;
+    const sendIndex = pushIndexOf(task);
+    const itemIndex = name && sendIndex !== undefined ? sendIndex - firstSend.get(name)! : undefined;
     const isRoot = name
       ? (nodeId: string) => {
           if (nodeId === name) return true;
-          const item = /^(.+)\[[0-9]+\]$/.exec(nodeId);
-          return item !== null && mapSyntheticIds(item[1]!).workerId === name;
+          const item = /^(.+)\[([0-9]+)\]$/.exec(nodeId);
+          return item !== null && itemIndex !== undefined && item[2] === String(itemIndex) && mapSyntheticIds(item[1]!).workerId === name;
         }
       : undefined;
     for (const it of task.interrupts ?? []) {

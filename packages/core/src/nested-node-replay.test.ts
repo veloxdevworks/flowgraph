@@ -3,7 +3,7 @@ import { MemorySaver } from "@langchain/langgraph";
 import { AIMessage } from "@langchain/core/messages";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
-import { compileGraph } from "./compiler.js";
+import { compileGraph, pendingInterrupts } from "./compiler.js";
 import { createLangChainProvider, registerTool } from "./index.js";
 import { registerFunction } from "./nodes/function.js";
 import { defineProvider } from "./providers/types.js";
@@ -352,5 +352,36 @@ describe("a replayed tool result is only reused for the same call", () => {
     const text = failure instanceof Error ? `${(failure as { code?: string }).code ?? ""} ${failure.message}` : String(failure);
     expect(text).toMatch(/REPLAY_MISMATCH|Refusing to reuse/);
     expect(ran).toEqual(["A"]);
+  });
+});
+
+describe("map items at the top level", () => {
+  it("each item resumes with its own model turns, also when two maps run in the same step", async () => {
+    const inner = scripted("inner", echo);
+    const spec = graphOf("maps-in-parallel", [map("m1", ask("w", "inner", "which=a{{ item.item }}"))]) as unknown as {
+      nodes: Node[];
+      edges: Array<{ from: string; to: string }>;
+    };
+    spec.nodes.push(map("m2", ask("w", "inner", "which=b{{ item.item }}")));
+    spec.edges.push({ from: "START", to: "m2" }, { from: "m2", to: "END" });
+    const r = await approveAll(spec as unknown as GraphSpec, [inner.provider], { items: ["x", "y", "z"] });
+    expect(r.status).toBe("completed");
+    expect([...ran].sort()).toEqual(["ax", "ay", "az", "bx", "by", "bz"]);
+    // One model turn to ask and one after the approved call, per item: no turn is re-asked.
+    expect(inner.calls()).toBe(12);
+  });
+
+  it("accepts saved entries only for the map item a task runs", () => {
+    const task = (name: string, index: number) => ({ name, path: ["__pregel_push", index], interrupts: [{ value: {} }] });
+    const { taskRoots } = pendingInterrupts({
+      tasks: [task("mapw_m1", 0), task("mapw_m1", 1), task("mapw_m2", 2), task("mapw_m2", 3), { name: "a", interrupts: [{ value: {} }] }],
+    });
+    const [m1i0, m1i1, m2i0, m2i1, a] = taskRoots;
+    expect([m1i0!("m1[0]"), m1i0!("m1[1]"), m1i1!("m1[1]"), m1i1!("m1[0]")]).toEqual([true, false, true, false]);
+    expect([m2i0!("m2[0]"), m2i0!("m2[2]"), m2i1!("m2[1]"), m2i1!("m1[1]"), m2i1!("m2[01]")]).toEqual([true, false, true, false, false]);
+    expect([a!("a"), a!("a[0]"), m1i0!("mapw_m1")]).toEqual([true, false, true]);
+    // A worker task without a Send index (not something the engine produces) accepts no items.
+    const { taskRoots: bare } = pendingInterrupts({ tasks: [{ name: "mapw_m1", interrupts: [{ value: {} }] }] });
+    expect(bare[0]!("m1[0]")).toBe(false);
   });
 });
