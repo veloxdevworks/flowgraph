@@ -94,6 +94,59 @@ describe("replayStoreFromInterrupts", () => {
   });
 });
 
+describe("replay entries of nodes called as tools", () => {
+  const entries = { "llm:0": { text: "cached" } };
+  const owner = replayNodeKey([], "o");
+  const below = (...rest: string[]) => JSON.stringify(["o", ...rest]);
+
+  it("snapshots a node with the nodes it called as tools, and nothing beside it", () => {
+    const store = new ReplayStore();
+    store.set(owner, "llm:0", 1);
+    store.set(below("tool:0", "h"), "llm:0", 2);
+    store.set(below("tool:0", "h", "tool:1", "g"), "llm:0", 3);
+    store.set(JSON.stringify(["other"]), "llm:0", 4);
+    store.set(JSON.stringify(["ox"]), "llm:0", 5);
+    expect(store.snapshotUnder(owner).map((s) => s.node).sort()).toEqual([owner, below("tool:0", "h"), below("tool:0", "h", "tool:1", "g")].sort());
+  });
+
+  it("loads nested entries only below the interrupting node, through tool call segments", () => {
+    const ok = [below("tool:0", "h"), below("tool:3", "h", "tool:0", "g")];
+    const bad = [
+      JSON.stringify(["p", "tool:0", "h"]),
+      below("h"),
+      below("tool:0"),
+      below("tool:x", "h"),
+      below("sg", "a"),
+      JSON.stringify(["o"]),
+      "not json",
+    ];
+    const store = replayStoreFromInterrupts([
+      { data: { __nodeId: "o", __agentReplay: { node: owner, entries, nested: [...ok, ...bad].map((node) => ({ node, entries })) } } },
+      // A nested list on a snapshot that does not belong to its interrupt is ignored too.
+      { data: { __nodeId: "gate", __agentReplay: { node: owner, entries, nested: [{ node: below("tool:9", "z"), entries }] } } },
+    ]);
+    for (const k of ok) expect(store.has(k), k).toBe(true);
+    for (const k of [...bad.filter((k) => k !== JSON.stringify(["o"])), below("tool:9", "z")]) expect(store.has(k), k).toBe(false);
+  });
+
+  it("loads an interrupt saved by an earlier release for its own thread and node only", () => {
+    const legacy = (key: string, nodeId = "a") => ({ data: { __nodeId: nodeId, __agentReplay: { key, entries } } });
+    const store = replayStoreFromInterrupts([legacy("t1:a")], { threadId: "t1" });
+    expect(store.get(replayNodeKey([], "a"), "llm:0")).toEqual({ text: "cached" });
+    for (const [values, threadId] of [
+      [[legacy("t2:a")], "t1"],
+      [[legacy("t1:b")], "t1"],
+      [[legacy("t1:a", "b")], "t1"],
+      [[legacy(":a")], ""],
+      [[legacy("t1:a")], undefined],
+      [[{ data: { __nodeId: "a", __agentReplay: { key: "t1:a", node: replayNodeKey(["x"], "y"), entries } } }], "t1"],
+    ] as const) {
+      const other = replayStoreFromInterrupts(values as unknown as unknown[], { threadId });
+      expect(other.has(replayNodeKey([], "a")) || other.has(replayNodeKey([], "b")), JSON.stringify(values)).toBe(false);
+    }
+  });
+});
+
 describe("isGraphInterrupt", () => {
   it("detects GraphInterrupt-shaped errors", () => {
     const err = Object.assign(new Error("interrupt"), { name: "GraphInterrupt" });

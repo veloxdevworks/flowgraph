@@ -122,6 +122,11 @@ export function buildStateAnnotation(spec: GraphSpec): ReturnType<typeof Annotat
 
   // Reserved idempotency channel: merge of completed once-keys → results
   fields[ONCE_CHANNEL] = Annotation<Record<string, unknown>>(mergeRecords);
+  // Unused, kept on purpose: threads checkpointed by earlier releases carry
+  // values (and pending writes) for this channel, and keeping it declared
+  // means those checkpoints restore into the same channel set. Nothing reads
+  // or writes it; agent replay entries come from the snapshot the engine
+  // attaches to interrupts (providers/replay-cache.ts).
   fields[REPLAY_CHANNEL] = Annotation<Record<string, unknown>>({
     reducer: (cur: Record<string, unknown> = {}, inc: Record<string, unknown>) => {
       const out: Record<string, unknown> = { ...cur };

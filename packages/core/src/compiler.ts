@@ -366,7 +366,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     let replay = new ReplayStore();
     if (mode !== "start" && checkpointer) {
       const snap = await compiledLg.getState(cfg);
-      replay = replayStoreFromInterrupts(pendingInterruptValues(snap));
+      // `threadId` lets interrupts saved by earlier releases (keyed
+      // `<threadId>:<nodeId>`) resume without re-running approved tools.
+      replay = replayStoreFromInterrupts(pendingInterruptValues(snap), { threadId });
       await hydrateDurableRuntime(snap, threadId, graphSpec, {
         executeInvoke,
         nodePolicy: opts.nodePolicy,
@@ -1726,13 +1728,21 @@ function buildNodeCtx(
         payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
           ? { ...withoutReservedKeys(payload.data as Record<string, unknown>), __nodeId: nodeId }
           : { ...(payload.data !== undefined ? { value: payload.data } : {}), __nodeId: nodeId };
-      // This node's replay entries in the current execution, so a resume
-      // (possibly in another process) can rebuild them from the checkpoint.
+      // This node's replay entries in the current execution, and those of
+      // nodes it called as tools (an agent tool node that interrupts raises
+      // through this closure), so a resume, possibly in another process, can
+      // rebuild them from the checkpoint.
       if (runScope) {
         const node = replayNodeKey(runScope.path, nodeId);
-        const entries = runScope.replay.snapshot(node);
-        if (Object.keys(entries).length > 0) {
-          (data as Record<string, unknown>)["__agentReplay"] = { node, entries };
+        const saved = runScope.replay.snapshotUnder(node);
+        const own = saved.find((s) => s.node === node);
+        const nested = saved.filter((s) => s.node !== node);
+        if (saved.length > 0) {
+          (data as Record<string, unknown>)["__agentReplay"] = {
+            node,
+            entries: own?.entries ?? {},
+            ...(nested.length > 0 ? { nested } : {}),
+          };
         }
       }
       const tagged = { ...payload, data };

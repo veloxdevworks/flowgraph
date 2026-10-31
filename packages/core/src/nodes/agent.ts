@@ -18,7 +18,7 @@ import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
 import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
-import { isGraphInterrupt, ReplayStore, replayNodeKey, runScopeOf } from "../providers/replay-cache.js";
+import { childRunConfig, isGraphInterrupt, ReplayStore, replayNodeKey, runScopeOf } from "../providers/replay-cache.js";
 import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
 import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
@@ -124,7 +124,7 @@ export const agentNode = defineNode<Config>({
 
         // Replay entries belong to this execution of the graph (see RunScope);
         // outside one (a node run directly), nothing is replayed across calls.
-        const runScope = runScopeOf((ctx as { _lgConfig?: unknown })._lgConfig);
+        const runScope = runScopeOf(lgConfigOf(ctx));
         const replayStore = runScope?.replay ?? new ReplayStore();
         const cacheKey = replayNodeKey(runScope?.path ?? [], ctx.nodeId);
         let toolSeq = 0;
@@ -150,7 +150,13 @@ export const agentNode = defineNode<Config>({
             if (cached !== undefined) return cached;
 
             ctx.emit("agent.tool.call", { tool: name, args: callArgs });
-            let result = await exec(callArgs, ctx, state);
+            // A node called as a tool runs one level below this agent, under
+            // this call's index, so its replay entries are its own and are
+            // saved with this agent's when it interrupts (see RunScope).
+            const toolCtx = runScope
+              ? { ...ctx, _lgConfig: childRunConfig(childRunConfig(lgConfigOf(ctx)!, ctx.nodeId), toolIndex) }
+              : ctx;
+            let result = await exec(callArgs, toolCtx, state);
             ctx.emit("agent.tool.result", { tool: name, result });
 
             result = await reportToolResult(governance, name, callArgs, result);
@@ -293,4 +299,8 @@ function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number; costU
       detail: { usedTokens: budget.usedTokens, usedUSD: budget.usedUSD },
     });
   }
+}
+
+function lgConfigOf(ctx: unknown): { configurable?: Record<string, unknown> } | undefined {
+  return (ctx as { _lgConfig?: { configurable?: Record<string, unknown> } })._lgConfig;
 }

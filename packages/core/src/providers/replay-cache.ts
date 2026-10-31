@@ -108,6 +108,22 @@ export class ReplayStore {
     return out;
   }
 
+  /**
+   * JSON-safe copies of the entries of `key` and of every key below it (a
+   * node called as a tool by that node, at any depth), for an interrupt
+   * payload. Keys without entries are left out.
+   */
+  snapshotUnder(key: string): Array<{ node: string; entries: Record<string, unknown> }> {
+    const prefix = key.endsWith("]") ? key.slice(0, -1) : key;
+    const out: Array<{ node: string; entries: Record<string, unknown> }> = [];
+    for (const node of this.nodes.keys()) {
+      if (node !== key && !node.startsWith(`${prefix},`)) continue;
+      const entries = this.snapshot(node);
+      if (Object.keys(entries).length > 0) out.push({ node, entries });
+    }
+    return out;
+  }
+
   /** Load a snapshot taken by {@link snapshot}; entries already present win. */
   load(key: string, serialized: Record<string, unknown>): void {
     const map = this.nodes.get(key) ?? new Map<string, unknown>();
@@ -164,13 +180,53 @@ export function childRunConfig<C extends { configurable?: Record<string, unknown
 }
 
 /**
- * Build the replay store for an execution that continues `threadId`'s
- * checkpoint: load the snapshot the engine attached to each pending
- * interrupt. Only the interrupts of the snapshot the caller read for this
- * thread are used; entries whose node key does not end with the interrupt's
- * engine-set `__nodeId` are ignored.
+ * A node an agent calls as a tool runs one path level below the agent, under
+ * the agent's tool call index (`tool:<n>`): its replay key is
+ * `[...agentPath, agentId, "tool:<n>", nodeId]`, so two calls to the same
+ * node, in one turn or across turns, never share entries.
  */
-export function replayStoreFromInterrupts(interruptValues: Iterable<unknown>): ReplayStore {
+const TOOL_SEGMENT = /^tool:[0-9]+$/;
+
+function parseNodeKey(key: unknown): string[] | undefined {
+  if (typeof key !== "string") return undefined;
+  let path: unknown;
+  try {
+    path = JSON.parse(key);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(path) || path.length === 0 || !path.every((p) => typeof p === "string" && p)) return undefined;
+  return path as string[];
+}
+
+/** `path` is `owner` followed by one or more `tool:<n>`, node id pairs. */
+function isToolCallBelow(path: readonly string[], owner: readonly string[]): boolean {
+  if (path.length <= owner.length || (path.length - owner.length) % 2 !== 0) return false;
+  for (let i = 0; i < owner.length; i++) if (path[i] !== owner[i]) return false;
+  for (let i = owner.length; i < path.length; i += 2) if (!TOOL_SEGMENT.test(path[i]!)) return false;
+  return true;
+}
+
+export interface ReplayLoadOptions {
+  /**
+   * The thread being resumed. When set, interrupts saved by releases before
+   * per-execution replay stores (`{ key: "<threadId>:<nodeId>", entries }`)
+   * are loaded for that top-level node, but only when the key names this
+   * thread and the interrupt's own `__nodeId`.
+   */
+  threadId?: string | undefined;
+}
+
+/**
+ * Build the replay store for an execution that continues a thread's
+ * checkpoint from the snapshot the engine attached to each of its pending
+ * interrupts (pass only the interrupts of the snapshot read for that
+ * thread). An interrupt restores the entries of the node that raised it
+ * (the key must end with its engine-set `__nodeId`) and of nodes it called
+ * as tools (keys that extend that key with `tool:<n>`, node id pairs).
+ * Anything else in the payload is ignored.
+ */
+export function replayStoreFromInterrupts(interruptValues: Iterable<unknown>, opts: ReplayLoadOptions = {}): ReplayStore {
   const store = new ReplayStore();
   for (const value of interruptValues) {
     if (!isPlainObject(value)) continue;
@@ -181,16 +237,24 @@ export function replayStoreFromInterrupts(interruptValues: Iterable<unknown>): R
     if (!isPlainObject(blob) || typeof nodeId !== "string" || !nodeId) continue;
     const key = blob["node"];
     const entries = blob["entries"];
-    if (typeof key !== "string" || !isPlainObject(entries)) continue;
-    let path: unknown;
-    try {
-      path = JSON.parse(key);
-    } catch {
+    const owner = parseNodeKey(key);
+    if (owner && owner[owner.length - 1] === nodeId) {
+      if (isPlainObject(entries)) store.load(key as string, entries);
+      const nested = blob["nested"];
+      if (Array.isArray(nested)) {
+        for (const item of nested) {
+          if (!isPlainObject(item) || !isPlainObject(item["entries"])) continue;
+          const path = parseNodeKey(item["node"]);
+          if (path && isToolCallBelow(path, owner)) store.load(item["node"] as string, item["entries"]);
+        }
+      }
       continue;
     }
-    if (!Array.isArray(path) || path.length === 0 || !path.every((p) => typeof p === "string" && p)) continue;
-    if (path[path.length - 1] !== nodeId) continue;
-    store.load(key, entries);
+    // Saved by an earlier release: read-only, top-level node, this thread only.
+    const legacyKey = blob["key"];
+    if (opts.threadId && key === undefined && legacyKey === `${opts.threadId}:${nodeId}` && isPlainObject(entries)) {
+      store.load(replayNodeKey([], nodeId), entries);
+    }
   }
   return store;
 }
