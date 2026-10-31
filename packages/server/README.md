@@ -175,7 +175,7 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 | `FLOWGRAPH_MAX_CONCURRENT_RUNS` | `16` | In-flight `running`/`started` threads per process (`0` = unlimited) |
 | `FLOWGRAPH_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. `GET /ping` access logs are `debug`. |
 | `FLOWGRAPH_GIT_SHA` | _(unset)_ | Optional build identity included on `/` and `/healthz`. |
-| `FLOWGRAPH_SHUTDOWN_TIMEOUT_MS` | `10000` | On SIGTERM / SIGINT the server stops accepting connections and new runs (503 `SERVER_CLOSING`), waits this long for runs in flight, aborts what is still running and gives it 2 s to settle, waits for pending graph-store meta writes (status updates whose request did not wait for them), then closes database pools and exits. `RunService.close()` does the same for embedders; once it resolves nothing more is written to the graph store |
+| `FLOWGRAPH_SHUTDOWN_TIMEOUT_MS` | `10000` | On SIGTERM / SIGINT the server stops accepting connections and new runs (503 `SERVER_CLOSING`), waits this long for runs in flight, aborts what is still running and gives it 2 s to settle, waits for pending graph-store meta writes (status updates whose request did not wait for them), then closes database pools and exits. `RunService.close()` does the same for embedders and refuses control calls (cancel, pause) with 503 `SERVER_CLOSING`; once it resolves nothing more is written to the graph store, unless a run was still going after the 2 s abort grace (logged as `shutdown.unsettled`): such a run can still write when it finishes |
 | `FLOWGRAPH_GRAPH_STORE` | `/tmp/flowgraph-graphs` | Uploaded YAML + `{threadId}.events.jsonl`. **Do not use `/tmp` on a lab host** — it is wiped on reboot. |
 
 ## Memory

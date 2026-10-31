@@ -37,6 +37,8 @@ beforeAll(() => {
     finished++;
     return value;
   });
+  // Returns at once.
+  registerFunction("shutdownQuick", async () => ({ n: 1 }));
   // Runs until the run is aborted.
   registerFunction("shutdownStuck", async (_input, ctx) => {
     await new Promise<void>((resolve, reject) => {
@@ -201,6 +203,46 @@ describe("RunService.close", () => {
     }
     await settle();
     expect(unhandled).toEqual([]);
+  });
+
+  for (const control of ["cancelRun", "pauseRun"] as const) {
+    it(`refuses ${control} after close and leaves the stored status alone`, async () => {
+      const s = await service();
+      await s.startRun({ threadId: "done", yaml: graph("quick", "shutdownQuick") });
+      // close() waits for the run, so it has completed when close resolves.
+      await s.close();
+      expect(s.registry.get("done")?.status).toBe("completed");
+      expect((await readGraphMeta(s.config.graphStoreDir, "done"))?.status).toBe("completed");
+      await expect(s[control]("done")).rejects.toMatchObject({ status: 503, code: "SERVER_CLOSING" });
+      expect((await readGraphMeta(s.config.graphStoreDir, "done"))?.status).toBe("completed");
+      expect(s.registry.get("done")?.status).toBe("completed");
+    });
+  }
+
+  it("names the threads whose meta writes are still pending when the wait times out", async () => {
+    const s = await service({ closeTimeoutMs: 0 });
+    await storeThread(s, "held");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const hooked = s as unknown as MetaWrites;
+    const write = hooked.writeMeta.bind(s);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    hooked.writeMeta = async (threadId, patch) => {
+      await gate;
+      await write(threadId, patch);
+    };
+    try {
+      const pending = hooked.patchMeta("held", { status: "completed" });
+      // With no time left to wait, close() gives up on the write at once and says which thread it was.
+      await s.close();
+      const lines = warn.mock.calls.map((c) => JSON.parse(String(c[0])) as { msg: string; threadIds?: string[]; pending?: number });
+      expect(lines).toContainEqual(expect.objectContaining({ msg: "shutdown.meta_writes_timeout", pending: 1, threadIds: ["held"] }));
+      release();
+      await pending;
+    } finally {
+      warn.mockRestore();
+    }
+    expect((await readGraphMeta(s.config.graphStoreDir, "held"))?.status).toBe("completed");
   });
 
   it.skipIf(!PG_URL)("with postgres, closes pools only after runs in flight finish, with no unhandled rejection", async () => {

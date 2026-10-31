@@ -117,11 +117,13 @@ export class RunService {
    */
   private readonly metaWrites = new Map<string, Promise<void>>();
   /**
-   * Every meta write not yet settled, whether or not its caller waits for it
-   * (resume and continue start theirs without waiting). close() waits for
-   * them, so nothing writes to the graph store once it resolves.
+   * Every meta write not yet settled, with its thread id, whether or not
+   * its caller waits for it (resume and continue start theirs without
+   * waiting). close() waits for them (up to `closeTimeoutMs`), so once it
+   * resolves only a run that never settled after the abort grace can still
+   * write to the graph store.
    */
-  private readonly pendingMetaWrites = new Set<Promise<void>>();
+  private readonly pendingMetaWrites = new Map<Promise<void>, string>();
 
   /** Resolves callers to principals (OIDC, the legacy token, or none), built from config.auth. */
   get authenticator(): Authenticator {
@@ -195,7 +197,7 @@ export class RunService {
     }
     const closeMs = this.config.closeTimeoutMs ?? SHUTDOWN_CLOSE_TIMEOUT_MS;
     if (!(await this.settleMetaWrites(closeMs))) {
-      log("warn", "shutdown.meta_writes_timeout", { pending: this.pendingMetaWrites.size, timeoutMs: closeMs });
+      log("warn", "shutdown.meta_writes_timeout", { pending: this.pendingMetaWrites.size, threadIds: [...new Set(this.pendingMetaWrites.values())], timeoutMs: closeMs });
     }
     for (const c of this.closers.splice(0).reverse()) {
       let timer: NodeJS.Timeout | undefined;
@@ -249,7 +251,7 @@ export class RunService {
       if (left <= 0) return false;
       let timer: NodeJS.Timeout | undefined;
       const timedOut = await Promise.race([
-        Promise.allSettled([...this.pendingMetaWrites]).then(() => false),
+        Promise.allSettled([...this.pendingMetaWrites.keys()]).then(() => false),
         new Promise<boolean>((r) => {
           timer = setTimeout(() => r(true), left);
         }),
@@ -402,7 +404,7 @@ export class RunService {
         },
       );
     this.metaWrites.set(threadId, done);
-    this.pendingMetaWrites.add(done);
+    this.pendingMetaWrites.set(done, threadId);
     void done.then(() => {
       this.pendingMetaWrites.delete(done);
       if (this.metaWrites.get(threadId) === done) this.metaWrites.delete(threadId);
@@ -883,6 +885,7 @@ export class RunService {
   }
 
   async cancelRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+    this.assertOpen();
     await this.checkThreadAccess(threadId, this.principalFor(caller), { mustExist: true });
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
@@ -894,6 +897,7 @@ export class RunService {
   }
 
   async pauseRun(threadId: string, caller?: Principal): Promise<ControlResult> {
+    this.assertOpen();
     await this.checkThreadAccess(threadId, this.principalFor(caller), { mustExist: true });
     const session = this.registry.get(threadId);
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
