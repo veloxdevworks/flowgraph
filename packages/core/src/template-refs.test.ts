@@ -47,6 +47,21 @@ describe("templateRefs", () => {
     expect(templateRefs("see __init__.py").reserved).toBe(false);
   });
 
+  it("checks many blocks with look-alikes or escapes in one pass, with the same answers", () => {
+    const inputs = [`${fill("{{ \uff3f }}")}__[`, `${fill("{{ \u00e9 }}")}__`, fill("{{ \\u005f }}")];
+    for (const text of inputs) {
+      expect(timed(() => templateRefs(text)), text.slice(0, 12)).toBeLessThan(1000);
+      expect(templateRefs(text).reserved, text.slice(0, 12)).toBe(false);
+    }
+    for (const last of ["{{ state.\uff3f\uff3fx }}", "{{ state._\u200b_x }}", "{{ state['\\u005f\\u005fx'] }}"]) {
+      expect(templateRefs(`${fill("{{ \uff3f }}")}${last}`).reserved, last).toBe(true);
+    }
+    // Neighbouring blocks are not read as one expression.
+    expect(templateRefs("{{ a_ }}{{ _x }}").reserved).toBe(false);
+    expect(templateRefs("{{ \uff3f }}{{ \uff3fx }}").reserved).toBe(false);
+    expect(templateRefs("{{ \\u005f }}{{ \\u005fx }}").reserved).toBe(false);
+  });
+
   it("finds secret reads in closed blocks and after an unclosed `{{`", () => {
     expect(templateRefs("{{ secret.KEY }}").secret).toBe(true);
     expect(templateRefs("x {{ secrets ['KEY'] }}").secret).toBe(true);

@@ -314,6 +314,9 @@ export function isReservedChannel(name: string): boolean {
 const RESERVED_REF_RE = /(?:^|[^A-Za-z0-9_$])__[A-Za-z0-9_$]/;
 const RESERVED_REF = { test: (text: string): boolean => RESERVED_REF_RE.test(foldLookalikes(text)) };
 
+/** Text that {@link foldLookalikes} or {@link decodeUnicodeEscapes} could change. */
+const NEEDS_FOLDING_RE = /[^\x00-\x7f]|\\/;
+
 /** `\uXXXX` sequences as the characters they spell. */
 function decodeUnicodeEscapes(text: string): string {
   return text.replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
@@ -422,31 +425,39 @@ function hasReservedConstantIndex(root: Expr): boolean {
  */
 const MAX_PARSED_BLOCKS = 1000;
 
-interface ParseBudget {
-  left: number;
-}
-
 /**
- * Whether a template expression names a `__` channel: as written, with
- * look-alike characters or `\uXXXX` sequences, or through a constant index
- * (see {@link hasReservedConstantIndex}). An expression the parser cannot
- * read (a syntax error, or nesting deep enough to exhaust the stack) is
- * only checked as text; it fails the same way when the node renders it.
+ * Whether any of the template expressions `exprs` names a `__` channel: as
+ * written, with look-alike characters or `\uXXXX` sequences, or through a
+ * constant index (see {@link hasReservedConstantIndex}). An expression the
+ * parser cannot read (a syntax error, or nesting deep enough to exhaust the
+ * stack) is only checked as text; it fails the same way when the node
+ * renders it.
+ *
+ * The text checks run once on the expressions joined by newlines rather than
+ * once per expression, so a string with many blocks folds and decodes in
+ * one pass. That gives the same answer: a newline is never folded,
+ * decoded, removed or combined with a neighbour, and the pattern sees it as
+ * the start of the next expression.
  */
-function refersToReservedInExpr(text: string, budget: ParseBudget): boolean {
-  if (RESERVED_REF.test(text) || RESERVED_REF.test(decodeUnicodeEscapes(text))) return true;
-  // A constant index needs brackets and a string literal; skip parsing
-  // anything else, which keeps the check cheap on text with many blocks.
-  if (!text.includes("[") || (!text.includes("'") && !text.includes('"'))) return false;
-  // Past the budget, count the block as reserved rather than parse it.
-  if (budget.left-- <= 0) return true;
-  let expr: Expr;
-  try {
-    expr = parseExpr(text.trim());
-  } catch {
-    return false;
+function refersToReservedInExprs(exprs: string[]): boolean {
+  const joined = exprs.join("\n");
+  if (RESERVED_REF.test(joined) || RESERVED_REF.test(decodeUnicodeEscapes(joined))) return true;
+  let parsed = 0;
+  for (const text of exprs) {
+    // A constant index needs brackets and a string literal; skip parsing
+    // anything else, which keeps the check cheap on text with many blocks.
+    if (!text.includes("[") || (!text.includes("'") && !text.includes('"'))) continue;
+    // Past the budget, count the string as reserved rather than parse more.
+    if (++parsed > MAX_PARSED_BLOCKS) return true;
+    let expr: Expr;
+    try {
+      expr = parseExpr(text.trim());
+    } catch {
+      continue;
+    }
+    if (hasReservedConstantIndex(expr)) return true;
   }
-  return hasReservedConstantIndex(expr);
+  return false;
 }
 
 /** `secret.X` or `secrets[...]` inside an expression. */
@@ -473,14 +484,20 @@ export interface TemplateRefs {
 export function templateRefs(text: string): TemplateRefs {
   const out: TemplateRefs = { reserved: false, secret: false };
   if (!text.includes("{{")) return out;
+  // Each block is a substring of the text (after a `{`), so a check that
+  // cannot match anywhere in the text cannot match in any block: a secret
+  // read needs the secret pattern, a reserved read needs `__`, `[` (a
+  // constant index) or something to fold or decode first.
+  let checkSecret = SECRET_REF_RE.test(text);
+  const checkReserved = NEEDS_FOLDING_RE.test(text) || text.includes("__") || text.includes("[");
+  if (!checkSecret && !checkReserved) return out;
   const { spans, unclosedAt } = scanTemplate(text);
-  const budget: ParseBudget = { left: MAX_PARSED_BLOCKS };
-  for (const span of spans) {
-    if (!out.secret && SECRET_REF_RE.test(span.expr)) out.secret = true;
-    if (!out.reserved && refersToReservedInExpr(span.expr, budget)) out.reserved = true;
-    if (out.secret && out.reserved) return out;
+  if (checkSecret && spans.some((span) => SECRET_REF_RE.test(span.expr))) {
+    out.secret = true;
+    checkSecret = false;
   }
-  if (!out.secret && unclosedAt >= 0 && SECRET_REF_RE.test(text.slice(unclosedAt + 2))) out.secret = true;
+  if (checkReserved) out.reserved = refersToReservedInExprs(spans.map((span) => span.expr));
+  if (checkSecret && unclosedAt >= 0 && SECRET_REF_RE.test(text.slice(unclosedAt + 2))) out.secret = true;
   return out;
 }
 
