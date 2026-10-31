@@ -177,6 +177,8 @@ export function projectExplicitOutput(opts: {
   childState: Record<string, unknown>;
   seeds: Record<string, ChannelSeed>;
   parentChannels: Record<string, ChannelMergeDef>;
+  /** Child channel definitions, including auto-declared `{ type: "any" }` targets. */
+  childChannelDefs: Record<string, ChannelMergeDef>;
   resolve: (ref: string) => unknown;
 }): Record<string, unknown> {
   const update: Record<string, unknown> = {};
@@ -193,6 +195,7 @@ export function projectExplicitOutput(opts: {
       sameChannel,
       sameChannel ? seed!.value : undefined,
       value,
+      childChannelUsesMessages(source != null ? opts.childChannelDefs[source] : undefined),
     );
     if (projected.omit) continue;
     update[parentChannel] = projected.value;
@@ -204,6 +207,7 @@ export function projectMatchingOutput(opts: {
   childState: Record<string, unknown>;
   seeds: Record<string, ChannelSeed>;
   parentChannels: Record<string, ChannelMergeDef>;
+  childChannelDefs: Record<string, ChannelMergeDef>;
 }): Record<string, unknown> {
   const update: Record<string, unknown> = {};
   const parentNames = new Set(Object.keys(opts.parentChannels));
@@ -219,6 +223,7 @@ export function projectMatchingOutput(opts: {
         sameChannel,
         sameChannel ? seed!.value : undefined,
         value,
+        childChannelUsesMessages(opts.childChannelDefs[channel]),
       );
       if (projected.omit) continue;
       update[channel] = projected.value;
@@ -238,11 +243,22 @@ export function projectMatchingOutput(opts: {
   return update;
 }
 
+export function childChannelUsesMessages(def: ChannelMergeDef | undefined): boolean {
+  return def?.type === "messages" || def?.reducer === "messages";
+}
+
 export function reducerInput(
   channel: ChannelMergeDef | undefined,
   seeded: boolean,
   seed: unknown,
   next: unknown,
+  /**
+   * When the child channel itself uses the messages reducer, an id present in
+   * the seed and missing from the child state was removed inside the child.
+   * A replace (`array`) or undeclared channel that returns only its reply did
+   * not; those missing ids stay on the parent.
+   */
+  inferMessageRemovals = false,
 ): { omit: true } | { omit: false; value: unknown } {
   if (!seeded) return { omit: false, value: next };
   if (deepEqual(seed, next)) return { omit: true };
@@ -266,7 +282,7 @@ export function reducerInput(
   }
 
   if (reducer === "messages" || type === "messages") {
-    const delta = messageDelta(seed, next);
+    const delta = messageDelta(seed, next, inferMessageRemovals);
     if (Array.isArray(delta) && delta.length === 0) return { omit: true };
     return { omit: false, value: delta };
   }
@@ -293,7 +309,7 @@ function appendExtra(seed: unknown[], next: unknown[]): unknown[] {
   return extra;
 }
 
-function messageDelta(seed: unknown, next: unknown): unknown {
+function messageDelta(seed: unknown, next: unknown, inferRemovals: boolean): unknown {
   if (!Array.isArray(seed) || !Array.isArray(next)) return next;
   const seedById = new Map<string, unknown>();
   for (const message of seed) {
@@ -317,8 +333,10 @@ function messageDelta(seed: unknown, next: unknown): unknown {
     }
     if (!seedById.has(id) || !deepEqual(seedById.get(id), message)) delta.push(message);
   }
-  for (const id of seedById.keys()) {
-    if (!seen.has(id)) delta.push(new RemoveMessage({ id }));
+  if (inferRemovals) {
+    for (const id of seedById.keys()) {
+      if (!seen.has(id)) delta.push(new RemoveMessage({ id }));
+    }
   }
   return delta;
 }

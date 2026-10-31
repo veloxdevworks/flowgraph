@@ -3,6 +3,7 @@
  * Adds a reserved `__once` channel for idempotency bookkeeping.
  */
 
+import { RemoveMessage } from "@langchain/core/messages";
 import { Annotation, messagesStateReducer } from "@langchain/langgraph";
 import type { GraphSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
@@ -70,7 +71,7 @@ export function channelReducerAndDefault(
 
   if (ch.type === "messages" || ch.reducer === "messages") {
     return {
-      reducer: messagesStateReducer as (current: unknown, incoming: unknown) => unknown,
+      reducer: safeMessagesReducer,
       default: () => (ch.default as unknown[] | undefined) ?? [],
     };
   }
@@ -185,6 +186,36 @@ export function buildStateAnnotation(spec: GraphSpec): ReturnType<typeof Annotat
   });
 
   return Annotation.Root(fields as Parameters<typeof Annotation.Root>[0]);
+}
+
+/**
+ * LangGraph's messages reducer throws when a second write removes an id the
+ * first write already removed. Parallel subgraphs can both drop the same
+ * seeded id; a repeated removal is a no-op.
+ */
+function safeMessagesReducer(current: unknown, incoming: unknown): unknown {
+  const currentList = Array.isArray(current) ? current : current == null ? [] : [current];
+  const present = new Set(currentList.map(messageIdOf).filter((id): id is string => id != null));
+  const incomingList = Array.isArray(incoming) ? incoming : [incoming];
+  const filtered = incomingList.filter((message) => {
+    if (!isRemoval(message)) return true;
+    const id = messageIdOf(message);
+    if (id == null || id === "__remove_all__") return true;
+    return present.has(id);
+  });
+  if (filtered.length === 0) return currentList;
+  return messagesStateReducer(currentList as never, filtered as never);
+}
+
+function messageIdOf(message: unknown): string | undefined {
+  if (message == null || typeof message !== "object") return undefined;
+  const id = (message as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function isRemoval(message: unknown): boolean {
+  if (RemoveMessage.isInstance(message)) return true;
+  return message != null && typeof message === "object" && (message as { type?: unknown }).type === "remove";
 }
 
 function deepMerge(

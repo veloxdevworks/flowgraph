@@ -51,6 +51,16 @@ beforeAll(() => {
       messages: [new RemoveMessage({ id: "m1" }), { id: "m2", type: "human", content: "new" }],
     };
   });
+  registerFunction("subgraphMergeReply", (input) => {
+    const id = String((input as { id?: string }).id ?? "m9");
+    return { messages: [{ id, type: "human", content: "reply" }] };
+  });
+  registerFunction("subgraphMergeDropM1", () => {
+    return { messages: [new RemoveMessage({ id: "m1" })] };
+  });
+  registerFunction("subgraphMergeEditM1", () => {
+    return { messages: [{ id: "m1", type: "human", content: "EDITED" }] };
+  });
 });
 
 function childLogSpec(): GraphSpec {
@@ -156,9 +166,13 @@ describe("subgraph merge deltas", () => {
         { id: "m2", content: "new" },
       ],
     });
-    const absent = reducerInput({ type: "messages", reducer: "messages" }, true, [{ id: "m1", content: "orig" }], [
-      { id: "m2", content: "new" },
-    ]);
+    const absent = reducerInput(
+      { type: "messages", reducer: "messages" },
+      true,
+      [{ id: "m1", content: "orig" }],
+      [{ id: "m2", content: "new" }],
+      true,
+    );
     expect(absent.omit).toBe(false);
     if (!absent.omit) {
       const delta = absent.value as unknown[];
@@ -172,6 +186,18 @@ describe("subgraph merge deltas", () => {
       [{ id: "m1", content: "orig" }],
       [new RemoveMessage({ id: "m1" }), { id: "m2", content: "new" }],
     );
+    expect(
+      reducerInput(
+        { type: "messages", reducer: "messages" },
+        true,
+        [
+          { id: "m1", content: "orig" },
+          { id: "m2", content: "keep" },
+        ],
+        [{ id: "m9", content: "reply" }],
+        false,
+      ),
+    ).toEqual({ omit: false, value: [{ id: "m9", content: "reply" }] });
     expect(removed.omit).toBe(false);
     if (!removed.omit) {
       const delta = removed.value as unknown[];
@@ -185,6 +211,7 @@ describe("subgraph merge deltas", () => {
         childState: { draft: "hello" },
         seeds: { draft: { value: "hello", fromParent: "input" } },
         parentChannels: { input: { type: "string" }, result: { type: "string" } },
+        childChannelDefs: { draft: { type: "string" } },
         resolve: (ref) => (ref === "draft" ? "hello" : undefined),
       }),
     ).toEqual({ result: "hello" });
@@ -609,6 +636,172 @@ describe("subgraph merge regressions", () => {
     expect(result.status).toBe("completed");
     const messages = result.state["messages"] as Array<{ id?: string; content?: unknown }>;
     expect(messages.map((message) => [message.id, message.content])).toEqual([["m2", "new"]]);
+  });
+});
+
+describe("subgraph message channel types", () => {
+  function replyChild(channels: Record<string, { type: string; reducer?: string }> | undefined): GraphSpec {
+    return {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "child-reply" },
+      ...(channels ? { state: { channels } } : { state: { channels: {} } }),
+      nodes: [
+        {
+          id: "reply",
+          type: "function",
+          with: {
+            fn: "subgraphMergeReply",
+            input: { id: "m9" },
+            output: { map: { messages: "{{ result.messages }}" } },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "reply" },
+        { from: "reply", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+  }
+
+  function threadParent(child: GraphSpec, nodes?: GraphSpec["nodes"]): GraphSpec {
+    const graphNodes = nodes ?? [{ id: "embed", type: "subgraph", spec: child }];
+    const edges =
+      graphNodes.length === 1
+        ? [
+            { from: "START", to: "embed" },
+            { from: "embed", to: "END" },
+          ]
+        : [
+            { from: "START", to: graphNodes.map((node) => node.id) },
+            ...graphNodes.map((node) => ({ from: node.id, to: "END" })),
+          ];
+    return {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "parent-thread" },
+      state: { channels: { messages: { type: "messages" } } },
+      nodes: graphNodes,
+      edges,
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+  }
+
+  const seeded = {
+    input: {
+      messages: [
+        new HumanMessage({ id: "m1", content: "one" }),
+        new HumanMessage({ id: "m2", content: "two" }),
+      ],
+    },
+  };
+
+  it.each([
+    ["messages reducer", { messages: { type: "messages" } }],
+    ["array replace", { messages: { type: "array" } }],
+    ["append", { messages: { type: "array", reducer: "append" } }],
+    ["undeclared", undefined],
+  ] as const)("a %s child that returns only its reply keeps the parent thread", async (_label, channels) => {
+    const compiled = await compileGraph(threadParent(replyChild(channels)), { checkpointer: "none" });
+    const result = await compiled.run(seeded);
+    expect(result.status).toBe("completed");
+    const messages = result.state["messages"] as Array<{ id?: string; content?: unknown }>;
+    expect(messages.map((message) => [message.id, message.content])).toEqual([
+      ["m1", "one"],
+      ["m2", "two"],
+      ["m9", "reply"],
+    ]);
+  });
+
+  it("completes when two subgraphs remove the same seeded id", async () => {
+    const child = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "child-drop" },
+      state: { channels: { messages: { type: "messages" } } },
+      nodes: [
+        {
+          id: "drop",
+          type: "function",
+          with: {
+            fn: "subgraphMergeDropM1",
+            output: { map: { messages: "{{ result.messages }}" } },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "drop" },
+        { from: "drop", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(
+      threadParent(child, [
+        { id: "branch-a", type: "subgraph", spec: child },
+        { id: "branch-b", type: "subgraph", spec: child },
+      ]),
+      { checkpointer: "none" },
+    );
+    const result = await compiled.run(seeded);
+    expect(result.status).toBe("completed");
+    const messages = result.state["messages"] as Array<{ id?: string; content?: unknown }>;
+    expect(messages.map((message) => message.id)).toEqual(["m2"]);
+  });
+
+  it("lets the later sibling win when one removes an id and the other edits it", async () => {
+    const remover = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "child-remover" },
+      state: { channels: { messages: { type: "array" } } },
+      nodes: [
+        {
+          id: "drop",
+          type: "function",
+          with: {
+            fn: "subgraphMergeDropM1",
+            output: { map: { messages: "{{ result.messages }}" } },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "drop" },
+        { from: "drop", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+    const editor = {
+      ...remover,
+      metadata: { name: "child-editor" },
+      nodes: [
+        {
+          id: "edit",
+          type: "function",
+          with: {
+            fn: "subgraphMergeEditM1",
+            output: { map: { messages: "{{ result.messages }}" } },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "edit" },
+        { from: "edit", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(
+      threadParent(remover, [
+        { id: "branch-a", type: "subgraph", spec: remover },
+        { id: "branch-b", type: "subgraph", spec: editor },
+      ]),
+      { checkpointer: "none" },
+    );
+    const result = await compiled.run(seeded);
+    expect(result.status).toBe("completed");
+    const messages = result.state["messages"] as Array<{ id?: string; content?: unknown }>;
+    const byId = new Map(messages.map((message) => [message.id, message.content]));
+    expect(byId.get("m2")).toBe("two");
+    expect(byId.get("m1")).toBe("EDITED");
   });
 });
 

@@ -43,6 +43,8 @@ type NodeCtx = NodeRunContext & {
 interface EmbeddedChild {
   /** Child channels after output targets are declared, used to seed matching inputs. */
   channels: string[];
+  /** Reducer/type of each child channel, including auto-declared targets. */
+  channelDefs: Record<string, ChannelMergeDef>;
   invoke(
     input: Record<string, unknown>,
     lgConfig: import("@langchain/langgraph").LangGraphRunnableConfig,
@@ -109,6 +111,7 @@ export const subgraphNode = defineNode<Config>({
               childState: clean,
               seeds,
               parentChannels,
+              childChannelDefs: child.channelDefs,
               resolve: (ref) => resolveRef(ref, clean, {}, ctx),
             }),
           };
@@ -141,6 +144,7 @@ export const subgraphNode = defineNode<Config>({
             childState: clean,
             seeds,
             parentChannels,
+            childChannelDefs: child.channelDefs,
           }),
         };
       },
@@ -176,7 +180,14 @@ async function loadChild(
   }
 
   const declared = ensureDeclaredOutputChannels(spec);
-  const channels = Object.keys(declared.state?.channels ?? {});
+  const channelDefs: Record<string, ChannelMergeDef> = {};
+  for (const [name, def] of Object.entries(declared.state?.channels ?? {})) {
+    channelDefs[name] = {
+      ...(def.type ? { type: def.type } : {}),
+      ...(def.reducer ? { reducer: def.reducer } : {}),
+    };
+  }
+  const channels = Object.keys(channelDefs);
 
   const forwardSink = (event: FlowgraphEvent) => {
     parentEvents.emit(event.type, event.data, {
@@ -201,6 +212,7 @@ async function loadChild(
       return result;
     },
     channels,
+    channelDefs,
   };
 }
 
