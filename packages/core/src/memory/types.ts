@@ -55,6 +55,8 @@ export interface MemoryRecord {
 
 export type MemoryErrorCode =
   | "MEMORY_SUBJECT_UNRESOLVED"
+  | "MEMORY_GRAPH_NAME_INVALID"
+  | "MEMORY_THREAD_OWNER_INVALID"
   | "MEMORY_SCOPE_MISMATCH"
   | "MEMORY_VALUE_TOO_LARGE"
   | "MEMORY_SCOPE_FULL"

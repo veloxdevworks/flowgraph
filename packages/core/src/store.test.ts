@@ -4,6 +4,7 @@ import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@flowgraph/spec";
 import type { NodeRunContext } from "./context.js";
+import { createInMemoryMemoryBackend } from "./memory/index.js";
 
 function storeGraph(fn: string): GraphSpec {
   return {
@@ -84,5 +85,29 @@ describe("store", () => {
     const result = await compiled.run({ threadId: "no-store" });
     expect(result.status).toBe("completed");
     expect((result.state["result"] as { hasStore: boolean }).hasStore).toBe(false);
+  });
+});
+
+describe("store with a shared legacy backend", () => {
+  beforeEach(() => {
+    registerFunction("storeWriteOrg", async (input, ctx: NodeRunContext) => {
+      await ctx.store!.put(["notes"], "k", { v: (input as { v?: string }).v ?? "x" });
+      return { wrote: true };
+    });
+    registerFunction("storeReadOrg", async (_input, ctx: NodeRunContext) => {
+      const item = await ctx.store!.get(["notes"], "k");
+      return { value: item?.value ?? null };
+    });
+  });
+
+  it("memoryIdentity keeps same-name graphs in different orgs apart", async () => {
+    const backend = createInMemoryMemoryBackend();
+    const compile = (fn: string, org: string) =>
+      compileGraph(storeGraph(fn), { checkpointer: "memory", legacyStoreBackend: backend, memoryIdentity: { org, project: "p" } });
+    expect((await (await compile("storeWriteOrg", "acme")).run({ threadId: "w" })).status).toBe("completed");
+    const same = await (await compile("storeReadOrg", "acme")).run({ threadId: "r1" });
+    expect((same.state["result"] as { value: unknown }).value).toEqual({ v: "x" });
+    const other = await (await compile("storeReadOrg", "globex")).run({ threadId: "r2" });
+    expect((other.state["result"] as { value: unknown }).value).toBeNull();
   });
 });

@@ -10,7 +10,7 @@ import { registry } from "../registry.js";
 import { ISSUES_CHANNEL_CAP, issueDedupeKey, type RunIssue } from "./run-issues.js";
 
 export const ONCE_CHANNEL = "__once";
-/** Serialized agent replay dumps keyed by `threadId:nodeId`. */
+/** Declared so checkpoints written by older versions still load; the engine no longer reads or writes it. */
 export const REPLAY_CHANNEL = "__agentReplay";
 /** Fan-in bag for checkpointed map workers: `{ [mapId]: Array<{ i, v }> }`. */
 export const MAP_COLLECT_CHANNEL = "__mapCollect";
@@ -130,6 +130,11 @@ export function buildStateAnnotation(
 
   // Reserved idempotency channel: merge of completed once-keys → results
   fields[ONCE_CHANNEL] = Annotation<Record<string, unknown>>(mergeRecords);
+  // Unused, kept on purpose: threads checkpointed by earlier releases carry
+  // values (and pending writes) for this channel, and keeping it declared
+  // means those checkpoints restore into the same channel set. Nothing reads
+  // or writes it; agent replay entries come from the snapshot the engine
+  // attaches to interrupts (providers/replay-cache.ts).
   fields[REPLAY_CHANNEL] = Annotation<Record<string, unknown>>({
     reducer: (cur: Record<string, unknown> = {}, inc: Record<string, unknown>) => {
       const out: Record<string, unknown> = { ...cur };

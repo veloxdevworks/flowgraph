@@ -2,6 +2,8 @@
  * Shared outbound HTTP request helper used by the `http` and `demo` nodes.
  */
 
+import { guardedFetch, type OutboundHttpPolicy } from "../outbound-http.js";
+
 /** Header names whose values must never appear in event telemetry. */
 const SENSITIVE_HEADERS = new Set([
   "authorization",
@@ -37,6 +39,8 @@ export type PerformHttpRequestOptions = {
    */
   expectStatus?: number[] | "any";
   signal?: AbortSignal | null;
+  /** Host limits on where the request may connect (untrusted graphs). */
+  outbound?: OutboundHttpPolicy | undefined;
 };
 
 export type PerformHttpRequestResult = {
@@ -88,7 +92,9 @@ export async function performHttpRequest(
     signal: opts.signal ?? null,
   };
 
-  const response = await fetch(fullUrl, requestInit);
+  const response = opts.outbound
+    ? await guardedFetch(fullUrl, { method, headers: requestHeaders, body, signal: opts.signal ?? null }, opts.outbound)
+    : await fetch(fullUrl, requestInit);
 
   if (opts.expectStatus !== "any") {
     const allowedStatuses = opts.expectStatus ?? [200, 201, 202, 204];

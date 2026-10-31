@@ -17,7 +17,10 @@ import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
 import pg from "pg";
 import { DEFAULT_SETUP_LOCK_TIMEOUT_MS, retrySetupRace, withSetupLock } from "./setup-lock.js";
+import type { GraphNameRegistry, ThreadOwnerRegistry } from "@flowgraph/core";
 import {
+  createPostgresGraphNameRegistry,
+  createPostgresThreadOwnerRegistry,
   createPostgresMemoryBackend,
   maybeSweepPostgres,
   quoteSchema,
@@ -98,6 +101,10 @@ export interface PostgresBackend {
   pool: pg.Pool;
   checkpointer: BaseCheckpointSaver;
   memory: PostgresMemoryBackend;
+  /** Graph-name ownership (first registrant owns a name within an org), in the same schema. */
+  graphNames: GraphNameRegistry;
+  /** Thread ownership (who started each thread id), next to the checkpoints. */
+  threadOwners: ThreadOwnerRegistry;
   /** Ends the pool if this call created it. */
   close(): Promise<void>;
 }
@@ -148,11 +155,16 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
         )
       : await createPostgresMemoryBackend(pool, { schema, migrate: false });
     await maybeSweepPostgres(memory, opts.sweepIntervalMs ?? 3_600_000);
+    // Migrations above created its table.
+    const graphNames = await createPostgresGraphNameRegistry(pool, { schema, migrate: false });
+    const threadOwners = await createPostgresThreadOwnerRegistry(pool, { schema, migrate: false });
     let closed = false;
     return {
       pool,
       checkpointer: saver as unknown as BaseCheckpointSaver,
       memory,
+      graphNames,
+      threadOwners,
       async close() {
         if (closed || !owned) return;
         closed = true;
@@ -168,6 +180,8 @@ export async function openPostgresBackend(connStringOrOptions: string | Postgres
 export { PostgresSaver, DEFAULT_SETUP_LOCK_TIMEOUT_MS };
 export {
   createPostgresMemoryBackend,
+  createPostgresGraphNameRegistry,
+  createPostgresThreadOwnerRegistry,
   maybeSweepPostgres,
   memoryWriteLockKey,
   migratePostgresMemorySchema,

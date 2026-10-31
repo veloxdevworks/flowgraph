@@ -14,6 +14,7 @@ import { defineNode, type CompiledNode, type BuildContext, type NodeResult } fro
 import type { NodeRunContext } from "../context.js";
 import { parseDuration, sleep } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
+import { assertInboundWebhookAllowed, nodePolicyOf } from "../node-policy.js";
 
 const configSchema = WaitWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -48,6 +49,7 @@ export const waitNode = defineNode<Config>({
         // Inbound webhook — durable interrupt until HTTP POST resumes
         if (config.webhook) {
           const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
+          assertInboundWebhookAllowed(nodePolicyOf(ctx), `wait node "${nodeId}" with.webhook`);
           const schema = webhookSchema(config);
           const payload = ctx.interrupt<unknown>({
             reason: `Waiting for webhook callback on node "${nodeId}"`,

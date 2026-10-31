@@ -25,7 +25,7 @@ import { summaryBlock } from "../context/summary-block.js";
 import type { ContextMessage, ContextPolicy, ContextStats, ProviderContextManager } from "../context/types.js";
 import { getProvider } from "../providers/registry.js";
 import type { AgentRequest, AgentResult, ProviderAdapter, TokenUsage, ToolSpec } from "../providers/types.js";
-import { isGraphInterrupt, memoryReplayCache } from "../providers/replay-cache.js";
+import { isGraphInterrupt, type ReplayStore } from "../providers/replay-cache.js";
 import { ISSUE_CODE } from "../runtime/run-issues.js";
 
 export const TRANSCRIPT_HEADER = "Conversation so far:";
@@ -117,6 +117,8 @@ export function startAgentContext(args: {
   agentProvider: string;
   agentModel?: string | undefined;
   cacheKey: string;
+  /** Replay entries of this execution (see RunScope); summaries are cached here. */
+  replayStore: ReplayStore;
   /** Another agent in this graph uses the same history channel. */
   sharedHistory?: boolean;
   system?: string | undefined;
@@ -124,7 +126,7 @@ export function startAgentContext(args: {
   tools: ToolSpec[];
   onUsage(usage: TokenUsage): void;
 }): AgentContextSession {
-  const { policy, ctx, state, cacheKey } = args;
+  const { policy, ctx, state, cacheKey, replayStore } = args;
   const est = getTokenEstimator(policy.estimator);
   const stored = readHistory(state, policy, args.nodeLabel, ctx.nodeId);
   const promptMsg: ContextMessage = { role: "user", content: args.prompt };
@@ -135,7 +137,7 @@ export function startAgentContext(args: {
       ? undefined
       : async (r) => {
           const idx = `ctx:summary:${r.index}`;
-          const cached = memoryReplayCache.get(cacheKey, idx);
+          const cached = replayStore.get(cacheKey, idx);
           if (typeof cached === "string") return cached;
           let text: string;
           const s = policy.summarize;
@@ -168,7 +170,7 @@ export function startAgentContext(args: {
               text = await extractive(r);
             }
           }
-          memoryReplayCache.set(cacheKey, idx, text);
+          replayStore.set(cacheKey, idx, text);
           return text;
         };
 

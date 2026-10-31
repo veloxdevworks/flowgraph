@@ -1,4 +1,4 @@
-import { RunService } from "./run-service.js";
+import { DEFAULT_SHUTDOWN_TIMEOUT_MS, RunService } from "./run-service.js";
 import { listen } from "./http/app.js";
 import { defaultServerConfig } from "./types.js";
 import { errorFields, log } from "./metrics.js";
@@ -13,18 +13,27 @@ async function main(): Promise<void> {
   const service = new RunService(config);
   const server = await listen(service, config);
 
+  let stopping = false;
   const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
     log("info", "shutting down");
-    server.close(() => {
-      service.close().then(
-        () => process.exit(0),
-        (err: unknown) => {
-          log("error", "shutdown.failed", errorFields(err));
-          process.exit(1);
-        },
-      );
-    });
-    setTimeout(() => process.exit(1), 10_000).unref();
+    // Stop taking connections, refuse new runs and wait for the ones in
+    // flight, then drop idle and streaming (SSE) connections so the listener
+    // can close. The hard exit is a backstop past the drain timeout.
+    server.close();
+    const drainMs = config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    setTimeout(() => process.exit(1), drainMs + 5_000).unref();
+    service.close().then(
+      () => {
+        server.closeAllConnections?.();
+        process.exit(0);
+      },
+      (err: unknown) => {
+        log("error", "shutdown.failed", errorFields(err));
+        process.exit(1);
+      },
+    );
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

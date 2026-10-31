@@ -5,12 +5,12 @@ import path from "node:path";
 import yaml from "yaml";
 import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import type { GraphSpec } from "@flowgraph/spec";
+import { MemorySaver } from "@langchain/langgraph";
 import { compileGraph } from "../compiler.js";
 import { registerTool } from "../index.js";
 import { createLangChainProvider, type ChatModelLike } from "../providers/langchain/index.js";
 import { createScriptedProvider } from "../providers/index.js";
 import type { AgentRequest, ProviderAdapter } from "../providers/types.js";
-import { clearAllReplayCaches } from "../providers/replay-cache.js";
 import { createInMemoryMemoryBackend, defaultMemoryPolicy, type MemoryIdentity } from "../index.js";
 import { bytesEstimator as est } from "../context/estimator.js";
 import { registerFunction } from "./function.js";
@@ -201,12 +201,17 @@ describe("agent with.context: resume determinism", () => {
       { maxTokens: 6000, strategy: "summarize", toolResultMaxTokens: 1500, summarize: { provider: "ctx-cheap", maxTokens: 200 } },
       { permission, tools: [{ function: "ctx_counted" }] },
     );
-    const g = await compileGraph(spec, { providers: [createLangChainProvider(fm.model, { name: "lc-resume" }), cheap] });
+    // One checkpointer for the thread; "restart" compiles a new graph (a new
+    // process, in effect) for every resume, so only the checkpoint carries over.
+    const saver = new MemorySaver();
+    const compile = () =>
+      compileGraph(spec, { checkpointer: saver, providers: [createLangChainProvider(fm.model, { name: "lc-resume" }), cheap] });
+    let g = await compile();
     const threadId = `resume-${permission}-${restart}-${Date.now()}`;
     let r = await g.run({ threadId, onInterrupt: "fail" });
     let resumes = 0;
     while (r.status === "interrupted" && resumes < 20) {
-      if (restart) clearAllReplayCaches();
+      if (restart) g = await compile();
       r = await g.resume({ threadId, resume: true, onInterrupt: "fail" });
       resumes++;
     }
@@ -214,7 +219,7 @@ describe("agent with.context: resume determinism", () => {
   }
 
   for (const restart of [false, true]) {
-    it(`interrupting on every tool call gives the same model inputs and summaries as one straight run${restart ? " (replay cache lost between resumes)" : ""}`, async () => {
+    it(`interrupting on every tool call gives the same model inputs and summaries as one straight run${restart ? " (a new compiled graph for every resume)" : ""}`, async () => {
       const auto = await runCase("auto", restart);
       const ask = await runCase("ask", restart);
       expect(auto.r.error?.message).toBeUndefined();
