@@ -75,6 +75,7 @@ export {
   LocalToolsFsSchema,
   LocalToolsSchema,
   RuntimeSchema,
+  CheckpointRetentionSchema,
   RetrySchema,
   DurationSchema,
   OutputMappingSchema,

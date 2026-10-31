@@ -10,7 +10,11 @@ import {
   envExpansionCollisionDiagnostics,
   LOAD_TIME_ENV_VAR_RE,
 } from "./runtime/env-expansion-lint.js";
-import { graphLintDiagnostics } from "./runtime/validate-graph.js";
+import {
+  graphLintDiagnostics,
+  subgraphOutputSites,
+  unknownSubgraphOutputDiagnostics,
+} from "./runtime/validate-graph.js";
 import { registry } from "./registry.js";
 import "./nodes/index.js";
 
@@ -21,10 +25,14 @@ export {
 
 export async function loadGraph(
   filePath: string,
-  opts: { cwd?: string } = {},
+  opts: { cwd?: string; seen?: Set<string> } = {},
 ): Promise<{ spec: GraphSpec | null; diagnostics: Diagnostic[] }> {
   const cwd = opts.cwd ?? process.cwd();
   const resolved = path.resolve(cwd, filePath);
+  const seen = opts.seen ?? new Set<string>();
+  // A cycle (parent → child → parent) must not load the same file forever.
+  if (seen.has(resolved)) return { spec: null, diagnostics: [] };
+  seen.add(resolved);
 
   let raw: string;
   try {
@@ -73,7 +81,52 @@ export async function loadGraph(
     };
   }
 
-  return { spec: result.data, diagnostics: envCollisionDiags };
+  const diagnostics = [...envCollisionDiags];
+  diagnostics.push(...(await fileSubgraphOutputDiagnostics(result.data, path.dirname(resolved), seen)));
+  return { spec: result.data, diagnostics };
+}
+
+function subgraphAliases(spec: GraphSpec): Record<string, string> {
+  const aliases: Record<string, string> = {};
+  for (const imp of spec.imports ?? []) {
+    if ("subgraph" in imp && typeof imp.subgraph === "string") {
+      aliases[imp.as ?? imp.subgraph] = imp.subgraph;
+    }
+  }
+  return aliases;
+}
+
+function isGraphFileRef(ref: string): boolean {
+  return (
+    ref.endsWith(".yaml") ||
+    ref.endsWith(".yml") ||
+    ref.startsWith(".") ||
+    ref.includes("/") ||
+    ref.includes("\\")
+  );
+}
+
+/**
+ * `stateMap.out` values that name a channel the file child does not declare.
+ * Inline children are checked in `validateSpec` (no filesystem).
+ */
+async function fileSubgraphOutputDiagnostics(
+  spec: GraphSpec,
+  dir: string,
+  seen: Set<string>,
+): Promise<Diagnostic[]> {
+  const diagnostics: Diagnostic[] = [];
+  const aliases = subgraphAliases(spec);
+  for (const site of subgraphOutputSites(spec)) {
+    if (!site.out || !site.uses || site.inline) continue;
+    const ref = aliases[site.uses] ?? site.uses;
+    if (!isGraphFileRef(ref)) continue;
+    const childPath = path.resolve(dir, ref);
+    const child = await loadGraph(childPath, { cwd: path.dirname(childPath), seen });
+    if (!child.spec) continue;
+    diagnostics.push(...unknownSubgraphOutputDiagnostics(site, child.spec));
+  }
+  return diagnostics;
 }
 
 function expandEnvVars(yaml: string): string {

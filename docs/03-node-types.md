@@ -527,11 +527,13 @@ Composes a child graph as a single node. Enables modular libraries of graphs and
   uses: tests                    # imported via imports[].subgraph
   input: { repo: "{{ state.repo }}", sha: "{{ state.sha }}" }
   with:
-    output: { map: { testResults: "{{ result.summary }}" } }
-    # state mapping between parent/child channels:
+    # state mapping between parent/child channels (destination ← source):
     stateMap:
-      in:  { repo: repo, sha: sha }
-      out: { summary: testResults }
+      in:                        # child channel ← parent channel
+        repo: repo
+        sha: sha
+      out:                       # parent channel ← child channel
+        summary: testResults
 ```
 
 Provide **exactly one** of:
@@ -539,9 +541,21 @@ Provide **exactly one** of:
 - `uses:` — path or `imports[].subgraph` alias (resolved from the graph's working directory at run time)
 - `spec:` — an inline child `GraphSpec` (produced by `bundleGraphForRemote` for remote portability; the engine compiles it via `compileGraphForEmbedding` without reading the filesystem)
 
-The child graph runs with its own channels; `stateMap` projects parent state in and child state out. Child events are nested under the parent's span. The parent must use checkpointing (`runtime.checkpoint`) for nested HITL inside the child to pause and resume correctly — the child inherits the parent's LangGraph checkpointer.
+The child graph runs with its own channels. `stateMap.in` seeds the child (omit it and channels that share a name are copied in). `stateMap.out` writes back: **keys are parent channels, values are child channels** or `{{ }}` expressions. Omit `stateMap.out` and channels that share a name merge. Either way the **parent's reducer** combines the write — an `append` channel receives only the items the child added, and a `merge` channel receives only the keys the child changed. Child-only channels and the child's `outputs` bag stay in the child unless `stateMap.out` names them.
+
+`output: none` writes nothing. `output.to` / `output.map` (with no `stateMap.out`) is the ordinary node projection of the whole child state.
+
+A delta is applied only when the parent channel being written is the same channel that seeded the child. `in: { draft: "{{ state.input }}" }` and `out: { result: draft }` still copies `draft` into `result` when the child does not change it. Message channels keep edits to an existing id. A missing id becomes a removal only when the **child** channel uses the messages reducer (the child already applied that removal). A child channel that is `array`, `append`, or undeclared and returns only its reply does not wipe the parent thread; an explicit `RemoveMessage` in that reply is still applied. A second removal of an id that is already gone is ignored, so two parallel subgraphs can remove the same id. When one sibling removes an id and another edits it, writes apply in node-id order and the later sibling wins: an edit after a removal appends the message again, and a removal after an edit deletes it.
+
+**Limits.** `append` cannot delete: a child that shortens a list leaves the missing items on the parent, and items it still contains are not appended again. A `custom:` reducer receives the child's full value, so an additive reducer counts a seeded value twice (`5` seeded, child stores `8`, parent becomes `13`). Return only the delta from the child, or write a last-write channel. A `custom:` reducer that wraps the messages reducer does not get subgraph removals either: a missing id is turned into a `RemoveMessage` only when the child channel is `type: messages` or `reducer: messages`. An unchanged last-write value is not written back, so a parallel sibling that does write that channel wins. Anywhere in a graph, a `RemoveMessage` for an id that is not in the channel does nothing (it used to throw) and emits a warning log.
+
+Inside `map`, the subgraph's update is the per-item value (`collect` merges those in input order). A single changed channel, or a single `stateMap.out` entry, becomes that item; several changed channels become one object.
+
+Child events are nested under the parent's span. The parent must use checkpointing (`runtime.checkpoint`) for nested HITL inside the child to pause and resume correctly — the child inherits the parent's LangGraph checkpointer. The merge into the parent happens when the child finishes, so a resume sees the seeded parent value plus everything the child produced, once.
 
 On resume, the parent `subgraph` node re-executes from the top (recomputing `stateMap.in`). Side effects reached before a nested interrupt should use `ctx.once()` so they do not re-fire on replay (same pattern as top-level HITL nodes).
+
+`flowgraph validate` errors when an `out` key is not a parent channel (`UNDECLARED_OUTPUT_CHANNEL`) or an `out` value names a child channel that does not exist (`SUBGRAPH_OUTPUT_UNKNOWN`).
 
 ---
 

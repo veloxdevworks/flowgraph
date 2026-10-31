@@ -8,6 +8,7 @@ export {
   readPersistedGraphYaml,
   listPersistedGraphs,
   updateGraphMeta,
+  GraphMetaUnreadableError,
   appendEventJournal,
   loadEventJournal,
 } from "./graph-source.js";

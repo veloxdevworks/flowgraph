@@ -2,7 +2,9 @@
  * Built-in node type: `subgraph`
  *
  * Embeds another graph as a single node. `stateMap.in` projects parent state
- * into the child's channels; `stateMap.out` projects child results back.
+ * into the child's channels (child ← parent). `stateMap.out` projects child
+ * results back (parent ← child). With no `stateMap.out`, channels that share
+ * a name merge, and the parent's reducer combines only the child's new values.
  *
  * Nested HITL: the child graph is invoked with the parent's LangGraph RunnableConfig
  * so interrupts propagate to the parent checkpoint (see LangGraph subgraph docs).
@@ -24,7 +26,14 @@ import { assertSubgraphFileAllowed, isReservedChannel, nodePolicyOf, withoutRese
 import { childRunConfig } from "../providers/replay-cache.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
+import { ensureDeclaredOutputChannels } from "../runtime/validate-graph.js";
 import { applyOutput, isOutputNone } from "./output.js";
+import {
+  projectExplicitOutput,
+  projectMatchingOutput,
+  projectSubgraphInput,
+  type ChannelMergeDef,
+} from "./subgraph-merge.js";
 
 const configSchema = SubgraphWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -35,6 +44,10 @@ type NodeCtx = NodeRunContext & {
 };
 
 interface EmbeddedChild {
+  /** Child channels after output targets are declared, used to seed matching inputs. */
+  channels: string[];
+  /** Reducer/type of each child channel, including auto-declared targets. */
+  channelDefs: Record<string, ChannelMergeDef>;
   invoke(
     input: Record<string, unknown>,
     lgConfig: import("@langchain/langgraph").LangGraphRunnableConfig,
@@ -78,15 +91,14 @@ export const subgraphNode = defineNode<Config>({
         const child = await childPromise;
 
         const nodeInput = nodeCtx._input ?? {};
-        let childInput: Record<string, unknown>;
-        if (config.stateMap?.in) {
-          childInput = {};
-          for (const [childChannel, parentExpr] of Object.entries(config.stateMap.in)) {
-            childInput[childChannel] = resolveRef(parentExpr, state, nodeInput, ctx);
-          }
-        } else {
-          childInput = { ...state, ...nodeInput };
-        }
+        const parentChannels = (ctx.config.channels ?? {}) as Record<string, ChannelMergeDef>;
+        const { input: childInput, seeds } = projectSubgraphInput({
+          stateMapIn: config.stateMap?.in,
+          parentState: state,
+          nodeInput,
+          childChannels: child.channels,
+          resolve: (ref) => resolveRef(ref, state, nodeInput, ctx),
+        });
 
         ctx.emit("node.output", { subgraph: label, input: Object.keys(childInput) });
 
@@ -95,12 +107,19 @@ export const subgraphNode = defineNode<Config>({
         const childState = await child.invoke(withoutReservedKeys(childInput), childRunConfig(lgConfig, ctx.nodeId));
         const clean = stripSubgraphState(childState);
 
+        // Explicit parent ← child mapping. The parent's reducer sees a delta
+        // only when this parent channel is the one that seeded the child value.
         if (config.stateMap?.out) {
-          const update: Record<string, unknown> = {};
-          for (const [parentChannel, childExpr] of Object.entries(config.stateMap.out)) {
-            update[parentChannel] = resolveRef(childExpr, clean, {}, ctx);
-          }
-          return { update };
+          return {
+            update: projectExplicitOutput({
+              out: config.stateMap.out,
+              childState: clean,
+              seeds,
+              parentChannels,
+              childChannelDefs: child.channelDefs,
+              resolve: (ref) => resolveRef(ref, clean, {}, ctx),
+            }),
+          };
         }
 
         // Opt out of writing anything into the parent.
@@ -122,8 +141,17 @@ export const subgraphNode = defineNode<Config>({
           };
         }
 
-        // Default: merge the child's state into the parent (transparent passthrough).
-        return { update: clean };
+        // No explicit mapping: merge channels that share a name. Changed child-only
+        // channels stay on the update so `map` can unwrap them; the parent graph
+        // drops any key it did not declare.
+        return {
+          update: projectMatchingOutput({
+            childState: clean,
+            seeds,
+            parentChannels,
+            childChannelDefs: child.channelDefs,
+          }),
+        };
       },
     };
   },
@@ -157,6 +185,16 @@ async function loadChild(
     spec = loaded.spec;
   }
 
+  const declared = ensureDeclaredOutputChannels(spec);
+  const channelDefs: Record<string, ChannelMergeDef> = {};
+  for (const [name, def] of Object.entries(declared.state?.channels ?? {})) {
+    channelDefs[name] = {
+      ...(def.type ? { type: def.type } : {}),
+      ...(def.reducer ? { reducer: def.reducer } : {}),
+    };
+  }
+  const channels = Object.keys(channelDefs);
+
   const forwardSink = (event: FlowgraphEvent) => {
     parentEvents.emit(event.type, event.data, {
       ...event.scope,
@@ -182,6 +220,8 @@ async function loadChild(
       )) ?? {}) as Record<string, unknown>;
       return result;
     },
+    channels,
+    channelDefs,
   };
 }
 

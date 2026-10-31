@@ -145,7 +145,7 @@ describe("validateSpec graph lint", () => {
     expect(undeclared[0]!.message).toContain("missing");
   });
 
-  it("errors when subgraph stateMap.out values target undeclared parent channels", () => {
+  it("errors when subgraph stateMap.out keys target undeclared parent channels", () => {
     const diags = validateSpec({
       metadata: { name: "undeclared-statemap" },
       nodes: [
@@ -169,10 +169,13 @@ describe("validateSpec graph lint", () => {
       diags.some(
         (d) =>
           d.code === "UNDECLARED_OUTPUT_CHANNEL" &&
-          d.message.includes("testResults") &&
+          d.message.includes("summary") &&
           d.path === "nodes.child.with.stateMap.out",
       ),
     ).toBe(true);
+    expect(diags.some((d) => d.code === "UNDECLARED_OUTPUT_CHANNEL" && d.message.includes("testResults"))).toBe(
+      false,
+    );
   });
 
   it("does not error when output channels are declared", () => {

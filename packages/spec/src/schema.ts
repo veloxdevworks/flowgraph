@@ -706,10 +706,23 @@ export const ScriptWithSchema = BaseWithSchema.extend({
 export const SubgraphWithSchema = BaseWithSchema.extend({
   stateMap: z
     .object({
-      in: z.record(z.string()).optional(),
-      out: z.record(z.string()).optional(),
+      /** Child channel ← parent channel name or `{{ }}` expression. */
+      in: z
+        .record(z.string())
+        .optional()
+        .describe("Child channel ← parent channel or {{ }} expression"),
+      /**
+       * Parent channel ← child channel name or `{{ }}` expression.
+       * Keys are parent channels (where the value is written). Values read the child.
+       * Omit to merge channels that share a name; the parent's reducer applies.
+       */
+      out: z
+        .record(z.string())
+        .optional()
+        .describe("Parent channel ← child channel or {{ }} expression"),
     })
-    .optional(),
+    .optional()
+    .describe("Explicit projection between parent and child channels"),
 });
 
 // map node
@@ -1188,6 +1201,38 @@ export const RuntimeMemorySchema = z
   })
   .strict();
 
+export const CheckpointRetentionSchema = z.union([
+  z.boolean(),
+  z
+    .object({
+      /** Default true. `false` keeps every checkpoint and finished thread. */
+      enabled: z.boolean().optional(),
+      /** Newest checkpoints kept per thread namespace. Default 40. Minimum 1. */
+      maxCheckpoints: z.number().int().positive().optional(),
+      /**
+       * Interrupt and resume checkpoints kept outside that window, newest first.
+       * Default 8. The newest checkpoint is always kept.
+       */
+      maxInterruptPoints: z.number().int().nonnegative().optional(),
+      /**
+       * Opt-in. Delete completed threads older than this (`14d`, `12h`).
+       * `null` (the default) keeps them. Errored, aborted, and paused threads
+       * are never deleted.
+       */
+      finishedTtl: z.union([DurationSchema, z.null()]).optional(),
+      /**
+       * Opt-in. How many completed threads to keep. `null` (the default) does
+       * not cap them. `0` deletes a completed thread when the run finishes.
+       */
+      maxFinishedThreads: z.number().int().nonnegative().nullable().optional(),
+      /** Store each channel version once. Default true. */
+      dedupeChannels: z.boolean().optional(),
+      /** `auto` VACUUMs sqlite when free pages exceed live data. Default auto. */
+      vacuum: z.enum(["auto", "always", "never"]).optional(),
+    })
+    .strict(),
+]);
+
 export const RuntimeSchema = z.object({
   checkpoint: z
     .object({
@@ -1195,6 +1240,8 @@ export const RuntimeSchema = z.object({
       backend: CheckpointBackendSchema.optional().default("memory"),
       path: z.string().optional(),
       namespace: z.string().optional(),
+      /** Bound checkpoint history. Omitted means the default retention policy. */
+      retention: CheckpointRetentionSchema.optional(),
     })
     .optional(),
   store: z

@@ -8,6 +8,7 @@
 
 import type { GraphSpec, NodeSpec, Diagnostic } from "@flowgraph/spec";
 import type { Logger } from "../context.js";
+import { stateMapOutEntries } from "../nodes/subgraph-merge.js";
 
 /** Channels a node writes via explicit `with.output` / `with.collect` projections. */
 export function outputChannelsForNode(node: NodeSpec): string[] {
@@ -29,6 +30,10 @@ export function outputChannelsForNode(node: NodeSpec): string[] {
 
   addFrom(withBlock["output"]);
   addFrom(withBlock["collect"]);
+  const subgraphOut = stateMapOutEntries(withBlock);
+  if (subgraphOut) {
+    for (const channel of Object.keys(subgraphOut)) channels.add(channel);
+  }
 
   return [...channels];
 }

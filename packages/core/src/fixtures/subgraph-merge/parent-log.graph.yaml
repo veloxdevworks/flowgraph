@@ -1,0 +1,24 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: parent-log
+  description: File subgraph. Matching channels merge; the parent's append reducer keeps the seed once.
+
+state:
+  channels:
+    title: { type: string, default: kept }
+    marker: { type: string, default: stay }
+    log: { type: array, reducer: append, default: [seed] }
+    note: { type: string, default: "" }
+
+nodes:
+  - id: embed
+    type: subgraph
+    uses: ./child-log.graph.yaml
+
+edges:
+  - { from: START, to: embed }
+  - { from: embed, to: END }
+
+runtime:
+  checkpoint: { enabled: false }
