@@ -217,8 +217,14 @@ async function syncDir(dir: string): Promise<void> {
  * Test seams. `beforeMetaCreate` runs after a store has found no meta file
  * for a new thread and before it creates one, which is where another server
  * process sharing the store can create the same file first.
+ * `beforeGraphMove` runs after the meta file is created and before the
+ * staged graph is moved into place, which is where another server can
+ * already see the new thread and update it.
  */
-export const graphStoreHooks: { beforeMetaCreate?: (threadId: string, metaPath: string) => Promise<void> | void } = {};
+export const graphStoreHooks: {
+  beforeMetaCreate?: (threadId: string, metaPath: string) => Promise<void> | void;
+  beforeGraphMove?: (threadId: string, graphPath: string) => Promise<void> | void;
+} = {};
 
 /** Meta updates in progress, by meta file path. */
 const metaLocks = new Map<string, Promise<unknown>>();
@@ -394,11 +400,18 @@ function threadIdTaken(threadId: string): ServerRequestError {
  * 409 THREAD_ID_CONFLICT and changes neither file. The graph is flushed to a
  * temporary file before the claim and moved into place after it, so the
  * loser never replaces the winner's graph.
+ *
+ * If moving the graph fails after the claim, the meta file stays. Once it
+ * exists, another server may have read it and replaced it (the same owner
+ * retrying elsewhere), and no check-then-delete can tell the files apart
+ * without a window in which the other server's record is lost. Keeping it is
+ * the state a crash at that point leaves: the thread stays claimed by the
+ * requesting owner (who is already recorded in the thread owner registry),
+ * other callers are refused, and the owner's next upload stores the graph.
  */
 async function createThreadFiles(dir: string, threadId: string, filePath: string, yaml: string, meta: GraphMeta): Promise<void> {
   const metaPath = metaPathFor(dir, threadId);
   const stagedYaml = await stageFile(filePath, yaml);
-  let claimed = false;
   try {
     await graphStoreHooks.beforeMetaCreate?.(threadId, metaPath);
     try {
@@ -412,12 +425,10 @@ async function createThreadFiles(dir: string, threadId: string, filePath: string
       }
       throw threadIdTaken(threadId);
     }
-    claimed = true;
+    await graphStoreHooks.beforeGraphMove?.(threadId, filePath);
     await fs.rename(stagedYaml, filePath);
   } catch (err) {
     await fs.rm(stagedYaml, { force: true }).catch(() => undefined);
-    // The meta file was ours: without its graph it would describe nothing.
-    if (claimed) await fs.rm(metaPath, { force: true }).catch(() => undefined);
     throw err;
   }
   await syncDir(dir);
@@ -536,7 +547,9 @@ export async function readPersistedGraphYaml(dir: string, threadId: string): Pro
  * List persisted run metadata (graph store + `.meta.json` files). Meta files
  * that cannot be read are left out and passed to `onUnreadable` (with the
  * thread id as spelled in the file name), so a caller can tell them from
- * threads without an owner.
+ * threads without an owner. A file whose name holds no valid thread id (such
+ * as `.graph.yaml.meta.json`, an empty id) is skipped and logged: no request
+ * can address that thread, and it must not hide the others.
  */
 export async function listPersistedGraphs(
   dir: string,
@@ -549,6 +562,12 @@ export async function listPersistedGraphs(
     for (const name of names) {
       if (!name.endsWith(".graph.yaml.meta.json")) continue;
       const threadId = name.slice(0, -".graph.yaml.meta.json".length);
+      try {
+        assertValidThreadId(threadId);
+      } catch (err) {
+        log("warn", "graph meta file skipped", { path: path.join(dir, name), message: (err as Error).message });
+        continue;
+      }
       let meta: GraphMeta | null;
       try {
         meta = await readGraphMeta(dir, threadId);

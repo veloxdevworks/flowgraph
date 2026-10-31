@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFileExclusive,
   graphStoreHooks,
+  listPersistedGraphs,
   MAX_THREAD_ID_LENGTH,
   parseGraphYaml,
   persistGraph,
@@ -36,6 +37,7 @@ const bob: ThreadOwner = { id: "bob", org: "o" };
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   delete graphStoreHooks.beforeMetaCreate;
+  delete graphStoreHooks.beforeGraphMove;
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
@@ -168,5 +170,66 @@ describe("thread ids", () => {
     });
     expect(await fs.readFile(path.join(dir, "a_b.graph.yaml.meta.json"), "utf-8")).toBe(before);
     expect(await updateGraphMeta(dir, "a/b", { status: "running" })).toMatchObject({ threadId: "a/b", label: "mine", status: "running" });
+  });
+});
+
+describe("when moving a new thread's graph into place fails", () => {
+  const moveFailed = () => Object.assign(new Error("operation not permitted, rename"), { code: "EPERM" });
+  const strayFiles = async (dir: string) => (await fs.readdir(dir)).filter((n) => n.endsWith(".tmp"));
+
+  it("keeps the record another server wrote after the claim, so nobody else can take the thread", async () => {
+    const dir = await storeDir();
+    const other = await otherServer();
+    // The same owner's retry lands on another server, which sees the claim and updates the thread.
+    graphStoreHooks.beforeGraphMove = async () => {
+      await other.persistGraph(dir, "t", OTHER_YAML, spec(OTHER_YAML), { owner: alice, label: "from-other" });
+      throw moveFailed();
+    };
+    await expect(persistGraph(dir, "t", YAML, spec(YAML), { owner: alice })).rejects.toMatchObject({ code: "EPERM" });
+    expect(await readGraphMeta(dir, "t")).toMatchObject({ owner: alice, label: "from-other", graphName: "other-server" });
+    expect((await readPersistedGraphYaml(dir, "t"))?.yaml).toBe(OTHER_YAML);
+    expect(await strayFiles(dir)).toEqual([]);
+    // A third server, for another user, finds the thread stored and cannot become its owner.
+    const third = await otherServer();
+    await third.persistGraph(dir, "t", YAML, spec(YAML), { owner: bob });
+    expect(await readGraphMeta(dir, "t")).toMatchObject({ owner: alice });
+  });
+
+  it("keeps the claim for its owner, whose next upload stores the graph", async () => {
+    const dir = await storeDir();
+    graphStoreHooks.beforeGraphMove = () => {
+      throw moveFailed();
+    };
+    await expect(persistGraph(dir, "t", YAML, spec(YAML), { owner: alice })).rejects.toMatchObject({ code: "EPERM" });
+    delete graphStoreHooks.beforeGraphMove;
+    expect(await readGraphMeta(dir, "t")).toMatchObject({ owner: alice });
+    expect(await readPersistedGraphYaml(dir, "t")).toBeNull();
+    expect(await strayFiles(dir)).toEqual([]);
+    await persistGraph(dir, "t", YAML, spec(YAML), { owner: alice });
+    expect(await readPersistedGraphYaml(dir, "t")).toMatchObject({ yaml: YAML, meta: { owner: alice } });
+  });
+});
+
+describe("listing stored threads", () => {
+  it("skips a meta file whose name holds no thread id and lists the rest", async () => {
+    const dir = await storeDir();
+    await persistGraph(dir, "keep", YAML, spec(YAML), { owner: alice });
+    // Left by a host that stored an empty thread id before ids were checked.
+    const now = new Date().toISOString();
+    await fs.writeFile(path.join(dir, ".graph.yaml.meta.json"), JSON.stringify({ threadId: "", storedAt: now, updatedAt: now, owner: alice }));
+    await fs.writeFile(path.join(dir, ".graph.yaml"), YAML);
+    const unreadable: string[] = [];
+    expect((await listPersistedGraphs(dir, { onUnreadable: (t) => unreadable.push(t) })).map((m) => m.threadId)).toEqual(["keep"]);
+    expect(unreadable).toEqual([]);
+
+    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, authToken: "t" });
+    await s.init();
+    cleanup.push(() => s.close());
+    expect((await s.listRuns()).map((r) => r.threadId)).toEqual(["keep"]);
+    const claims: string[] = [];
+    const owners = { get: async () => null, claim: async (t: string, o: string) => (claims.push(t), { owner: o, created: true }) };
+    (s as unknown as { threadOwners: unknown }).threadOwners = owners;
+    expect(await s.backfillThreadOwners()).toEqual({ claimed: 1, existing: 0, conflicts: 0, skipped: 0, unreadable: 0 });
+    expect(claims).toEqual(["keep"]);
   });
 });
