@@ -7,15 +7,16 @@
  *   - `createScriptedProvider(name, handler)`: full control over AgentResult.
  */
 
-import { defineProvider, type AgentRequest, type AgentResult, type ProviderAdapter, type ProviderRunContext } from "./types.js";
+import { defineProvider, type AgentRequest, type AgentResult, type ProviderAdapter, type ProviderCapabilities, type ProviderRunContext } from "./types.js";
 
 export function createScriptedProvider(
   name: string,
   handler: (req: AgentRequest, ctx: ProviderRunContext) => AgentResult | Promise<AgentResult>,
+  capabilities: Partial<ProviderCapabilities> = {},
 ): ProviderAdapter {
   return defineProvider({
     name,
-    capabilities: { toolCalling: true, structuredOutput: true, streaming: false },
+    capabilities: { toolCalling: true, structuredOutput: true, streaming: false, ...capabilities },
     run: (req, ctx) => Promise.resolve(handler(req, ctx)),
   });
 }

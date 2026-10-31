@@ -25,7 +25,13 @@ import { ISSUES_CHANNEL } from "../runtime/state-annotation.js";
 import { ISSUE_CODE, type RunIssue } from "../runtime/run-issues.js";
 import type { ToolExecutor, NormalizedTools } from "../providers/tools.js";
 import type { AgentMemoryConfig } from "../memory/recall.js";
+import { MEMORY_RECALL_DEFAULT_TOKENS } from "../memory/types.js";
 import { appendRecallSection, recallForAgent, rememberTool } from "./agent-memory.js";
+import { resolveContextPolicy, recallBudget } from "../context/policy.js";
+import type { ContextConfigInput, ContextPolicy } from "../context/types.js";
+import { capIssueLines } from "../context/issues.js";
+import { getTokenEstimator } from "../context/estimator.js";
+import { startAgentContext, type AgentContextSession } from "./agent-context.js";
 
 const configSchema = AgentWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -43,6 +49,7 @@ export const agentNode = defineNode<Config>({
     // invokeNode once all sibling nodes are built). Read lazily at call time.
     const wiring: ToolWiring =
       (buildCtx as BuildContext & { toolWiring?: ToolWiring }).toolWiring ?? {};
+    assertHistoryChannelAllowed(String(nodeSpec["id"] ?? "?"), (config.context as { history?: unknown } | undefined)?.history);
 
     return {
       contract: {},
@@ -80,8 +87,18 @@ export const agentNode = defineNode<Config>({
           }
         }
 
+        const contextPolicy = resolveContextPolicy(
+          buildCtx.contextDefaults,
+          config.context as ContextConfigInput | undefined,
+          { outputMaxTokens: config.maxTokens },
+        );
+
         // Recall memory (never written to state). Templates see it as {{ memory.<id> }}.
-        const memoryConfig = config.memory as AgentMemoryConfig | undefined;
+        // Under a context budget, recall gets at most half of it.
+        let memoryConfig = config.memory as AgentMemoryConfig | undefined;
+        if (contextPolicy && memoryConfig?.recall?.length) {
+          memoryConfig = { ...memoryConfig, maxTokens: recallBudget(contextPolicy, memoryConfig.maxTokens ?? MEMORY_RECALL_DEFAULT_TOKENS) };
+        }
         const recall = await recallForAgent(ctx, memoryConfig, scope, [config.prompt, config.system, agentBody]);
         const tplScope = recall ? { ...scope, memory: recall.vars } : scope;
 
@@ -95,7 +112,7 @@ export const agentNode = defineNode<Config>({
         } else if (config.system) {
           system = stringifyRendered(renderDeep(config.system, tplScope));
         }
-        system = prependKnownIssues(system, state);
+        system = prependKnownIssues(system, state, contextPolicy);
         system = appendRecallSection(system, recall);
 
         const { normalized, mcpRefs } = normalizeTools(config.tools as ToolRef[] | undefined, wiring);
@@ -213,6 +230,30 @@ export const agentNode = defineNode<Config>({
         ctx.emit("agent.step", { provider: providerName, model: nodeModel, tools: specs.map((t) => t.name) });
 
         try {
+          let contextSession: AgentContextSession | undefined;
+          if (contextPolicy) {
+            contextSession = startAgentContext({
+              policy: contextPolicy,
+              ctx,
+              state,
+              nodeLabel: String(nodeSpec["id"] ?? ctx.nodeId),
+              agentProvider: providerName,
+              agentModel: req.model,
+              cacheKey,
+              replayStore,
+              sharedHistory: !!contextPolicy.history && !!buildCtx.sharedHistoryChannels?.has(contextPolicy.history),
+              system,
+              prompt,
+              tools: specs,
+              onUsage: (usage) => {
+                ctx.emit("agent.usage", { ...usage, purpose: "context.summary" });
+                enforceBudget(ctx, usage);
+              },
+            });
+            await contextSession.prepare(req, provider);
+            providerCtx.context = contextSession.manager;
+          }
+
           const result = await provider.run(req, providerCtx);
           if (mismatch) throw mismatch;
 
@@ -239,12 +280,14 @@ export const agentNode = defineNode<Config>({
 
           replayStore.clear(cacheKey);
 
+          const historyUpdate = contextSession?.historyUpdate(result);
           return {
             update: {
               ...applyOutput(config.output, result.output, {
                 nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
                 scope,
               }),
+              ...(historyUpdate ?? {}),
             },
           };
         } catch (err) {
@@ -256,17 +299,22 @@ export const agentNode = defineNode<Config>({
   },
 });
 
-function prependKnownIssues(system: string | undefined, state: Record<string, unknown>): string | undefined {
+function prependKnownIssues(
+  system: string | undefined,
+  state: Record<string, unknown>,
+  contextPolicy?: ContextPolicy,
+): string | undefined {
   const issues = (state[ISSUES_CHANNEL] as RunIssue[] | undefined) ?? [];
   if (issues.length === 0) return system;
-  const block = issues
-    .map((i) => {
-      const loc = i.nodeId ? ` [${i.nodeId}]` : "";
-      const impact = i.impact ? ` Impact: ${i.impact}` : "";
-      const fix = i.remediation ? ` Remediation: ${i.remediation}` : "";
-      return `- [${i.severity}] ${i.code}${loc}: ${i.message}.${impact}${fix}`;
-    })
-    .join("\n");
+  let lines = issues.map((i) => {
+    const loc = i.nodeId ? ` [${i.nodeId}]` : "";
+    const impact = i.impact ? ` Impact: ${i.impact}` : "";
+    const fix = i.remediation ? ` Remediation: ${i.remediation}` : "";
+    return `- [${i.severity}] ${i.code}${loc}: ${i.message}.${impact}${fix}`;
+  });
+  // Under a context budget the issues section has its own cap (newest kept).
+  if (contextPolicy) lines = capIssueLines(lines, contextPolicy.issuesMaxTokens, getTokenEstimator(contextPolicy.estimator));
+  const block = lines.join("\n");
   const section =
     `Known issues so far (these may affect result quality; try to remediate if you can, or report remaining gaps with report_issue):\n${block}`;
   return system ? `${system}\n\n${section}` : section;
@@ -344,6 +392,19 @@ function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number; costU
       remediation: "Raise runtime.budget.maxTokens / maxUSD, or set onExceed: fail to stop instead of degrading.",
       detail: { usedTokens: budget.usedTokens, usedUSD: budget.usedUSD },
     });
+  }
+}
+
+/**
+ * `__`-prefixed channels belong to the engine (issues, replay, services, ...).
+ * An agent's history channel gets removals and summaries written to it, so it
+ * may never be one of them, under any node policy.
+ */
+export function assertHistoryChannelAllowed(nodeId: string, history: unknown): void {
+  if (typeof history === "string" && history.startsWith("__")) {
+    throw new Error(
+      `agent node "${nodeId}": with.context.history "${history}" is a reserved channel (names starting with "__" belong to the engine); use a channel of your own with type: messages`,
+    );
   }
 }
 

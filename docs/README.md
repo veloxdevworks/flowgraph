@@ -29,6 +29,7 @@ We are **not** building a new graph engine. LangGraph is the engine. flowgraph i
 | 14 | [Programmatic API](./14-programmatic-api.md) | `@flowgraph/core` + `@flowgraph/testing` |
 | 15 | [MCP operations](./15-mcp-operations.md) | OAuth, CI patterns, provider env vars |
 | 16 | [Agent Definitions](./16-agents.md) | Reusable `AGENT.md` system prompts for agent nodes |
+| 17 | [Agent Context Budgets](./17-context.md) | `with.context`: bounded prompts, history channels, summaries |
 | — | [Implementation status](./IMPLEMENTATION_STATUS.md) | Shipped vs planned feature matrix |
 | — | [ADRs](./adr/) | Architecture Decision Records capturing locked-in choices |
 | — | [Examples](../examples/README.md) | Runnable example index |

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { messagesStateReducer } from "@langchain/langgraph";
+import { RemoveMessage } from "@langchain/core/messages";
 import { buildStateAnnotation, channelReducerAndDefault } from "./state-annotation.js";
 import { registry } from "../registry.js";
 import type { GraphSpec } from "@flowgraph/spec";
@@ -46,18 +46,41 @@ describe("channelReducerAndDefault", () => {
     expect(reducer({ a: { x: 1 } }, { a: { x: 2 } })).toEqual({ a: { x: 2 } });
   });
 
-  it("messages type uses LangGraph messagesStateReducer", () => {
+  it("messages type upserts by id and ignores a repeated removal", () => {
     const { reducer, default: defaultFn } = channelReducerAndDefault("messages", { type: "messages" });
-    expect(reducer).toBe(messagesStateReducer);
     expect(defaultFn()).toEqual([]);
+    const first = reducer([], [{ id: "m1", type: "human", content: "a" }]) as Array<{ id?: string }>;
+    expect(first.map((message) => message.id)).toEqual(["m1"]);
+    const removed = reducer(first, [new RemoveMessage({ id: "m1" })]) as Array<{ id?: string }>;
+    expect(removed.map((message) => message.id)).toEqual([]);
+    const again = reducer(removed, [new RemoveMessage({ id: "m1" })]) as Array<{ id?: string }>;
+    expect(again.map((message) => message.id)).toEqual([]);
+    const addedThenRemoved = reducer([], [
+      { id: "m3", type: "human", content: "hi" },
+      new RemoveMessage({ id: "m3" }),
+    ]) as Array<{ id?: string }>;
+    expect(addedThenRemoved.map((message) => message.id)).toEqual([]);
   });
 
-  it("messages reducer literal uses LangGraph messagesStateReducer", () => {
+  it("warns and ignores a RemoveMessage for an unknown id", () => {
+    const warnings: string[] = [];
+    const { reducer } = channelReducerAndDefault("messages", { type: "messages" }, (msg) => warnings.push(msg));
+    const kept = reducer(
+      [{ id: "m1", type: "human", content: "a" }],
+      [new RemoveMessage({ id: "missing" })],
+    ) as Array<{ id?: string }>;
+    expect(kept.map((message) => message.id)).toEqual(["m1"]);
+    expect(warnings.some((msg) => msg.includes("missing"))).toBe(true);
+  });
+
+  it("messages reducer literal upserts by id like type messages", () => {
     const { reducer } = channelReducerAndDefault("chat", {
       type: "array",
       reducer: "messages",
     });
-    expect(reducer).toBe(messagesStateReducer);
+    const first = reducer([], [{ id: "m1", type: "human", content: "a" }]) as Array<{ id?: string; content?: string }>;
+    const edited = reducer(first, [{ id: "m1", type: "human", content: "b" }]) as Array<{ id?: string; content?: string }>;
+    expect(edited.map((message) => [message.id, message.content])).toEqual([["m1", "b"]]);
   });
 
   it("custom reducer merges via registered function", () => {

@@ -172,6 +172,8 @@ state:
 
 If `state` is omitted, a default single `messages` channel is assumed (chat-style graph).
 
+A `messages` channel appends messages and updates or deletes them by id. A `RemoveMessage` whose id is not in the channel does nothing — it used to throw — and the run emits a warning log. An id added earlier in the same write still counts, so `[m3, Remove(m3)]` removes `m3`. A repeated removal of an id that is already gone is ignored.
+
 ## 5. `nodes`
 
 Each node has a stable `id`, a `type` (resolved via the registry), and type-specific config under `with`. Common fields apply to every node regardless of type.
@@ -284,7 +286,7 @@ nodes:
 
 - `input:` builds an `input` object available to the node's `with` expressions (and to skills as their declared inputs).
 - `to` / `map` are optional overrides for shared/typed/reducer-backed channels (e.g. parallel fan-in into one `append` channel) or field projection.
-- **Exception — `subgraph`:** when `output` is omitted, the child graph's state is **merged** into the parent (transparent passthrough). Use `output: none` to suppress that, or `to`/`map`/`stateMap.out` for explicit projection.
+- **Exception — `subgraph`:** when `output` and `stateMap.out` are both omitted, channels that **share a name** merge back and the parent's reducer combines only the child's new values. Use `output: none` to write nothing, `output.to` / `output.map` for a normal node projection, or `stateMap.out` (`parentChannel: childChannel`) for an explicit mapping. See [05 — Subgraph merge-back](./05-state-and-data.md#subgraph-merge-back).
 - Prefer not to declare your own `outputs` channel unless you intend to override its `mergeDeep` semantics.
 
 ## 9. `runtime` (graph-level defaults)

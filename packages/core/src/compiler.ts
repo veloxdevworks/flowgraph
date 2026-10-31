@@ -43,6 +43,7 @@ import {
 import { OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
 import { collectNodeWriteChannels, ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
+import { sharedHistoryChannels } from "./context/shared.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
 import {
@@ -893,7 +894,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const agentAliases: Record<string, string> = { ...(opts.runConfig?.agents ?? {}), ...imported.agentAliases };
   const subgraphAliases: Record<string, string> = { ...(opts.runConfig?.subgraphs ?? {}), ...imported.subgraphAliases };
 
-  const StateAnnotation = buildStateAnnotation(spec);
+  const StateAnnotation = buildStateAnnotation(spec, (msg, data) => {
+    events.emit("log", { level: "warn", msg, ...data }, {});
+  });
   const graph = new StateGraph(StateAnnotation);
 
   let budget: BudgetState | undefined;
@@ -925,6 +928,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
   const toolWiring: ToolWiring = { mcp: mcpHub };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();
+  const sharedHistory = sharedHistoryChannels(spec.nodes as unknown as Array<Record<string, unknown>>);
 
   const hooks: HookBus = createHookBus(events);
   for (const h of defaultGuardrailHooks(spec)) hooks.register(h);
@@ -941,6 +945,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       skills: skillAliases,
       agents: agentAliases,
       subgraphs: subgraphAliases,
+      // Parent channel reducers for subgraph merge-back. Set after
+      // ensureDeclaredOutputChannels so auto-declared targets are included.
+      channels: spec.state?.channels ?? {},
     },
     secrets: createEnvSecretProvider(),
     events,
@@ -1013,6 +1020,8 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
         graphName: spec.metadata.name,
         toolWiring,
         ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
+        ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
+        sharedHistoryChannels: sharedHistory,
       } as Parameters<typeof factory.build>[0],
       nodeSpec as unknown as Record<string, unknown>,
       configResult.data,
@@ -2122,6 +2131,7 @@ function addCheckpointedMap(
     graphName: spec.metadata.name,
     toolWiring: ctx.toolWiring,
     ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
+    ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
   };
   const nodeRetry = (nodeSpec.retry ?? ctx.defaultRetry) as RetryConfigInput;
   const nodeTimeout = (nodeSpec.timeout ?? ctx.defaultTimeout) as string | undefined;

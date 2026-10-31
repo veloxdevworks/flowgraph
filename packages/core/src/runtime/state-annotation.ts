@@ -3,6 +3,7 @@
  * Adds a reserved `__once` channel for idempotency bookkeeping.
  */
 
+import { RemoveMessage } from "@langchain/core/messages";
 import { Annotation, messagesStateReducer } from "@langchain/langgraph";
 import type { GraphSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
@@ -39,10 +40,14 @@ export type ChannelReducerAndDefault = {
   default: () => unknown;
 };
 
+/** Optional sink for a removal the messages reducer ignores. */
+export type ReducerWarn = (message: string, data?: Record<string, unknown>) => void;
+
 /** Resolve reducer/default for a channel — exported for unit tests. */
 export function channelReducerAndDefault(
   channelName: string,
   ch: ChannelDef,
+  warn?: ReducerWarn,
 ): ChannelReducerAndDefault {
   if (ch.reducer === "append" || ch.reducer === "concat") {
     return {
@@ -70,7 +75,7 @@ export function channelReducerAndDefault(
 
   if (ch.type === "messages" || ch.reducer === "messages") {
     return {
-      reducer: messagesStateReducer as (current: unknown, incoming: unknown) => unknown,
+      reducer: makeSafeMessagesReducer(channelName, warn),
       default: () => (ch.default as unknown[] | undefined) ?? [],
     };
   }
@@ -96,12 +101,15 @@ export function channelReducerAndDefault(
   };
 }
 
-export function buildStateAnnotation(spec: GraphSpec): ReturnType<typeof Annotation.Root> {
+export function buildStateAnnotation(
+  spec: GraphSpec,
+  warn?: ReducerWarn,
+): ReturnType<typeof Annotation.Root> {
   const channels = spec.state?.channels ?? {};
   const fields: Record<string, unknown> = {};
 
   for (const [name, ch] of Object.entries(channels)) {
-    const { reducer, default: defaultFn } = channelReducerAndDefault(name, ch);
+    const { reducer, default: defaultFn } = channelReducerAndDefault(name, ch, warn);
     fields[name] = Annotation<unknown>({
       reducer,
       default: defaultFn,
@@ -190,6 +198,50 @@ export function buildStateAnnotation(spec: GraphSpec): ReturnType<typeof Annotat
   });
 
   return Annotation.Root(fields as Parameters<typeof Annotation.Root>[0]);
+}
+
+/**
+ * LangGraph's messages reducer throws when a removal names an id that is not
+ * in the channel. That removal is ignored instead. An id added earlier in the
+ * same write still counts, so `[m3, Remove(m3)]` removes `m3`.
+ */
+function makeSafeMessagesReducer(channelName: string, warn?: ReducerWarn) {
+  return (current: unknown, incoming: unknown): unknown => {
+    const currentList = Array.isArray(current) ? current : current == null ? [] : [current];
+    const present = new Set(currentList.map(messageIdOf).filter((id): id is string => id != null));
+    const incomingList = Array.isArray(incoming) ? incoming : [incoming];
+    const filtered: unknown[] = [];
+    for (const message of incomingList) {
+      const id = messageIdOf(message);
+      if (!isRemoval(message)) {
+        filtered.push(message);
+        if (id) present.add(id);
+        continue;
+      }
+      if (id == null || id === "__remove_all__" || present.has(id)) {
+        filtered.push(message);
+        if (id && id !== "__remove_all__") present.delete(id);
+        continue;
+      }
+      warn?.(`messages channel "${channelName}": RemoveMessage for unknown id "${id}" ignored`, {
+        channel: channelName,
+        id,
+      });
+    }
+    if (filtered.length === 0) return currentList;
+    return messagesStateReducer(currentList as never, filtered as never);
+  };
+}
+
+function messageIdOf(message: unknown): string | undefined {
+  if (message == null || typeof message !== "object") return undefined;
+  const id = (message as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function isRemoval(message: unknown): boolean {
+  if (RemoveMessage.isInstance(message)) return true;
+  return message != null && typeof message === "object" && (message as { type?: unknown }).type === "remove";
 }
 
 function deepMerge(
