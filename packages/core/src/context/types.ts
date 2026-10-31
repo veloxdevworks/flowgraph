@@ -74,6 +74,8 @@ export interface ContextStats {
   keptMessages: number;
   droppedMessages: number;
   summarizedMessages: number;
+  /** Other agents' summaries shortened or left out of this call to fit the budget. */
+  sharedSummariesCut?: number;
   overBudget: boolean;
 }
 

@@ -5,6 +5,7 @@ import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { MEMORY_RECALL_DEFAULT_TOKENS } from "../memory/types.js";
 import { resolveContextPolicy } from "./policy.js";
 import { sharedHistoryChannels } from "./shared.js";
+import { SHARED_SUMMARY_SHARE } from "./window.js";
 import type { ContextConfigInput } from "./types.js";
 
 type Channels = Record<string, { type?: string; reducer?: string }>;
@@ -78,13 +79,41 @@ function sharedHistoryDiagnostics(spec: GraphSpec, defaults: ContextConfigInput 
   const nodes = spec.nodes as unknown as Array<Record<string, unknown>>;
   const shared = sharedHistoryChannels(nodes);
   if (shared.size === 0) return;
+  const policyOf = (node: Record<string, unknown>) => {
+    const w = (node["with"] ?? {}) as Record<string, unknown>;
+    const cfg = w["context"] as ContextConfigInput | undefined;
+    const outputMax = typeof w["maxTokens"] === "number" ? (w["maxTokens"] as number) : 0;
+    return cfg?.history ? { history: cfg.history, policy: resolveContextPolicy(defaults, cfg, { outputMaxTokens: outputMax })! } : undefined;
+  };
+  const agents = nodes
+    .filter((n) => n["type"] === "agent")
+    .map((n) => ({ id: String(n["id"]), p: policyOf(n) }))
+    .filter((a): a is { id: string; p: NonNullable<ReturnType<typeof policyOf>> } => !!a.p && shared.has(a.p.history));
+  // Another agent's summary only gets a share of this agent's budget, so a
+  // much larger one is shortened (or left out) in this agent's calls.
+  for (const a of agents) {
+    const room = Math.floor(Math.max(0, a.p.policy.maxTokens - a.p.policy.reserveTokens) * SHARED_SUMMARY_SHARE);
+    const big = agents.filter(
+      (b) => b !== a && b.p.history === a.p.history && b.p.policy.strategy === "summarize" && b.p.policy.summarize.maxTokens > room,
+    );
+    if (big.length === 0) continue;
+    out.push({
+      severity: "warning",
+      code: "CONTEXT_HISTORY_BUDGET_MISMATCH",
+      message:
+        `${big.map((b) => `"${b.id}" keeps a summary of up to ${b.p.policy.summarize.maxTokens} tokens`).join(", ")} in "${a.p.history}", ` +
+        `more than the ~${room} tokens this agent (maxTokens ${a.p.policy.maxTokens}) leaves for other agents' summaries, ` +
+        `so it is shortened or left out of this agent's calls. Give agents that share a history channel similar budgets, ` +
+        `or lower summarize.maxTokens on the larger one.`,
+      path: `nodes.${a.id}.with.context.maxTokens`,
+    });
+  }
   for (const node of nodes) {
     if (node["type"] !== "agent") continue;
     const w = (node["with"] ?? {}) as Record<string, unknown>;
     const cfg = w["context"] as ContextConfigInput | undefined;
     if (!cfg?.history || !shared.has(cfg.history)) continue;
-    const outputMax = typeof w["maxTokens"] === "number" ? (w["maxTokens"] as number) : 0;
-    const policy = resolveContextPolicy(defaults, cfg, { outputMaxTokens: outputMax })!;
+    const policy = policyOf(node)!.policy;
     if (!policy.compact || policy.strategy === "summarize") continue;
     const others = nodes
       .filter((n) => n !== node && n["type"] === "agent")

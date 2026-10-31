@@ -42,7 +42,16 @@ function lostSeeds(chat: BaseMessage[], seeds: BaseMessage[]): string[] {
     .map((s) => s.id!);
 }
 
-async function runOnce(spec: GraphSpec, provider: string, thread: string, seeds: BaseMessage[], onReq?: (r: AgentRequest) => void) {
+type CtxEvent = { nodeId: string; overBudget: boolean; sharedSummariesCut?: number };
+
+async function runOnce(
+  spec: GraphSpec,
+  provider: string,
+  thread: string,
+  seeds: BaseMessage[],
+  onReq?: (r: AgentRequest) => void,
+  ctxEvents?: CtxEvent[],
+) {
   const p = createScriptedProvider(
     provider,
     (req) => {
@@ -52,6 +61,9 @@ async function runOnce(spec: GraphSpec, provider: string, thread: string, seeds:
     { contextMessages: true },
   );
   const g = await compileGraph(spec, { providers: [p] } as never);
+  g.events.subscribe((e: { type: string; data: unknown }) => {
+    if (e.type === "agent.context") ctxEvents?.push(e.data as CtxEvent);
+  });
   const r = await g.run({ threadId: thread, input: { chat: seeds } });
   expect(r.status).toBe("completed");
   return r.state["chat"] as BaseMessage[];
@@ -128,6 +140,62 @@ describe("agents sharing a history channel", () => {
     const shared = validateSpec(spec).filter((d) => d.code === "CONTEXT_HISTORY_SHARED");
     expect(shared.map((d) => d.path)).toEqual(["nodes.a.with.context.history"]);
     expect(shared[0]!.message).toContain('"b", "c"');
+  });
+
+  it("a large summary another agent keeps never makes a smaller agent overflow", async () => {
+    // big summarizes with a 6000-token summary; small (trim, 4000) shares the channel
+    const spec = graph(
+      "sh-mismatch",
+      [
+        agent("big", "sm", { maxTokens: 16000, strategy: "summarize", summarize: { mode: "extract", maxTokens: 6000 } }),
+        agent("small", "sm", { maxTokens: 4000, strategy: "trim" }),
+      ],
+      false,
+    );
+    const mismatch = validateSpec(spec).filter((d) => d.code === "CONTEXT_HISTORY_BUDGET_MISMATCH");
+    expect(mismatch.map((d) => d.path)).toEqual(["nodes.small.with.context.maxTokens"]);
+    expect(mismatch[0]!.message).toContain('"big" keeps a summary of up to 6000 tokens');
+
+    const bulk: BaseMessage[] = [];
+    for (let i = 0; i < 400; i++) {
+      bulk.push(new HumanMessage({ id: `bulk-u${i}`, content: `bulkQ${i} ${"q".repeat(200)}` }));
+      bulk.push(new AIMessage({ id: `bulk-a${i}`, content: `bulkA${i} ${"a".repeat(200)}` }));
+    }
+    const reqs: AgentRequest[] = [];
+    const ev: CtxEvent[] = [];
+    let chat = await runOnce(spec, "sm", "sh-mismatch", bulk, (r) => reqs.push(r), ev);
+    const bigSummary = chat.find((m) => m.id === "fg-summary-chat-big")!;
+    const bigText = String((bigSummary.additional_kwargs["flowgraph"] as { text: string }).text);
+    expect(bigText.length).toBeGreaterThan(15000);
+    // small's call: within budget, with big's summary shortened to its newest lines
+    const smallReq = reqs.find((r) => r.prompt.endsWith("small turn"))!;
+    const smallEv = ev.filter((e) => e.nodeId === "small");
+    expect(smallEv.length).toBeGreaterThan(0);
+    expect(smallEv.every((e) => !e.overBudget && e.sharedSummariesCut === 1)).toBe(true);
+    const firstText = String(smallReq.messages![0]!.content);
+    expect(firstText).toContain('kept-by="big"');
+    expect(firstText).toContain(bigText.split("\n").at(-1)!);
+    // the channel still holds big's full summary, and later runs keep working
+    for (let run = 0; run < 3; run++) {
+      chat = await runOnce(spec, "sm", "sh-mismatch", [...chat, new HumanMessage({ id: `more-${run}`, content: `more ${run}` })]);
+      const s = chat.find((m) => m.id === "fg-summary-chat-big")!;
+      expect(String((s.additional_kwargs["flowgraph"] as { text: string }).text).length).toBeGreaterThan(15000);
+    }
+  });
+
+  it("other agents' summaries are left out rather than overflow", async () => {
+    const reqs: AgentRequest[] = [];
+    const other = new HumanMessage({
+      id: "fg-summary-chat-gone",
+      content: "x",
+      additional_kwargs: { flowgraph: { summary: true, node: "gone", text: "- user: old line\n".repeat(400) } },
+    });
+    const spec = graph("sh-drop", [agent("a", "sd", { maxTokens: 200, strategy: "trim" })], false);
+    const ev: CtxEvent[] = [];
+    await runOnce(spec, "sd", "sh-drop", [other, ...seeded(2)], (r) => reqs.push(r), ev);
+    expect(ev.length).toBeGreaterThan(0);
+    expect(ev.every((e) => !e.overBudget && e.sharedSummariesCut === 1)).toBe(true);
+    expect(JSON.stringify(reqs)).not.toContain('kept-by=\\"gone\\"');
   });
 
   it("with.context.history counts as a channel the agent writes", () => {

@@ -59,11 +59,55 @@ export function omittedMarker(n: number): string {
 /** Share of the free budget that summarize keeps after folding (hysteresis, so it does not summarize every call). */
 const SUMMARIZE_KEEP_RATIO = 0.75;
 
+/**
+ * Share of the room left after the fixed parts that other agents' summaries
+ * may take. They are read only for this agent, so shortening or leaving them
+ * out of its call loses nothing in the channel.
+ */
+export const SHARED_SUMMARY_SHARE = 0.25;
+/** A shortened summary of another agent below this size is left out instead. */
+const MIN_SHARED_SUMMARY_TOKENS = 24;
+
+/** Keep the newest lines of a summary that fit in maxTokens, marking the cut. */
+function keepNewest(text: string, maxTokens: number, est: TokenEstimator): string {
+  if (est(text) <= maxTokens) return text;
+  const head = "…\n";
+  const budget = maxTokens - est(head);
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = est(`${lines[i]}\n`);
+    if (used + t > budget) {
+      if (out.length === 0) {
+        // one long line: keep its end
+        const chars = Array.from(lines[i]!);
+        let lo = 0;
+        let hi = chars.length;
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          if (est(chars.slice(chars.length - mid).join("")) <= budget) lo = mid;
+          else hi = mid - 1;
+        }
+        if (lo > 0) out.unshift(chars.slice(chars.length - lo).join(""));
+      }
+      break;
+    }
+    out.unshift(lines[i]!);
+    used += t;
+  }
+  return out.length ? head + out.join("\n") : "";
+}
+
 export class ContextWindow {
   readonly policy: ContextPolicy;
   private readonly est: TokenEstimator;
   private readonly baseSystem: string[];
   private readonly shared: Array<{ node: string; text: string }>;
+  private readonly sharedTokens: number[];
+  /** Other agents' summaries as sent by the current fit (shortened or left out to fit). */
+  private sent: Array<{ node: string; text: string }>;
+  private sharedCut = 0;
   private readonly prompt: ContextMessage;
   private readonly history: ContextMessage[][];
   private readonly invalidHistory: ContextMessage[];
@@ -90,6 +134,7 @@ export class ContextWindow {
     this.est = init.estimator ?? getTokenEstimator(init.policy.estimator);
     this.baseSystem = [init.system, ...(init.systemNotes ?? [])].filter((s): s is string => !!s && s.length > 0);
     this.shared = (init.sharedSummaries ?? []).filter((x) => x.text.length > 0);
+    this.sent = this.shared;
     this.prompt = init.prompt;
     const { units, invalid } = toUnits(init.history ?? []);
     this.history = units;
@@ -100,6 +145,40 @@ export class ContextWindow {
     this.initialSummary = this.summaryText;
     this.baseSystemTokens = this.baseSystem.length ? this.est(this.baseSystem.join("\n\n")) : 0;
     this.promptTokens = this.tok(this.prompt);
+    this.sharedTokens = this.shared.map((x) => this.est(x.text));
+  }
+
+  /**
+   * Fit other agents' summaries into `cap` tokens of text: small ones stay
+   * whole, the largest are shortened first (newest lines kept), and any left
+   * with too little room are not sent.
+   */
+  private fitShared(cap: number): void {
+    const n = this.shared.length;
+    if (n === 0) return;
+    const order = this.sharedTokens.map((_, i) => i).sort((a, b) => this.sharedTokens[a]! - this.sharedTokens[b]! || a - b);
+    const alloc = new Array<number>(n).fill(0);
+    let left = Math.max(0, Math.floor(cap));
+    order.forEach((i, j) => {
+      alloc[i] = Math.min(this.sharedTokens[i]!, Math.floor(left / (n - j)));
+      left -= alloc[i]!;
+    });
+    this.sent = [];
+    this.sharedCut = 0;
+    this.shared.forEach((s, i) => {
+      if (alloc[i]! >= this.sharedTokens[i]!) {
+        this.sent.push(s);
+        return;
+      }
+      this.sharedCut++;
+      if (alloc[i]! < MIN_SHARED_SUMMARY_TOKENS) return;
+      const text = keepNewest(s.text, alloc[i]!, this.est);
+      if (text) this.sent.push({ node: s.node, text });
+    });
+  }
+
+  private sentSharedTokens(): number {
+    return this.sent.reduce((a, s) => a + this.est(s.text), 0);
   }
 
   /** History messages that were not sent because a tool call and its result were not both present. */
@@ -163,7 +242,7 @@ export class ContextWindow {
 
   /** The summaries, fenced as data, sent at the start of the first user turn. */
   private block(summary: string | undefined): string | undefined {
-    return summaryBlock(this.policy.strategy === "summarize" ? summary : undefined, this.shared);
+    return summaryBlock(this.policy.strategy === "summarize" ? summary : undefined, this.sent);
   }
 
   private blockTokens(summary: string | undefined): number {
@@ -199,6 +278,10 @@ export class ContextWindow {
     const unitLen = all.map((u) => u.length);
 
     const fixed = this.baseSystemTokens + this.toolsTokens + p.reserveTokens + this.promptTokens;
+    // Other agents' summaries get at most a share of what is left after the
+    // parts that are always sent, so they can never make this call overflow.
+    const pinnedTok = pinnedTail ? this.unitTokens(all[all.length - 1]!) : 0;
+    this.fitShared(Math.max(0, p.maxTokens - fixed - pinnedTok) * SHARED_SUMMARY_SHARE);
     // suffix sums: tokens/messages of units k..end
     const sufTok = new Array<number>(all.length + 1).fill(0);
     const sufLen = new Array<number>(all.length + 1).fill(0);
@@ -253,18 +336,29 @@ export class ContextWindow {
     const keptHistory = this.history.slice(Math.min(this.droppedUnits, this.history.length));
     const keptLoop = kept.slice(keptHistory.length);
     const summary = p.strategy === "summarize" ? this.summaryText : undefined;
-    let sectionTok = this.sectionTokens(this.droppedMsgs, summary);
     const historyTok = keptHistory.reduce((a, u) => a + this.unitTokens(u), 0);
     const loopTok = keptLoop.reduce((a, u) => a + this.unitTokens(u), 0);
-    let total = fixed + historyTok + loopTok + sectionTok;
-    // The omitted-messages marker is a courtesy: leave it out rather than
-    // overflow when the call fits without it.
-    let marker = true;
-    const markerTok = sectionTok - this.blockTokens(summary);
-    if (markerTok > 0 && total > p.maxTokens && total - markerTok <= p.maxTokens) {
-      marker = false;
-      sectionTok -= markerTok;
-      total -= markerTok;
+    const measure = () => {
+      let sectionTok = this.sectionTokens(this.droppedMsgs, summary);
+      let total = fixed + historyTok + loopTok + sectionTok;
+      // The omitted-messages marker is a courtesy: leave it out rather than
+      // overflow when the call fits without it.
+      let marker = true;
+      const markerTok = sectionTok - this.blockTokens(summary);
+      if (markerTok > 0 && total > p.maxTokens && total - markerTok <= p.maxTokens) {
+        marker = false;
+        sectionTok -= markerTok;
+        total -= markerTok;
+      }
+      return { sectionTok, total, marker };
+    };
+    let { sectionTok, total, marker } = measure();
+    // Still over: shorten other agents' summaries further, down to none,
+    // before reporting an overflow.
+    for (let tries = 0; total > p.maxTokens && this.sent.length > 0; tries++) {
+      const cap = tries < 3 ? this.sentSharedTokens() - (total - p.maxTokens) - 8 : 0;
+      this.fitShared(cap);
+      ({ sectionTok, total, marker } = measure());
     }
     const stats: ContextStats = {
       budget: p.maxTokens,
@@ -281,6 +375,7 @@ export class ContextWindow {
       summarizedMessages: p.strategy === "summarize" ? this.summarizedMsgs : 0,
       overBudget: total > p.maxTokens,
     };
+    if (this.sharedCut > 0) stats.sharedSummariesCut = this.sharedCut;
     this.lastStats = stats;
     if (stats.overBudget && p.onOverflow === "error") {
       throw new ContextOverflowError(
