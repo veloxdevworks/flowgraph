@@ -10,12 +10,13 @@ import { AgentWithSchema } from "@flowgraph/spec";
 import { renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import { getProvider, listProviders } from "../providers/registry.js";
+import { providerFor, providerNamesFor } from "../providers/registry.js";
 import { normalizeTools, mergeTools, type ToolRef, type ToolWiring } from "../providers/tools.js";
 import { expandMcpTools, requireMcpHub } from "../mcp/expand.js";
 import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
 import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
+import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
 import { applyOutput } from "./output.js";
 import {
   hydrateReplay,
@@ -53,18 +54,18 @@ export const agentNode = defineNode<Config>({
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const providerName =
           (config.hub === "deepagents" ? "deepagents" : undefined) ??
-          nodeProvider ?? ctx.config.defaults?.provider ?? defaultProviderName();
+          nodeProvider ?? ctx.config.defaults?.provider ?? defaultProviderName(ctx);
         if (!providerName) {
           throw new Error(
             `agent node "${String(nodeSpec["id"])}": no provider specified and none registered. ` +
               `Set node.provider, config.defaults.provider, or register a provider.`,
           );
         }
-        const provider = getProvider(providerName);
+        const provider = providerFor(ctx, providerName);
         if (!provider) {
           throw new Error(
             `agent node "${String(nodeSpec["id"])}": provider "${providerName}" is not registered. ` +
-              `Available: ${listProviders().join(", ") || "(none)"}.`,
+              `Available: ${providerNamesFor(ctx).join(", ") || "(none)"}.`,
           );
         }
 
@@ -74,6 +75,7 @@ export const agentNode = defineNode<Config>({
 
         let agentBody: string | undefined;
         if (config.agent) {
+          assertAgentRefAllowed(nodePolicyOf(ctx), `agent node "${String(nodeSpec["id"])}"`);
           try {
             agentBody = (await loadResolvedAgent(config.agent, ctx)).body;
           } catch (err) {
@@ -264,8 +266,8 @@ function reportIssueTool(): NormalizedTools {
   };
 }
 
-function defaultProviderName(): string | undefined {
-  const all = listProviders();
+function defaultProviderName(ctx: NodeRunContext): string | undefined {
+  const all = providerNamesFor(ctx);
   return all.length === 1 ? all[0] : all.includes("mock") ? "mock" : undefined;
 }
 

@@ -7,7 +7,8 @@ import { START, END, StateGraph, MemorySaver, Command, Send, type BaseCheckpoint
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
-import type { GraphSpec } from "@flowgraph/spec";
+import type { GraphSpec, NodeSpec } from "@flowgraph/spec";
+import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
@@ -47,7 +48,8 @@ import {
 import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
 import { cleanupWorktrees } from "./nodes/worktree.js";
 import { registerProvider, type ProviderAdapter } from "./providers/index.js";
-import { clearThreadReplayCache, hydrateReplay, hydrateReplayFromInterruptPayload, replayCacheKey, snapshotReplay } from "./providers/replay-cache.js";
+import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
+import { clearThreadReplayCache, hydrateThreadReplay, hydrateReplayFromInterruptPayload, replayCacheKey, snapshotReplay } from "./providers/replay-cache.js";
 import { collectMapResults, mapSyntheticIds, runMapItem, type MapTask } from "./nodes/map.js";
 import type { ToolWiring } from "./providers/tools.js";
 import type { BudgetState } from "./context.js";
@@ -65,6 +67,8 @@ import {
   assertHostExecAllowed,
   assertHostProbeAllowed,
   assertNoReservedChannels,
+  assertImportsAllowed,
+  isReservedChannel,
   assertNoReservedInput,
   hostExecAllowed,
   assertNodeSpecAllowed,
@@ -351,7 +355,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
     // Reserved channels are the engine's own bookkeeping; callers never set them.
     if (mode === "start" && payload != null && !(payload instanceof Command)) {
-      assertNoReservedInput(payload, [...RESERVED_STATE_CHANNELS, "__interrupt__"], `graph "${graphSpec.metadata.name}" run`);
+      assertNoReservedInput(payload, `graph "${graphSpec.metadata.name}" run`);
     }
 
     // A fresh start must not replay agent LLM/tool results left behind by an
@@ -519,6 +523,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           threadId,
           graphSpec,
           executeInvoke,
+          nodePolicy: opts.nodePolicy,
           ...(runOpts.signal ? { signal: runOpts.signal } : {}),
           ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
         });
@@ -751,8 +756,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   for (const extra of opts.extraFactories ?? []) {
     if (!registry.has(extra.type)) registry.register(extra);
   }
-  for (const provider of opts.providers ?? []) registerProvider(provider);
+  // Providers stay with this graph (see GRAPH_PROVIDERS below). Without a
+  // policy they are also registered process-wide, as before, for code that
+  // looks them up by name outside a run.
+  if (!opts.nodePolicy) for (const provider of opts.providers ?? []) registerProvider(provider);
 
+  // Refused before anything is loaded: imports register modules for the whole process.
+  assertImportsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
   const imported = await loadGraphImports(spec, { cwd: graphDir });
   const skillAliases: Record<string, string> = { ...(opts.runConfig?.skills ?? {}), ...imported.skillAliases };
   const agentAliases: Record<string, string> = { ...(opts.runConfig?.agents ?? {}), ...imported.agentAliases };
@@ -774,12 +784,17 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
 
   assertGraphToolsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
   assertGraphRuntimeAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
-  assertNoReservedChannels(
-    opts.nodePolicy,
-    [...Object.keys(spec.state?.channels ?? {}), ...spec.nodes.flatMap((n) => collectNodeWriteChannels(n))],
-    [...RESERVED_STATE_CHANNELS, "__interrupt__"],
-    `graph "${spec.metadata?.name ?? "graph"}"`,
-  );
+  {
+    // Every node, map inner and inline subgraph (and its declared channels) at any depth.
+    const channels = [...Object.keys(spec.state?.channels ?? {})];
+    walkNodes(spec, (n) => {
+      channels.push(...collectNodeWriteChannels(n as NodeSpec));
+      const inline = (n as { spec?: GraphSpec }).spec;
+      if (inline && typeof inline === "object") channels.push(...Object.keys(inline.state?.channels ?? {}));
+      assertNodeSpecAllowed(opts.nodePolicy, n as { type?: unknown; with?: unknown }, `node "${String((n as { id?: unknown }).id ?? "?")}"`);
+    });
+    assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
+  }
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
   const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
   const toolWiring: ToolWiring = { mcp: mcpHub };
@@ -811,6 +826,14 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   };
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
   if (opts.nodePolicy) (baseCtx as Record<symbol, unknown>)[NODE_POLICY] = opts.nodePolicy;
+  if (opts.providers?.length || opts.nodePolicy) {
+    const graphProviders: GraphProviders = {
+      byName: new Map((opts.providers ?? []).map((p) => [p.name, p])),
+      // Under a policy, nothing outside what the graph was compiled with.
+      exclusive: !!opts.nodePolicy,
+    };
+    (baseCtx as Record<symbol, unknown>)[GRAPH_PROVIDERS] = graphProviders;
+  }
 
   const defaultRetry = spec.runtime?.retry;
   const defaultTimeout = spec.runtime?.timeoutDefault;
@@ -895,13 +918,16 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
         },
       );
 
-    const finalizeUpdate = (run: NodeRun): Record<string, unknown> => {
-      const update = resultToUpdate(run.res);
-      const onceUpdates = run.ctx._onceUpdates;
-      if (Object.keys(onceUpdates).length > 0) update[ONCE_CHANNEL] = onceUpdates;
-      if (run.ctx._issueUpdates.length > 0) update[ISSUES_CHANNEL] = run.ctx._issueUpdates;
-      return update;
+    // A node's update loses reserved channels its type does not own; engine
+    // bookkeeping (`__once`, `__issues`) is added afterwards. Also applied to
+    // what node:after / state:beforeUpdate hooks hand back.
+    const sealUpdate = (update: Record<string, unknown>, run: NodeRun): Record<string, unknown> => {
+      const sealed = { ...dropUnownedReserved(update, nodeSpec.type, opts.nodePolicy) };
+      if (Object.keys(run.ctx._onceUpdates).length > 0) sealed[ONCE_CHANNEL] = run.ctx._onceUpdates;
+      if (run.ctx._issueUpdates.length > 0) sealed[ISSUES_CHANNEL] = run.ctx._issueUpdates;
+      return sealed;
     };
+    const finalizeUpdate = (run: NodeRun): Record<string, unknown> => sealUpdate(resultToUpdate(run.res), run);
 
     // Routers (and any routing-capable node) declare Command.goto destinations via
     // `ends` so LangGraph accepts goto without requiring a duplicate branch edge.
@@ -964,13 +990,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
             events.emit("node.end", { nodeId: nodeSpec.id, update, routed: c.to }, scope);
             return new Command({ goto: c.to, update }) as unknown as Record<string, unknown>;
           }
-          update = (r.payload.update as Record<string, unknown> | undefined) ?? update;
+          update = sealUpdate((r.payload.update as Record<string, unknown> | undefined) ?? update, run);
         }
 
         // state:beforeUpdate — redact / transform the delta before commit
         if (hooks.has("state:beforeUpdate")) {
           const r = await hooks.run("state:beforeUpdate", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, update } });
-          update = (r.payload.update as Record<string, unknown> | undefined) ?? update;
+          update = sealUpdate((r.payload.update as Record<string, unknown> | undefined) ?? update, run);
         }
 
         if (nodeGoto != null) {
@@ -1368,6 +1394,39 @@ function resolveMemory(
   return { runtime, store };
 }
 
+/** Reserved channels each node type writes itself; every other node's write to them is dropped. */
+const OWNED_RESERVED: Readonly<Record<string, readonly string[]>> = {
+  agent: [REPLAY_CHANNEL],
+  intelligent: [REPLAY_CHANNEL],
+  service: [SERVICES_CHANNEL],
+  worktree: [WORKTREES_CHANNEL],
+};
+const ENGINE_CHANNELS: ReadonlySet<string> = new Set([...RESERVED_STATE_CHANNELS, "__interrupt__"]);
+
+/**
+ * Drop reserved channels from a node's update unless its type owns them
+ * (agent → `__agentReplay`, service → `__services`, worktree → `__worktrees`).
+ * Engine channels are always dropped otherwise, so a function, router,
+ * subgraph merge or output mapping can never plant service commands,
+ * worktree paths or replayed tool results. Under a policy, every other `__`
+ * name is dropped too.
+ */
+function dropUnownedReserved(
+  update: Record<string, unknown>,
+  nodeType: string,
+  policy: NodePolicy | undefined,
+): Record<string, unknown> {
+  const owned = OWNED_RESERVED[nodeType] ?? [];
+  let out: Record<string, unknown> | undefined;
+  for (const k of Object.keys(update)) {
+    if (!isReservedChannel(k) || owned.includes(k)) continue;
+    if (!ENGINE_CHANNELS.has(k) && !policy) continue;
+    out ??= { ...update };
+    delete out[k];
+  }
+  return out ?? update;
+}
+
 function resultToUpdate(result: NodeResult): Record<string, unknown> {
   if ("update" in result) return result.update;
   if ("command" in result) return result.command.update ?? {};
@@ -1491,8 +1550,11 @@ async function attachWebhookUrls(
     ) => Promise<RunResult>;
     signal?: AbortSignal;
     sinks?: EventSink[];
+    nodePolicy?: NodePolicy | undefined;
   },
 ): Promise<void> {
+  // Never listen on a host port for a graph whose policy refuses inbound webhooks.
+  if (opts.nodePolicy?.blockInboundWebhooks) return;
   const webhookInterrupts = interrupts.filter(isWebhookInterrupt);
   if (webhookInterrupts.length === 0) return;
 
@@ -1541,10 +1603,9 @@ async function attachWebhookUrls(
 }
 
 function stripReserved(state: Record<string, unknown>): Record<string, unknown> {
-  const reserved = new Set<string>([...RESERVED_STATE_CHANNELS, "__interrupt__"]);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(state)) {
-    if (reserved.has(k)) continue;
+    if (isReservedChannel(k)) continue;
     out[k] = v;
   }
   return out;
@@ -1638,9 +1699,14 @@ function buildNodeCtx(
     },
     emit(type, data) { events.emit(type, data, { nodeId, nodeType, ...(parentSpanId ? { parentSpanId } : {}) }); },
     interrupt<T = unknown>(payload: { reason: string; data?: unknown; kind?: import("./context.js").InterruptKind }): T {
+      // `__` keys in interrupt data are the engine's (`__nodeId`, `__agentReplay`);
+      // drop any the node or graph author put there before adding ours.
       const data =
         payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
-          ? { ...(payload.data as Record<string, unknown>), __nodeId: nodeId }
+          ? {
+              ...Object.fromEntries(Object.entries(payload.data as Record<string, unknown>).filter(([k]) => !isReservedChannel(k))),
+              __nodeId: nodeId,
+            }
           : { ...(payload.data !== undefined ? { value: payload.data } : {}), __nodeId: nodeId };
       const threadId = (base.meta as RunMeta | undefined)?.threadId ?? (base.meta as RunMeta | undefined)?.runId;
       if (threadId) {
@@ -1745,17 +1811,11 @@ export async function hydrateDurableRuntime(
   if (!snap) return;
   for (const task of snap.tasks ?? []) {
     for (const it of task.interrupts ?? []) {
-      hydrateReplayFromInterruptPayload(it.value);
+      hydrateReplayFromInterruptPayload(it.value, threadId);
     }
   }
-  const replayState = snap.values?.[REPLAY_CHANNEL];
-  if (replayState && typeof replayState === "object" && !Array.isArray(replayState)) {
-    for (const [key, entries] of Object.entries(replayState as Record<string, unknown>)) {
-      if (entries && typeof entries === "object" && !Array.isArray(entries)) {
-        hydrateReplay(key, entries as Record<string, unknown>);
-      }
-    }
-  }
+  // Only this thread's keys: the replay cache is process-wide.
+  hydrateThreadReplay(threadId, snap.values?.[REPLAY_CHANNEL]);
 
   const interrupts: InterruptInfo[] = [];
   for (const task of snap.tasks ?? []) {
@@ -1766,6 +1826,7 @@ export async function hydrateDurableRuntime(
       threadId,
       graphSpec,
       executeInvoke: opts.executeInvoke,
+      nodePolicy: opts.nodePolicy,
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.sinks ? { sinks: opts.sinks } : {}),
     });

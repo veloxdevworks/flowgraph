@@ -41,8 +41,21 @@ export interface NodePolicy {
   allowedTools?: readonly string[] | undefined;
   /** Registered functions a `function` node may call, by name. Unset: every registered function. */
   allowedFunctions?: readonly string[] | undefined;
-  /** Refuse node features that run a host program outside `blockedTypes`: a workshop `diff` that runs git. */
+  /** Refuse node features that run a host program outside `blockedTypes`: a workshop or review `diff` that runs git. */
   blockHostExec?: boolean | undefined;
+  /**
+   * Refuse agent `with.agent` references, which load an AGENT.md from a path
+   * or package on the host (directly, or through an operator or import alias).
+   */
+  blockAgentRefs?: boolean | undefined;
+  /**
+   * Refuse `imports` in the graph and in inline subgraphs: node, provider and
+   * reducer imports load a module from the host and register what it exports
+   * for the whole process.
+   */
+  blockImports?: boolean | undefined;
+  /** Refuse inbound webhooks: wait `webhook` and `runtime.webhookServer`, which listen on a host port. */
+  blockInboundWebhooks?: boolean | undefined;
   /** Who set the policy, for error messages (e.g. "uploaded graphs from untrusted authors"). */
   reason?: string | undefined;
 }
@@ -61,7 +74,10 @@ export type NodePolicyErrorCode =
   | "TOOL_BLOCKED"
   | "FUNCTION_BLOCKED"
   | "HOST_EXEC_BLOCKED"
-  | "RESERVED_CHANNEL_BLOCKED";
+  | "RESERVED_CHANNEL_BLOCKED"
+  | "AGENT_REF_BLOCKED"
+  | "IMPORTS_BLOCKED"
+  | "INBOUND_WEBHOOK_BLOCKED";
 
 export class NodePolicyError extends Error {
   constructor(
@@ -189,6 +205,15 @@ export function assertNodeSpecAllowed(policy: NodePolicy | undefined, node: { ty
   const w = (node.with ?? {}) as Record<string, unknown>;
   if (type === "agent" || type === "intelligent") {
     for (const name of registeredToolNamesOf(w.tools)) assertToolAllowed(policy, name, `${where} agent tool`);
+    if (w.agent !== undefined) assertAgentRefAllowed(policy, where);
+  }
+  if (type === "wait" && w.webhook) assertInboundWebhookAllowed(policy, `${where} with.webhook`);
+  const reservedRefs = reservedStateMapRefs(node);
+  if (reservedRefs.length > 0) {
+    throw new NodePolicyError(
+      "RESERVED_CHANNEL_BLOCKED",
+      `${where}: ${reservedRefs.join(", ")} names a reserved state channel (names starting with "${RESERVED_CHANNEL_PREFIX}")${suffix(policy)}`,
+    );
   }
   if (type === "function" || type === "code") {
     if (typeof w.fn === "string") assertFunctionAllowed(policy, w.fn, where);
@@ -221,22 +246,98 @@ export function assertGraphRuntimeAllowed(
   if (graph.runtime?.worktrees?.cleanupOnEnd && !hostExecAllowed(policy, "worktree")) {
     throw refuse("runtime.worktrees.cleanupOnEnd (git worktree remove)");
   }
+  if ((graph.runtime as { webhookServer?: unknown } | undefined)?.webhookServer !== undefined) {
+    assertInboundWebhookAllowed(policy, `${where} runtime.webhookServer`);
+  }
+}
+
+/** Throws INBOUND_WEBHOOK_BLOCKED under a policy that refuses inbound webhooks. */
+export function assertInboundWebhookAllowed(policy: NodePolicy | undefined, where: string): void {
+  if (!policy?.blockInboundWebhooks) return;
+  throw new NodePolicyError(
+    "INBOUND_WEBHOOK_BLOCKED",
+    `${where}: an inbound webhook listens on a port on the host, which is not allowed here${suffix(policy)}`,
+  );
 }
 
 /**
- * Under a policy, refuse graphs that declare or write the engine's reserved
- * state channels (service intents, worktree paths, agent replay, ...): what
- * lands there is later acted on as if the engine had put it there.
+ * Throws IMPORTS_BLOCKED under a policy that refuses imports, for `imports`
+ * on the graph or on any inline subgraph or map inner at any depth. Runs
+ * before anything is loaded.
  */
-export function assertNoReservedChannels(
-  policy: NodePolicy | undefined,
-  channels: Iterable<string>,
-  reserved: Iterable<string>,
-  where: string,
-): void {
+export function assertImportsAllowed(policy: NodePolicy | undefined, spec: unknown, where: string): void {
+  if (!policy?.blockImports) return;
+  const visit = (graph: unknown, at: string, depth: number): void => {
+    if (!graph || typeof graph !== "object" || depth > 32) return;
+    const g = graph as { imports?: unknown; nodes?: unknown };
+    if (Array.isArray(g.imports) && g.imports.length > 0) {
+      throw new NodePolicyError(
+        "IMPORTS_BLOCKED",
+        `${at}: imports load modules from the host and register them for the whole process, which is not allowed here${suffix(policy)}`,
+      );
+    }
+    const nodes = Array.isArray(g.nodes) ? g.nodes : [];
+    const visitNode = (n: unknown, nAt: string): void => {
+      if (!n || typeof n !== "object") return;
+      const node = n as { id?: unknown; spec?: unknown; with?: { node?: unknown } };
+      if (node.spec) visit(node.spec, `${nAt} inline subgraph`, depth + 1);
+      if (node.with?.node) visitNode(node.with.node, `${nAt} inner node`);
+    };
+    for (const n of nodes) visitNode(n, `${at} node "${String((n as { id?: unknown })?.id ?? "?")}"`);
+  };
+  visit(spec, where, 0);
+}
+
+/** State channel names starting with this belong to the engine (`__services`, `__agentReplay`, ...). */
+export const RESERVED_CHANNEL_PREFIX = "__";
+
+/** Whether `name` is in the engine's reserved channel namespace (any `__` prefix, known or not). */
+export function isReservedChannel(name: string): boolean {
+  return name.startsWith(RESERVED_CHANNEL_PREFIX);
+}
+
+/** A `__name` used as a whole reference or inside a `{{ }}` expression (`state.__x`, `state['__x']`). */
+const RESERVED_REF = /(?:^|[^A-Za-z0-9_$])__[A-Za-z0-9_$]/;
+
+/**
+ * Reserved channel names a subgraph `stateMap` reads or writes: `in` keys
+ * (child channels it fills), `in` values (parent channels it reads), `out`
+ * keys (parent channels it fills) and `out` values (child channels it reads).
+ * Returned as `stateMap.in.<key>`-style paths.
+ */
+export function reservedStateMapRefs(node: { with?: unknown }): string[] {
+  const stateMap = (node.with as { stateMap?: unknown } | undefined)?.stateMap;
+  if (!stateMap || typeof stateMap !== "object" || Array.isArray(stateMap)) return [];
+  const out: string[] = [];
+  for (const dir of ["in", "out"] as const) {
+    const m = (stateMap as Record<string, unknown>)[dir];
+    if (!m || typeof m !== "object" || Array.isArray(m)) continue;
+    for (const [key, value] of Object.entries(m as Record<string, unknown>)) {
+      if (isReservedChannel(key.trim()) || (typeof value === "string" && RESERVED_REF.test(value.trim()))) {
+        out.push(`stateMap.${dir}.${key}`);
+      }
+    }
+  }
+  return out;
+}
+
+/** Throws AGENT_REF_BLOCKED for `with.agent` under a policy that blocks it. */
+export function assertAgentRefAllowed(policy: NodePolicy | undefined, where: string): void {
+  if (!policy?.blockAgentRefs) return;
+  throw new NodePolicyError(
+    "AGENT_REF_BLOCKED",
+    `${where}: with.agent loads an AGENT.md from a path or package on the host, which is not allowed here${suffix(policy)}`,
+  );
+}
+
+/**
+ * Under a policy, refuse graphs that declare or write reserved state
+ * channels (any `__` name: service intents, worktree paths, agent replay,
+ * ...): what lands there is later acted on as if the engine had put it there.
+ */
+export function assertNoReservedChannels(policy: NodePolicy | undefined, channels: Iterable<string>, where: string): void {
   if (!policy) return;
-  const r = new Set(reserved);
-  const bad = [...new Set([...channels].filter((c) => r.has(c)))];
+  const bad = [...new Set([...channels].filter((c) => isReservedChannel(c)))];
   if (bad.length > 0) {
     throw new NodePolicyError(
       "RESERVED_CHANNEL_BLOCKED",
@@ -256,20 +357,19 @@ export function hostExecAllowed(policy: NodePolicy | undefined, nodeType?: strin
 }
 
 /**
- * Throws RESERVED_CHANNEL_BLOCKED when caller-supplied run input sets one of
- * the engine's reserved state channels (`__services`, `__worktrees`,
- * `__agentReplay`, …). Those are written only by the engine; accepting them
+ * Throws RESERVED_CHANNEL_BLOCKED when caller-supplied run input sets a
+ * reserved state channel: any name starting with `__` (`__services`,
+ * `__worktrees`, `__agentReplay`, …). Those are written only by the engine; accepting them
  * from input would let a caller plant services to restart, worktrees to
  * remove or replayed tool results.
  */
-export function assertNoReservedInput(input: unknown, reserved: Iterable<string>, where: string): void {
+export function assertNoReservedInput(input: unknown, where: string): void {
   if (!input || typeof input !== "object" || Array.isArray(input)) return;
-  const names = new Set(reserved);
-  const hit = Object.keys(input).filter((k) => names.has(k));
+  const hit = Object.keys(input).filter((k) => isReservedChannel(k));
   if (hit.length) {
     throw new NodePolicyError(
       "RESERVED_CHANNEL_BLOCKED",
-      `${where}: input may not set reserved state channel${hit.length > 1 ? "s" : ""} ${hit.map((h) => `"${h}"`).join(", ")}`,
+      `${where}: input may not set reserved state channel${hit.length > 1 ? "s" : ""} ${hit.map((h) => `"${h}"`).join(", ")} (names starting with "${RESERVED_CHANNEL_PREFIX}" belong to the engine)`,
     );
   }
 }

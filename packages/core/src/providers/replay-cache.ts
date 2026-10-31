@@ -118,14 +118,14 @@ export function clearAllReplayCaches(): void {
 }
 
 /**
- * Drop all cached entries for a thread (every node key with this prefix).
+ * Drop all cached entries for a thread (every `${threadId}:${nodeId}` key).
  * Called on a fresh run start: entries left behind by an interrupted run that
- * was never resumed must not leak into a new run on the same thread.
+ * was never resumed must not leak into a new run on the same thread. Thread
+ * `t` does not clear thread `t:x`.
  */
 export function clearThreadReplayCache(threadId: string): void {
-  const prefix = `${threadId}:`;
   for (const key of store.keys()) {
-    if (key.startsWith(prefix)) store.delete(key);
+    if (replayKeyBelongsTo(key, threadId)) store.delete(key);
   }
 }
 
@@ -139,14 +139,45 @@ export function hydrateReplay(key: string, serialized: Record<string, unknown>):
   memoryReplayCache.load(key, deserializeReplayDump(serialized));
 }
 
-export function hydrateReplayFromInterruptPayload(payload: unknown): void {
+/**
+ * Whether `key` is a replay key of `threadId`: exactly `${threadId}:${nodeId}`
+ * with a non-empty node id. Node ids never contain ":", so the split is at the
+ * last colon and `t1:x` never matches thread `t1:x`'s keys or the reverse.
+ */
+export function replayKeyBelongsTo(key: string, threadId: string): boolean {
+  const i = key.lastIndexOf(":");
+  return i > 0 && i < key.length - 1 && key.slice(0, i) === threadId;
+}
+
+/**
+ * Load saved replay entries for `threadId` from a checkpoint's
+ * `__agentReplay` channel value. Keys for any other thread are ignored: the
+ * cache is process-wide, so loading them would hand one thread's agent
+ * another thread's (or a forged) LLM and tool results.
+ */
+export function hydrateThreadReplay(threadId: string, replayState: unknown): void {
+  if (!isPlainObject(replayState)) return;
+  for (const [key, entries] of Object.entries(replayState)) {
+    if (!replayKeyBelongsTo(key, threadId) || !isPlainObject(entries)) continue;
+    hydrateReplay(key, entries);
+  }
+}
+
+/**
+ * Load the replay snapshot the engine attached to an interrupt of `threadId`.
+ * Only a key equal to `${threadId}:${data.__nodeId}` (the interrupting node,
+ * set by the engine) is accepted.
+ */
+export function hydrateReplayFromInterruptPayload(payload: unknown, threadId: string): void {
   if (!isPlainObject(payload)) return;
   const data = isPlainObject(payload["data"]) ? payload["data"] : payload;
   const blob = data["__agentReplay"];
   if (!isPlainObject(blob)) return;
   const key = blob["key"];
   const entries = blob["entries"];
-  if (typeof key !== "string" || !isPlainObject(entries)) return;
+  const nodeId = data["__nodeId"];
+  if (typeof key !== "string" || !isPlainObject(entries) || typeof nodeId !== "string") return;
+  if (key !== replayCacheKey(threadId, nodeId) || !replayKeyBelongsTo(key, threadId)) return;
   hydrateReplay(key, entries);
 }
 

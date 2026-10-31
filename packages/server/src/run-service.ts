@@ -19,7 +19,6 @@ import {
   type RunIssue,
   type RunResult,
   MEMORY_SWEEP_MAX_INTERVAL_MS,
-  RESERVED_STATE_CHANNELS,
   assertNoReservedInput,
 } from "@flowgraph/core";
 import { maybeSweepPostgres, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
@@ -597,7 +596,7 @@ export class RunService {
   private async startRunNow(req: StartRunRequest, caller?: Principal): Promise<StartRunResult> {
     rejectClientSecrets(req.env);
     // Engine bookkeeping channels (__services, __worktrees, ...) are never caller input.
-    assertNoReservedInput(req.input, [...RESERVED_STATE_CHANNELS, "__interrupt__"], "run input");
+    assertNoReservedInput(req.input, "run input");
     if (!req.threadId?.trim()) throw new Error("threadId is required");
     if (!req.yaml?.trim()) throw new Error("yaml is required");
     const principal = this.principalFor(caller);
