@@ -91,7 +91,7 @@ assistant: …
 
 **Map:** agents inside `map` run in parallel, so they read `history` but do not write it (run issue `CONTEXT_HISTORY_READ_ONLY`, lint `CONTEXT_HISTORY_IN_MAP`).
 
-**Subgraphs:** map the channel in and out with `stateMap`. Turns a child appends reach the parent; ids keep the parent's copy free of duplicates. Compaction is local to the graph that runs it: removals made by a child agent do not propagate to the parent's channel, so the parent keeps its full history and the child's new turns. Each agent fits its own calls, so every call stays within budget either way. To bound the parent's channel too, give a parent agent on that channel its own `with.context`.
+**Subgraphs:** map the channel in and out with `stateMap`. Turns a child appends reach the parent; ids keep the parent's copy free of duplicates. Compaction does not propagate to the parent: inside a subgraph an agent fits its own calls but only appends its turn to the history channel, with no removals and no summary message, so the parent keeps its full history plus the child's new turns. Every call still stays within budget. To bound the parent's channel, give an agent in the parent graph a `with.context` on that channel; it compacts as usual.
 
 ## 5. Known issues
 

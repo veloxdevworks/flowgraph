@@ -483,20 +483,21 @@ describe("agent with.context inside map and subgraphs", () => {
       expect(chat.map((m) => m.content)).toEqual(["parent: x", "re: parent: x", "child: x", "re: child: x"]);
     });
 
-    it("compaction inside the child does not remove messages from the parent's channel", async () => {
+    for (const strategy of ["trim", "summarize"] as const)
+    it(`${strategy} inside the child does not compact the parent's channel`, async () => {
       const reqs: AgentRequest[] = [];
-      const p: ProviderAdapter = createScriptedProvider("ctx-sub2", (req) => {
+      const p: ProviderAdapter = createScriptedProvider(`ctx-sub2-${strategy}`, (req) => {
         reqs.push(req);
         return { output: { text: "ok" }, stopReason: "done" };
       }, { contextMessages: true });
       await fs.writeFile(
-        path.join(dir, "child-small.graph.yaml"),
+        path.join(dir, `child-small-${strategy}.graph.yaml`),
         yaml.stringify({
           apiVersion: "flowgraph/v1",
           kind: "Graph",
           metadata: { name: "ctx-child-small" },
           state: { channels: { chat: { type: "messages" }, q: { type: "string" } } },
-          nodes: [{ id: "inner", type: "agent", provider: "ctx-sub2", with: { prompt: "child: {{ state.q }}", context: { history: "chat", maxTokens: 600 } } }],
+          nodes: [{ id: "inner", type: "agent", provider: `ctx-sub2-${strategy}`, with: { prompt: "child: {{ state.q }}", context: { history: "chat", maxTokens: 600, strategy, ...(strategy === "summarize" ? { summarize: { mode: "extract", maxTokens: 100 } } : {}) } } }],
           edges: [
             { from: "START", to: "inner" },
             { from: "inner", to: "END" },
@@ -511,9 +512,9 @@ describe("agent with.context inside map and subgraphs", () => {
       const spec = {
         apiVersion: "flowgraph/v1",
         kind: "Graph",
-        metadata: { name: "ctx-parent-small" },
+        metadata: { name: `ctx-parent-small-${strategy}` },
         state: { channels: { chat: { type: "messages" }, q: { type: "string" } } },
-        nodes: [{ id: "embed", type: "subgraph", uses: "./child-small.graph.yaml", with: { stateMap: { in: { chat: "chat", q: "q" }, out: { chat: "chat" } } } }],
+        nodes: [{ id: "embed", type: "subgraph", uses: `./child-small-${strategy}.graph.yaml`, with: { stateMap: { in: { chat: "chat", q: "q" }, out: { chat: "chat" } } } }],
         edges: [
           { from: "START", to: "embed" },
           { from: "embed", to: "END" },
@@ -521,7 +522,7 @@ describe("agent with.context inside map and subgraphs", () => {
         runtime: { checkpoint: { enabled: true, backend: "memory" } },
       } as unknown as GraphSpec;
       const g = await compileGraph(spec, { providers: [p], cwd: dir, checkpointer: "memory" });
-      const r = await g.run({ threadId: "sub-compact", input: { q: "x", chat: seeded } });
+      const r = await g.run({ threadId: `sub-compact-${strategy}`, input: { q: "x", chat: seeded } });
       expect(r.error?.message).toBeUndefined();
       expect(r.status).toBe("completed");
       // The child sent only what fit...
@@ -531,6 +532,7 @@ describe("agent with.context inside map and subgraphs", () => {
       expect(chat.length).toBe(seeded.length + 2);
       expect(chat.slice(0, seeded.length).map((m) => m.id)).toEqual(seeded.map((m) => m.id));
       expect(chat.at(-2)!.content).toBe("child: x");
+      expect(chat.some((m) => kind(m) === "system")).toBe(false);
     });
   });
 });

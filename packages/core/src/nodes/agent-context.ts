@@ -33,6 +33,15 @@ export function isMapWorker(nodeId: string): boolean {
   return /\[\d+\]$/.test(nodeId);
 }
 
+/**
+ * True when this node runs inside an embedded subgraph. LangGraph nests the
+ * checkpoint namespace (`parent:task|child:task`) for subgraph nodes.
+ */
+export function inSubgraph(ctx: NodeRunContext): boolean {
+  const ns = (ctx as { _lgConfig?: { configurable?: Record<string, unknown> } })._lgConfig?.configurable?.["checkpoint_ns"];
+  return typeof ns === "string" && ns.includes("|");
+}
+
 interface StoredHistory {
   history: ContextMessage[];
   systemNotes: string[];
@@ -212,11 +221,16 @@ export function startAgentContext(args: {
         });
         return undefined;
       }
+      // Inside a subgraph the channel belongs to the parent: append the turn
+      // only, so compaction (removals and the summary message) stays local
+      // to the calls this agent makes and never reaches the parent.
+      const nested = inSubgraph(ctx);
+      const compact = policy.compact && !nested;
       const out: BaseMessage[] = [];
-      if (policy.compact) {
+      if (compact) {
         for (const m of window.droppedHistory()) if (m.id) out.push(removeMessage(m.id));
       }
-      if (policy.strategy === "summarize" && window.summaryChanged && window.summary) {
+      if (!nested && policy.strategy === "summarize" && window.summaryChanged && window.summary) {
         const dropped = window.droppedHistory();
         const prevCovers = stored.summary?.meta?.["coversThroughId"];
         const coversThroughId = policy.compact ? undefined : (dropped[dropped.length - 1]?.id ?? prevCovers);
@@ -231,7 +245,7 @@ export function startAgentContext(args: {
       }
       let turn: ContextMessage[];
       if (policy.record === "all" && result.turn && result.turn.length > 0) {
-        const droppedLoop = policy.compact ? window.droppedLoop() : new Set<ContextMessage>();
+        const droppedLoop = compact ? window.droppedLoop() : new Set<ContextMessage>();
         turn = [promptMsg, ...result.turn.filter((m) => !droppedLoop.has(m))];
       } else {
         turn = [promptMsg, { role: "assistant", content: outputText(result.output) }];
