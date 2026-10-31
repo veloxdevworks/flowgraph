@@ -291,6 +291,26 @@ describe("FlowgraphMemorySaver run waiting for an answer", () => {
     expect(seenInPost).toEqual(["active"]);
   });
 
+  it("attaches the failed park to the error when the row cannot be stored as paused either", async () => {
+    const { saver } = faultySaverAt();
+    saver.failWaiting = true;
+    saver.failStatus = true;
+    postSaver = saver;
+    postThread = "db-down";
+    seenInPost.length = 0;
+    const graph = await compileGraph(gatedSpec("approval"), { checkpointer: saver });
+    const result = await graph.run({
+      threadId: postThread,
+      input: {},
+      onInterrupt: "prompt",
+      resolveInterrupt: async () => ({ approved: true }),
+    });
+    expect((result.error as { code?: string }).code).toBe(THREAD_WAIT_NOT_RECORDED);
+    expect((result.error as { parkError?: Error }).parkError?.message).toBe("still down");
+    // Neither write landed, so the row is still active and a sweep past activeTtl can reclaim it.
+    expect(saver.savedThreadStatus(postThread)?.status).toBe("active");
+  });
+
   it("stops the run without applying the answer when the row cannot be stored as active again", async () => {
     const { saver } = faultySaverAt();
     saver.failAnswered = true;
@@ -369,6 +389,11 @@ class FaultyMemorySaver extends FlowgraphMemorySaver {
   failAnswered = false;
   /** Act as if the row stopped being this run's just before the wait. */
   lostBeforeWait = false;
+  failStatus = false;
+  override async noteThreadStatus(...args: Parameters<FlowgraphMemorySaver["noteThreadStatus"]>): Promise<void> {
+    if (this.failStatus) throw new Error("still down");
+    return super.noteThreadStatus(...args);
+  }
   override noteThreadWaiting(threadId: string, activeMark: string): boolean {
     if (this.failWaiting) throw new Error("disk full");
     if (this.lostBeforeWait) return false;

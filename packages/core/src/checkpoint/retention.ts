@@ -182,7 +182,7 @@ export function threadWaitError(
   threadId: string,
   when: "before" | "after",
   cause?: unknown,
-): Error & { code: ThreadWaitErrorCode } {
+): Error & { code: ThreadWaitErrorCode; parkError?: unknown } {
   const reason = cause instanceof Error ? `: ${cause.message}` : "";
   const message =
     code === THREAD_WAIT_NOT_RECORDED

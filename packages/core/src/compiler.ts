@@ -399,8 +399,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (retention && bookkeeping) {
         try {
           await retention.noteThreadStatus(threadId, retentionStatusForRun(r.status));
-        } catch {
+        } catch (err) {
           // Retention bookkeeping must not fail a run that already finished.
+          if ((r.error as { code?: unknown } | undefined)?.code === THREAD_WAIT_NOT_RECORDED) Object.assign(r.error!, { parkError: err });
         }
       }
       return r;
