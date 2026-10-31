@@ -108,6 +108,7 @@ describe("POST /runs dryRun", () => {
     expect(handled).toBe(true);
     expect(startRun).toHaveBeenCalledWith(
       expect.objectContaining({ threadId: "t1", dryRun: true }),
+      undefined,
     );
     expect(res.statusCode).toBe(202);
   });

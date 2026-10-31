@@ -11,6 +11,7 @@ import { ShellWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { assertHostProbeAllowed, nodePolicyOf } from "../node-policy.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import {
@@ -77,6 +78,7 @@ export const shellNode = defineNode<Config>({
         const timeoutMs = config.timeout ? parseDuration(config.timeout) : DEFAULT_TIMEOUT_MS;
         const allowedExit = config.expect?.exitCode ?? [0];
 
+        assertHostProbeAllowed(nodePolicyOf(ctx), config.requires, `shell node "${ctx.nodeId}"`);
         const missing = await findMissingBins(config.requires);
         if (missing.length > 0) {
           const skip = config.onMissingTool === "skip";

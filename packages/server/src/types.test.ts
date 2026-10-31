@@ -27,6 +27,39 @@ describe("defaultServerConfig", () => {
     expect(cfg.connectToken).toBe("ctok");
   });
 
+  it("reads FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS", () => {
+    expect(defaultServerConfig({}).untrustedHttpAllowHosts).toBeUndefined();
+    expect(defaultServerConfig({ FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS: " hooks.internal:8443, *.corp.example ,[fd00::1]:80" }).untrustedHttpAllowHosts).toEqual([
+      "hooks.internal:8443",
+      "*.corp.example",
+      "[fd00::1]:80",
+    ]);
+    expect(() => defaultServerConfig({ FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS: "http://x/" })).toThrow(/FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS/);
+  });
+
+  it("reads FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS and FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS", () => {
+    expect(defaultServerConfig({}).untrustedAllowTools).toBeUndefined();
+    const c = defaultServerConfig({ FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS: " lookup_order, crm.search ", FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS: "score" });
+    expect(c.untrustedAllowTools).toEqual(["lookup_order", "crm.search"]);
+    expect(c.untrustedAllowFunctions).toEqual(["score"]);
+    expect(() => defaultServerConfig({ FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS: "a b" })).toThrow(/FLOWGRAPH_UNTRUSTED_ALLOW_TOOLS/);
+  });
+
+  it("reads FLOWGRAPH_SHUTDOWN_TIMEOUT_MS", () => {
+    expect(defaultServerConfig({}).shutdownTimeoutMs).toBeUndefined();
+    expect(defaultServerConfig({ FLOWGRAPH_SHUTDOWN_TIMEOUT_MS: "2500" }).shutdownTimeoutMs).toBe(2500);
+    expect(() => defaultServerConfig({ FLOWGRAPH_SHUTDOWN_TIMEOUT_MS: "soon" })).toThrow(/FLOWGRAPH_SHUTDOWN_TIMEOUT_MS/);
+  });
+
+  it("reads FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS", () => {
+    expect(defaultServerConfig({}).setupLockTimeoutMs).toBeUndefined();
+    expect(defaultServerConfig({ FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS: "0" }).setupLockTimeoutMs).toBe(0);
+    expect(defaultServerConfig({ FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS: "120000" }).setupLockTimeoutMs).toBe(120_000);
+    for (const bad of ["-1", "1.5", "soon"]) {
+      expect(() => defaultServerConfig({ FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS: bad })).toThrow(/FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS/);
+    }
+  });
+
   it("parses voice policy env (default: no unauthenticated minting)", () => {
     expect(defaultServerConfig({}).voice).toEqual({ allowUnauthenticated: false });
     const cfg = defaultServerConfig({

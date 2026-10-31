@@ -4,8 +4,11 @@ export type { Token, TokenKind } from "./lexer.js";
 export { parseExpr, ParseError } from "./parser.js";
 export type { Expr, BinaryOp } from "./ast.js";
 
-export { evalExpr, EvalError } from "./evaluator.js";
+export { evalExpr, EvalError, HIDDEN_STATE_PREFIX } from "./evaluator.js";
 export type { EvalScope } from "./evaluator.js";
+
+export { scanTemplate, soleTemplateExpr } from "./scan.js";
+export type { TemplateScan, TemplateSpan } from "./scan.js";
 
 export { renderTemplate, renderDeep, stringifyRendered, evalGuard, collectRefs } from "./template.js";
 

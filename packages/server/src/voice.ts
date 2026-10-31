@@ -1,6 +1,7 @@
 import { mintEphemeralToken, apiKeyEnvForVoice, voiceProvider } from "@flowgraph/workshop-session";
 import { errorFields, log } from "./metrics.js";
 import type { ServerConfig } from "./types.js";
+import { authModeOf } from "./identity.js";
 
 /** Models callers may request when `voice.allowedModels` is unset. */
 export const DEFAULT_VOICE_MODELS: readonly string[] = [
@@ -23,13 +24,15 @@ export class VoiceRequestError extends Error {
 }
 
 /** True when REST requests reach handlers without a verified bearer token. */
-export function restIsUnauthenticated(config: Pick<ServerConfig, "authDisabled" | "authToken">): boolean {
-  return Boolean(config.authDisabled) || !config.authToken;
+export function restIsUnauthenticated(config: Pick<ServerConfig, "auth" | "authDisabled" | "authToken">): boolean {
+  const mode = authModeOf(config);
+  if (mode === "oidc") return false;
+  return mode === "none" || !config.authToken;
 }
 
 export async function mintVoiceClientSecret(
   body: { provider?: string; model?: string },
-  config: Pick<ServerConfig, "authDisabled" | "authToken" | "voice"> = {},
+  config: Pick<ServerConfig, "auth" | "authDisabled" | "authToken" | "voice"> = {},
   opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<{ token: string; expiresAt?: string; url: string; model: string; provider: string }> {
   if (restIsUnauthenticated(config)) {
@@ -37,7 +40,7 @@ export async function mintVoiceClientSecret(
       throw new VoiceRequestError(
         403,
         "VOICE_AUTH_REQUIRED",
-        "Voice token minting is disabled while server auth is off. Set FLOWGRAPH_AUTH_TOKEN, " +
+        "Voice token minting is disabled while server auth is off. Configure OIDC (FLOWGRAPH_OIDC_ISSUER) or FLOWGRAPH_AUTH_TOKEN, " +
           "or explicitly opt in with FLOWGRAPH_VOICE_ALLOW_UNAUTHENTICATED=1 (voice.allowUnauthenticated).",
       );
     }
@@ -93,7 +96,7 @@ export async function mintVoiceClientSecret(
 }
 
 /** Startup warnings for the voice endpoint policy. */
-export function logVoicePolicy(config: Pick<ServerConfig, "authDisabled" | "authToken" | "voice">): void {
+export function logVoicePolicy(config: Pick<ServerConfig, "auth" | "authDisabled" | "authToken" | "voice">): void {
   if (config.voice?.allowUnauthenticated && restIsUnauthenticated(config)) {
     log("warn", "voice.allow-unauthenticated", {
       message:

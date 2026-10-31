@@ -1,10 +1,13 @@
 import {
   AsyncEngineMemoryBackend,
   createInMemoryMemoryBackend,
+  createInMemoryGraphNameRegistry,
   type AsyncMemoryTable,
   type MemoryTable,
 } from "@flowgraph/core";
-import { describeMemoryBackendConformance } from "./memory-conformance.js";
+import { describeGraphNameRegistryConformance, describeMemoryBackendConformance } from "./memory-conformance.js";
+
+describeGraphNameRegistryConformance("in-memory", async () => ({ registry: createInMemoryGraphNameRegistry() }));
 
 describeMemoryBackendConformance("in-memory", async () => ({ backend: createInMemoryMemoryBackend() }));
 

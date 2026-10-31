@@ -26,12 +26,15 @@ class FakeSocket implements WebSocketLike {
   }
 }
 
+const tokenMode = { mode: "token" };
+
 describe("ConnectClient", () => {
   it("sends hello on open and command.result after hello.ack", async () => {
     let socket: FakeSocket | undefined;
     const listRuns = vi.fn(async () => [{ threadId: "t1", status: "completed" }]);
     const service = {
       registry: new SessionRegistry(),
+      authenticator: tokenMode,
       listRuns,
     } as unknown as RunService;
 
@@ -110,10 +113,46 @@ describe("ConnectClient", () => {
     client.stop();
   });
 
+  it("with OIDC, acts for the user in params.accessToken and refuses commands without one", async () => {
+    let socket: FakeSocket | undefined;
+    const alice = { id: "iss|alice", subject: "alice", org: "acme", teams: [], roles: [], trusted: false, via: "oidc" };
+    const listRuns = vi.fn(async () => []);
+    const authenticate = vi.fn(async (h?: string) =>
+      h === "Bearer good"
+        ? { ok: true, principal: alice }
+        : { ok: false, status: 401, code: h ? "AUTH_INVALID_TOKEN" : "AUTH_REQUIRED", message: "no token" },
+    );
+    const service = { registry: new SessionRegistry(), authenticator: { mode: "oidc", authenticate }, listRuns } as unknown as RunService;
+    const client = new ConnectClient({
+      url: "wss://platform.test/connect",
+      service,
+      webSocket: class {
+        constructor() {
+          socket = new FakeSocket();
+          return socket;
+        }
+      } as unknown as new (url: string) => WebSocketLike,
+    });
+    client.start();
+    socket!.emit("open");
+    socket!.emit("message", JSON.stringify({ type: "hello.ack", protocolVersion: CONNECT_PROTOCOL_VERSION, sessionId: "s1" }));
+    socket!.emit("message", JSON.stringify({ type: "command", id: "anon", method: "run.list", params: {} }));
+    socket!.emit("message", JSON.stringify({ type: "command", id: "ok", method: "run.list", params: { accessToken: "good" } }));
+    const results = () =>
+      socket!.sent.map((x) => JSON.parse(x) as { type: string; id?: string; ok?: boolean; code?: string }).filter((m) => m.type === "command.result");
+    await vi.waitFor(() => expect(results()).toHaveLength(2));
+    expect(results().find((m) => m.id === "anon")).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    expect(results().find((m) => m.id === "ok")).toMatchObject({ ok: true });
+    expect(listRuns).toHaveBeenCalledTimes(1);
+    expect(listRuns).toHaveBeenCalledWith(alice);
+    client.stop();
+  });
+
   it("rejects unknown methods", async () => {
     let socket: FakeSocket | undefined;
     const service = {
       registry: new SessionRegistry(),
+      authenticator: tokenMode,
     } as unknown as RunService;
     const client = new ConnectClient({
       url: "ws://platform.test/connect",
