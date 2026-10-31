@@ -8,7 +8,15 @@
  * still cannot run a blocked node.
  */
 
-import { classifyAddress, hostIsAllowListed, registeredToolNamesOf, walkNodes, type NodePolicy } from "@flowgraph/core";
+import {
+  RESERVED_STATE_CHANNELS,
+  classifyAddress,
+  collectNodeWriteChannels,
+  hostIsAllowListed,
+  registeredToolNamesOf,
+  walkNodes,
+  type NodePolicy,
+} from "@flowgraph/core";
 import { isIP } from "node:net";
 import type { GraphSpec } from "@flowgraph/spec";
 import { ServerRequestError } from "./errors.js";
@@ -59,7 +67,12 @@ export type UploadViolationCode =
   | "UPLOAD_MCP_BLOCKED"
   | "UPLOAD_LOCAL_TOOLS_BLOCKED"
   | "UPLOAD_HOST_PROBE_BLOCKED"
-  | "UPLOAD_HOST_PATH_BLOCKED";
+  | "UPLOAD_HOST_PATH_BLOCKED"
+  | "UPLOAD_RUNTIME_HOST_EXEC_BLOCKED"
+  | "UPLOAD_RESERVED_CHANNEL_BLOCKED";
+
+/** Engine bookkeeping channels (service intents, worktree paths, agent replay, ...). */
+const RESERVED_CHANNELS: ReadonlySet<string> = new Set([...RESERVED_STATE_CHANNELS, "__interrupt__"]);
 
 export interface UploadViolation {
   severity: "error";
@@ -187,8 +200,14 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
       if (why) add("UPLOAD_HTTP_TARGET_BLOCKED", `${path}.with.url`, why);
     }
     const diff = w.diff as Record<string, unknown> | undefined;
-    if (type === "workshop" && diff && typeof diff === "object" && diff.before == null && diff.after == null) {
-      add("UPLOAD_HOST_PATH_BLOCKED", `${path}.with.diff`, "workshop diff runs git in a directory on the server");
+    const diffNode = type === "workshop" ? "workshop" : type === "hitl" && w.mode === "review" ? "review" : undefined;
+    if (diffNode && diff && typeof diff === "object" && diff.before == null && diff.after == null) {
+      add("UPLOAD_HOST_PATH_BLOCKED", `${path}.with.diff`, `${diffNode} diff runs git in a directory on the server; pass before/after text instead`);
+    }
+    for (const channel of collectNodeWriteChannels(node as Parameters<typeof collectNodeWriteChannels>[0])) {
+      if (RESERVED_CHANNELS.has(channel)) {
+        add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${path}.with.output`, `"${channel}" is a reserved state channel`);
+      }
     }
   });
   return out;
@@ -209,7 +228,29 @@ function checkGraphLevel(
   if (typeof defaultProvider === "string" && LOCAL_ENDPOINT_VENDORS.includes(defaultProvider) && !graph.providers?.[defaultProvider]) {
     add("UPLOAD_PROVIDER_ENDPOINT_BLOCKED", `${where}config.defaults.provider`, `vendor "${defaultProvider}" talks to a model server on the host`);
   }
+  for (const channel of Object.keys(graph.state?.channels ?? {})) {
+    if (RESERVED_CHANNELS.has(channel)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}state.channels.${channel}`, `"${channel}" is a reserved state channel`);
+    }
+  }
+  for (const key of Object.keys((graph as { input?: Record<string, unknown> }).input ?? {})) {
+    if (RESERVED_CHANNELS.has(key)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}input.${key}`, `"${key}" is a reserved state channel`);
+    }
+  }
   const runtime = (graph.runtime ?? {}) as Record<string, unknown>;
+  const services = runtime.services as { rehydrateOnResume?: unknown } | undefined;
+  if (services?.rehydrateOnResume) {
+    add(
+      "UPLOAD_RUNTIME_HOST_EXEC_BLOCKED",
+      `${where}runtime.services.rehydrateOnResume`,
+      "rehydrateOnResume restarts saved service commands on the server",
+    );
+  }
+  const cleanup = runtime.worktrees as { cleanupOnEnd?: unknown } | undefined;
+  if (cleanup?.cleanupOnEnd) {
+    add("UPLOAD_RUNTIME_HOST_EXEC_BLOCKED", `${where}runtime.worktrees.cleanupOnEnd`, "cleanupOnEnd runs git worktree remove on the server");
+  }
   if (typeof runtime.workspace === "string" && runtime.workspace) {
     add("UPLOAD_HOST_PATH_BLOCKED", `${where}runtime.workspace`, "runtime.workspace is a path on the server");
   }
