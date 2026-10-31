@@ -142,6 +142,20 @@ export async function writeFileAtomic(filePath: string, data: string): Promise<v
     await fs.rm(tmp, { force: true }).catch(() => undefined);
     throw err;
   }
+  await syncDir(path.dirname(filePath));
+}
+
+/** Flush a directory so a rename in it survives a crash. Some filesystems cannot, which is not an error. */
+async function syncDir(dir: string): Promise<void> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(dir, "r");
+    await handle.sync();
+  } catch {
+    // Not supported here (some platforms and filesystems refuse fsync on a directory).
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 /** Meta updates in progress, by meta file path. */
