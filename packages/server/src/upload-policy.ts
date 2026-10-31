@@ -136,8 +136,15 @@ export interface UntrustedUploadOptions {
   allowFunctions?: readonly string[] | undefined;
 }
 
-const IDENT_START = /[A-Za-z_]/;
-const IDENT_PART = /[A-Za-z0-9_]/;
+/** `[A-Za-z_]`, by character code. */
+function isIdentStart(c: number): boolean {
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+}
+
+/** `[A-Za-z0-9_]`, by character code. */
+function isIdentPart(c: number): boolean {
+  return isIdentStart(c) || (c >= 48 && c <= 57);
+}
 
 /**
  * The first `${NAME}` or `${NAME:-default}` in a line of raw YAML, or
@@ -151,9 +158,9 @@ export function findEnvPlaceholder(line: string): string | undefined {
     const start = line.indexOf("${", from);
     if (start < 0) return undefined;
     let i = start + 2;
-    if (i < line.length && IDENT_START.test(line[i]!)) {
+    if (isIdentStart(line.charCodeAt(i))) {
       i++;
-      while (i < line.length && IDENT_PART.test(line[i]!)) i++;
+      while (isIdentPart(line.charCodeAt(i))) i++;
       if (line[i] === "}") return line.slice(start, i + 1);
       if (line.startsWith(":-", i)) {
         const close = line.indexOf("}", i + 2);
