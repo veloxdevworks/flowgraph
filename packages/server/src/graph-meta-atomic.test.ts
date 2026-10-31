@@ -146,6 +146,38 @@ describe("meta writes and concurrent readers", () => {
     expect((await readGraphMeta(dir, "t"))?.label).toBe("label-39");
   });
 
+  it("applies writes for thread ids that share a file one at a time, and keeps the first thread's file", async () => {
+    const dir = await storeDir();
+    await persistGraph(dir, "a/b", YAML, spec(), { owner: { id: owner.id, org: owner.org } });
+    const graphFile = path.join(dir, "a_b.graph.yaml");
+    const before = await fs.readFile(graphFile, "utf-8");
+    const other_yaml = YAML.replace("meta-atomic", "other-graph");
+    const results = await Promise.allSettled([
+      ...Array.from({ length: 30 }, (_, i) => updateGraphMeta(dir, "a/b", { label: `label-${i}` })),
+      persistGraph(dir, "a_b", other_yaml, parseGraphYaml(other_yaml, { expandEnv: false }).spec!, { owner: { id: other.id, org: other.org } }),
+      updateGraphMeta(dir, "a_b", { label: "from-the-other-id" }),
+    ]);
+    expect(results.slice(0, 30).every((r) => r.status === "fulfilled")).toBe(true);
+    expect(results[30]).toMatchObject({ status: "rejected", reason: { status: 409, code: "THREAD_ID_CONFLICT" } });
+    const meta = await readGraphMeta(dir, "a/b");
+    expect(meta).toMatchObject({ threadId: "a/b", owner: { id: owner.id } });
+    // The last queued patch for the shared file wins, in order.
+    expect(meta?.label).toBe("from-the-other-id");
+    expect(await fs.readFile(graphFile, "utf-8")).toBe(before);
+  });
+
+  it("refuses to store a graph over a meta file it cannot read, and leaves both files alone", async () => {
+    const dir = await storeDir();
+    await persistGraph(dir, "t", YAML, spec(), { owner: { id: owner.id, org: owner.org } });
+    await fs.writeFile(metaFile(dir, "t"), '{"threadId":"t","owner":{"id"');
+    const other_yaml = YAML.replace("meta-atomic", "other-graph");
+    await expect(
+      persistGraph(dir, "t", other_yaml, parseGraphYaml(other_yaml, { expandEnv: false }).spec!, { owner: { id: other.id, org: other.org } }),
+    ).rejects.toBeInstanceOf(GraphMetaUnreadableError);
+    expect(await fs.readFile(path.join(dir, "t.graph.yaml"), "utf-8")).toBe(YAML);
+    expect(await fs.readFile(metaFile(dir, "t"), "utf-8")).toBe('{"threadId":"t","owner":{"id"');
+  });
+
   it("writes a file in one step and cleans up when the write fails", async () => {
     const dir = await storeDir();
     const target = path.join(dir, "x.json");
@@ -159,6 +191,57 @@ describe("meta writes and concurrent readers", () => {
     await expect(writeFileAtomic(path.join(dir, "d.json"), "four")).rejects.toThrow();
     expect((await fs.readdir(dir)).sort()).toEqual(["d.json", "x.json"]);
   });
+});
+
+describe("a thread id that shares another thread's file", () => {
+  it("is always refused while the owner's thread is patched, and the owner keeps the thread", async () => {
+    const dir = await storeDir();
+    const s = await startService(dir);
+    await s.startRun({ threadId: "team/plan", yaml: YAML, input: {} }, owner);
+    for (let i = 0; i < 500 && s.registry.get("team/plan")?.status !== "interrupted"; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(s.registry.get("team/plan")?.status).toBe("interrupted");
+    const graphFile = path.join(dir, "team_plan.graph.yaml");
+    const ownersGraph = await fs.readFile(graphFile, "utf-8");
+    const otherYaml = YAML.replace("meta-atomic", "other-graph");
+
+    // Status patches as runs make them: some awaited, some not (a resumed run marks itself running without waiting).
+    const patchMeta = (s as unknown as { patchMeta(t: string, p: object): void }).patchMeta.bind(s);
+    let stop = false;
+    let patches = 0;
+    const writer = (async () => {
+      while (!stop) {
+        patchMeta("team/plan", { status: "running" });
+        await updateGraphMeta(dir, "team/plan", { status: patches++ % 2 ? "running" : "interrupted" });
+      }
+    })();
+    let attempts = 0;
+    const outcomes = new Map<string, number>();
+    const end = Date.now() + 2000;
+    try {
+      while (Date.now() < end) {
+        attempts++;
+        let outcome: string;
+        try {
+          await s.startRun({ threadId: "team_plan", yaml: otherYaml, input: {} }, other);
+          outcome = "started";
+        } catch (err) {
+          outcome = `${(err as { status?: number }).status} ${(err as { code?: string }).code}`;
+        }
+        outcomes.set(outcome, (outcomes.get(outcome) ?? 0) + 1);
+        if (outcome === "started") break;
+      }
+    } finally {
+      stop = true;
+      await writer;
+    }
+    expect(Object.fromEntries(outcomes)).toEqual({ "403 THREAD_NOT_OWNED": attempts });
+    expect(attempts).toBeGreaterThan(20);
+    expect(patches).toBeGreaterThan(20);
+    expect(await readGraphMeta(dir, "team/plan")).toMatchObject({ threadId: "team/plan", owner: { id: owner.id } });
+    expect(await fs.readFile(graphFile, "utf-8")).toBe(ownersGraph);
+    expect((await s.getRun("team/plan", owner))?.threadId).toBe("team/plan");
+    await expect(s.getRun("team/plan", other)).rejects.toMatchObject({ status: 403 });
+  }, 30_000);
 });
 
 describe("unreadable meta files", () => {

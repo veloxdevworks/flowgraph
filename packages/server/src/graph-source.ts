@@ -255,8 +255,14 @@ async function persistGraphLocked(
   extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" },
 ): Promise<PersistedGraph> {
   const filePath = graphPathFor(dir, threadId);
-  // Read first: an unreadable meta file must not be replaced (and its owner lost) by a new upload.
+  // Read first: an unreadable meta file must not be replaced (and its owner
+  // lost) by a new upload, and neither must the file of another thread id
+  // that maps to the same file name ("a/b" and "a_b"). Callers check access
+  // first; this keeps the write safe if a check raced with another write.
   const existing = await readGraphMeta(dir, threadId);
+  if (existing && existing.threadId !== threadId) {
+    throw new ServerRequestError(409, "THREAD_ID_CONFLICT", `Thread id "${threadId}" collides with another stored thread; use another id`);
+  }
   await writeFileAtomic(filePath, yaml);
   const now = new Date().toISOString();
   const storedAt = existing?.storedAt ?? now;
