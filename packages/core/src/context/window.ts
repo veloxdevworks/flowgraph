@@ -10,7 +10,7 @@
  * is a pure function of the history and the loop so far (deterministic on
  * replay and resume).
  */
-import { getTokenEstimator, messageTokens, truncateToTokens, type TokenEstimator } from "./estimator.js";
+import { checkedEstimator, getTokenEstimator, messageTokens, truncateToTokens, type TokenEstimator } from "./estimator.js";
 import { toUnits } from "./messages.js";
 import { summaryBlock } from "./summary-block.js";
 import {
@@ -134,7 +134,7 @@ export class ContextWindow {
 
   constructor(init: ContextWindowInit) {
     this.policy = init.policy;
-    this.est = init.estimator ?? getTokenEstimator(init.policy.estimator);
+    this.est = init.estimator ? checkedEstimator("custom", init.estimator) : getTokenEstimator(init.policy.estimator);
     this.baseSystem = [init.system, ...(init.systemNotes ?? [])].filter((s): s is string => !!s && s.length > 0);
     this.shared = (init.sharedSummaries ?? []).filter((x) => x.text.length > 0);
     this.sent = this.shared;

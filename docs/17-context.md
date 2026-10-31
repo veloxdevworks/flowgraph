@@ -139,7 +139,7 @@ runtime:
   context: { estimator: cl100k, maxTokens: 120000 }
 ```
 
-An unregistered estimator name fails the node with a message naming the registered ones.
+An unregistered estimator name fails the node with a message naming the registered ones. An estimator must return a finite number >= 0; any other answer (NaN, a negative count, Infinity) fails the node rather than letting a call through unfitted.
 
 Only text is counted and sent: image and other non-text message parts in a history channel are dropped from what the agent sends and count as no tokens.
 

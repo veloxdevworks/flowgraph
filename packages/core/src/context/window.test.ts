@@ -105,6 +105,29 @@ describe("estimator", () => {
   });
 });
 
+describe("estimator answers are checked", () => {
+  for (const [label, fn] of [
+    ["NaN", () => Number.NaN],
+    ["negative", () => -1],
+    ["Infinity", () => Number.POSITIVE_INFINITY],
+    ["non-number", () => "12" as unknown as number],
+  ] as const) {
+    it(`a registered estimator returning ${label} throws instead of letting the call through unfitted`, async () => {
+      registerTokenEstimator(`bad-${label}`, fn);
+      const fit = async () => new ContextWindow({ policy: policy({ maxTokens: 2000, estimator: `bad-${label}` }), history: turns(10, 100), prompt: user("now") }).fit();
+      await expect(fit()).rejects.toThrow(/must return a finite number >= 0/);
+    });
+    it(`an estimator passed to the window returning ${label} throws too`, async () => {
+      const fit = async () => new ContextWindow({ policy: policy({ maxTokens: 2000 }), estimator: fn, history: turns(10, 100), prompt: user("now") }).fit();
+      await expect(fit()).rejects.toThrow(/must return a finite number >= 0/);
+    });
+  }
+  it("zero is a valid answer", async () => {
+    const w = new ContextWindow({ policy: policy({ maxTokens: 2000 }), estimator: () => 0, history: turns(3, 10), prompt: user("now") });
+    await expect(w.fit()).resolves.toBeDefined();
+  });
+});
+
 describe("toUnits", () => {
   it("groups calls with their results and sets aside orphans and unanswered calls", () => {
     const msgs = [user("a"), call(["c1", "c2"]), result("c1"), result("c2"), result("zz"), call(["c3"]), user("b")];

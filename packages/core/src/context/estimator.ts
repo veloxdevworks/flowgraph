@@ -16,7 +16,22 @@ const estimators = new Map<string, TokenEstimator>([["bytes", bytesEstimator]]);
 /** Register (or replace) a named estimator, e.g. a tiktoken-backed counter. */
 export function registerTokenEstimator(name: string, fn: TokenEstimator): void {
   if (!name) throw new Error("registerTokenEstimator: name is required");
-  estimators.set(name, fn);
+  estimators.set(name, checkedEstimator(name, fn));
+}
+
+/**
+ * A host estimator whose every answer is checked: a count that is not a
+ * finite number >= 0 (NaN, negative, Infinity, a string) would make every
+ * budget comparison false and let a call through unfitted, so it throws.
+ */
+export function checkedEstimator(name: string, fn: TokenEstimator): TokenEstimator {
+  return (text) => {
+    const n = fn(text);
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) {
+      throw new Error(`context estimator "${name}" returned ${typeof n === "number" ? String(n) : typeof n} for a ${text.length}-character text; it must return a finite number >= 0`);
+    }
+    return n;
+  };
 }
 
 export function hasTokenEstimator(name: string): boolean {
