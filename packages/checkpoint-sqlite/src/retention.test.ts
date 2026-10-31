@@ -601,4 +601,80 @@ describe("sqlite checkpoint retention", () => {
     db.close();
     (sweeper as unknown as { db: { close(): void } }).db.close();
   });
+
+  for (const gates of [2, 3]) {
+    it(`a ${gates}-gate thread is swept after it finishes`, async () => {
+      const saver = createSqliteCheckpointer({
+        path: tmpDb(),
+        retention: { finishedTtl: "1h", maxFinishedThreads: null },
+      });
+      const compiled = await compileGraph(sqliteGates(gates), { checkpointer: saver });
+      const threadId = `gates-${gates}`;
+      await finishSqliteGates(compiled, threadId, gates);
+      (saver as unknown as { sweep(now?: number): void }).sweep(Date.now() + 2 * 60 * 60 * 1000);
+      const db = (saver as unknown as { db: SqliteBackend["db"] }).db;
+      const n = (db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`).get(threadId) as { n: number }).n;
+      expect(n).toBe(0);
+      db.close();
+    });
+  }
+
+  it("a sweep in the read window keeps a thread that was marked active", async () => {
+    const path = tmpDb();
+    const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+    const writer = createSqliteCheckpointer({ path, retention });
+    const sweeper = createSqliteCheckpointer({ path, retention });
+    const db = (writer as unknown as { db: SqliteBackend["db"] }).db;
+    const api = writer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown): Promise<unknown>;
+      noteThreadStatus(threadId: string, status: "finished", now?: number): void;
+      markThreadActive(threadId: string): void;
+      getTuple(config: unknown): Promise<{ checkpoint: { channel_values: Record<string, unknown> } } | undefined>;
+    };
+    await api.put(
+      { configurable: { thread_id: "window", checkpoint_ns: "" } },
+      { v: 4, id: "1", ts: new Date().toISOString(), channel_values: { a: "keep" }, channel_versions: { a: 1 }, versions_seen: {} },
+      { source: "loop", step: 1, parents: {} },
+    );
+    api.noteThreadStatus("window", "finished", 1);
+    api.markThreadActive("window");
+    (sweeper as unknown as { sweep(now?: number): void }).sweep(Date.now());
+    const tuple = await api.getTuple({ configurable: { thread_id: "window", checkpoint_ns: "" } });
+    expect(tuple?.checkpoint.channel_values["a"]).toBe("keep");
+    db.close();
+    (sweeper as unknown as { db: { close(): void } }).db.close();
+  });
 });
+
+function sqliteGates(gates: number): GraphSpec {
+  const nodes = Array.from({ length: gates }, (_, i) => ({
+    id: `g${i}`,
+    type: "hitl",
+    with: { mode: "approve", message: `gate ${i}`, output: { to: `r${i}` } },
+  }));
+  const channels: Record<string, { type: "object" }> = {};
+  for (let i = 0; i < gates; i++) channels[`r${i}`] = { type: "object" };
+  return {
+    metadata: { name: `sqlite-gates-${gates}` },
+    state: { channels },
+    nodes,
+    edges: [
+      { from: "START", to: "g0" },
+      ...Array.from({ length: gates - 1 }, (_, i) => ({ from: `g${i}`, to: `g${i + 1}` })),
+      { from: `g${gates - 1}`, to: "END" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+async function finishSqliteGates(
+  compiled: Awaited<ReturnType<typeof compileGraph>>,
+  threadId: string,
+  gates: number,
+) {
+  let result = await compiled.run({ threadId, onInterrupt: "fail" });
+  for (let i = 0; i < gates; i++) {
+    expect(result.status).toBe("interrupted");
+    result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
+  }
+  expect(result.status).toBe("completed");
+}

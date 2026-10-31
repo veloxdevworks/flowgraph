@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { compileGraph, registerFunction, type GraphSpec } from "@flowgraph/core";
+import pg from "pg";
+import { compileGraph, registerFunction, resolveCheckpointRetention, type GraphSpec } from "@flowgraph/core";
 import { openPostgresBackend, type PostgresBackend } from "./index.js";
+import { FlowgraphPostgresSaver } from "./retention.js";
 
 const DB = process.env["FLOWGRAPH_TEST_POSTGRES_URL"];
 
@@ -311,6 +313,107 @@ describe.skipIf(!DB)("postgres checkpoint retention", () => {
     }
     expect(lost).toBe(0);
   });
+
+  it("a sweep deletes finished checkpoints when fg_memory_threads is absent", async () => {
+    for (const retention of [
+      { finishedTtl: "1h", maxFinishedThreads: null } as const,
+      { finishedTtl: null, maxFinishedThreads: 0 } as const,
+    ]) {
+      const schema = schemaName();
+      schemas.push(schema);
+      const pool = new pg.Pool({ connectionString: DB });
+      const saver = new FlowgraphPostgresSaver(pool, resolveCheckpointRetention(retention), { schema });
+      try {
+        await saver.setup();
+        const reg = await pool.query<{ ok: string | null }>(
+          `SELECT to_regclass(format('%I.fg_memory_threads', $1::text)) AS ok`,
+          [schema],
+        );
+        expect(reg.rows[0]?.ok ?? null).toBeNull();
+        const base = { v: 4, ts: new Date().toISOString(), versions_seen: {} };
+        const threadId = "nomem";
+        for (const [id, parent] of [["1", undefined], ["2", "1"], ["3", "2"]] as const) {
+          await saver.put(
+            { configurable: { thread_id: threadId, checkpoint_ns: "", ...(parent ? { checkpoint_id: parent } : {}) } },
+            { ...base, id, channel_values: { a: "keep" }, channel_versions: { a: "1" } },
+            { source: "loop", step: Number(id), parents: {} },
+            { a: "1" },
+          );
+        }
+        const before = await pool.query<{ n: string }>(
+          `SELECT COUNT(*) AS n FROM "${schema}".checkpoints WHERE thread_id = $1`,
+          [threadId],
+        );
+        expect(Number(before.rows[0]?.n)).toBe(3);
+        await saver.noteThreadStatus(threadId, "finished", 1);
+        await saver.sweep(Date.now());
+        const after = await pool.query<{ n: string }>(
+          `SELECT COUNT(*) AS n FROM "${schema}".checkpoints WHERE thread_id = $1`,
+          [threadId],
+        );
+        expect(Number(after.rows[0]?.n)).toBe(0);
+      } finally {
+        await saver.end();
+      }
+    }
+  });
+
+  for (const gates of [2, 3]) {
+    it(`a ${gates}-gate thread is swept after it finishes`, async () => {
+      const schema = schemaName();
+      const backend = await openPostgresBackend({
+        connectionString: DB!,
+        schema,
+        retention: { finishedTtl: "1h", maxFinishedThreads: null },
+      });
+      open.push(backend);
+      schemas.push(schema);
+      const compiled = await compileGraph(pgGates(gates), { checkpointer: backend.checkpointer });
+      const threadId = `gates-${gates}`;
+      await finishPgGates(compiled, threadId, gates);
+      await (backend.checkpointer as unknown as { sweep(now?: number): Promise<void> }).sweep(
+        Date.now() + 2 * 60 * 60 * 1000,
+      );
+      const left = await backend.pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM "${schema}".checkpoints WHERE thread_id = $1`,
+        [threadId],
+      );
+      expect(Number(left.rows[0]?.n)).toBe(0);
+    });
+  }
+
+  it("a sweep in the read window keeps a thread that was marked active", async () => {
+    const schema = schemaName();
+    const retention = { finishedTtl: "1h", maxFinishedThreads: null } as const;
+    const writer = await openPostgresBackend({ connectionString: DB!, schema, retention });
+    const sweeper = await openPostgresBackend({ connectionString: DB!, schema, retention, setup: false });
+    open.push(writer, sweeper);
+    schemas.push(schema);
+    const api = writer.checkpointer as unknown as {
+      put(config: unknown, checkpoint: unknown, metadata: unknown, versions: unknown): Promise<unknown>;
+      noteThreadStatus(threadId: string, status: "finished", now?: number): Promise<void>;
+      markThreadActive(threadId: string): Promise<void>;
+      getTuple(config: unknown): Promise<{ checkpoint: { channel_values: Record<string, unknown> } } | undefined>;
+    };
+    await api.put(
+      { configurable: { thread_id: "window", checkpoint_ns: "" } },
+      {
+        v: 4,
+        id: "1",
+        ts: new Date().toISOString(),
+        channel_values: { a: "keep" },
+        channel_versions: { a: "1" },
+        versions_seen: {},
+      },
+      { source: "loop", step: 1, parents: {} },
+      { a: "1" },
+    );
+    await api.noteThreadStatus("window", "finished", 1);
+    await api.markThreadActive("window");
+    await (sweeper.checkpointer as unknown as { sweep(now?: number): Promise<void> }).sweep(Date.now());
+    const tuple = await api.getTuple({ configurable: { thread_id: "window", checkpoint_ns: "" } });
+    expect(tuple?.checkpoint.channel_values["a"]).toBe("keep");
+  });
 });
 
 function pgParallel(warm: number): GraphSpec {
@@ -401,4 +504,37 @@ async function pgDrive(
     result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
   }
   return { status: result.status, resumes, hits: [...pgSideHits], out: result.state["out"], gate: result.state["gate"], side: result.state["sideOut"] };
+}
+
+function pgGates(gates: number): GraphSpec {
+  const nodes = Array.from({ length: gates }, (_, i) => ({
+    id: `g${i}`,
+    type: "hitl",
+    with: { mode: "approve", message: `gate ${i}`, output: { to: `r${i}` } },
+  }));
+  const channels: Record<string, { type: "object" }> = {};
+  for (let i = 0; i < gates; i++) channels[`r${i}`] = { type: "object" };
+  return {
+    metadata: { name: `pg-gates-${gates}` },
+    state: { channels },
+    nodes,
+    edges: [
+      { from: "START", to: "g0" },
+      ...Array.from({ length: gates - 1 }, (_, i) => ({ from: `g${i}`, to: `g${i + 1}` })),
+      { from: `g${gates - 1}`, to: "END" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+async function finishPgGates(
+  compiled: Awaited<ReturnType<typeof compileGraph>>,
+  threadId: string,
+  gates: number,
+) {
+  let result = await compiled.run({ threadId, onInterrupt: "fail" });
+  for (let i = 0; i < gates; i++) {
+    expect(result.status).toBe("interrupted");
+    result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
+  }
+  expect(result.status).toBe("completed");
 }

@@ -202,36 +202,63 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
    */
   private async deleteFinishedIfUnchanged(threadId: string, updatedAt: number): Promise<void> {
     if (this.runs.held(threadId)) return;
-    const client = await this.db().connect();
-    try {
-      await client.query("BEGIN");
-      const locked = await client.query<{ status: string; updated_at: string; deletable: number }>(
-        `SELECT status, updated_at, deletable FROM ${this.q}.fg_checkpoint_threads
-         WHERE thread_id = $1 FOR UPDATE`,
-        [threadId],
-      );
-      const row = locked.rows[0];
-      if (!row || row.status !== "finished" || Number(row.deletable) !== 1 || Number(row.updated_at) !== updatedAt) {
+    // A missing fg_memory_threads aborts the transaction if the DELETE runs
+    // inside it. Look the table up before BEGIN. Retry a deadlock; replicas
+    // can lock checkpoint rows in a different order than a run's put.
+    const dropMemoryThreads = await this.memoryThreadsTableExists();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const client = await this.db().connect();
+      try {
+        await client.query("BEGIN");
+        const locked = await client.query<{ status: string; updated_at: string; deletable: number }>(
+          `SELECT status, updated_at, deletable FROM ${this.q}.fg_checkpoint_threads
+           WHERE thread_id = $1 FOR UPDATE`,
+          [threadId],
+        );
+        const row = locked.rows[0];
+        if (!row || row.status !== "finished" || Number(row.deletable) !== 1 || Number(row.updated_at) !== updatedAt) {
+          await client.query("COMMIT");
+          return;
+        }
+        for (const table of ["checkpoints", "checkpoint_blobs", "checkpoint_writes", "fg_checkpoint_pins", "fg_checkpoint_threads"]) {
+          await client.query(`DELETE FROM ${this.q}.${table} WHERE thread_id = $1`, [threadId]);
+        }
+        if (dropMemoryThreads) {
+          await client.query(`DELETE FROM ${this.q}.fg_memory_threads WHERE thread_id = $1`, [threadId]);
+        }
         await client.query("COMMIT");
         return;
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        const code = (err as { code?: string }).code;
+        if (code === "40P01" && attempt < 4) continue;
+        throw err;
+      } finally {
+        client.release();
       }
-      for (const table of ["checkpoints", "checkpoint_blobs", "checkpoint_writes", "fg_checkpoint_pins", "fg_checkpoint_threads"]) {
-        await client.query(`DELETE FROM ${this.q}.${table} WHERE thread_id = $1`, [threadId]);
-      }
-      await client.query(`DELETE FROM ${this.q}.fg_memory_threads WHERE thread_id = $1`, [threadId]).catch((err: { code?: string }) => {
-        if (err.code !== "42P01") throw err;
-      });
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw err;
-    } finally {
-      client.release();
     }
+  }
+
+  /** True once `fg_memory_threads` exists. A false result is checked again later. */
+  private memoryThreadsPresent: boolean | null = null;
+  private async memoryThreadsTableExists(): Promise<boolean> {
+    if (this.memoryThreadsPresent === true) return true;
+    const found = await this.db().query<{ ok: string | null }>(
+      `SELECT to_regclass(format('%I.fg_memory_threads', $1::text)) AS ok`,
+      [this.schemaName],
+    );
+    this.memoryThreadsPresent = found.rows[0]?.ok != null;
+    return this.memoryThreadsPresent;
   }
 
   noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
     this.threadPolicy.set(threadId, policy);
+  }
+
+  async markThreadActive(threadId: string): Promise<void> {
+    const policy = this.policyFor(threadId);
+    if (!policy.enabled || !threadDeletionRequested(policy)) return;
+    await this.touch(threadId, "active", Date.now(), policy);
   }
 
   beginThreadRun(threadId: string): number {

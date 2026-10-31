@@ -141,6 +141,12 @@ export class FlowgraphMemorySaver extends MemorySaver {
     this.addPin(threadId, config.configurable?.checkpoint_ns ?? "", checkpointId, hit[0], Date.now());
   }
 
+  markThreadActive(threadId: string): void {
+    const policy = this.policyFor(threadId);
+    if (!policy.enabled || !threadDeletionRequested(policy)) return;
+    this.touch(threadId, "active", Date.now(), policy);
+  }
+
   beginThreadRun(threadId: string): number {
     return this.runs.begin(threadId);
   }

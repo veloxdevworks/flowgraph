@@ -209,7 +209,8 @@ describe("resume after checkpoint pruning", () => {
     });
     expect(again.status).toBe("error");
     expect((again.error as { code?: string; message?: string } | undefined)?.code).toBe(CHECKPOINT_PRUNED);
-    expect((again.error as { message?: string } | undefined)?.message).toMatch(/Retention/);
+    expect((again.error as { message?: string } | undefined)?.message).toMatch(/missing or was pruned/);
+    expect((again.error as { message?: string } | undefined)?.message).not.toMatch(/Retention pruned it/);
     const row = (saver as unknown as { threads: Map<string, { status: string }> }).threads.get(threadId);
     expect(row?.status).not.toBe("paused");
   });
@@ -268,5 +269,93 @@ describe("thread run guard", () => {
     await saver.noteThreadStatus("other", "finished");
     expect(saver.storage["waiting"]).toBeDefined();
     expect(saver.storage["other"]).toBeUndefined();
+  });
+
+  it("a finish on the same thread does not clear another run's park", async () => {
+    const saver = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ maxFinishedThreads: 0, finishedTtl: null }),
+    );
+    await saver.put(config("same"), checkpoint("1", { n: 1 }, { n: 1 }), meta(1));
+    const parked = saver.beginThreadRun("same");
+    saver.endThreadRun("same", "paused", parked);
+    const sibling = saver.beginThreadRun("same");
+    saver.endThreadRun("same", "finished", sibling, false);
+    await saver.noteThreadStatus("same", "finished");
+    expect(saver.storage["same"]).toBeDefined();
+  });
+});
+
+function gateSpec(gates: number): GraphSpec {
+  const nodes = Array.from({ length: gates }, (_, i) => ({
+    id: `g${i}`,
+    type: "hitl",
+    with: { mode: "approve", message: `gate ${i}`, output: { to: `r${i}` } },
+  }));
+  const channels: Record<string, { type: "object" }> = {};
+  for (let i = 0; i < gates; i++) channels[`r${i}`] = { type: "object" };
+  const edges = [
+    { from: "START", to: "g0" },
+    ...Array.from({ length: gates - 1 }, (_, i) => ({ from: `g${i}`, to: `g${i + 1}` })),
+    { from: `g${gates - 1}`, to: "END" },
+  ];
+  return {
+    metadata: { name: `gates-${gates}` },
+    state: { channels },
+    nodes,
+    edges,
+  } as unknown as GraphSpec;
+}
+
+async function finishGates(compiled: Awaited<ReturnType<typeof compileGraph>>, threadId: string, gates: number) {
+  let result = await compiled.run({ threadId, onInterrupt: "fail" });
+  for (let i = 0; i < gates; i++) {
+    expect(result.status).toBe("interrupted");
+    result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
+  }
+  expect(result.status).toBe("completed");
+}
+
+describe("several interrupts then a sweep", () => {
+  for (const gates of [2, 3]) {
+    it(`a ${gates}-gate thread is swept after it finishes`, async () => {
+      const saver = new FlowgraphMemorySaver(
+        resolveCheckpointRetention({ finishedTtl: "1h", maxFinishedThreads: null }),
+      );
+      const compiled = await compileGraph(gateSpec(gates), { checkpointer: saver });
+      const threadId = `gates-${gates}`;
+      await finishGates(compiled, threadId, gates);
+      await saver.sweep(Date.now() + 2 * 60 * 60 * 1000);
+      expect(saver.storage[threadId]).toBeUndefined();
+    });
+  }
+
+  it("marks the thread active before a later run reads its checkpoint", async () => {
+    const saver = new FlowgraphMemorySaver(
+      resolveCheckpointRetention({ finishedTtl: "1h", maxFinishedThreads: null }),
+    );
+    const spec = {
+      metadata: { name: "read-window" },
+      state: { channels: { n: { type: "number" } } },
+      nodes: [{ id: "a", type: "function", with: { fn: "retTag", output: { to: "n" } } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const compiled = await compileGraph(spec, { checkpointer: saver });
+    const threadId = "read-window";
+    await compiled.run({ threadId, input: { n: 1 }, onInterrupt: "fail" });
+    const seen: Array<string | undefined> = [];
+    const orig = saver.getTuple.bind(saver);
+    saver.getTuple = async (config) => {
+      const row = (saver as unknown as { threads: Map<string, { status: string }> }).threads.get(threadId);
+      seen.push(row?.status);
+      await saver.sweep(Date.now() + 2 * 60 * 60 * 1000);
+      return orig(config);
+    };
+    const again = await compiled.run({ threadId, input: { n: 2 }, onInterrupt: "fail" });
+    expect(again.status).toBe("completed");
+    expect(seen[0]).toBe("active");
+    expect(saver.storage[threadId]).toBeDefined();
   });
 });

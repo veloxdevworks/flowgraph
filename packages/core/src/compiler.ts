@@ -372,7 +372,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     let retentionOpen = false;
     let runToken = 0;
     const resumedRun = () => mode === "resume" || mode === "continue";
-    const finish = async (r: RunResult, bookkeeping = true): Promise<RunResult> => {
+    const finish = async (r: RunResult, bookkeeping = true, resumed?: boolean): Promise<RunResult> => {
       try {
         const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
         if (issues.length > 0) r.issues = issues;
@@ -382,7 +382,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (retentionOpen) {
         retentionOpen = false;
         try {
-          retention?.endThreadRun?.(threadId, retentionStatusForRun(r.status), runToken, resumedRun());
+          retention?.endThreadRun?.(threadId, retentionStatusForRun(r.status), runToken, resumed ?? resumedRun());
         } catch {
           /* bookkeeping must not hide the run result */
         }
@@ -405,6 +405,16 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // Reserved channels are the engine's own bookkeeping; callers never set them.
     if (mode === "start" && payload != null && !(payload instanceof Command)) {
       assertNoReservedInput(payload, `graph "${graphSpec.metadata.name}" run`);
+    }
+
+    // Hold the thread and mark it active before any read, so a sweep in the
+    // window before the first checkpoint write cannot delete it.
+    runToken = retention?.beginThreadRun?.(threadId) ?? 0;
+    retentionOpen = !!retention;
+    try {
+      await retention?.markThreadActive?.(threadId);
+    } catch {
+      // A missed active mark must not fail the run. The in-process hold still applies.
     }
 
     // Agent replay entries belong to this execution only. A fresh start begins
@@ -453,14 +463,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           (retention as { retention?: { enabled?: boolean } }).retention?.enabled !== false;
         const error = checkpointPrunedError(threadId, requestedCheckpoint, { retention: retentionOn });
         events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
-        // Do not record this as a pause. The thread's status stays whatever it was.
-        return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs }, false);
+        // Do not record this as a pause, and do not release a park this run never continued.
+        return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs }, false, false);
       }
     }
 
     try {
-      runToken = retention?.beginThreadRun?.(threadId) ?? 0;
-      retentionOpen = !!retention;
       let current: Record<string, unknown> | Command | null = payload;
 
       if (mode === "start" && current != null && !(current instanceof Command) && hooks.has("run:before")) {

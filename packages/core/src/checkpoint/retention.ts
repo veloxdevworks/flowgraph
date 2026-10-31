@@ -151,7 +151,7 @@ export function checkpointPrunedError(
   opts?: { retention?: boolean },
 ): Error & { code: typeof CHECKPOINT_PRUNED } {
   const why = opts?.retention
-    ? " Retention pruned it; resume from a checkpoint that is still kept."
+    ? " It is missing or was pruned; resume from a checkpoint that is still kept."
     : "";
   const err = new Error(
     `Checkpoint "${checkpointId}" for thread "${threadId}" is not available.${why}`,
@@ -180,22 +180,22 @@ export class ThreadRunGuard {
   }
 
   /**
-   * @param resumed True when this run continued an interrupt. A finished
-   * resume clears one parked interrupt. Any other finish clears only its own token.
+   * @param resumed True when this run continued an interrupt. That releases
+   * one earlier park before this run parks again or finishes, so a thread
+   * that pauses several times does not stay parked after the last run ends.
+   * A finish that did not resume leaves every other park in place.
    */
   end(threadId: string, status: CheckpointThreadStatus, token: number, resumed = false): void {
     const live = this.inFlight.get(threadId);
     live?.delete(token);
     if (live && live.size === 0) this.inFlight.delete(threadId);
     const parks = this.parked.get(threadId) ?? new Set<number>();
-    if (status === "paused") parks.add(token);
-    else {
-      parks.delete(token);
-      if (status === "finished" && resumed) {
-        const other = parks.values().next().value;
-        if (other !== undefined) parks.delete(other);
-      }
+    if (resumed) {
+      const earlier = parks.values().next().value;
+      if (earlier !== undefined) parks.delete(earlier);
     }
+    if (status === "paused") parks.add(token);
+    else parks.delete(token);
     if (parks.size === 0) this.parked.delete(threadId);
     else this.parked.set(threadId, parks);
   }
@@ -349,6 +349,12 @@ export interface CheckpointRetentionSaver {
   sweep(now?: number): Promise<void> | void;
   /** Remember this thread's graph policy. Graph fields override the host saver. */
   noteThreadPolicy?(threadId: string, policy: ResolvedCheckpointRetention): void;
+  /**
+   * Mark the thread active before the run reads checkpoint state, when thread
+   * deletion is on. A crash after this and before the checkpoint row is written
+   * leaves the thread active until a later run or `deleteThread`.
+   */
+  markThreadActive?(threadId: string): void | Promise<void>;
   /** Mark a thread in use. Returns a token for {@link endThreadRun}. */
   beginThreadRun?(threadId: string): number;
   /**

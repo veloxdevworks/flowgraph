@@ -209,6 +209,13 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
+  markThreadActive(threadId: string): void {
+    const policy = this.policyFor(threadId);
+    if (!policy.enabled || !threadDeletionRequested(policy)) return;
+    this.setup();
+    this.touch(threadId, "active", Date.now(), policy);
+  }
+
   beginThreadRun(threadId: string): number {
     return this.runs.begin(threadId);
   }
