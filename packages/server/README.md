@@ -84,7 +84,7 @@ A graph uploaded by a caller who is not a trusted author is checked when it is u
 | `UPLOAD_ENV_PLACEHOLDER_BLOCKED` / `UPLOAD_SECRET_REFERENCE_BLOCKED` | `${VAR}` placeholders and `{{ secrets.* }}` templates, which would read the server's environment |
 | `UPLOAD_HOST_PATH_BLOCKED` | node `workspace`, `runtime.workspace`, `runtime.worktrees.root`, and workshop or `hitl` `mode: review` `with.diff` that runs `git diff` on the server (a `before` / `after` diff is allowed; a review with no `diff` shows none) |
 | `UPLOAD_RUNTIME_HOST_EXEC_BLOCKED` | `runtime.services.rehydrateOnResume` (restarts saved service commands on resume) and `runtime.worktrees.cleanupOnEnd` (runs `git worktree remove`) |
-| `UPLOAD_RESERVED_CHANNEL_BLOCKED` | declaring, writing (`output.to`), giving a default `input` for, setting or reading in a node's `input` (map inner nodes and inline subgraphs included), or naming in a subgraph `stateMap.in` / `stateMap.out` (keys or values) any state channel whose name starts with `__`; that prefix is the engine's own (`__services`, `__worktrees`, `__agentReplay`, `__once`, `__mapCollect`, `__mapTask`, `__issues`, `__interrupt__`, and any it adds later) |
+| `UPLOAD_RESERVED_CHANNEL_BLOCKED` | declaring, writing (`output.to`), giving a default `input` for, setting or reading in a node's `input` (map inner nodes and inline subgraphs included), naming in a subgraph `stateMap.in` / `stateMap.out` (keys or values), or reading in a `{{ }}` expression in any node `with` field (prompts, messages, tool arguments) any state channel whose name starts with `__`, including spellings that normalise to it (fullwidth underscores, a leading zero-width or space character); that prefix is the engine's own (`__services`, `__worktrees`, `__agentReplay`, `__once`, `__mapCollect`, `__mapTask`, `__issues`, `__interrupt__`, and any it adds later) |
 | `UPLOAD_AGENT_REF_BLOCKED` | agents with `with.agent`, which loads an agent definition from the server's disk or an installed package |
 | `UPLOAD_IMPORTS_BLOCKED` | graph `imports`, at the top level or in inline subgraphs and `map` inners (they load modules on the server; uploads strip them for every caller, see below) |
 | `UPLOAD_INBOUND_WEBHOOK_BLOCKED` | `wait` nodes with `with.webhook` and `runtime.webhookServer`, which listen on a port on the server |
@@ -138,12 +138,14 @@ These changes can stop an existing deployment or graph until you act:
    - `function` / `code` nodes (`UPLOAD_FUNCTION_BLOCKED`): list safe functions in `FLOWGRAPH_UNTRUSTED_ALLOW_FUNCTIONS`;
    - workshop or `hitl` review `diff` with `cwd` / `base` / `paths` (`UPLOAD_HOST_PATH_BLOCKED`): pass `diff: { before, after }` text instead, or leave `diff` out;
    - `runtime.services.rehydrateOnResume` or `runtime.worktrees.cleanupOnEnd` (`UPLOAD_RUNTIME_HOST_EXEC_BLOCKED`): remove them; untrusted graphs cannot start services or worktrees anyway;
-   - state channels starting with `__` in `state.channels`, `output.to`, `input` or a subgraph `stateMap` (`UPLOAD_RESERVED_CHANNEL_BLOCKED`): rename the channel;
+   - state channels starting with `__` in `state.channels`, `output.to`, `input`, a subgraph `stateMap` or a `{{ }}` expression in a `with` field (`UPLOAD_RESERVED_CHANNEL_BLOCKED`): rename the channel;
    - agents with `with.agent` (`UPLOAD_AGENT_REF_BLOCKED`): inline the agent's prompt and tools in the node;
    - `imports` anywhere in the graph (`UPLOAD_IMPORTS_BLOCKED`): remove them; they were never run on the server;
    - `wait` nodes with `with.webhook`, or `runtime.webhookServer` (`UPLOAD_INBOUND_WEBHOOK_BLOCKED`): resume the thread through the server's API instead.
 4. **Run input may not set any key starting with `__`** (`__services`, `__worktrees`, `__agentReplay`, …), from any caller: 403 `RESERVED_CHANNEL_BLOCKED`. Remove those keys from `input`.
-5. **Thread owners move into the checkpoint store.** Start every replica once after upgrading so it copies the owners in its graph store's meta files (see *Runs* above); until a replica has done so, its pre-upgrade threads are refused on other replicas.
+5. **Expressions no longer see `__` channels.** In every graph, `state` in a `{{ }}` expression or a `when` condition leaves out channels starting with `__` (`{{ state }}`, `keys(state)` and `state['_' + '_services']` included). Keys starting with `__` inside your own channels are unaffected.
+6. **Runs interrupted before the upgrade can be resumed.** An agent waiting for approval when you upgrade resumes with the model turns and tool results it saved, so calls it already made are not made again. Nothing needs to be done first.
+7. **Thread owners move into the checkpoint store.** Start every replica once after upgrading so it copies the owners in its graph store's meta files (see *Runs* above); until a replica has done so, its pre-upgrade threads are refused on other replicas.
 
 Also: reusing a thread id for a different graph is a 409 `THREAD_ID_CONFLICT`, and stored graph YAML is now kept as uploaded (see *Stored graphs* above). The `flowgraph` CLI runs graphs locally and is unaffected by all of this.
 
