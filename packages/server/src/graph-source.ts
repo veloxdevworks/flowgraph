@@ -15,7 +15,7 @@ import {
   validateSpec,
 } from "@flowgraph/core";
 import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
-import { ServerRequestError } from "./errors.js";
+import { GraphStoreError, isSystemError, ServerRequestError } from "./errors.js";
 import { errorFields, log } from "./metrics.js";
 import type { GraphMeta, PersistedGraph, RunStatus, ServerEvent, ThreadOwner } from "./types.js";
 
@@ -339,8 +339,26 @@ export async function persistGraph(
   extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" } = {},
 ): Promise<PersistedGraph> {
   assertValidThreadId(threadId);
-  await ensureGraphStoreDir(dir);
-  return withMetaLock(metaPathFor(dir, threadId), () => persistGraphLocked(dir, threadId, yaml, spec, extras));
+  return storeIo("write", threadId, async () => {
+    await ensureGraphStoreDir(dir);
+    return withMetaLock(metaPathFor(dir, threadId), () => persistGraphLocked(dir, threadId, yaml, spec, extras));
+  });
+}
+
+/**
+ * Run graph-store I/O for one thread. A failed system call (disk full,
+ * permissions, an I/O error) is logged with its path and errno and rethrown
+ * as {@link GraphStoreError} (503), whose message names only the thread.
+ */
+async function storeIo<T>(op: "write" | "read", threadId: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isSystemError(err)) throw err;
+    const e = err as NodeJS.ErrnoException;
+    log("error", `graph store ${op} failed`, { threadId, path: e.path, errno: e.code, syscall: e.syscall, ...errorFields(err) });
+    throw new GraphStoreError(op, threadId, err);
+  }
 }
 
 async function persistGraphLocked(
@@ -486,7 +504,7 @@ export async function updateGraphMeta(
   patch: Partial<Pick<GraphMeta, "label" | "status" | "graphName">>,
 ): Promise<GraphMeta | null> {
   assertValidThreadId(threadId);
-  return withMetaLock(metaPathFor(dir, threadId), async () => {
+  return storeIo("write", threadId, () => withMetaLock(metaPathFor(dir, threadId), async () => {
     const existing = await readGraphMeta(dir, threadId);
     if (!existing) return null;
     // Thread ids that share a file name ("a/b" and "a_b"): never patch the other thread's record.
@@ -498,7 +516,7 @@ export async function updateGraphMeta(
     };
     await writeGraphMeta(dir, threadId, next);
     return next;
-  });
+  }));
 }
 
 /**
@@ -530,16 +548,19 @@ export async function loadPersistedGraph(
 /**
  * The stored graph text and meta, without parsing or expanding it, or null
  * when no graph is stored. An unreadable meta file throws
- * {@link GraphMetaUnreadableError}.
+ * {@link GraphMetaUnreadableError}; an unreadable graph file throws
+ * {@link GraphStoreError} (GRAPH_STORE_READ_FAILED).
  */
 export async function readPersistedGraphYaml(dir: string, threadId: string): Promise<{ yaml: string; meta: GraphMeta | null } | null> {
   assertValidThreadId(threadId);
-  let yaml: string;
-  try {
-    yaml = await fs.readFile(graphPathFor(dir, threadId), "utf-8");
-  } catch {
-    return null;
-  }
+  const yaml = await storeIo("read", threadId, () =>
+    fs.readFile(graphPathFor(dir, threadId), "utf-8").catch((err: NodeJS.ErrnoException) => {
+      // No graph stored (or no store directory yet).
+      if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
+      throw err;
+    }),
+  );
+  if (yaml === null) return null;
   return { yaml, meta: await readGraphMeta(dir, threadId) };
 }
 

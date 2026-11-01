@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ClientSecretsRejectedError } from "../credentials.js";
 import type { RunService } from "../run-service.js";
-import { refusalOf } from "../errors.js";
+import { refusalOf, unexpectedError } from "../errors.js";
+import { errorFields, log } from "../metrics.js";
 import type { Principal } from "../identity.js";
 import { streamEventsUntilTerminal } from "./sse.js";
 import { readJsonBody, sendJson } from "./util.js";
@@ -139,8 +140,10 @@ export async function handleAgentCore(
         sendJson(res, 400, { error: err.message, code: "CLIENT_SECRETS_REJECTED" });
         return true;
       }
-      const message = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { error: message });
+      // Unexpected failures answer 500 here, as before; only the body is made safe.
+      const { body } = unexpectedError(err);
+      log("error", "invocation.failed", errorFields(err));
+      sendJson(res, 500, body);
       return true;
     }
   }

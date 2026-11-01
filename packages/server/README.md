@@ -129,6 +129,12 @@ Errors are JSON `{ "error", "code" }`; 401s also send `WWW-Authenticate: Bearer`
 | 409 | `THREAD_ID_CONFLICT` / `GRAPH_NAME_TAKEN` | Thread id used for a different graph, or created at the same moment by another server sharing the graph store / graph name owned by someone else |
 | 400 | `INVALID_THREAD_ID` | Empty thread id, or longer than 234 characters (the graph store keeps one file per thread id) |
 | 403 | `RESERVED_CHANNEL_BLOCKED` | Run `input` sets an engine state channel (`__services`, `__worktrees`, `__agentReplay`, …). Refused for every caller and in every mode |
+| 503 | `THREAD_META_UNREADABLE` | The thread's meta file exists but cannot be read or parsed. Retryable; the path is in the server log (`graph meta unreadable`) |
+| 503 | `GRAPH_STORE_WRITE_FAILED` | The graph store could not save the thread's graph or meta file (disk full, permissions, an I/O error). Retryable; the path and errno are in the server log (`graph store write failed`) |
+| 503 | `GRAPH_STORE_READ_FAILED` | The thread's stored graph file exists but cannot be read. Retryable; the path and errno are in the server log (`graph store read failed`) |
+| 500 | `INTERNAL_ERROR` | Any other failed system call. The response says only `Internal server error`; the message and stack are in the server log (`request.failed`, `invocation.failed`, `request.error` or `connect.command.failed`) |
+
+No error response (REST, `/invocations` or connect `command.result`) carries a server path, errno or stack trace; those go to the server log only.
 
 ### Upgrading from 0.1
 
