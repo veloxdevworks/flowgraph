@@ -3,6 +3,7 @@ import { isAgentCorePath } from "../auth.js";
 import { checkStartupAuth, OidcAuthenticator, type AuthOutcome, type Principal } from "../identity.js";
 import { credentialStatus } from "../credentials.js";
 import { isEphemeralGraphStore, processIdentity } from "../diagnostics.js";
+import { INTERNAL_ERROR_BODY } from "../errors.js";
 import { errorFields, log } from "../metrics.js";
 import type { RunService } from "../run-service.js";
 import type { ServerConfig } from "../types.js";
@@ -114,9 +115,7 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
         ...errorFields(err),
       });
       if (!res.headersSent) {
-        sendJson(res, 500, {
-          error: err instanceof Error ? err.message : String(err),
-        });
+        sendJson(res, 500, { ...INTERNAL_ERROR_BODY });
       }
     }
   });

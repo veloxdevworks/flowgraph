@@ -184,6 +184,43 @@ describe("ConnectClient", () => {
     client.stop();
   });
 
+  it("answers a failed system call without its path or stack", async () => {
+    let socket: FakeSocket | undefined;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const file = "/srv/flowgraph/graphs/secret.graph.yaml";
+    const service = {
+      registry: new SessionRegistry(),
+      authenticator: tokenMode,
+      listRuns: async () => Promise.reject(Object.assign(new Error(`EIO: i/o error, open '${file}'`), { code: "EIO", errno: -5, syscall: "open", path: file })),
+    } as unknown as RunService;
+    const client = new ConnectClient({
+      url: "ws://platform.test/connect",
+      service,
+      webSocket: class {
+        constructor() {
+          socket = new FakeSocket();
+          return socket;
+        }
+      } as unknown as new (url: string) => WebSocketLike,
+    });
+    client.start();
+    socket!.emit("open");
+    socket!.emit(
+      "message",
+      JSON.stringify({ type: "hello.ack", protocolVersion: CONNECT_PROTOCOL_VERSION, sessionId: "s1" }),
+    );
+    socket!.emit("message", JSON.stringify({ type: "command", id: "c3", method: "run.list", params: {} }));
+    let reply: string | undefined;
+    await vi.waitFor(() => {
+      reply = socket!.sent.find((s) => s.includes('"c3"'));
+      expect(reply).toBeDefined();
+    });
+    expect(JSON.parse(reply!)).toEqual({ type: "command.result", id: "c3", ok: false, error: "Internal server error", code: "INTERNAL_ERROR" });
+    expect(errors.mock.calls.some(([line]) => String(line).includes(file))).toBe(true);
+    errors.mockRestore();
+    client.stop();
+  });
+
   it("drains more than one 50-event batch without a further enqueue", async () => {
     let socket: FakeSocket | undefined;
     const service = { registry: new SessionRegistry() } as unknown as RunService;

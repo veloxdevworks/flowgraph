@@ -55,6 +55,7 @@ import type {
 } from "./types.js";
 
 import { ServerRequestError, TooManyRunsError } from "./errors.js";
+import { ErrorMasker, newErrorId, runErrorMessage } from "./event-errors.js";
 import { assertUntrustedUploadAllowed, untrustedNodePolicy, type UntrustedUploadOptions } from "./upload-policy.js";
 import { authModeOf, createAuthenticator, singleUserPrincipal, type Authenticator, type Principal } from "./identity.js";
 
@@ -146,6 +147,8 @@ export class RunService {
     if (sweepMs !== undefined && !(Number.isInteger(sweepMs) && sweepMs >= 1_000 && sweepMs <= MEMORY_SWEEP_MAX_INTERVAL_MS)) {
       throw new Error(`memory.sweepIntervalMs must be a whole number of milliseconds from 1000 to ${MEMORY_SWEEP_MAX_INTERVAL_MS} (got ${sweepMs})`);
     }
+    // Throws on a short key, naming only its length.
+    this.errors = new ErrorMasker(config.errorIdKey);
     // With OIDC each caller's token names its org; single-user servers need FLOWGRAPH_ORG.
     if (memBackend !== "memory" && authModeOf(config) !== "oidc" && !config.memory?.identity?.org?.trim()) {
       throw new Error(
@@ -700,7 +703,7 @@ export class RunService {
     let compiled: CompiledGraph;
     try {
       compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
-        this.registry.pushEvent(req.threadId, ev);
+        this.pushEvent(req.threadId, ev);
       }, principal, Boolean(req.dryRun));
     } catch (err) {
       // Don't leave a "running" placeholder behind for a run that never started.
@@ -744,11 +747,12 @@ export class RunService {
         });
         await this.applyResult(req.threadId, result);
       } catch (err) {
-        log("error", "run.error", { threadId: req.threadId, ...errorFields(err) });
+        const errorId = newErrorId();
+        log("error", "run.error", { threadId: req.threadId, errorId, ...errorFields(err) });
         await this.patchMeta(req.threadId, { status: "error" });
         this.registry.setStatus(req.threadId, "error");
         this.metrics.recordResult("error");
-        const message = err instanceof Error ? err.message : String(err);
+        const { message, redacted } = runErrorMessage(err, errorId);
         this.registry.pushEvent(req.threadId, {
           id: `err-${Date.now()}`,
           type: "run.error",
@@ -757,7 +761,7 @@ export class RunService {
           threadId: req.threadId,
           graph: graphName,
           scope: {},
-          data: { message },
+          data: redacted ? { message, errorId } : { message },
           seq: -1,
         });
       }
@@ -769,6 +773,18 @@ export class RunService {
       status: "started",
       ...(importsStripped ? { importsStripped: true } : {}),
     };
+  }
+
+  /**
+   * Masks system error text in what the server sends, with ids keyed by
+   * `config.errorIdKey`. Made with the service, so a bad key fails there; each
+   * service has its own, with its own key when none is configured.
+   */
+  private readonly errors: ErrorMasker;
+
+  /** Record an engine event for the thread, with system error text replaced (see {@link ErrorMasker.redactEvent}). */
+  private pushEvent(threadId: string, event: ServerEvent): void {
+    this.registry.pushEvent(threadId, this.errors.redactEvent(threadId, event));
   }
 
   private async applyResult(threadId: string, result: RunResult): Promise<void> {
@@ -834,7 +850,7 @@ export class RunService {
       cwd,
       req.threadId,
       (ev) => {
-        this.registry.pushEvent(req.threadId, ev);
+        this.pushEvent(req.threadId, ev);
       },
       principal,
       dryRun,
@@ -858,11 +874,12 @@ export class RunService {
         });
         await this.applyResult(req.threadId, result);
       } catch (err) {
-        log("error", "resume.error", { threadId: req.threadId, ...errorFields(err) });
+        const errorId = newErrorId();
+        log("error", "resume.error", { threadId: req.threadId, errorId, ...errorFields(err) });
         await this.patchMeta(req.threadId, { status: "error" });
         this.registry.setStatus(req.threadId, "error");
         this.metrics.recordResult("error");
-        const message = err instanceof Error ? err.message : String(err);
+        const { message, redacted } = runErrorMessage(err, errorId);
         this.registry.pushEvent(req.threadId, {
           id: `err-${Date.now()}`,
           type: "run.error",
@@ -871,7 +888,7 @@ export class RunService {
           threadId: req.threadId,
           graph: graphName,
           scope: {},
-          data: { message },
+          data: redacted ? { message, errorId } : { message },
           seq: -1,
         });
       }
@@ -968,7 +985,7 @@ export class RunService {
       cwd,
       threadId,
       (ev) => {
-        this.registry.pushEvent(threadId, ev);
+        this.pushEvent(threadId, ev);
       },
       principal,
       dryRun,
@@ -1017,7 +1034,8 @@ export class RunService {
     const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
     const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
     const state = await compiled.getState(threadId);
-    return { state };
+    // The engine keeps issue text as raised; system error text in it stays server-side.
+    return { state: this.errors.maskIssues(threadId, state, "state").value };
   }
 
   getHistory(threadId: string, yaml?: string, caller?: Principal): Promise<{ history: unknown[] }> {
@@ -1036,7 +1054,7 @@ export class RunService {
     const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
     const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
     const history = await compiled.getStateHistory(threadId);
-    return { history };
+    return { history: this.errors.maskIssues(threadId, history, "state history").value };
   }
 
   async listRuns(caller?: Principal): Promise<RunListItem[]> {
@@ -1113,7 +1131,8 @@ export class RunService {
 
   private readIssues(threadId: string): RunIssue[] {
     try {
-      return readRunIssues(this.config.graphStoreDir, threadId);
+      // The issues file keeps the text as raised; clients get system error text masked.
+      return this.errors.mask(threadId, readRunIssues(this.config.graphStoreDir, threadId), "issues").value;
     } catch {
       return [];
     }

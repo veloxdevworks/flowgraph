@@ -2,7 +2,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { ClientSecretsRejectedError, credentialStatus } from "../credentials.js";
 import { processIdentity } from "../diagnostics.js";
 import { authModeOf } from "../identity.js";
-import { refusalOf, TooManyRunsError } from "../errors.js";
+import { refusalOf, TooManyRunsError, unexpectedError } from "../errors.js";
+import { errorFields, log } from "../metrics.js";
 import type { Principal } from "../identity.js";
 import type { RunService } from "../run-service.js";
 import { attachSse } from "./sse.js";
@@ -256,7 +257,7 @@ export function sendError(res: ServerResponse, err: unknown): void {
     sendJson(res, 429, { error: err.message, code: "TOO_MANY_RUNS" });
     return;
   }
-  const message = err instanceof Error ? err.message : String(err);
-  const status = /required|Invalid|No persisted|No active/i.test(message) ? 400 : 500;
-  sendJson(res, status, { error: message });
+  const { status, body } = unexpectedError(err);
+  if (status === 500) log("error", "request.failed", errorFields(err));
+  sendJson(res, status, body);
 }

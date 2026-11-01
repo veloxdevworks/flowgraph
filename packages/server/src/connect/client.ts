@@ -9,7 +9,7 @@
 import type { ServerEvent } from "../types.js";
 import type { RunService } from "../run-service.js";
 import { errorFields, log } from "../metrics.js";
-import { refusalOf, ServerRequestError } from "../errors.js";
+import { refusalOf, ServerRequestError, unexpectedError } from "../errors.js";
 import type { Principal } from "../identity.js";
 import {
   CONNECT_PROTOCOL_VERSION,
@@ -269,8 +269,7 @@ export class ConnectClient {
         type: "command.result",
         id: cmd.id,
         ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        ...(refusalOf(err) ? { code: refusalOf(err)!.code } : {}),
+        ...connectError(err),
       });
     }
   }
@@ -322,4 +321,13 @@ export function startConnectClient(opts: ConnectClientOptions): ConnectClient {
   const client = new ConnectClient(opts);
   client.start();
   return client;
+}
+
+/** The error fields of a failed command: a refusal keeps its message and code; anything unexpected is logged and answered without its detail. */
+function connectError(err: unknown): { error: string; code?: string } {
+  const refusal = refusalOf(err);
+  if (refusal) return { error: (err as Error).message, code: refusal.code };
+  const { status, body } = unexpectedError(err);
+  if (status === 500) log("error", "connect.command.failed", errorFields(err));
+  return body;
 }
