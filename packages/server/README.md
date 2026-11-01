@@ -112,6 +112,8 @@ At run time the engine enforces the same limits again (`NODE_TYPE_BLOCKED`, `SUB
 
 A new thread's meta file (`{threadId}.graph.yaml.meta.json`) is created exclusively, so when two servers share one graph store and both start the same new thread id (or two ids that share a file name, such as `a/b` and `a_b`), one stores it and the other gets 409 `THREAD_ID_CONFLICT` without changing either file. The file is written in full and flushed before it appears (a hard link from a temporary file), so a reader never sees it half-written; on a filesystem without hard links it is created with an exclusive open instead, and a reader that catches it mid-write gets a retryable 503 `THREAD_META_UNREADABLE`. If storing the graph fails after the meta file was created, the meta file stays: the thread remains its owner's, and the owner's next upload stores the graph.
 
+**Graph-store sweep.** Every server sweeps the graph store at startup and every `FLOWGRAPH_GRAPH_STORE_SWEEP_INTERVAL_MS`. It removes temporary files (`.{name}.{pid}.{hex}.tmp`) older than `FLOWGRAPH_GRAPH_STORE_SWEEP_AGE_MS`, which a writer that crashed left behind. A meta file with no graph file next to it, the trace of a create that stopped after claiming the thread id, is not removed: removing it would let another caller take the id. `GET /runs` leaves such a thread out while it is younger than the sweep age (another server may still be storing its graph) and lists it with status `error` once it is older, instead of `running` forever. Its owner can upload it again under the same id, which stores the graph; anyone else is still refused. The sweep logs such threads as `graph-store.sweep`. Servers sharing one store can all sweep it: nothing younger than the sweep age is touched.
+
 ### Auth errors
 
 Errors are JSON `{ "error", "code" }`; 401s also send `WWW-Authenticate: Bearer`.
@@ -180,6 +182,8 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 | `FLOWGRAPH_GIT_SHA` | _(unset)_ | Optional build identity included on `/` and `/healthz`. |
 | `FLOWGRAPH_SHUTDOWN_TIMEOUT_MS` | `10000` | On SIGTERM / SIGINT the server stops accepting connections and new runs (503 `SERVER_CLOSING`), waits this long for runs in flight, aborts what is still running and gives it 2 s to settle, waits for pending graph-store meta writes (status updates whose request did not wait for them), then closes database pools and exits. `RunService.close()` does the same for embedders and refuses control calls (cancel, pause) with 503 `SERVER_CLOSING`, waiting for any already under way; once it resolves nothing more is written to the graph store, unless a run was still going after the 2 s abort grace (logged as `shutdown.unsettled`): such a run can still write when it finishes |
 | `FLOWGRAPH_GRAPH_STORE` | `/tmp/flowgraph-graphs` | Uploaded YAML + `{threadId}.events.jsonl`. **Do not use `/tmp` on a lab host** — it is wiped on reboot. |
+| `FLOWGRAPH_GRAPH_STORE_SWEEP_AGE_MS` | `3600000` | Age after which the graph-store sweep removes a leftover temporary file and lists a thread with no stored graph as `error` (whole milliseconds, at least 60000). Keep it well above the longest graph-store write |
+| `FLOWGRAPH_GRAPH_STORE_SWEEP_INTERVAL_MS` | `3600000` | How often the graph store is swept after the sweep at startup (whole milliseconds, 1000 to 2147483647; `0` sweeps at startup only) |
 
 ## Memory
 

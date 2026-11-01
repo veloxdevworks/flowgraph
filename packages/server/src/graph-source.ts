@@ -143,6 +143,14 @@ async function stageFile(filePath: string, data: string): Promise<string> {
   }
 }
 
+/** True for the name of a temporary file written by {@link stageFile}. */
+export function isStagedFileName(name: string): boolean {
+  return /^\..+\.\d+\.[0-9a-f]{12}\.tmp$/.test(name);
+}
+
+/** Suffix of a thread's meta file, which sits next to its `{id}.graph.yaml`. */
+export const GRAPH_META_SUFFIX = ".graph.yaml.meta.json";
+
 /**
  * Replace `filePath` with `data` so a reader sees either the old file or the
  * new one, never a partly written one: write a temporary file in the same
@@ -214,17 +222,17 @@ async function syncDir(dir: string): Promise<void> {
 }
 
 /**
- * Test seams. `beforeMetaCreate` runs after a store has found no meta file
- * for a new thread and before it creates one, which is where another server
- * process sharing the store can create the same file first.
- * `beforeGraphMove` runs after the meta file is created and before the
- * staged graph is moved into place, which is where another server can
- * already see the new thread and update it.
+ * Test seams, passed to {@link persistGraph}. `beforeMetaCreate` runs after
+ * a store has found no meta file for a new thread and before it creates one,
+ * which is where another server process sharing the store can create the
+ * same file first. `beforeGraphMove` runs after the meta file is created and
+ * before the staged graph is moved into place, which is where another server
+ * can already see the new thread and update it.
  */
-export const graphStoreHooks: {
+export interface GraphStoreHooks {
   beforeMetaCreate?: (threadId: string, metaPath: string) => Promise<void> | void;
   beforeGraphMove?: (threadId: string, graphPath: string) => Promise<void> | void;
-} = {};
+}
 
 /** Meta updates in progress, by meta file path. */
 const metaLocks = new Map<string, Promise<unknown>>();
@@ -336,7 +344,7 @@ export async function persistGraph(
   threadId: string,
   yaml: string,
   spec: GraphSpec,
-  extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" } = {},
+  extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw"; hooks?: GraphStoreHooks } = {},
 ): Promise<PersistedGraph> {
   assertValidThreadId(threadId);
   await ensureGraphStoreDir(dir);
@@ -348,7 +356,7 @@ async function persistGraphLocked(
   threadId: string,
   yaml: string,
   spec: GraphSpec,
-  extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw" },
+  extras: { label?: string; status?: RunStatus; owner?: ThreadOwner; yamlFormat?: "raw"; hooks?: GraphStoreHooks },
 ): Promise<PersistedGraph> {
   const filePath = graphPathFor(dir, threadId);
   // Read first: an unreadable meta file must not be replaced (and its owner
@@ -375,7 +383,7 @@ async function persistGraphLocked(
     await writeFileAtomic(filePath, yaml);
     await writeGraphMeta(dir, threadId, meta);
   } else {
-    await createThreadFiles(dir, threadId, filePath, yaml, meta);
+    await createThreadFiles(dir, threadId, filePath, yaml, meta, extras.hooks);
   }
   return {
     threadId,
@@ -409,11 +417,18 @@ function threadIdTaken(threadId: string): ServerRequestError {
  * requesting owner (who is already recorded in the thread owner registry),
  * other callers are refused, and the owner's next upload stores the graph.
  */
-async function createThreadFiles(dir: string, threadId: string, filePath: string, yaml: string, meta: GraphMeta): Promise<void> {
+async function createThreadFiles(
+  dir: string,
+  threadId: string,
+  filePath: string,
+  yaml: string,
+  meta: GraphMeta,
+  hooks: GraphStoreHooks = {},
+): Promise<void> {
   const metaPath = metaPathFor(dir, threadId);
   const stagedYaml = await stageFile(filePath, yaml);
   try {
-    await graphStoreHooks.beforeMetaCreate?.(threadId, metaPath);
+    await hooks.beforeMetaCreate?.(threadId, metaPath);
     try {
       await createFileExclusive(metaPath, JSON.stringify(meta));
     } catch (err) {
@@ -425,7 +440,7 @@ async function createThreadFiles(dir: string, threadId: string, filePath: string
       }
       throw threadIdTaken(threadId);
     }
-    await graphStoreHooks.beforeGraphMove?.(threadId, filePath);
+    await hooks.beforeGraphMove?.(threadId, filePath);
     await fs.rename(stagedYaml, filePath);
   } catch (err) {
     await fs.rm(stagedYaml, { force: true }).catch(() => undefined);
@@ -544,24 +559,54 @@ export async function readPersistedGraphYaml(dir: string, threadId: string): Pro
 }
 
 /**
+ * Whether a meta file whose graph file was missing from the listing is a
+ * young or old orphan, or not one after all (its graph has appeared since).
+ */
+async function orphanStatus(dir: string, metaName: string, orphans: { maxAgeMs: number; now: number }): Promise<"young" | "old" | "stored"> {
+  const metaPath = path.join(dir, metaName);
+  try {
+    await fs.lstat(metaPath.slice(0, -".meta.json".length));
+    return "stored";
+  } catch {
+    // No graph file.
+  }
+  try {
+    const st = await fs.lstat(metaPath);
+    return orphans.now - st.mtimeMs >= orphans.maxAgeMs ? "old" : "young";
+  } catch {
+    return "young";
+  }
+}
+
+/**
  * List persisted run metadata (graph store + `.meta.json` files). Meta files
  * that cannot be read are left out and passed to `onUnreadable` (with the
  * thread id as spelled in the file name), so a caller can tell them from
  * threads without an owner. A file whose name holds no valid thread id (such
  * as `.graph.yaml.meta.json`, an empty id) is skipped and logged: no request
  * can address that thread, and it must not hide the others.
+ *
+ * With `orphans`, a meta file that has no graph file next to it (a create
+ * that stopped after claiming the thread id) is left out while it is younger
+ * than `orphans.maxAgeMs`, since another server may still be moving its graph
+ * into place, and is listed with status `error` once it is older. Without
+ * `orphans` every readable meta file is listed as stored.
  */
 export async function listPersistedGraphs(
   dir: string,
-  opts: { onUnreadable?: (fileThreadId: string, err: GraphMetaUnreadableError) => void } = {},
+  opts: {
+    onUnreadable?: (fileThreadId: string, err: GraphMetaUnreadableError) => void;
+    orphans?: { maxAgeMs: number; now: number };
+  } = {},
 ): Promise<GraphMeta[]> {
   try {
     await ensureGraphStoreDir(dir);
     const names = await fs.readdir(dir);
+    const present = opts.orphans ? new Set(names) : undefined;
     const metas: GraphMeta[] = [];
     for (const name of names) {
-      if (!name.endsWith(".graph.yaml.meta.json")) continue;
-      const threadId = name.slice(0, -".graph.yaml.meta.json".length);
+      if (!name.endsWith(GRAPH_META_SUFFIX)) continue;
+      const threadId = name.slice(0, -GRAPH_META_SUFFIX.length);
       try {
         assertValidThreadId(threadId);
       } catch (err) {
@@ -576,7 +621,16 @@ export async function listPersistedGraphs(
         opts.onUnreadable?.(threadId, err);
         continue;
       }
-      if (meta) metas.push(meta);
+      if (!meta) continue;
+      if (opts.orphans && !present!.has(name.slice(0, -".meta.json".length))) {
+        const orphan = await orphanStatus(dir, name, opts.orphans);
+        if (orphan === "young") continue;
+        if (orphan === "old") {
+          metas.push({ ...meta, status: "error" });
+          continue;
+        }
+      }
+      metas.push(meta);
     }
     metas.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
     return metas;

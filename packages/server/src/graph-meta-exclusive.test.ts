@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFileExclusive,
-  graphStoreHooks,
+  type GraphStoreHooks,
   listPersistedGraphs,
   MAX_THREAD_ID_LENGTH,
   parseGraphYaml,
@@ -33,6 +33,10 @@ const OTHER_YAML = YAML.replace("meta-exclusive", "other-server");
 const spec = (yaml: string) => parseGraphYaml(yaml, { expandEnv: false }).spec!;
 const alice: ThreadOwner = { id: "alice", org: "o" };
 const bob: ThreadOwner = { id: "bob", org: "o" };
+
+/** Seams for this server's uploads (the other server's copy gets none). */
+const graphStoreHooks: GraphStoreHooks = {};
+const hooks = { hooks: graphStoreHooks };
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -71,7 +75,7 @@ describe("creating a thread's meta file", () => {
     const dir = await storeDir();
     const other = await otherServer();
     otherServerCreatesFirst(other, dir, "t", bob);
-    await expect(persistGraph(dir, "t", YAML, spec(YAML), { owner: alice })).rejects.toMatchObject({
+    await expect(persistGraph(dir, "t", YAML, spec(YAML), { owner: alice, ...hooks })).rejects.toMatchObject({
       status: 409,
       code: "THREAD_ID_CONFLICT",
       message: expect.stringContaining("just created by another request"),
@@ -86,7 +90,7 @@ describe("creating a thread's meta file", () => {
     const dir = await storeDir();
     const other = await otherServer();
     otherServerCreatesFirst(other, dir, "a_b", bob);
-    await expect(persistGraph(dir, "a/b", YAML, spec(YAML), { owner: alice })).rejects.toMatchObject({
+    await expect(persistGraph(dir, "a/b", YAML, spec(YAML), { owner: alice, ...hooks })).rejects.toMatchObject({
       status: 409,
       code: "THREAD_ID_CONFLICT",
       message: expect.stringContaining("collides with another stored thread"),
@@ -98,7 +102,7 @@ describe("creating a thread's meta file", () => {
 
   it("a run service that loses the create answers 409 and keeps no session", async () => {
     const dir = await storeDir();
-    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, authToken: "t" });
+    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, authToken: "t" }, { graphStoreHooks });
     await s.init();
     cleanup.push(() => s.close());
     const other = await otherServer();
@@ -112,9 +116,9 @@ describe("creating a thread's meta file", () => {
     const dir = await storeDir();
     let hookCalls = 0;
     graphStoreHooks.beforeMetaCreate = () => void hookCalls++;
-    await persistGraph(dir, "t", YAML, spec(YAML), { owner: alice });
+    await persistGraph(dir, "t", YAML, spec(YAML), { owner: alice, ...hooks });
     // Later uploads update the stored thread; only the first one creates it.
-    await persistGraph(dir, "t", OTHER_YAML, spec(OTHER_YAML), { owner: bob });
+    await persistGraph(dir, "t", OTHER_YAML, spec(OTHER_YAML), { owner: bob, ...hooks });
     expect(hookCalls).toBe(1);
     expect(await readGraphMeta(dir, "t")).toMatchObject({ threadId: "t", owner: alice, graphName: "other-server" });
     expect(await files(dir)).toEqual(["t.graph.yaml", "t.graph.yaml.meta.json"]);
@@ -185,7 +189,7 @@ describe("when moving a new thread's graph into place fails", () => {
       await other.persistGraph(dir, "t", OTHER_YAML, spec(OTHER_YAML), { owner: alice, label: "from-other" });
       throw moveFailed();
     };
-    await expect(persistGraph(dir, "t", YAML, spec(YAML), { owner: alice })).rejects.toMatchObject({ code: "EPERM" });
+    await expect(persistGraph(dir, "t", YAML, spec(YAML), { owner: alice, ...hooks })).rejects.toMatchObject({ code: "EPERM" });
     expect(await readGraphMeta(dir, "t")).toMatchObject({ owner: alice, label: "from-other", graphName: "other-server" });
     expect((await readPersistedGraphYaml(dir, "t"))?.yaml).toBe(OTHER_YAML);
     expect(await strayFiles(dir)).toEqual([]);
@@ -200,7 +204,7 @@ describe("when moving a new thread's graph into place fails", () => {
     graphStoreHooks.beforeGraphMove = () => {
       throw moveFailed();
     };
-    await expect(persistGraph(dir, "t", YAML, spec(YAML), { owner: alice })).rejects.toMatchObject({ code: "EPERM" });
+    await expect(persistGraph(dir, "t", YAML, spec(YAML), { owner: alice, ...hooks })).rejects.toMatchObject({ code: "EPERM" });
     delete graphStoreHooks.beforeGraphMove;
     expect(await readGraphMeta(dir, "t")).toMatchObject({ owner: alice });
     expect(await readPersistedGraphYaml(dir, "t")).toBeNull();

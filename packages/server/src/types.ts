@@ -199,6 +199,16 @@ export interface ServerConfig {
   untrustedAllowFunctions?: string[];
   /** Directory for persisted uploaded graphs. */
   graphStoreDir: string;
+  /**
+   * Cleanup of what crashed writers leave in the graph store, run at startup
+   * and every `intervalMs`. Temporary files older than `maxAgeMs` are removed;
+   * a meta file older than `maxAgeMs` with no graph file is kept (it is the
+   * owner's claim on the thread id) and listed with status `error`.
+   * Env: `FLOWGRAPH_GRAPH_STORE_SWEEP_AGE_MS` (default 3600000, at least
+   * 60000) and `FLOWGRAPH_GRAPH_STORE_SWEEP_INTERVAL_MS` (default 3600000;
+   * 0 sweeps at startup only).
+   */
+  graphStoreSweep?: { maxAgeMs?: number; intervalMs?: number };
   /** Max events retained per thread for SSE replay. */
   eventBufferSize: number;
   /** AWS region hint for Bedrock (also set on process.env). */
@@ -410,6 +420,19 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
       );
     }
     config.memory.sweepIntervalMs = sweepMs;
+  }
+  const sweepAgeRaw = env.FLOWGRAPH_GRAPH_STORE_SWEEP_AGE_MS?.trim();
+  const sweepIntervalRaw = env.FLOWGRAPH_GRAPH_STORE_SWEEP_INTERVAL_MS?.trim();
+  if (sweepAgeRaw || sweepIntervalRaw) {
+    for (const [key, raw] of [["FLOWGRAPH_GRAPH_STORE_SWEEP_AGE_MS", sweepAgeRaw], ["FLOWGRAPH_GRAPH_STORE_SWEEP_INTERVAL_MS", sweepIntervalRaw]] as const) {
+      if (raw && (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)))) {
+        throw new Error(`${key} must be a whole number of milliseconds (got "${env[key]}")`);
+      }
+    }
+    config.graphStoreSweep = {
+      ...(sweepAgeRaw ? { maxAgeMs: Number(sweepAgeRaw) } : {}),
+      ...(sweepIntervalRaw ? { intervalMs: Number(sweepIntervalRaw) } : {}),
+    };
   }
   const lockRaw = env.FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS?.trim();
   if (lockRaw) {
