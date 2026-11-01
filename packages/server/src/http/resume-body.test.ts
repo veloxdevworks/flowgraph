@@ -36,6 +36,9 @@ const missing: Array<[string, string]> = [
   ["{}", "{}"],
   ["an empty body", ""],
   ["a misspelled key", '{"resum":true}'],
+  ["a null body", "null"],
+  ["a number body", "42"],
+  ["an array body", "[true]"],
 ];
 
 describe("POST /runs/:threadId/resume without a resume value", () => {
