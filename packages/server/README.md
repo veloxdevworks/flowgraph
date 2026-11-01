@@ -134,7 +134,13 @@ Errors are JSON `{ "error", "code" }`; 401s also send `WWW-Authenticate: Bearer`
 | 503 | `GRAPH_STORE_READ_FAILED` | The thread's stored graph file exists but cannot be read. Retryable; the path and errno are in the server log (`graph store read failed`) |
 | 500 | `INTERNAL_ERROR` | Any other failed system call. The response says only `Internal server error`; the message and stack are in the server log (`request.failed`, `invocation.failed`, `request.error` or `connect.command.failed`) |
 
-No error response (REST, `/invocations` or connect `command.result`) carries a server path, errno or stack trace; those go to the server log only. The same holds for run events (`run.error`, `node.error` and the other error events, over SSE, `/invocations` streams, connect and the event journal): an event whose error is a system error (one with an errno, such as `EACCES: permission denied, open '…'` or `connect ECONNREFUSED …`) says `Internal server error (error id err_…)` and carries that id as `errorId`, and the server log line with the same `errorId` (`run.event.error`, or `run.error` / `resume.error`) has the full text. Errors raised by a graph's own nodes and logic keep their message.
+No error response (REST, `/invocations` or connect `command.result`) carries a server path, errno or stack trace; those go to the server log only. System error text in a run (text in Node's format with an errno code, such as `EACCES: permission denied, open '…'` or `connect ECONNREFUSED …`) is masked as `Internal server error (error id err_…)` in:
+
+- the failure events `run.error`, `run.aborted`, `run.issue`, `node.error`, `node.retry`, `hook.error` and `skill.error`, in any field of their data (an issue's `detail` included);
+- the issues under `__issues` in `node.end`, `state.update`, `run.end` and `run.paused`, and the block errors (`blocks[].error`) in `memory.recall`;
+- the issues from `GET /runs/:id/issues` and `GET /runs/:id`, and any `__issues` in `GET /runs/:id/state` and `/history` (and their `/invocations` and connect forms).
+
+This applies to events over SSE, `/invocations` streams, connect and the event journal. A masked event carries the id as `errorId`. The id comes from the thread and the text, so the same text has the same id in every event and response, and the server logs it once per process as `run.event.error` with the full text. When a run throws a system error, the server's own `run.error` event uses the id of its `run.error` / `resume.error` log line. Other events and fields, and errors raised by a graph's own nodes and logic, are passed on as they are. The engine's state and the run's issues file keep the text as raised; only what the server sends is masked.
 
 ### Upgrading from 0.1
 

@@ -55,7 +55,7 @@ import type {
 } from "./types.js";
 
 import { ServerRequestError, TooManyRunsError } from "./errors.js";
-import { newErrorId, redactEventErrors, runErrorMessage } from "./event-errors.js";
+import { maskIssuesIn, maskSystemErrorText, newErrorId, redactEventErrors, runErrorMessage } from "./event-errors.js";
 import { assertUntrustedUploadAllowed, untrustedNodePolicy, type UntrustedUploadOptions } from "./upload-policy.js";
 import { authModeOf, createAuthenticator, singleUserPrincipal, type Authenticator, type Principal } from "./identity.js";
 
@@ -1025,7 +1025,8 @@ export class RunService {
     const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
     const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
     const state = await compiled.getState(threadId);
-    return { state };
+    // The engine keeps issue text as raised; system error text in it stays server-side.
+    return { state: maskIssuesIn(threadId, state, "state").value };
   }
 
   getHistory(threadId: string, yaml?: string, caller?: Principal): Promise<{ history: unknown[] }> {
@@ -1044,7 +1045,7 @@ export class RunService {
     const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
     const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
     const history = await compiled.getStateHistory(threadId);
-    return { history };
+    return { history: maskIssuesIn(threadId, history, "state history").value };
   }
 
   async listRuns(caller?: Principal): Promise<RunListItem[]> {
@@ -1121,7 +1122,8 @@ export class RunService {
 
   private readIssues(threadId: string): RunIssue[] {
     try {
-      return readRunIssues(this.config.graphStoreDir, threadId);
+      // The issues file keeps the text as raised; clients get system error text masked.
+      return maskSystemErrorText(threadId, readRunIssues(this.config.graphStoreDir, threadId), "issues").value;
     } catch {
       return [];
     }
