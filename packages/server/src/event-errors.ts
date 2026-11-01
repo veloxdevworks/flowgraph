@@ -100,15 +100,20 @@ const MAX_DEPTH = 12;
 /** How many error ids a masker remembers having logged before it starts over. */
 const MAX_LOGGED_IDS = 10_000;
 
+/** The shortest error id key accepted. */
+export const MIN_KEY_LENGTH = 16;
+
 type Masked<T> = { value: T; errorIds: string[] };
 
 /**
  * Replaces system error text in what the server sends with
  * {@link internalErrorMessage} and an error id.
  *
- * The id is the first 12 hex characters of HMAC-SHA256 over the thread id
- * and the text, keyed by `key` (`FLOWGRAPH_ERROR_ID_KEY`) or, without one,
- * by 32 random bytes chosen when the masker is made. The same text in the
+ * The id is the first 12 hex characters of HMAC-SHA256 over the
+ * length-prefixed thread id and the text, keyed by `key` (at least
+ * {@link MIN_KEY_LENGTH} characters; `FLOWGRAPH_ERROR_ID_KEY` or
+ * `errorIdKey`) or, without one, by 32 random bytes chosen when the masker is
+ * made. The same text in the
  * same thread gets the same id from every masker with the same key, a
  * different id in another thread, and an id nobody can recompute without the
  * key. Each masker logs an id with its full text (`run.event.error`) the
@@ -119,12 +124,23 @@ export class ErrorMasker {
   readonly #logged = new Set<string>();
 
   constructor(key?: string) {
-    this.#key = key ? Buffer.from(key, "utf8") : randomBytes(32);
+    if (key !== undefined && key.length < MIN_KEY_LENGTH) {
+      // The key is a secret: the message names only its length.
+      throw new Error(`errorIdKey must be at least ${MIN_KEY_LENGTH} characters (got ${key.length})`);
+    }
+    this.#key = key !== undefined ? Buffer.from(key, "utf8") : randomBytes(32);
   }
 
-  /** The id for system error `text` seen in `threadId`. */
+  /**
+   * The id for system error `text` seen in `threadId`. The thread id goes in
+   * with its byte length first, so no split of the same bytes between thread
+   * and text (a thread id may hold any character, NUL included) gives the
+   * same input.
+   */
   errorId(threadId: string, text: string): string {
-    return `err_${createHmac("sha256", this.#key).update(threadId).update("\0").update(text).digest("hex").slice(0, 12)}`;
+    const hmac = createHmac("sha256", this.#key);
+    hmac.update(`${Buffer.byteLength(threadId, "utf8")}:`).update(threadId, "utf8").update(text, "utf8");
+    return `err_${hmac.digest("hex").slice(0, 12)}`;
   }
 
   /**

@@ -147,6 +147,8 @@ export class RunService {
     if (sweepMs !== undefined && !(Number.isInteger(sweepMs) && sweepMs >= 1_000 && sweepMs <= MEMORY_SWEEP_MAX_INTERVAL_MS)) {
       throw new Error(`memory.sweepIntervalMs must be a whole number of milliseconds from 1000 to ${MEMORY_SWEEP_MAX_INTERVAL_MS} (got ${sweepMs})`);
     }
+    // Throws on a short key, naming only its length.
+    this.errors = new ErrorMasker(config.errorIdKey);
     // With OIDC each caller's token names its org; single-user servers need FLOWGRAPH_ORG.
     if (memBackend !== "memory" && authModeOf(config) !== "oidc" && !config.memory?.identity?.org?.trim()) {
       throw new Error(
@@ -773,12 +775,12 @@ export class RunService {
     };
   }
 
-  private errorMasker: ErrorMasker | undefined;
-  /** Masks system error text in what the server sends, with ids keyed by `config.errorIdKey`. */
-  private get errors(): ErrorMasker {
-    this.errorMasker ??= new ErrorMasker(this.config.errorIdKey);
-    return this.errorMasker;
-  }
+  /**
+   * Masks system error text in what the server sends, with ids keyed by
+   * `config.errorIdKey`. Made with the service, so a bad key fails there; each
+   * service has its own, with its own key when none is configured.
+   */
+  private readonly errors: ErrorMasker;
 
   /** Record an engine event for the thread, with system error text replaced (see {@link ErrorMasker.redactEvent}). */
   private pushEvent(threadId: string, event: ServerEvent): void {

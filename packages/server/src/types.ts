@@ -175,9 +175,10 @@ export interface ServerConfig {
   /**
    * Key for the error ids that stand in for system error text in run events,
    * issues and state (HMAC-SHA256 over the thread id and the text). Unset: 32
-   * random bytes per process, so ids change on restart and differ between
+   * random bytes per `RunService`, so ids change on restart and differ between
    * replicas; replicas that share a key give the same text the same id.
-   * At least 16 characters. Never logged or returned.
+   * At least 16 characters: `RunService` throws on a shorter key, with an
+   * error that gives only its length. Never logged or returned.
    * Env: `FLOWGRAPH_ERROR_ID_KEY`.
    */
   errorIdKey?: string;

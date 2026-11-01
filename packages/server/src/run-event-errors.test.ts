@@ -337,11 +337,12 @@ describe("error ids", () => {
 
   it("are HMAC-SHA256 of the thread and text under the key, cut to 12 hex characters", () => {
     const id = new ErrorMasker(KEY).errorId(thread, text);
-    expect(id).toBe(`err_${createHmac("sha256", KEY).update(`${thread}\0${text}`).digest("hex").slice(0, 12)}`);
+    expect(id).toBe(`err_${createHmac("sha256", KEY).update(`${Buffer.byteLength(thread)}:${thread}${text}`).digest("hex").slice(0, 12)}`);
     // Not recomputable without the key: neither a plain hash nor an empty or default key gives it.
     for (const guess of [
       createHash("sha256").update(`${thread}\0${text}`).digest("hex"),
       createHash("sha256").update(`${thread}${text}`).digest("hex"),
+      createHash("sha256").update(`${Buffer.byteLength(thread)}:${thread}${text}`).digest("hex"),
       createHmac("sha256", "").update(`${thread}\0${text}`).digest("hex"),
     ]) {
       expect(id).not.toBe(`err_${guess.slice(0, 12)}`);
@@ -355,6 +356,66 @@ describe("error ids", () => {
     const a = new ErrorMasker();
     expect(a.errorId(thread, text)).toBe(a.errorId(thread, text));
     expect(new ErrorMasker().errorId(thread, text)).not.toBe(a.errorId(thread, text));
+  });
+
+  it("tell apart every split of the same bytes between thread and text", () => {
+    const masker = new ErrorMasker(KEY);
+    const ids = [
+      masker.errorId("a\0b", "c"),
+      masker.errorId("a", "b\0c"),
+      masker.errorId("a\0", "b\0c"),
+      masker.errorId("a\0b\0c", ""),
+      masker.errorId("", "a\0b\0c"),
+      masker.errorId("1:a", "b"),
+      masker.errorId("1", ":ab"),
+    ];
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("refuse a key shorter than 16 characters, from config as from the env, naming only its length", () => {
+    for (const key of ["abc", "", "fifteen-chars-x"]) {
+      let message = "";
+      try {
+        new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: os.tmpdir(), eventBufferSize: 10, errorIdKey: key });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toBe(`errorIdKey must be at least 16 characters (got ${key.length})`);
+      expect(() => new ErrorMasker(key)).toThrow(`errorIdKey must be at least 16 characters (got ${key.length})`);
+    }
+    expect(() => new ErrorMasker("sixteen-chars-xx")).not.toThrow();
+  });
+
+  it("come from each server's own masker", async () => {
+    const log = captureErrorLog();
+    const threadId = `u-${randomUUID()}`;
+    const push = (service: RunService) => {
+      service.registry.create({ threadId, runId: "r", graphName: "g", yaml: "" });
+      const seen: ServerEvent[] = [];
+      service.registry.onGlobal((id, ev) => {
+        if (id === threadId) seen.push(ev);
+      });
+      (service as unknown as { pushEvent(id: string, ev: ServerEvent): void }).pushEvent(threadId, event("node.error", { nodeId: "n", error: text }));
+      expect(seen).toHaveLength(1);
+      expect(JSON.stringify(seen)).not.toContain(SECRET);
+      return dataOf(seen[0]);
+    };
+    // Same key: same id, and each server logs it, since each logs only what it handed out.
+    const a = push((await newService()).service);
+    const b = push((await newService()).service);
+    expect(a["errorId"]).toBe(new ErrorMasker(KEY).errorId(threadId, text));
+    expect(b["errorId"]).toBe(a["errorId"]);
+    expect(log.filter((l) => l["msg"] === "run.event.error").map((l) => l["errorId"])).toEqual([a["errorId"], a["errorId"]]);
+    // No key: each server picks its own, so the ids differ.
+    const dirs2 = [await fs.mkdtemp(path.join(os.tmpdir(), "fg-event-errors-")), await fs.mkdtemp(path.join(os.tmpdir(), "fg-event-errors-"))];
+    dirs.push(...dirs2);
+    const unkeyed = dirs2.map((dir) => {
+      const service = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 10 });
+      services.push(service);
+      return push(service);
+    });
+    expect(unkeyed[0]!["errorId"]).toMatch(/^err_[0-9a-f]{12}$/);
+    expect(unkeyed[1]!["errorId"]).not.toBe(unkeyed[0]!["errorId"]);
   });
 
   it("never show the key in a log line, an event or the masker itself", () => {
