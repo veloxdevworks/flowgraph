@@ -55,7 +55,7 @@ import type {
 } from "./types.js";
 
 import { ServerRequestError, TooManyRunsError } from "./errors.js";
-import { maskIssuesIn, maskSystemErrorText, newErrorId, redactEventErrors, runErrorMessage } from "./event-errors.js";
+import { ErrorMasker, newErrorId, runErrorMessage } from "./event-errors.js";
 import { assertUntrustedUploadAllowed, untrustedNodePolicy, type UntrustedUploadOptions } from "./upload-policy.js";
 import { authModeOf, createAuthenticator, singleUserPrincipal, type Authenticator, type Principal } from "./identity.js";
 
@@ -773,9 +773,16 @@ export class RunService {
     };
   }
 
-  /** Record an engine event for the thread, with system error text replaced (see {@link redactEventErrors}). */
+  private errorMasker: ErrorMasker | undefined;
+  /** Masks system error text in what the server sends, with ids keyed by `config.errorIdKey`. */
+  private get errors(): ErrorMasker {
+    this.errorMasker ??= new ErrorMasker(this.config.errorIdKey);
+    return this.errorMasker;
+  }
+
+  /** Record an engine event for the thread, with system error text replaced (see {@link ErrorMasker.redactEvent}). */
   private pushEvent(threadId: string, event: ServerEvent): void {
-    this.registry.pushEvent(threadId, redactEventErrors(threadId, event));
+    this.registry.pushEvent(threadId, this.errors.redactEvent(threadId, event));
   }
 
   private async applyResult(threadId: string, result: RunResult): Promise<void> {
@@ -1026,7 +1033,7 @@ export class RunService {
     const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
     const state = await compiled.getState(threadId);
     // The engine keeps issue text as raised; system error text in it stays server-side.
-    return { state: maskIssuesIn(threadId, state, "state").value };
+    return { state: this.errors.maskIssues(threadId, state, "state").value };
   }
 
   getHistory(threadId: string, yaml?: string, caller?: Principal): Promise<{ history: unknown[] }> {
@@ -1045,7 +1052,7 @@ export class RunService {
     const { spec, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
     const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
     const history = await compiled.getStateHistory(threadId);
-    return { history: maskIssuesIn(threadId, history, "state history").value };
+    return { history: this.errors.maskIssues(threadId, history, "state history").value };
   }
 
   async listRuns(caller?: Principal): Promise<RunListItem[]> {
@@ -1123,7 +1130,7 @@ export class RunService {
   private readIssues(threadId: string): RunIssue[] {
     try {
       // The issues file keeps the text as raised; clients get system error text masked.
-      return maskSystemErrorText(threadId, readRunIssues(this.config.graphStoreDir, threadId), "issues").value;
+      return this.errors.mask(threadId, readRunIssues(this.config.graphStoreDir, threadId), "issues").value;
     } catch {
       return [];
     }

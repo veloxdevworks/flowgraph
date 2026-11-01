@@ -173,6 +173,15 @@ export interface ServerConfig {
    */
   shutdownTimeoutMs?: number;
   /**
+   * Key for the error ids that stand in for system error text in run events,
+   * issues and state (HMAC-SHA256 over the thread id and the text). Unset: 32
+   * random bytes per process, so ids change on restart and differ between
+   * replicas; replicas that share a key give the same text the same id.
+   * At least 16 characters. Never logged or returned.
+   * Env: `FLOWGRAPH_ERROR_ID_KEY`.
+   */
+  errorIdKey?: string;
+  /**
    * How long shutdown waits for each pool or store to close (a stuck
    * connection must not hold the process), in ms. Default 5000.
    */
@@ -424,6 +433,12 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
       throw new Error(`FLOWGRAPH_SHUTDOWN_TIMEOUT_MS must be a whole number of milliseconds (got "${env.FLOWGRAPH_SHUTDOWN_TIMEOUT_MS}")`);
     }
     config.shutdownTimeoutMs = Number(shutdownRaw);
+  }
+  const errorIdKey = env.FLOWGRAPH_ERROR_ID_KEY?.trim();
+  if (errorIdKey) {
+    // The value is a secret: the message names only its length.
+    if (errorIdKey.length < 16) throw new Error(`FLOWGRAPH_ERROR_ID_KEY must be at least 16 characters (got ${errorIdKey.length})`);
+    config.errorIdKey = errorIdKey;
   }
   const allowHosts = (env.FLOWGRAPH_UNTRUSTED_HTTP_ALLOW_HOSTS ?? "")
     .split(",")

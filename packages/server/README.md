@@ -140,7 +140,7 @@ No error response (REST, `/invocations` or connect `command.result`) carries a s
 - the issues under `__issues` in `node.end`, `state.update`, `run.end` and `run.paused`, and the block errors (`blocks[].error`) in `memory.recall`;
 - the issues from `GET /runs/:id/issues` and `GET /runs/:id`, and any `__issues` in `GET /runs/:id/state` and `/history` (and their `/invocations` and connect forms).
 
-This applies to events over SSE, `/invocations` streams, connect and the event journal. A masked event carries the id as `errorId`. The id comes from the thread and the text, so the same text has the same id in every event and response, and the server logs it once per process as `run.event.error` with the full text. When a run throws a system error, the server's own `run.error` event uses the id of its `run.error` / `resume.error` log line. Other events and fields, and errors raised by a graph's own nodes and logic, are passed on as they are. The engine's state and the run's issues file keep the text as raised; only what the server sends is masked.
+This applies to events over SSE, `/invocations` streams, connect and the event journal. A masked event carries the id as `errorId`. The id is the first 12 hex characters of HMAC-SHA256 over the thread id and the text, so within a thread the same text has the same id in every event and response, the same text in another thread has a different id, and an id cannot be recomputed (or a hidden path or address guessed from it) without the key. The key is `FLOWGRAPH_ERROR_ID_KEY` (`errorIdKey` in `ServerConfig`); without it each process picks 32 random bytes at startup, so ids change across restarts and differ between replicas. Replicas that share a key give the same text the same id. The key is never logged or returned. Each server process logs every id it hands out, once, as `run.event.error` with the full text, so look the id up in the logs of the process that sent it. When a run throws a system error, the server's own `run.error` event uses the id of its `run.error` / `resume.error` log line. Other events and fields, and errors raised by a graph's own nodes and logic, are passed on as they are. The check looks only at a short window around each errno code, so its cost grows linearly with the length of a string. The engine's state and the run's issues file keep the text as raised; only what the server sends is masked.
 
 ### Upgrading from 0.1
 
@@ -187,6 +187,7 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 | Env | Default | Purpose |
 |---|---|---|
 | `FLOWGRAPH_MAX_BODY_BYTES` | `2000000` | JSON body cap for `POST /runs` and control endpoints (`0` = unlimited) |
+| `FLOWGRAPH_ERROR_ID_KEY` | _(unset)_ | Key (at least 16 characters) for the error ids that replace system error text in run events, issues and state. Unset: random per process, so ids change on restart; set the same key on every replica to keep ids stable across them. Never logged or returned |
 | `FLOWGRAPH_MAX_CONCURRENT_RUNS` | `16` | In-flight `running`/`started` threads per process (`0` = unlimited) |
 | `FLOWGRAPH_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. `GET /ping` access logs are `debug`. |
 | `FLOWGRAPH_GIT_SHA` | _(unset)_ | Optional build identity included on `/` and `/healthz`. |
