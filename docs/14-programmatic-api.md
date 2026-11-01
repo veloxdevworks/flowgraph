@@ -84,6 +84,8 @@ await compiled.resume({
 });
 ```
 
+`resume: false` (or any falsy value) denies the approval and records `approved: false`.
+
 See [release-notes](../examples/release-notes/register.ts) for `ctx.interrupt()` and `ctx.once()` patterns.
 
 ## Custom providers

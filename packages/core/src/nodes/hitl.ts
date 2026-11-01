@@ -221,11 +221,10 @@ function mapHitlResume(
     };
   }
 
-  // choice
-  let choice =
-    typeof resume === "string"
-      ? resume
-      : (resume as { choice?: string })?.choice ?? "";
+  // choice: a string or number answer, bare or as `{ choice }`. A number is
+  // read as a 1-based index, the same as its string form.
+  const raw = resume !== null && typeof resume === "object" ? (resume as { choice?: unknown }).choice : resume;
+  let choice = typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
   if (opts.choices?.length && !opts.choices.includes(choice)) {
     const idx = Number(choice) - 1;
     if (Number.isInteger(idx) && idx >= 0 && idx < opts.choices.length) {

@@ -130,11 +130,13 @@ Each interrupt carries a **kind** so operators know how to answer:
 |---|---|---|
 | `approval` | `hitl` approve mode, tool gates, `permission: ask` | `{ approved: true \| false }` |
 | `question` | `hitl` question mode, `ask_human` | `{ answer: "..." }` |
-| `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }` |
+| `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }`, the choice string, or its 1-based index as a number or string |
 | `form` | `hitl` form mode | schema-validated object |
 | `review` | `hitl` review mode | `{ decision, feedback? }` |
 | `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` |
 | `custom` | advanced / hook payloads | arbitrary JSON |
+
+A falsy resume value (`false`, `null`, `undefined`, `0`, `""`) is applied as given, from `compiled.resume()`, the CLI's `--resume`, a webhook POST or `resolveInterrupt`: an approval records `approved: false`, and a choice re-prompts as invalid. With several interrupts pending, it answers each of them, the same as any other single value.
 
 ```yaml
 - id: approve-release

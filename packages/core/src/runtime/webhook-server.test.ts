@@ -75,6 +75,19 @@ describe("webhook HTTP ingress", () => {
     expect(snap?.values["approval"]).toEqual({ approved: true });
   });
 
+  it("POST with a falsy JSON body resumes the run with that value", async () => {
+    const compiled = await compileGraph(webhookWaitGraph(), {});
+    for (const [i, body] of [false, null, 0].entries()) {
+      const threadId = `ingress-falsy-${i}`;
+      const r1 = await compiled.run({ threadId, onInterrupt: "fail" });
+      const url = (r1.interrupts?.[0]?.payload as { data?: { webhookUrl?: string } })?.data?.webhookUrl;
+      const post = await postJson(url!, body);
+      expect(post.status).toBe(200);
+      expect(post.json).toEqual({ status: "completed" });
+      expect((await compiled.getState(threadId))?.values["approval"]).toEqual({ value: body });
+    }
+  });
+
   it("enforces each graph's webhook token on its own routes only", async () => {
     const secured = await compileGraph(webhookWaitGraph({}, { webhookServer: { port: 0, token: "s3cret" } }), {});
     const open = await compileGraph(webhookWaitGraph(), {});
