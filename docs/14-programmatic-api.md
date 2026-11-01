@@ -84,7 +84,7 @@ await compiled.resume({
 });
 ```
 
-`resume: false` (or any falsy value) denies the approval and records `approved: false`.
+`resume: false` (or `null`, `0`, `""`) denies the approval and records `approved: false`. Leaving `resume` out (or passing `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` instead, and the interrupt stays pending.
 
 See [release-notes](../examples/release-notes/register.ts) for `ctx.interrupt()` and `ctx.once()` patterns.
 

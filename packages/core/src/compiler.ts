@@ -857,6 +857,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
       );
       if (hasInterrupt) {
+        // A missing answer is not a denial: fail before anything runs and leave the interrupt pending.
+        if (resumeOpts.resume === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
         payload = resumeCommand(resumeOpts.resume, (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []));
       }
       // Static breakpoints pause with empty task.interrupts and a non-empty
@@ -1667,6 +1669,14 @@ function isAbortFailure(err: unknown, signal?: AbortSignal): boolean {
     if (name === "AbortError") return true;
   }
   return false;
+}
+
+function resumeValueRequiredError(threadId: string): Error & { code: "RESUME_VALUE_REQUIRED" } {
+  const err = new Error(
+    `resume() on thread "${threadId}" needs a value for its pending interrupt; pass resume: false or null to deny.`,
+  ) as Error & { code: "RESUME_VALUE_REQUIRED" };
+  err.code = "RESUME_VALUE_REQUIRED";
+  return err;
 }
 
 /**

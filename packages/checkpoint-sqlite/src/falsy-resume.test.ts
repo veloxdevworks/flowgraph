@@ -3,21 +3,21 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { compileGraph, type GraphSpec } from "@flowgraph/core";
-import { createSqliteCheckpointer } from "./index.js";
+import { openSqliteBackend, type SqliteBackend } from "./index.js";
 
 const tmpFiles: string[] = [];
-const savers: Array<ReturnType<typeof createSqliteCheckpointer>> = [];
+const backends: SqliteBackend[] = [];
 afterEach(() => {
-  for (const saver of savers.splice(0)) (saver as unknown as { db: { close(): void } }).db.close();
+  for (const backend of backends.splice(0)) backend.close();
   for (const file of tmpFiles.splice(0)) fs.rmSync(file, { force: true });
 });
 
-function saver(): ReturnType<typeof createSqliteCheckpointer> {
+async function saver(): Promise<SqliteBackend["checkpointer"]> {
   const file = path.join(os.tmpdir(), `fg-falsy-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   tmpFiles.push(file);
-  const s = createSqliteCheckpointer({ path: file });
-  savers.push(s);
-  return s;
+  const backend = await openSqliteBackend({ path: file });
+  backends.push(backend);
+  return backend.checkpointer;
 }
 
 function gate(withConfig: Record<string, unknown>): GraphSpec {
@@ -36,8 +36,8 @@ function gate(withConfig: Record<string, unknown>): GraphSpec {
 
 describe("sqlite external resume with a falsy answer", () => {
   it("records a denied approval", async () => {
-    const compiled = await compileGraph(gate({ mode: "approve" }), { checkpointer: saver() });
-    for (const [i, answer] of [false, null, undefined, 0, ""].entries()) {
+    const compiled = await compileGraph(gate({ mode: "approve" }), { checkpointer: await saver() });
+    for (const [i, answer] of [false, null, 0, ""].entries()) {
       const threadId = `deny-${i}`;
       expect((await compiled.run({ threadId, onInterrupt: "fail" })).status).toBe("interrupted");
       const r = await compiled.resume({ threadId, resume: answer, onInterrupt: "fail" });
@@ -47,7 +47,7 @@ describe("sqlite external resume with a falsy answer", () => {
   });
 
   it("re-prompts a falsy choice and accepts a valid one next", async () => {
-    const compiled = await compileGraph(gate({ mode: "choice", choices: ["a", "b"] }), { checkpointer: saver() });
+    const compiled = await compileGraph(gate({ mode: "choice", choices: ["a", "b"] }), { checkpointer: await saver() });
     for (const [i, answer] of [false, null, 0, ""].entries()) {
       const threadId = `choice-${i}`;
       await compiled.run({ threadId, onInterrupt: "fail" });

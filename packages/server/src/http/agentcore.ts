@@ -69,6 +69,10 @@ export async function handleAgentCore(
           return true;
         }
         case "resume": {
+          if (!("resume" in body)) {
+            sendJson(res, 400, { error: "resume is required (use false or null to deny)", code: "RESUME_REQUIRED" });
+            return true;
+          }
           const result = await service.resumeRun({
             threadId: body.threadId ?? "",
             resume: body.resume,

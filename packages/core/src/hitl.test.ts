@@ -140,13 +140,49 @@ describe("hitl node", () => {
 
   it("approve mode records a falsy external resume as a denial", async () => {
     const compiled = await compileGraph(hitlGraph("approve"), {});
-    for (const [i, answer] of [false, null, undefined, 0, ""].entries()) {
+    for (const [i, answer] of [false, null, 0, ""].entries()) {
       const threadId = `hitl-ext-deny-${i}`;
       await compiled.run({ threadId, onInterrupt: "fail" });
       const r = await compiled.resume({ threadId, resume: answer, onInterrupt: "fail" });
       expect(r.status).toBe("completed");
       expect((r.state["gateResult"] as { approved: boolean }).approved).toBe(false);
     }
+  });
+
+  it("a resume with no value fails and leaves the approval pending", async () => {
+    const compiled = await compileGraph(hitlGraph("approve"), {});
+    await compiled.run({ threadId: "hitl-no-value", onInterrupt: "fail" });
+    // A JavaScript caller can leave `resume` out entirely.
+    const noKey = { threadId: "hitl-no-value", onInterrupt: "fail" } as Parameters<typeof compiled.resume>[0];
+    await expect(compiled.resume(noKey)).rejects.toThrow(
+      /needs a value for its pending interrupt/,
+    );
+    await expect(
+      compiled.resume({ threadId: "hitl-no-value", resume: undefined, onInterrupt: "fail" }),
+    ).rejects.toMatchObject({ code: "RESUME_VALUE_REQUIRED" });
+    const snap = await compiled.getState("hitl-no-value");
+    expect(snap?.interrupts).toHaveLength(1);
+    expect(snap?.values["gateResult"] ?? null).toBeNull();
+
+    const r = await compiled.resume({ threadId: "hitl-no-value", resume: true, onInterrupt: "fail" });
+    expect(r.status).toBe("completed");
+    expect((r.state["gateResult"] as { approved: boolean }).approved).toBe(true);
+  });
+
+  it("choice mode reads a number only as a 1-based index, even with numeric labels", async () => {
+    const compiled = await compileGraph(hitlGraph("choice", { choices: ["2", "1"] }), {});
+    const cases: Array<[unknown, string]> = [[1, "2"], [{ choice: 1 }, "2"], [2, "1"], ["1", "1"], ["2", "2"]];
+    for (const [i, [answer, expected]] of cases.entries()) {
+      const threadId = `hitl-numeric-labels-${i}`;
+      await compiled.run({ threadId, onInterrupt: "fail" });
+      const r = await compiled.resume({ threadId, resume: answer, onInterrupt: "fail" });
+      expect(r.status).toBe("completed");
+      expect((r.state["gateResult"] as { choice: string }).choice).toBe(expected);
+    }
+    await compiled.run({ threadId: "hitl-numeric-out-of-range", onInterrupt: "fail" });
+    const r = await compiled.resume({ threadId: "hitl-numeric-out-of-range", resume: 3, onInterrupt: "fail" });
+    expect(r.status).toBe("interrupted");
+    expect(r.interrupts?.[0]?.validationError).toContain("Invalid choice 3");
   });
 
   it("choice mode maps a numeric 1-based index to the choice string", async () => {
@@ -159,7 +195,7 @@ describe("hitl node", () => {
 
   it("choice mode accepts a valid answer after an invalid one, truthy or falsy", async () => {
     const compiled = await compileGraph(hitlGraph("choice"), {});
-    const invalid: unknown[] = ["nope", 5, { choice: "nope" }, false, null, undefined, 0, ""];
+    const invalid: unknown[] = ["nope", 5, { choice: "nope" }, false, null, 0, ""];
     const valid: Array<[unknown, string]> = [["b", "b"], [2, "b"], ["1", "a"], [{ choice: "a" }, "a"]];
     let n = 0;
     for (const bad of invalid) {

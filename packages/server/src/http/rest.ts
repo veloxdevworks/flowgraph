@@ -109,6 +109,10 @@ export async function handleRest(
           resume?: unknown;
           yaml?: string;
         };
+        if (!body || typeof body !== "object" || !("resume" in body)) {
+          sendJson(res, 400, { error: "resume is required (use false or null to deny)", code: "RESUME_REQUIRED" });
+          return true;
+        }
         const result = await service.resumeRun({
           threadId: m.threadId,
           resume: body.resume,

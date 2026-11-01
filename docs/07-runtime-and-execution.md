@@ -130,13 +130,18 @@ Each interrupt carries a **kind** so operators know how to answer:
 |---|---|---|
 | `approval` | `hitl` approve mode, tool gates, `permission: ask` | `{ approved: true \| false }` |
 | `question` | `hitl` question mode, `ask_human` | `{ answer: "..." }` |
-| `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }`, the choice string, or its 1-based index as a number or string |
+| `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }`, the choice string, or its 1-based index. A number (bare or as `choice`) is always an index; a string matches a choice first, then an index |
 | `form` | `hitl` form mode | schema-validated object |
 | `review` | `hitl` review mode | `{ decision, feedback? }` |
 | `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` |
 | `custom` | advanced / hook payloads | arbitrary JSON |
 
-A falsy resume value (`false`, `null`, `undefined`, `0`, `""`) is applied as given, from `compiled.resume()`, the CLI's `--resume`, a webhook POST or `resolveInterrupt`: an approval records `approved: false`, and a choice re-prompts as invalid. With several interrupts pending, it answers each of them, the same as any other single value.
+A falsy resume value (`false`, `null`, `0`, `""`) is applied as given, from `compiled.resume()`, the CLI's `--resume`, the server's resume endpoints, a webhook POST or `resolveInterrupt`: an approval records `approved: false`, and a choice re-prompts as invalid. With several interrupts pending, it answers each of them, the same as any other single value. A missing answer is not a denial: `compiled.resume()` with no `resume` value (or `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` and runs nothing, and the server answers a resume request without a `resume` key with 400 `RESUME_REQUIRED`.
+
+Two limits apply to falsy answers:
+
+- `resumeFrom()` keys a falsy answer by the interrupts pending at the latest point in the thread, not at the requested checkpoint. Resuming from a checkpoint whose interrupt was already answered replays the stored answer, whatever value you pass (truthy or falsy).
+- A falsy webhook body answers only that webhook's own interrupt. A truthy body is sent as one value and answers every pending interrupt.
 
 ```yaml
 - id: approve-release

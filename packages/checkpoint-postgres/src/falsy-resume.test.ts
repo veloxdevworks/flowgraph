@@ -46,7 +46,7 @@ function gate(withConfig: Record<string, unknown>): GraphSpec {
 describe.skipIf(!DB)("postgres external resume with a falsy answer", () => {
   it("records a denied approval", async () => {
     const compiled = await compileGraph(gate({ mode: "approve" }), { checkpointer: (await backend()).checkpointer });
-    for (const [i, answer] of [false, null, undefined, 0, ""].entries()) {
+    for (const [i, answer] of [false, null, 0, ""].entries()) {
       const threadId = `deny-${i}`;
       expect((await compiled.run({ threadId, onInterrupt: "fail" })).status).toBe("interrupted");
       const r = await compiled.resume({ threadId, resume: answer, onInterrupt: "fail" });
