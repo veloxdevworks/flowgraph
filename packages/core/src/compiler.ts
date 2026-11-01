@@ -856,6 +856,11 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const hasInterrupt = (snap?.tasks ?? []).some(
         (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
       );
+      if (hasInterrupt) {
+        // A missing answer is not a denial: fail before anything runs and leave the interrupt pending.
+        if (resumeOpts.resume === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
+        payload = resumeCommand(resumeOpts.resume, (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []));
+      }
       // Static breakpoints pause with empty task.interrupts and a non-empty
       // `next`. LangGraph continues those with null input, not Command({ resume }).
       if (!hasInterrupt && Array.isArray(snap?.next) && snap.next.length > 0) {
@@ -1666,14 +1671,22 @@ function isAbortFailure(err: unknown, signal?: AbortSignal): boolean {
   return false;
 }
 
+function resumeValueRequiredError(threadId: string): Error & { code: "RESUME_VALUE_REQUIRED" } {
+  const err = new Error(
+    `resume() on thread "${threadId}" needs a value for its pending interrupt; pass resume: false or null to deny.`,
+  ) as Error & { code: "RESUME_VALUE_REQUIRED" };
+  err.code = "RESUME_VALUE_REQUIRED";
+  return err;
+}
+
 /**
  * Resume the pending interrupts with one answer. LangGraph drops a falsy
  * `resume` (`false`, `0`, `""`, `null`, `undefined`) as empty input, so a
  * falsy answer is sent per interrupt id instead, which it applies as given.
  */
-function resumeCommand(value: unknown, pending: InterruptInfo[]): Command {
+function resumeCommand(value: unknown, pending: ReadonlyArray<{ id?: string }>): Command {
   if (value) return new Command({ resume: value });
-  const ids = pending.map((it) => it.id);
+  const ids = pending.map((it) => it.id ?? "");
   if (ids.length > 0 && ids.every((id) => /^[0-9a-f]{32}$/.test(id))) {
     return new Command({ resume: Object.fromEntries(ids.map((id) => [id, value])) });
   }
@@ -1797,7 +1810,7 @@ async function attachWebhookUrls(
       resume: async (body) => {
         if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
         const result = await opts.executeInvoke(
-          new Command({ resume: body }),
+          resumeCommand(body, [interrupt]),
           {
             threadId: opts.threadId,
             resume: body,

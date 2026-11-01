@@ -221,11 +221,17 @@ function mapHitlResume(
     };
   }
 
-  // choice
-  let choice =
-    typeof resume === "string"
-      ? resume
-      : (resume as { choice?: string })?.choice ?? "";
+  // choice: a string or number answer, bare or as `{ choice }`. A number is
+  // only a 1-based index; a string matches a label first, then an index.
+  const raw = resume !== null && typeof resume === "object" ? (resume as { choice?: unknown }).choice : resume;
+  if (typeof raw === "number" && opts.choices?.length) {
+    const picked = Number.isInteger(raw) && raw >= 1 ? opts.choices[raw - 1] : undefined;
+    if (picked === undefined) {
+      throw new Error(`Invalid choice ${raw}. Expected an index from 1 to ${opts.choices.length}`);
+    }
+    return { choice: picked };
+  }
+  let choice = typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
   if (opts.choices?.length && !opts.choices.includes(choice)) {
     const idx = Number(choice) - 1;
     if (Number.isInteger(idx) && idx >= 0 && idx < opts.choices.length) {

@@ -803,6 +803,8 @@ export class RunService {
 
   private async resumeRunNow(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
     if (!req.threadId?.trim()) throw new Error("threadId is required");
+    // A missing answer is not a denial: refuse it here so every entry point gets the same 400.
+    if (req.resume === undefined) throw new ServerRequestError(400, "RESUME_REQUIRED", "resume is required (use false or null to deny)");
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(req.threadId, principal, { mustExist: true });
 
