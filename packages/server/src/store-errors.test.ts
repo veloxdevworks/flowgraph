@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GraphStoreError, INTERNAL_ERROR_BODY } from "./errors.js";
-import { parseGraphYaml, persistGraph, updateGraphMeta } from "./graph-source.js";
+import { GraphMetaUnreadableError, parseGraphYaml, persistGraph, readGraphMeta, readPersistedGraphYaml, updateGraphMeta } from "./graph-source.js";
 import { createHttpServer } from "./http/app.js";
 import { RunService } from "./run-service.js";
 import type { ServerConfig } from "./types.js";
@@ -145,6 +145,19 @@ describe("graph store failures", () => {
     const { base } = await realServer();
     const res = await fetch(`${base}/runs/nothing-here`, { headers: auth });
     expect(res.status).toBe(404);
+  });
+
+  it("a store path that is not a directory (ENOTDIR) is a read failure for the graph and the meta file alike", async () => {
+    const notADir = path.join(await storeDir(), "file");
+    await fs.writeFile(notADir, "");
+    const log = captureErrorLog();
+
+    await expect(readPersistedGraphYaml(notADir, "n1")).rejects.toMatchObject({ status: 503, code: "GRAPH_STORE_READ_FAILED" });
+    await expect(readGraphMeta(notADir, "n1")).rejects.toBeInstanceOf(GraphMetaUnreadableError);
+    expect(log.find((l) => l["msg"] === "graph store read failed")).toMatchObject({ threadId: "n1", errno: "ENOTDIR" });
+    // A store directory that does not exist yet still means nothing stored.
+    await expect(readPersistedGraphYaml(path.join(notADir + "-missing", "store"), "n1")).resolves.toBeNull();
+    await expect(readGraphMeta(path.join(notADir + "-missing", "store"), "n1")).resolves.toBeNull();
   });
 
   it("a failed meta update throws GraphStoreError, not the fs error", async () => {

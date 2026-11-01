@@ -555,8 +555,10 @@ export async function readPersistedGraphYaml(dir: string, threadId: string): Pro
   assertValidThreadId(threadId);
   const yaml = await storeIo("read", threadId, () =>
     fs.readFile(graphPathFor(dir, threadId), "utf-8").catch((err: NodeJS.ErrnoException) => {
-      // No graph stored (or no store directory yet).
-      if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
+      // No graph stored (or no store directory yet). Anything else, ENOTDIR
+      // included (the store path is not a directory), is a read failure, as
+      // it is for the meta file in readGraphMeta.
+      if (err.code === "ENOENT") return null;
       throw err;
     }),
   );

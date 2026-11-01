@@ -134,7 +134,7 @@ Errors are JSON `{ "error", "code" }`; 401s also send `WWW-Authenticate: Bearer`
 | 503 | `GRAPH_STORE_READ_FAILED` | The thread's stored graph file exists but cannot be read. Retryable; the path and errno are in the server log (`graph store read failed`) |
 | 500 | `INTERNAL_ERROR` | Any other failed system call. The response says only `Internal server error`; the message and stack are in the server log (`request.failed`, `invocation.failed`, `request.error` or `connect.command.failed`) |
 
-No error response (REST, `/invocations` or connect `command.result`) carries a server path, errno or stack trace; those go to the server log only.
+No error response (REST, `/invocations` or connect `command.result`) carries a server path, errno or stack trace; those go to the server log only. The same holds for run events (`run.error`, `node.error` and the other error events, over SSE, `/invocations` streams, connect and the event journal): an event whose error is a system error (one with an errno, such as `EACCES: permission denied, open '…'` or `connect ECONNREFUSED …`) says `Internal server error (error id err_…)` and carries that id as `errorId`, and the server log line with the same `errorId` (`run.event.error`, or `run.error` / `resume.error`) has the full text. Errors raised by a graph's own nodes and logic keep their message.
 
 ### Upgrading from 0.1
 
