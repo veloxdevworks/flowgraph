@@ -12,6 +12,43 @@ import {
 import { RunService } from "./run-service.js";
 import { defaultServerConfig, type ServerConfig, type ThreadOwner } from "./types.js";
 
+/**
+ * A failing file system: an `lstat` or `rm` of a file whose name `fault`
+ * lists throws the error a real disk would.
+ */
+const fault = vi.hoisted(() => ({ lstat: new Set<string>(), rm: new Set<string>() }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const failing = (op: "lstat" | "rm", file: unknown): void => {
+    const name = String(file).split("/").pop()!;
+    if (fault[op].has(name)) {
+      throw Object.assign(new Error(`EIO: i/o error, ${op} '${String(file)}'`), { code: "EIO", errno: -5, syscall: op, path: String(file) });
+    }
+  };
+  const lstat = (async (file: string, ...rest: unknown[]) => {
+    failing("lstat", file);
+    return (actual.lstat as (...a: unknown[]) => unknown)(file, ...rest);
+  }) as typeof actual.lstat;
+  const rm = (async (file: string, ...rest: unknown[]) => {
+    failing("rm", file);
+    return (actual.rm as (...a: unknown[]) => unknown)(file, ...rest);
+  }) as typeof actual.rm;
+  return { ...actual, lstat, rm, default: { ...actual, lstat, rm } };
+});
+
+/** Capture log lines at `level`, parsed. */
+function captureLog(method: "log" | "warn"): Array<Record<string, unknown>> {
+  const lines: Array<Record<string, unknown>> = [];
+  vi.spyOn(console, method).mockImplementation((line: unknown) => {
+    try {
+      lines.push(JSON.parse(String(line)) as Record<string, unknown>);
+    } catch {
+      lines.push({ raw: String(line) });
+    }
+  });
+  return lines;
+}
+
 const YAML = `
 apiVersion: flowgraph/v1
 kind: Graph
@@ -34,6 +71,9 @@ const T0 = Date.parse("2026-01-01T00:00:00.000Z");
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  fault.lstat.clear();
+  fault.rm.clear();
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
@@ -87,7 +127,7 @@ describe("sweepGraphStore", () => {
 
     const result = await sweepGraphStore(dir, { maxAgeMs: HOUR, now: T0 + HOUR });
 
-    expect(result).toEqual({ tempFilesRemoved: 2, orphanedMetas: ["old"] });
+    expect(result).toEqual({ tempFilesRemoved: 2, orphanedMetas: ["old"], filesFailed: 0 });
     expect(await files(dir)).toEqual([
       ".b.graph.yaml.77.00112233aabb.tmp",
       ".hidden.tmp",
@@ -100,19 +140,69 @@ describe("sweepGraphStore", () => {
     // The claim stays with its owner.
     expect(await readGraphMeta(dir, "old")).toMatchObject({ owner: alice });
     // Sweeping again finds nothing more to remove.
-    expect(await sweepGraphStore(dir, { maxAgeMs: HOUR, now: T0 + HOUR })).toEqual({ tempFilesRemoved: 0, orphanedMetas: ["old"] });
+    expect(await sweepGraphStore(dir, { maxAgeMs: HOUR, now: T0 + HOUR })).toEqual({ tempFilesRemoved: 0, orphanedMetas: ["old"], filesFailed: 0 });
   });
 
   it("uses the configured age", async () => {
     const dir = await storeDir();
     await fileAt(dir, ".a.graph.yaml.1.0123456789ab.tmp", T0);
-    expect(await sweepGraphStore(dir, { maxAgeMs: 2 * HOUR, now: T0 + HOUR })).toEqual({ tempFilesRemoved: 0, orphanedMetas: [] });
-    expect(await sweepGraphStore(dir, { maxAgeMs: 2 * HOUR, now: T0 + 2 * HOUR })).toEqual({ tempFilesRemoved: 1, orphanedMetas: [] });
+    expect(await sweepGraphStore(dir, { maxAgeMs: 2 * HOUR, now: T0 + HOUR })).toEqual({ tempFilesRemoved: 0, orphanedMetas: [], filesFailed: 0 });
+    expect(await sweepGraphStore(dir, { maxAgeMs: 2 * HOUR, now: T0 + 2 * HOUR })).toEqual({ tempFilesRemoved: 1, orphanedMetas: [], filesFailed: 0 });
+  });
+
+  it("leaves a symlink named like a leftover alone, and the old file it points at", async () => {
+    const dir = await storeDir();
+    const elsewhere = await storeDir();
+    const target = path.join(elsewhere, "target.graph.yaml");
+    await fileAt(elsewhere, "target.graph.yaml", T0);
+    const link = path.join(dir, ".a.graph.yaml.1.0123456789ab.tmp");
+    const metaLink = path.join(dir, "linked.graph.yaml.meta.json");
+    await fs.symlink(target, link);
+    await fs.symlink(target, metaLink);
+    // Both the links and what they point at are old.
+    for (const l of [link, metaLink]) await fs.lutimes(l, T0 / 1000, T0 / 1000);
+
+    expect(await sweepGraphStore(dir, { maxAgeMs: HOUR, now: T0 + 2 * HOUR })).toEqual({ tempFilesRemoved: 0, orphanedMetas: [], filesFailed: 0 });
+    expect(await files(dir)).toEqual([".a.graph.yaml.1.0123456789ab.tmp", "linked.graph.yaml.meta.json"]);
+    expect(await files(elsewhere)).toEqual(["target.graph.yaml"]);
+  });
+
+  it("leaves a folder named like a leftover alone", async () => {
+    const dir = await storeDir();
+    for (const name of [".a.graph.yaml.1.0123456789ab.tmp", "folder.graph.yaml.meta.json"]) {
+      await fs.mkdir(path.join(dir, name));
+      await fileAt(path.join(dir, name), "inside", T0);
+      await setMtime(path.join(dir, name), T0);
+    }
+
+    expect(await sweepGraphStore(dir, { maxAgeMs: HOUR, now: T0 + 2 * HOUR })).toEqual({ tempFilesRemoved: 0, orphanedMetas: [], filesFailed: 0 });
+    expect(await files(dir)).toEqual([".a.graph.yaml.1.0123456789ab.tmp", "folder.graph.yaml.meta.json"]);
+    expect(await files(path.join(dir, ".a.graph.yaml.1.0123456789ab.tmp"))).toEqual(["inside"]);
+  });
+
+  it("logs a file it cannot check or remove and goes on with the others", async () => {
+    const dir = await storeDir();
+    for (const name of [".a.graph.yaml.1.0123456789ab.tmp", ".b.graph.yaml.1.0123456789ab.tmp", ".c.graph.yaml.1.0123456789ab.tmp"]) {
+      await fileAt(dir, name, T0);
+    }
+    await orphan(dir, "old", T0);
+    fault.lstat.add(".a.graph.yaml.1.0123456789ab.tmp");
+    fault.rm.add(".b.graph.yaml.1.0123456789ab.tmp");
+    const warnings = captureLog("warn");
+
+    const result = await sweepGraphStore(dir, { maxAgeMs: HOUR, now: T0 + 2 * HOUR });
+
+    expect(result).toEqual({ tempFilesRemoved: 1, orphanedMetas: ["old"], filesFailed: 2 });
+    expect(await files(dir)).toEqual([".a.graph.yaml.1.0123456789ab.tmp", ".b.graph.yaml.1.0123456789ab.tmp", "old.graph.yaml.meta.json"]);
+    expect(warnings.filter((l) => l["msg"] === "graph-store.sweep file failed").map((l) => [l["file"], l["message"]])).toEqual([
+      [path.join(dir, ".a.graph.yaml.1.0123456789ab.tmp"), expect.stringContaining("EIO")],
+      [path.join(dir, ".b.graph.yaml.1.0123456789ab.tmp"), expect.stringContaining("EIO")],
+    ]);
   });
 
   it("does nothing for a store directory that does not exist yet", async () => {
     const dir = await storeDir();
-    expect(await sweepGraphStore(path.join(dir, "missing"), { maxAgeMs: HOUR, now: T0 })).toEqual({ tempFilesRemoved: 0, orphanedMetas: [] });
+    expect(await sweepGraphStore(path.join(dir, "missing"), { maxAgeMs: HOUR, now: T0 })).toEqual({ tempFilesRemoved: 0, orphanedMetas: [], filesFailed: 0 });
   });
 });
 
@@ -173,7 +263,7 @@ describe("two servers sharing a graph store", () => {
     const sweeper = startGraphStoreSweeper(dir, { intervalMs: 0, now: () => bNow, onSweep: (r) => sweeps.push(r) });
     await sweeper.sweepNow();
     await sweeper.stop();
-    expect(sweeps).toEqual([{ tempFilesRemoved: 1, orphanedMetas: ["u"] }]);
+    expect(sweeps).toEqual([{ tempFilesRemoved: 1, orphanedMetas: ["u"], filesFailed: 0 }]);
     // A's run journal (`t.events.jsonl`) is not the sweep's business either.
     expect(await files(dir)).toEqual(["t.events.jsonl", "t.graph.yaml", "t.graph.yaml.meta.json", "u.graph.yaml.meta.json"]);
     const listed = await b.listRuns();
@@ -205,14 +295,34 @@ describe("the sweeper", () => {
 
     vi.advanceTimersByTime(10 * 60_000);
     await next;
-    expect(results).toEqual([{ tempFilesRemoved: 1, orphanedMetas: [] }]);
+    expect(results).toEqual([{ tempFilesRemoved: 1, orphanedMetas: [], filesFailed: 0 }]);
     expect(await files(dir)).toEqual([]);
 
     next = new Promise<void>((r) => (swept = r));
     await sweeper.stop();
     expect(vi.getTimerCount()).toBe(0);
-    expect(await sweeper.sweepNow()).toEqual({ tempFilesRemoved: 0, orphanedMetas: [] });
+    expect(await sweeper.sweepNow()).toEqual({ tempFilesRemoved: 0, orphanedMetas: [], filesFailed: 0 });
     expect(results).toHaveLength(1);
+  });
+
+  it("logs each orphaned thread once, not on every sweep", async () => {
+    const dir = await storeDir();
+    await orphan(dir, "old", T0);
+    const sweeper = startGraphStoreSweeper(dir, { intervalMs: 0, now: () => T0 + 2 * HOUR });
+    cleanup.push(() => sweeper.stop());
+    const lines = captureLog("log");
+    const sweepLogs = () => lines.filter((l) => l["msg"] === "graph-store.sweep");
+
+    expect((await sweeper.sweepNow()).orphanedMetas).toEqual(["old"]);
+    expect(sweepLogs()).toEqual([expect.objectContaining({ level: "info", orphanedMetas: 1, newOrphanedThreadIds: ["old"] })]);
+
+    expect((await sweeper.sweepNow()).orphanedMetas).toEqual(["old"]);
+    expect(sweepLogs()).toHaveLength(1);
+
+    await orphan(dir, "later", T0);
+    expect((await sweeper.sweepNow()).orphanedMetas.sort()).toEqual(["later", "old"]);
+    expect(sweepLogs()).toHaveLength(2);
+    expect(sweepLogs()[1]).toMatchObject({ orphanedMetas: 2, newOrphanedThreadIds: ["later"] });
   });
 
   it("with interval 0 sweeps only when asked", async () => {
@@ -220,6 +330,15 @@ describe("the sweeper", () => {
     const sweeper = startGraphStoreSweeper(await storeDir(), { intervalMs: 0 });
     expect(vi.getTimerCount()).toBe(0);
     await sweeper.stop();
+  });
+
+  it("a run service stops its sweeper when it closes", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const s = service(await storeDir(), () => T0, { graphStoreSweep: { intervalMs: 10 * 60_000 } });
+    await s.init();
+    expect(vi.getTimerCount()).toBe(1);
+    await s.close();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("a run service sweeps the store at startup", async () => {

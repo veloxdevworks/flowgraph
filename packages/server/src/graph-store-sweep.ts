@@ -34,9 +34,28 @@ export interface GraphStoreSweepResult {
   tempFilesRemoved: number;
   /** Meta files older than `maxAgeMs` with no graph file, by the thread id their file name spells. */
   orphanedMetas: string[];
+  /** Files that could not be checked or removed (logged; the sweep went on with the next file). */
+  filesFailed: number;
 }
 
-/** Age in ms of a regular file, or undefined when it is gone or not a file. */
+export interface SweepGraphStoreOptions {
+  /** Age after which a leftover is swept. */
+  maxAgeMs: number;
+  /** The time to sweep as of, in ms since the epoch. */
+  now: number;
+  /**
+   * Thread ids already logged as orphaned. A new orphan is logged at info and
+   * added; one already in the set is not logged again. The sweeper keeps one
+   * set for its lifetime, so each orphan is logged once per process.
+   */
+  reportedOrphans?: Set<string>;
+}
+
+/**
+ * Age in ms of a regular file, or undefined when it is gone or is anything
+ * else. `lstat`, not `stat`: a symlink is never followed, so a link named
+ * like a temporary file is left alone, as is whatever it points at.
+ */
 async function ageOf(file: string, now: number): Promise<number | undefined> {
   try {
     const st = await fs.lstat(file);
@@ -47,9 +66,13 @@ async function ageOf(file: string, now: number): Promise<number | undefined> {
   }
 }
 
-/** Sweep `dir` once, as of `now` (ms since the epoch). */
-export async function sweepGraphStore(dir: string, opts: { maxAgeMs: number; now: number }): Promise<GraphStoreSweepResult> {
-  const result: GraphStoreSweepResult = { tempFilesRemoved: 0, orphanedMetas: [] };
+/**
+ * Sweep `dir` once. A file that cannot be checked or removed (permissions, an
+ * I/O error) is logged as `graph-store.sweep file failed` and skipped; the
+ * other files are still swept.
+ */
+export async function sweepGraphStore(dir: string, opts: SweepGraphStoreOptions): Promise<GraphStoreSweepResult> {
+  const result: GraphStoreSweepResult = { tempFilesRemoved: 0, orphanedMetas: [], filesFailed: 0 };
   let names: string[];
   try {
     names = await fs.readdir(dir);
@@ -58,26 +81,41 @@ export async function sweepGraphStore(dir: string, opts: { maxAgeMs: number; now
     throw err;
   }
   const present = new Set(names);
+  const newOrphans: string[] = [];
   for (const name of names) {
     const file = path.join(dir, name);
-    if (isStagedFileName(name)) {
-      const age = await ageOf(file, opts.now);
-      if (age === undefined || age < opts.maxAgeMs) continue;
-      await fs.rm(file, { force: true });
-      result.tempFilesRemoved++;
-    } else if (name.endsWith(GRAPH_META_SUFFIX) && !present.has(name.slice(0, -".meta.json".length))) {
-      const age = await ageOf(file, opts.now);
-      // The graph may have been moved into place since the directory was read.
-      if (age === undefined || age < opts.maxAgeMs || (await exists(file.slice(0, -".meta.json".length)))) continue;
-      result.orphanedMetas.push(name.slice(0, -GRAPH_META_SUFFIX.length));
+    try {
+      if (isStagedFileName(name)) {
+        const age = await ageOf(file, opts.now);
+        if (age === undefined || age < opts.maxAgeMs) continue;
+        await fs.rm(file, { force: true });
+        result.tempFilesRemoved++;
+      } else if (name.endsWith(GRAPH_META_SUFFIX) && !present.has(name.slice(0, -".meta.json".length))) {
+        const age = await ageOf(file, opts.now);
+        // The graph may have been moved into place since the directory was read.
+        if (age === undefined || age < opts.maxAgeMs || (await exists(file.slice(0, -".meta.json".length)))) continue;
+        const threadId = name.slice(0, -GRAPH_META_SUFFIX.length);
+        result.orphanedMetas.push(threadId);
+        if (!opts.reportedOrphans?.has(threadId)) {
+          opts.reportedOrphans?.add(threadId);
+          newOrphans.push(threadId);
+        }
+      }
+    } catch (err) {
+      result.filesFailed++;
+      log("warn", "graph-store.sweep file failed", { file, ...errorFields(err) });
     }
   }
-  if (result.tempFilesRemoved > 0 || result.orphanedMetas.length > 0) {
-    log("info", "graph-store.sweep", {
-      tempFilesRemoved: result.tempFilesRemoved,
-      orphanedMetas: result.orphanedMetas.length,
-      ...(result.orphanedMetas.length ? { orphanedThreadIds: result.orphanedMetas.slice(0, 20) } : {}),
-    });
+  const summary = {
+    tempFilesRemoved: result.tempFilesRemoved,
+    orphanedMetas: result.orphanedMetas.length,
+    filesFailed: result.filesFailed,
+    ...(newOrphans.length ? { newOrphanedThreadIds: newOrphans.slice(0, 20) } : {}),
+  };
+  if (result.tempFilesRemoved > 0 || result.filesFailed > 0 || newOrphans.length > 0) {
+    log("info", "graph-store.sweep", summary);
+  } else if (result.orphanedMetas.length > 0) {
+    log("debug", "graph-store.sweep", summary);
   }
   return result;
 }
@@ -120,16 +158,17 @@ export function startGraphStoreSweeper(dir: string, opts: GraphStoreSweeperOptio
   const now = opts.now ?? Date.now;
   let running: Promise<GraphStoreSweepResult> | undefined;
   let stopped = false;
+  const reportedOrphans = new Set<string>();
   const sweepNow = (): Promise<GraphStoreSweepResult> => {
-    if (stopped) return Promise.resolve({ tempFilesRemoved: 0, orphanedMetas: [] });
+    if (stopped) return Promise.resolve({ tempFilesRemoved: 0, orphanedMetas: [], filesFailed: 0 });
     running ??= (async () => {
       try {
-        const result = await sweepGraphStore(dir, { maxAgeMs, now: now() });
+        const result = await sweepGraphStore(dir, { maxAgeMs, now: now(), reportedOrphans });
         opts.onSweep?.(result);
         return result;
       } catch (err) {
         log("warn", "graph-store.sweep failed", errorFields(err));
-        return { tempFilesRemoved: 0, orphanedMetas: [] };
+        return { tempFilesRemoved: 0, orphanedMetas: [], filesFailed: 0 };
       } finally {
         running = undefined;
       }
