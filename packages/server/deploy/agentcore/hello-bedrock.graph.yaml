@@ -1,0 +1,19 @@
+# One Bedrock call through the runtime's execution role.
+# Set `model` to an inference profile your account can use
+# (aws bedrock list-inference-profiles --region us-east-1) and `region` to the runtime's region.
+apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: agentcore-hello-bedrock }
+providers:
+  main:
+    kind: langchain
+    vendor: bedrock
+    region: us-east-1
+    model: us.anthropic.claude-sonnet-4-20250514-v1:0
+config: { defaults: { provider: main } }
+state: { channels: { result: { type: string } } }
+nodes:
+  - id: hello
+    type: agent
+    with: { prompt: "Say hello from AgentCore in one short sentence.", maxSteps: 1, output: { to: result } }
+edges: [{ from: START, to: hello }, { from: hello, to: END }]

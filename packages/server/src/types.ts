@@ -154,6 +154,13 @@ export interface ServerConfig {
    */
   auth?: ServerAuthConfig;
   /**
+   * The server runs as a Bedrock AgentCore Runtime (`FLOWGRAPH_AGENTCORE=1`).
+   * Only then does `/invocations` trust the AgentCore edge (SigV4) to have
+   * checked the caller in `token` and `none` mode. Unset, `/invocations` takes
+   * the same auth as REST, so an ECS / ALB deployment does not expose it.
+   */
+  agentcore?: boolean;
+  /**
    * Postgres URL for checkpoints (takes precedence over every other store).
    * When unset, checkpoints go to the sqlite file with `memory.backend: "sqlite"`,
    * else stay in process memory (local smoke only).
@@ -387,6 +394,7 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
     eventBufferSize: Number(env.FLOWGRAPH_EVENT_BUFFER ?? 5000),
     authDisabled: envFlag(env, "FLOWGRAPH_AUTH_DISABLED"),
     auth: authConfigFromEnv(env),
+    agentcore: envFlag(env, "FLOWGRAPH_AGENTCORE"),
     maxBodyBytes: envInt(env, "FLOWGRAPH_MAX_BODY_BYTES", 2_000_000),
     maxConcurrentRuns: envInt(env, "FLOWGRAPH_MAX_CONCURRENT_RUNS", 16),
   };

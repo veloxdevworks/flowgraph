@@ -27,6 +27,7 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, ActiveSession>();
   private readonly maxEvents: number;
   private readonly globalListeners = new Set<GlobalEventListener>();
+  private readonly statusListeners = new Set<(threadId: string, status: RunStatus) => void>();
   private readonly onPersist: ((threadId: string, event: ServerEvent) => void) | undefined;
   private readonly loadJournal: ((threadId: string) => ServerEvent[]) | undefined;
 
@@ -46,10 +47,15 @@ export class SessionRegistry {
     return this.sessions.get(threadId);
   }
 
-  /** True if any session is actively running (for AgentCore HealthyBusy). */
+  /**
+   * True if any run is live in this process (for AgentCore HealthyBusy).
+   * A cold-subscribe placeholder (no run behind it) does not count, or a
+   * client attaching to a thread this process never ran would keep the
+   * AgentCore session busy until its max lifetime.
+   */
   hasActiveWork(): boolean {
     for (const s of this.sessions.values()) {
-      if (s.status === "running" || s.status === "started") return true;
+      if (isLive(s)) return true;
     }
     return false;
   }
@@ -57,9 +63,15 @@ export class SessionRegistry {
   activeCount(): number {
     let n = 0;
     for (const s of this.sessions.values()) {
-      if (s.status === "running" || s.status === "started") n++;
+      if (isLive(s)) n++;
     }
     return n;
+  }
+
+  /** True if this thread has a run in progress in this process. */
+  hasLiveRun(threadId: string): boolean {
+    const s = this.sessions.get(threadId);
+    return s !== undefined && isLive(s);
   }
 
   create(opts: {
@@ -110,7 +122,27 @@ export class SessionRegistry {
 
   setStatus(threadId: string, status: RunStatus): void {
     const s = this.sessions.get(threadId);
-    if (s) s.status = status;
+    if (!s) return;
+    s.status = status;
+    for (const listener of this.statusListeners) {
+      try {
+        listener(threadId, status);
+      } catch {
+        // ignore listener errors
+      }
+    }
+  }
+
+  /**
+   * Be told whenever a thread's run status changes. A run's last event is pushed
+   * before its status leaves "running" (the meta file is written in between), so
+   * a stream that must end with the run watches this as well as the events.
+   */
+  onStatus(listener: (threadId: string, status: RunStatus) => void): () => void {
+    this.statusListeners.add(listener);
+    return () => {
+      this.statusListeners.delete(listener);
+    };
   }
 
   pushEvent(threadId: string, event: ServerEvent): void {
@@ -224,4 +256,9 @@ export class SessionRegistry {
   list(): ActiveSession[] {
     return [...this.sessions.values()];
   }
+}
+
+/** A session with a run behind it (not a cold-subscribe placeholder) that has not finished. */
+function isLive(s: ActiveSession): boolean {
+  return s.runId !== "" && (s.status === "running" || s.status === "started");
 }

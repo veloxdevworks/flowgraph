@@ -1,0 +1,10 @@
+# Deployment check with no model access needed: stops at an approval gate,
+# then finishes when you resume it. See README.md "First run".
+apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: agentcore-hello-approval }
+state: { channels: { approval: { type: object } } }
+nodes:
+  - { id: gate, type: hitl, with: { mode: approve, message: "Approve the maiden voyage?", output: { to: approval } } }
+edges: [{ from: START, to: gate }, { from: gate, to: END }]
+runtime: { checkpoint: { enabled: true, backend: memory }, hitl: { onInterrupt: fail } }

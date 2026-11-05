@@ -5,7 +5,7 @@
 | Ingress | Auth |
 |---------|------|
 | REST (`/runs`, `/healthz`, …) | `Authorization: Bearer <FLOWGRAPH_AUTH_TOKEN>` when the env var is set. Desktop stores the token in the OS keychain (`flowgraph` / `serverAuthToken`). |
-| AgentCore (`/ping`, `/invocations`) | AWS SigV4 / OAuth at the AgentCore edge. No bearer check inside the container. |
+| AgentCore (`/ping`, `/invocations`) | `/ping` is open. With `FLOWGRAPH_AGENTCORE=1` (set by `deploy/agentcore/register.sh`), `/invocations` relies on SigV4 at the AgentCore edge in `token` / `none` mode. Without it (ECS, local), `/invocations` takes the same auth as REST. In `oidc` mode it always needs the caller's JWT. |
 
 ## Credentials
 
