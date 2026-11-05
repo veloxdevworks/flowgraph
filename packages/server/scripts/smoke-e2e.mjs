@@ -257,8 +257,10 @@ async function main() {
       `expected interrupt.raised, got ${interrupted.map((e) => e.type)}`,
     );
 
+    // Not "interrupt.raised": the gate runs again on resume and emits a node-level
+    // interrupt.raised before it takes the answer, then the run ends.
     const resumeSse = collectSse(threadId, {
-      untilTypes: new Set(["run.end", "run.error", "interrupt.raised"]),
+      untilTypes: new Set(["run.end", "run.error"]),
       timeoutMs: 15_000,
     });
     await sleep(100);

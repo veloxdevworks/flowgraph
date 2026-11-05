@@ -109,6 +109,14 @@ describe("/invocations streams", () => {
     expect(sseEvents(await replay.text()).at(-1)?.type).toBe("interrupt.raised");
     // The run is marked finished once its meta file is written, just after the event.
     await expect.poll(async () => ((await (await fetch(`${base}/ping`)).json()) as { status: string }).status).toBe("Healthy");
+
+    // On resume the gate runs again and emits a node-level interrupt.raised before it
+    // gets its answer; the stream must carry on to run.end, not stop there.
+    const resumed = await invoke(base, { action: "resume", threadId: "ac-t1", resume: { approved: true } });
+    expect(resumed.status).toBe(200);
+    const after = sseEvents(await resumed.text());
+    expect(after.map((e) => e.type)).toContain("interrupt.raised");
+    expect(after.at(-1)?.type).toBe("run.end");
   });
 });
 

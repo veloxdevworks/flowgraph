@@ -63,13 +63,21 @@ export function attachSse(
   return cleanup;
 }
 
-const TERMINAL_EVENTS = new Set([
-  "run.end",
-  "run.error",
-  "run.aborted",
-  "run.paused",
-  "interrupt.raised",
-]);
+const TERMINAL_EVENTS = new Set(["run.end", "run.error", "run.aborted", "run.paused"]);
+
+/**
+ * True when the run has stopped. `interrupt.raised` comes in two kinds: a node
+ * emits one every time it calls `interrupt()` (including when it runs again on
+ * resume and gets its answer straight back), and the run emits one with
+ * `data.interrupts` when it actually stops to wait. Only the second ends a run.
+ */
+export function isTerminalEvent(event: ServerEvent): boolean {
+  const type = String(event.type);
+  if (TERMINAL_EVENTS.has(type)) return true;
+  if (type !== "interrupt.raised") return false;
+  const data = event.data as { interrupts?: unknown } | undefined;
+  return Array.isArray(data?.interrupts);
+}
 
 export interface StreamUntilTerminalOptions {
   /** Replay buffered events with a seq greater than this (like Last-Event-ID). */
@@ -124,7 +132,7 @@ export function streamEventsUntilTerminal(
       res.write(`id: ${event.seq}\n`);
       res.write(`event: engine\n`);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
-      if (TERMINAL_EVENTS.has(String(event.type))) finish();
+      if (isTerminalEvent(event)) finish();
     };
 
     res.on("close", finish);
