@@ -157,7 +157,7 @@ Implemented alongside this ADR: spec schemas (`Artifact`, `kind: media`, `image`
 
 ## Open questions
 
-1. Suno: is there an official, supported API? Unofficial wrappers that automate the web app are not an acceptable basis for a first-party adapter. Decide before building one.
+1. **Suno (researched 2026-11-05; no adapter built).** As reported by trade press (Music Business Worldwide, 2 Jul and 30 Oct 2026), Suno's developer API is an invite-only beta for a curated set of partners. Its sign-in portal (`platform.suno.com`) shows no public docs, pricing or self-serve keys, so there is no public contract to code against. Suno's separate MCP beta acts on an end user's own account through OAuth and is a poor fit for a server-side workflow node. Third-party "Suno APIs" are not affiliated as far as could be established, and their access method is undisclosed or reportedly unofficial; Suno's terms (revised Aug 2026) prohibit scraping and obtaining Output outside its download channel. A first-party adapter waits for a partner agreement and real docs. In the meantime the `audio` node's `music` kind is served by any vendor that offers it (ElevenLabs), and a Suno adapter can later be a plugin package against the same `MediaProvider` contract.
 2. Artifact retention: when are `.flowgraph/artifacts/<thread>/` and `.flowgraph/jobs/<thread>/` cleaned up relative to checkpoint retention?
 3. Should `demo` move onto the `Artifact` contract (and its directory)?
 4. Static plugin manifest for no-execute browsing: needed, and if so where does it live?
