@@ -754,6 +754,14 @@ edges:
 
 **Client side.** The `WorkshopController` in `@flowgraph/workshop-session` is the client-side counterpart that runs the facilitated session and builds this resume value; see [ADR-0018](./adr/0018-workshop-controller-and-facilitators.md). For a headless run, see `examples/workshop-intake`.
 
+**In the terminal.** `flowgraph run|resume --on-interrupt prompt` on an interactive terminal runs a real session for a `workshop` interrupt, built on `WorkshopController`. It first shows any `validationError`, then asks how to take part:
+
+- `chat`: a text facilitator (`TextFacilitator`). Offered only when `FLOWGRAPH_WORKSHOP_MODEL=<vendor>:<model>` is set (`anthropic` with `ANTHROPIC_API_KEY`, `openai` with `OPENAI_API_KEY`, `xai` with `XAI_API_KEY` or `GROK_API_KEY`). After each turn it prints the agenda with coverage marks and what is still missing. Commands: `/status`, `/draft`, `/form` (switch, keeping the draft), `/end` (end as `human_ended`; only accepted when the contract allows it), `/json`, `/help`. Ctrl-C or end of input ends as `human_ended` when allowed, otherwise aborts the prompt.
+- `form`: confirm or annotate each agenda item, then fill each top-level schema property (parsed by declared type; arrays take one item per line or a JSON array; objects take JSON; Enter skips an optional field). If the engine's rule rejects the result, only the failing fields are asked again; with `allowPartial` you may end early.
+- `json`: paste the resume value, as before.
+
+The default is `chat` when a model is configured, otherwise `form`, or `json` when the contract's `fallback` is `json`. Without a TTY (piped stdin, CI) nothing changes: the prompt asks for pasted JSON. API keys are read from the environment and never printed.
+
 **Where a client opens.** A node that declares `voice` asks for a voice session. Without it, `fallback` is the starting mode, and voice is a click away. A client falls back to the form when voice cannot start.
 
 The interrupt payload (`payload.data`) is typed as `WorkshopContract` in `@flowgraph/spec` (re-exported by `@flowgraph/workshop-session`): `mode`, `agenda`, `fallback`, optional `schema` / `allowPartial` / `context` / `facilitator` / `voice` / `limits`, `artifactRefs` (rendered `with.artifacts`), and `diff` / `diffStat`. A git diff failure is reported on `diff.error` (no `diffStat`); patches over 256 KiB are cut and marked `diff.truncated: true`.
