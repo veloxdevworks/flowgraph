@@ -169,8 +169,8 @@ export type {
 export { findFreePorts } from "./runtime/port.js";
 export type { FindFreePortsOptions } from "./runtime/port.js";
 
-export { registry, defineNode } from "./registry.js";
-export type { NodeFactory, CompiledNode, NodeResult, NodeContract, NodeCapabilities, ReducerFn } from "./registry.js";
+export { registry, defineNode, describeNodeTypes } from "./registry.js";
+export type { NodeFactory, CompiledNode, NodeResult, NodeContract, NodeCapabilities, ReducerFn, NodeUiMeta, NodeTypeDescriptor } from "./registry.js";
 export { registerFunction } from "./nodes/function.js";
 export { registerFunction as registerFn } from "./nodes/function.js";
 export { runScriptSandboxed } from "./nodes/script.js";
@@ -368,3 +368,33 @@ export type {
   SummarizeRequest,
 } from "./context/index.js";
 export { isNonRetryable } from "./runtime/retry.js";
+
+// ── Generative media (image / video / model3d) — ADR-0017 ──────────────────
+export {
+  registerMediaVendor,
+  registerMediaProvider,
+  getMediaVendor,
+  listMediaVendors,
+  deriveMediaProviders,
+  mediaProviderFor,
+  mediaProvidersFor,
+  GRAPH_MEDIA_PROVIDERS,
+} from "./media/registry.js";
+export { runMediaJob } from "./media/run-job.js";
+export { createFileJournal, fingerprintRequest } from "./media/journal.js";
+export { createOutputWriter, artifactDir, extensionForMime, mimeForExtension, probeImageSize } from "./media/artifacts.js";
+export { resolveMediaInputs } from "./media/inputs.js";
+export { imageNode, videoNode, model3dNode } from "./nodes/media.js";
+export type {
+  MediaModality,
+  MediaInput,
+  MediaRequest,
+  MediaOutput,
+  MediaCallContext,
+  MediaProvider,
+  MediaVendor,
+  MediaVendorOptions,
+  JobHandle,
+  JobStatus,
+  JobState,
+} from "./media/types.js";

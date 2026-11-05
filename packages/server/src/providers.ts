@@ -41,6 +41,12 @@ export async function buildServerProviders(
         built.add(name);
         break;
       }
+      case "media": {
+        // Built by compileGraph (media providers are not agent providers), but
+        // an untrusted author's endpoint settings are still refused here.
+        if (opts.untrusted) assertUntrustedProvider(name, cfg);
+        break;
+      }
       case "cli":
       case "claude":
       case "cursor":

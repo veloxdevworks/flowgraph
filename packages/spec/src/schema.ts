@@ -646,6 +646,99 @@ export const PortWithSchema = BaseWithSchema.extend({
   host: z.string().optional().describe("Bind host for the probe (default 127.0.0.1)"),
 });
 
+// ---------------------------------------------------------------------------
+// Artifacts + generative media nodes (image / video / model3d)
+// ---------------------------------------------------------------------------
+
+export const ArtifactRoleSchema = z.enum(["image", "video", "model3d", "audio", "document", "file"]);
+
+/**
+ * A file produced or consumed by a node. State holds this record, never the
+ * bytes: the file lives on disk under the run workspace.
+ */
+export const ArtifactSchema = z.object({
+  kind: z.literal("artifact"),
+  /** Workspace-relative path (posix separators). */
+  path: z.string().min(1),
+  mimeType: z.string().min(1),
+  sizeBytes: z.number().int().nonnegative(),
+  role: ArtifactRoleSchema.optional(),
+  sha256: z.string().optional(),
+  meta: z
+    .object({
+      width: z.number().optional(),
+      height: z.number().optional(),
+      durationMs: z.number().optional(),
+      /** Workspace-relative path of a preview image. */
+      thumbnail: z.string().optional(),
+      source: z
+        .object({
+          provider: z.string(),
+          vendor: z.string().optional(),
+          model: z.string().optional(),
+          jobId: z.string().optional(),
+          prompt: z.string().optional(),
+        })
+        .optional(),
+      costUSD: z.number().nonnegative().optional(),
+    })
+    .passthrough()
+    .optional(),
+});
+
+/** Reference input(s): a template resolving to an Artifact, a file path, or a URL. */
+const MediaInputRefSchema = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
+
+const MediaCommonWithSchema = BaseWithSchema.extend({
+  prompt: z.string().optional(),
+  negativePrompt: z.string().optional(),
+  input: MediaInputRefSchema.optional().describe(
+    "Reference input(s): a template resolving to an Artifact, a workspace path, or a URL",
+  ),
+  seed: z.number().int().optional(),
+  params: z.record(z.unknown()).optional().describe("Vendor passthrough options"),
+  timeout: DurationSchema.optional().describe("Max wall time for the whole job (default per node type)"),
+});
+
+// image node
+export const ImageWithSchema = MediaCommonWithSchema.extend({
+  prompt: z.string().min(1, "image: prompt is required"),
+  count: z.number().int().min(1).max(10).optional().default(1),
+  size: z.string().optional().describe('Pixel size such as "1024x1024"'),
+  aspectRatio: z.string().optional().describe('Aspect ratio such as "16:9"'),
+  quality: z.string().optional(),
+});
+
+// video node
+export const VideoWithSchema = MediaCommonWithSchema.extend({
+  count: z.number().int().min(1).max(4).optional().default(1),
+  duration: z.number().positive().optional().describe("Clip length in seconds"),
+  aspectRatio: z.string().optional(),
+  resolution: z.string().optional().describe('e.g. "720p"'),
+}).superRefine((v, ctx) => {
+  if (!v.prompt?.trim() && v.input === undefined) {
+    ctx.addIssue({ code: "custom", path: ["prompt"], message: "video: set prompt, input, or both" });
+  }
+});
+
+export const Model3dFormatSchema = z.enum(["glb", "gltf", "fbx", "obj", "usdz", "stl"]);
+
+// model3d node
+export const Model3dWithSchema = MediaCommonWithSchema.extend({
+  mode: z
+    .enum(["text", "image", "multiview"])
+    .optional()
+    .describe("Defaults from the inputs: no input = text, one = image, several = multiview"),
+  format: Model3dFormatSchema.optional().default("glb"),
+  texture: z.boolean().optional(),
+  quality: z.string().optional(),
+  count: z.number().int().min(1).max(4).optional().default(1),
+}).superRefine((v, ctx) => {
+  if (!v.prompt?.trim() && v.input === undefined) {
+    ctx.addIssue({ code: "custom", path: ["prompt"], message: "model3d: set prompt, input, or both" });
+  }
+});
+
 export const ServiceWithSchema = BaseWithSchema.extend({
   name: z.string().min(1).describe("Stable service id within a run/thread"),
   action: z
@@ -1115,12 +1208,33 @@ export const DeepAgentsProviderConfigSchema = z.object({
   options: z.record(z.unknown()).optional(),
 });
 
+/**
+ * Dedicated media-generation backend (Tripo, Meshy, Grok Imagine, ...).
+ *
+ * LLM vendors that also generate media (`langchain` with vendor `openai` or
+ * `xai`) do NOT need one of these: a `media` node can name the existing
+ * `langchain` entry and reuses its credentials. Use `kind: media` for
+ * backends that have no LLM side, or to pin different credentials/models.
+ *
+ * `vendor` is a free string so third-party packages can register their own
+ * (via `imports[].providers` / the media vendor registry).
+ */
+export const MediaProviderConfigSchema = z.object({
+  kind: z.literal("media"),
+  vendor: z.string().min(1),
+  model: z.string().optional(),
+  baseUrl: z.string().optional(),
+  apiKeyEnv: z.string().optional(),
+  options: z.record(z.unknown()).optional(),
+});
+
 export const ProviderConfigSchema = z.discriminatedUnion("kind", [
   LangChainProviderConfigSchema,
   ClaudeProviderConfigSchema,
   CursorProviderConfigSchema,
   CliProviderConfigSchema,
   DeepAgentsProviderConfigSchema,
+  MediaProviderConfigSchema,
 ]);
 
 export const ProvidersSchema = z.record(ProviderConfigSchema);
@@ -1453,6 +1567,11 @@ export type ClaudeProviderConfig = z.infer<typeof ClaudeProviderConfigSchema>;
 export type CursorProviderConfig = z.infer<typeof CursorProviderConfigSchema>;
 export type CliProviderConfig = z.infer<typeof CliProviderConfigSchema>;
 export type DeepAgentsProviderConfig = z.infer<typeof DeepAgentsProviderConfigSchema>;
+export type MediaProviderConfig = z.infer<typeof MediaProviderConfigSchema>;
+export type Artifact = z.infer<typeof ArtifactSchema>;
+export type ImageWith = z.infer<typeof ImageWithSchema>;
+export type VideoWith = z.infer<typeof VideoWithSchema>;
+export type Model3dWith = z.infer<typeof Model3dWithSchema>;
 export type CliVendor = z.infer<typeof CliVendorSchema>;
 export type LangChainVendor = z.infer<typeof LangChainVendorSchema>;
 
