@@ -25,6 +25,8 @@ export {
   ImageWithSchema,
   VideoWithSchema,
   Model3dWithSchema,
+  AudioWithSchema,
+  AudioKindSchema,
   Model3dFormatSchema,
   MediaProviderConfigSchema,
   FunctionWithSchema,
@@ -124,6 +126,7 @@ export type {
   ImageWith,
   VideoWith,
   Model3dWith,
+  AudioWith,
   CliVendor,
   LangChainVendor,
 } from "./schema.js";

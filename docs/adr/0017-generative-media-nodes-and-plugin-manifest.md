@@ -86,11 +86,13 @@ interface MediaProvider {
 
 ### 4. Three modality nodes, built into core
 
-Add node types **`image`**, **`video`** and **`model3d`**. Separate types, not one `generate` node with a `modality:` switch: the desktop has one icon, form and preview per type and the `with` surfaces differ. They share one implementation. `model3d` rather than `3d` because a type name starting with a digit is awkward in YAML and code.
+Add node types **`image`**, **`video`**, **`model3d`** and **`audio`**. Separate types, not one `generate` node with a `modality:` switch: the desktop has one icon, form and preview per type and the `with` surfaces differ. They share one implementation. `model3d` rather than `3d` because a type name starting with a digit is awkward in YAML and code.
 
 They are **built into `@flowgraph/core`** (revised from the first draft, which proposed an optional package): the nodes depend only on the contracts above and carry no heavy dependency. The dependencies live in the vendor adapters, which are separate. Built-in nodes also give every user the palette entries and bespoke inspectors with no install step.
 
-Common `with`: `prompt`, `input`, `count`, `seed`, `negativePrompt`, `params` (vendor passthrough), `timeout`, `output`. Modality fields: image `size`/`aspectRatio`/`quality`; video `duration`/`aspectRatio`/`resolution`; model3d `mode`/`format`/`texture`/`quality`. Output: `{ artifact, artifacts[], count, provider, vendor, model?, costUSD, reused }`. Capabilities: `sideEffecting: true`.
+Common `with`: `prompt`, `input`, `count`, `seed`, `negativePrompt`, `params` (vendor passthrough), `timeout`, `output`. Modality fields: image `size`/`aspectRatio`/`quality`; video `duration`/`aspectRatio`/`resolution`; model3d `mode`/`format`/`texture`/`quality`; audio `kind` (`speech` | `sfx` | `music`), `text`, `voice`, `language`, `duration`, `instrumental`, `format`. `audio` is one node with a `kind` rather than three node types: speech, sound effects and music share a provider capability, an artifact role (`audio`) and a player, and a vendor typically offers more than one (ElevenLabs does all three). Its `with` is validated per kind (speech needs `text`, sfx needs `prompt`, music needs `prompt` or lyrics), and a provider may restrict `audioKinds` so a music-only backend is not chosen for speech.
+
+Output: `{ artifact, artifacts[], count, provider, vendor, model?, costUSD, reused }`. Capabilities: `sideEffecting: true`.
 
 ### 5. Node-type metadata is code-defined, not a manifest file
 
@@ -119,7 +121,7 @@ A `DecisionProvider` interface (`decide({ question, input, answer: choice | scor
 |---|---|
 | `Artifact`, journal/`runMediaJob`, `MediaProvider`, registry, `describeNodeTypes` | `@flowgraph/spec`, `@flowgraph/core` |
 | `image`, `video`, `model3d` nodes | `@flowgraph/core` |
-| Reference vendor adapters (xAI, OpenAI images, Tripo, Meshy) | `@flowgraph/media` (dependency-free `fetch`) |
+| Reference vendor adapters (xAI, OpenAI images, Tripo, Meshy, ElevenLabs, and Suno if it offers an official API) | `@flowgraph/media` (dependency-free `fetch`) |
 | Other vendors, local video inference (GPU, weights, licenses) | Third-party plugins |
 | `decide` node / Jev | Follow-up |
 | Computer use | **Deferred.** Start as an agent tool or MCP server; needs `permission: ask`, HITL gating and a desktop-only capability flag before it could be a node. |
@@ -155,7 +157,8 @@ Implemented alongside this ADR: spec schemas (`Artifact`, `kind: media`, `image`
 
 ## Open questions
 
-1. Artifact retention: when are `.flowgraph/artifacts/<thread>/` and `.flowgraph/jobs/<thread>/` cleaned up relative to checkpoint retention?
-2. Should `demo` move onto the `Artifact` contract (and its directory)?
-3. Static plugin manifest for no-execute browsing: needed, and if so where does it live?
-4. Idempotency keys: which target vendors accept one, so the orphan window can be closed for them?
+1. Suno: is there an official, supported API? Unofficial wrappers that automate the web app are not an acceptable basis for a first-party adapter. Decide before building one.
+2. Artifact retention: when are `.flowgraph/artifacts/<thread>/` and `.flowgraph/jobs/<thread>/` cleaned up relative to checkpoint retention?
+3. Should `demo` move onto the `Artifact` contract (and its directory)?
+4. Static plugin manifest for no-execute browsing: needed, and if so where does it live?
+5. Idempotency keys: which target vendors accept one, so the orphan window can be closed for them?

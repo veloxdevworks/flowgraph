@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ImageWithSchema, Model3dWithSchema, VideoWithSchema, type GraphSpec } from "@flowgraph/spec";
+import { AudioWithSchema, ImageWithSchema, Model3dWithSchema, VideoWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import { defineNode, describeNodeTypes, registry } from "../registry.js";
 import { z } from "zod";
@@ -382,5 +382,101 @@ describe("node type descriptors (for palettes and generic inspectors)", () => {
     expect(d.label).toBe(type);
     expect(d.category).toBe("custom");
     expect((d.configSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty("bucket");
+  });
+});
+
+describe("audio node (speech, sound effects, music)", () => {
+  const MP3 = Uint8Array.from([0xff, 0xfb, 0x90, 0x00, 1, 2, 3, 4]);
+  const audioProvider = (calls: FakeCalls, over: Partial<MediaProvider> = {}): MediaProvider => ({
+    name: "voice",
+    vendor: "fakeaudio",
+    modalities: ["audio"],
+    async start(req: MediaRequest, ctx: MediaCallContext): Promise<JobHandle> {
+      calls.start.push(req);
+      return { id: "a1", done: [await ctx.saveOutput({ bytes: MP3, mimeType: "audio/mpeg", meta: { durationMs: 1200 } })] };
+    },
+    ...over,
+  });
+
+  it("validates per kind", () => {
+    expect(AudioWithSchema.safeParse({ kind: "speech" }).success).toBe(false);
+    expect(AudioWithSchema.safeParse({ kind: "speech", text: "hello" }).success).toBe(true);
+    expect(AudioWithSchema.safeParse({ kind: "sfx" }).success).toBe(false);
+    expect(AudioWithSchema.safeParse({ kind: "sfx", prompt: "door slam", duration: 2 }).success).toBe(true);
+    expect(AudioWithSchema.safeParse({ kind: "music" }).success).toBe(false);
+    expect(AudioWithSchema.safeParse({ kind: "music", prompt: "lofi beat", instrumental: true }).success).toBe(true);
+    expect(AudioWithSchema.safeParse({ kind: "music", text: "la la la" }).success).toBe(true);
+    expect(AudioWithSchema.safeParse({ kind: "podcast", prompt: "x" }).success).toBe(false);
+  });
+
+  it("passes speech fields to the provider and saves an audio artifact", async () => {
+    const calls = newCalls();
+    const compiled = await compileGraph(
+      graph([
+        {
+          id: "vo",
+          type: "audio",
+          provider: "voice",
+          model: "some-model",
+          with: { kind: "speech", text: "Welcome to the show", voice: "narrator", language: "en", format: "mp3" },
+        },
+      ]),
+      { cwd: dir, mediaProviders: [audioProvider(calls)] },
+    );
+    const res = await compiled.run({ threadId: "au1" });
+    expect(res.status).toBe("completed");
+    expect(calls.start[0]).toMatchObject({
+      modality: "audio",
+      audioKind: "speech",
+      text: "Welcome to the show",
+      voice: "narrator",
+      language: "en",
+      format: "mp3",
+      model: "some-model",
+    });
+    const out = (res.state["outputs"] as Outputs)["vo"]!;
+    expect(out.artifact).toMatchObject({ mimeType: "audio/mpeg", role: "audio" });
+    expect(out.artifact.path.endsWith(".mp3")).toBe(true);
+    expect(out.artifact.meta).toMatchObject({ durationMs: 1200 });
+  });
+
+  it("different text is a different job (fingerprint), same text is reused", async () => {
+    const calls = newCalls();
+    const mk = (text: string) =>
+      graph([{ id: "vo", type: "audio", provider: "voice", with: { kind: "speech", text } }]);
+    const run = async (text: string) =>
+      (await compileGraph(mk(text), { cwd: dir, mediaProviders: [audioProvider(calls)] })).run({ threadId: "au2" });
+    await run("one");
+    await run("two");
+    await run("one");
+    expect(calls.start).toHaveLength(2);
+  });
+
+  it("picks the provider that supports the requested audio kind", async () => {
+    const speechCalls = newCalls();
+    const musicCalls = newCalls();
+    const speech = audioProvider(speechCalls, { name: "speech-only", audioKinds: ["speech", "sfx"] });
+    const music = audioProvider(musicCalls, { name: "music-only", audioKinds: ["music"] });
+    const compiled = await compileGraph(
+      graph([{ id: "song", type: "audio", with: { kind: "music", prompt: "synthwave", instrumental: true } }]),
+      { cwd: dir, mediaProviders: [speech, music] },
+    );
+    expect((await compiled.run({ threadId: "au3" })).status).toBe("completed");
+    expect(speechCalls.start).toHaveLength(0);
+    expect(musicCalls.start[0]).toMatchObject({ audioKind: "music", instrumental: true, prompt: "synthwave" });
+  });
+
+  it("names the kind when a chosen provider cannot make it", async () => {
+    const compiled = await compileGraph(
+      graph([{ id: "vo", type: "audio", provider: "music-only", with: { kind: "speech", text: "hi" } }]),
+      { cwd: dir, mediaProviders: [audioProvider(newCalls(), { name: "music-only", audioKinds: ["music"] })] },
+    );
+    const res = await compiled.run({ threadId: "au4" });
+    expect(res.status).toBe("error");
+    expect(String(res.error?.message ?? res.error)).toMatch(/does not support audio \(speech\)/);
+  });
+
+  it("is listed for palettes", () => {
+    expect(describeNodeTypes().find((d) => d.type === "audio")).toMatchObject({ category: "media", icon: "audio-lines" });
   });
 });

@@ -739,6 +739,30 @@ export const Model3dWithSchema = MediaCommonWithSchema.extend({
   }
 });
 
+export const AudioKindSchema = z.enum(["speech", "sfx", "music"]);
+
+// audio node — speech (text to voice), sound effects, music
+export const AudioWithSchema = MediaCommonWithSchema.extend({
+  kind: AudioKindSchema.describe("speech = voice reading `text`; sfx = sound effect from `prompt`; music = song/score from `prompt` (and optional `text` lyrics)"),
+  text: z.string().optional().describe("speech: the script to speak; music: optional lyrics"),
+  voice: z.string().optional().describe("speech: voice id or name (vendor-specific)"),
+  language: z.string().optional().describe('e.g. "en"'),
+  duration: z.number().positive().optional().describe("Target length in seconds (sfx, music)"),
+  instrumental: z.boolean().optional().describe("music: no vocals"),
+  format: z.enum(["mp3", "wav", "ogg", "flac", "opus"]).optional(),
+  count: z.number().int().min(1).max(4).optional().default(1),
+}).superRefine((v, ctx) => {
+  if (v.kind === "speech" && !v.text?.trim()) {
+    ctx.addIssue({ code: "custom", path: ["text"], message: "audio: kind speech requires text" });
+  }
+  if (v.kind === "sfx" && !v.prompt?.trim()) {
+    ctx.addIssue({ code: "custom", path: ["prompt"], message: "audio: kind sfx requires prompt" });
+  }
+  if (v.kind === "music" && !v.prompt?.trim() && !v.text?.trim()) {
+    ctx.addIssue({ code: "custom", path: ["prompt"], message: "audio: kind music requires prompt or text (lyrics)" });
+  }
+});
+
 export const ServiceWithSchema = BaseWithSchema.extend({
   name: z.string().min(1).describe("Stable service id within a run/thread"),
   action: z
@@ -1572,6 +1596,7 @@ export type Artifact = z.infer<typeof ArtifactSchema>;
 export type ImageWith = z.infer<typeof ImageWithSchema>;
 export type VideoWith = z.infer<typeof VideoWithSchema>;
 export type Model3dWith = z.infer<typeof Model3dWithSchema>;
+export type AudioWith = z.infer<typeof AudioWithSchema>;
 export type CliVendor = z.infer<typeof CliVendorSchema>;
 export type LangChainVendor = z.infer<typeof LangChainVendorSchema>;
 

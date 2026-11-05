@@ -959,9 +959,9 @@ runtime:
 
 ---
 
-## 9d. `image` / `video` / `model3d` — generative media
+## 9d. `image` / `video` / `model3d` / `audio` — generative media
 
-Generate images, video clips and 3D assets. All three share one contract (see [ADR-0017](./adr/0017-generative-media-nodes-and-plugin-manifest.md)): pick a **media provider**, run (or re-attach to) a job, save the results as **Artifacts**.
+Generate images, video clips, 3D assets and audio. All four share one contract (see [ADR-0017](./adr/0017-generative-media-nodes-and-plugin-manifest.md)): pick a **media provider**, run (or re-attach to) a job, save the results as **Artifacts**.
 
 ```yaml
 providers:
@@ -985,19 +985,28 @@ nodes:
       input: "{{ state.outputs.concept.artifact }}"   # image-to-3D from the previous node
       format: glb
       texture: true
+
+  - id: narration              # audio: speech | sfx | music
+    type: audio
+    provider: voices           # a provider that can make speech
+    with:
+      kind: speech
+      voice: narrator
+      text: "{{ state.outputs.script.text }}"
 ```
 
 | Field | Applies to | Notes |
 |---|---|---|
 | `prompt` | all | Required for `image`; `video`/`model3d` need a `prompt`, an `input`, or both. Templates allowed. |
 | `input` | all | Reference input(s): an Artifact, a media node's whole output, a `{ path }`/`{ url }` object, a workspace path, an http(s) URL or a `data:` URI. Local paths must resolve **inside the run workspace**. |
-| `count` | all | Outputs wanted (image ≤ 10, video/model3d ≤ 4). Split into several jobs when the vendor produces fewer per job. |
+| `count` | all | Outputs wanted (image ≤ 10, video/model3d/audio ≤ 4). Split into several jobs when the vendor produces fewer per job. |
 | `size`, `aspectRatio`, `quality` | image | Vendor-interpreted strings. |
 | `duration` (seconds), `aspectRatio`, `resolution` | video | |
 | `mode` (`text`/`image`/`multiview`), `format` (`glb` default, `gltf`, `fbx`, `obj`, `usdz`, `stl`), `texture` | model3d | `mode` defaults from the number of inputs. |
+| `kind` (`speech` / `sfx` / `music`), `text`, `voice`, `language`, `duration`, `instrumental`, `format` (`mp3`, `wav`, `ogg`, `flac`, `opus`) | audio | `kind` is required. `speech` needs `text` (the script) and usually a `voice`; `sfx` needs a `prompt` and optionally a `duration`; `music` needs a `prompt` and/or `text` (lyrics), and `instrumental: true` drops vocals. `input` can be reference audio where the vendor supports it. |
 | `seed`, `negativePrompt` | all | Passed when the vendor supports them. |
 | `params` | all | Vendor passthrough options. |
-| `timeout` | all | Whole-job limit (defaults: image 5m, video/model3d 15m). On timeout the job is left running and a retry re-attaches. |
+| `timeout` | all | Whole-job limit (defaults: image 5m, audio 10m, video/model3d 15m). On timeout the job is left running and a retry re-attaches. |
 
 **Output** (`state.outputs.<id>`, or per `output:`):
 
@@ -1044,6 +1053,7 @@ Files live under `<workspace>/.flowgraph/artifacts/<thread>/<node>/`; state hold
 | `image` | Generate / edit images | side-effecting | core (+ a media provider) |
 | `video` | Generate video clips | side-effecting | core (+ a media provider) |
 | `model3d` | Generate 3D assets (GLB, FBX, …) | side-effecting | core (+ a media provider) |
+| `audio` | Generate speech, sound effects, music | side-effecting | core (+ a media provider) |
 
 ---
 

@@ -9,7 +9,7 @@ import type { Artifact } from "@flowgraph/spec";
 import type { Logger } from "../context.js";
 import type { SecretProvider } from "../secrets.js";
 
-export type MediaModality = "image" | "video" | "model3d";
+export type MediaModality = "image" | "video" | "model3d" | "audio";
 
 /** A resolved reference input (image-to-video, image-to-3D, edit, ...). */
 export interface MediaInput {
@@ -44,6 +44,13 @@ export interface MediaRequest {
   /** Seconds (video). */
   duration?: number | undefined;
   resolution?: string | undefined;
+  /** audio: speech | sfx | music */
+  audioKind?: "speech" | "sfx" | "music" | undefined;
+  /** audio: the script to speak (speech) or lyrics (music) */
+  text?: string | undefined;
+  voice?: string | undefined;
+  language?: string | undefined;
+  instrumental?: boolean | undefined;
   /** model3d */
   mode?: "text" | "image" | "multiview" | undefined;
   format?: string | undefined;
@@ -100,6 +107,8 @@ export interface MediaProvider {
   /** Vendor id (`xai`, `openai`, `tripo`, ...). */
   vendor: string;
   modalities: readonly MediaModality[];
+  /** audio only: which kinds this provider can make (default: all of speech, sfx, music). */
+  audioKinds?: readonly ("speech" | "sfx" | "music")[] | undefined;
   /** Models worth listing in UIs / validation. Informational. */
   models?: Partial<Record<MediaModality, readonly string[]>> | undefined;
   /** Max outputs one job can produce, per modality (default 1). The node splits larger counts. */

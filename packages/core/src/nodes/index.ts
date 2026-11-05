@@ -21,7 +21,7 @@ import { workshopNode } from "./workshop.js";
 import { worktreeNode } from "./worktree.js";
 import { webhookNode } from "./webhook.js";
 import { memoryNode } from "./memory.js";
-import { imageNode, videoNode, model3dNode } from "./media.js";
+import { imageNode, videoNode, model3dNode, audioNode } from "./media.js";
 import "../providers/ask-human.js";
 import "../providers/list-services.js";
 import "../providers/service-tools.js";
@@ -50,6 +50,7 @@ const BUILT_INS = [
   imageNode,
   videoNode,
   model3dNode,
+  audioNode,
 ];
 for (const node of BUILT_INS) {
   if (!registry.has(node.type)) registry.register(node);

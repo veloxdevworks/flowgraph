@@ -8,7 +8,7 @@
  */
 
 import { z } from "zod";
-import { ImageWithSchema, Model3dWithSchema, VideoWithSchema, type Artifact } from "@flowgraph/spec";
+import { AudioWithSchema, ImageWithSchema, Model3dWithSchema, VideoWithSchema, type Artifact } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult, type NodeUiMeta } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
@@ -48,6 +48,12 @@ const MODALITIES: Record<MediaModality, ModalitySpec> = {
     defaultTimeout: "15m",
     ui: { label: "3D model", description: "Generate a 3D asset", category: "media", icon: "box", color: "#8b5cf6" },
   },
+  audio: {
+    type: "audio",
+    schema: AudioWithSchema,
+    defaultTimeout: "10m",
+    ui: { label: "Audio", description: "Generate speech, sound effects or music", category: "media", icon: "audio-lines", color: "#14b8a6" },
+  },
 };
 
 type Config = Record<string, unknown> & {
@@ -62,6 +68,11 @@ type Config = Record<string, unknown> & {
   duration?: number;
   resolution?: string;
   mode?: "text" | "image" | "multiview";
+  kind?: "speech" | "sfx" | "music";
+  text?: string;
+  voice?: string;
+  language?: string;
+  instrumental?: boolean;
   format?: string;
   texture?: boolean;
   params?: Record<string, unknown>;
@@ -69,25 +80,36 @@ type Config = Record<string, unknown> & {
   output?: Parameters<typeof applyOutput>[0];
 };
 
+type AudioKind = "speech" | "sfx" | "music";
+
+/** Can this provider make this modality (and, for audio, this kind)? */
+function supports(p: MediaProvider, modality: MediaModality, kind: AudioKind | undefined): boolean {
+  if (!p.modalities.includes(modality)) return false;
+  if (modality === "audio" && kind && p.audioKinds) return p.audioKinds.includes(kind);
+  return true;
+}
+
 function resolveProvider(
   ctx: NodeRunContext,
   modality: MediaModality,
   nodeId: string,
   named: string | undefined,
+  kind: AudioKind | undefined,
 ): MediaProvider {
+  const what = modality === "audio" && kind ? `audio (${kind})` : modality;
   const wanted = named ?? undefined;
   if (wanted) {
     const p = mediaProviderFor(ctx, wanted);
     if (!p) {
-      const avail = mediaProvidersFor(ctx, modality).map((x) => x.name);
+      const avail = mediaProvidersFor(ctx, modality).filter((x) => supports(x, modality, kind)).map((x) => x.name);
       throw new Error(
         `${modality} node "${nodeId}": no media provider named "${wanted}". ` +
           (avail.length ? `Available for ${modality}: ${avail.join(", ")}.` : `None are configured for ${modality}.`) +
           ` Declare it under providers: (a langchain xai/openai entry works, or kind: media).`,
       );
     }
-    if (!p.modalities.includes(modality)) {
-      throw new Error(`${modality} node "${nodeId}": provider "${wanted}" (${p.vendor}) does not support ${modality}.`);
+    if (!supports(p, modality, kind)) {
+      throw new Error(`${modality} node "${nodeId}": provider "${wanted}" (${p.vendor}) does not support ${what}.`);
     }
     return p;
   }
@@ -95,15 +117,15 @@ function resolveProvider(
   const def = ctx.config.defaults?.provider;
   if (def) {
     const p = mediaProviderFor(ctx, def);
-    if (p?.modalities.includes(modality)) return p;
+    if (p && supports(p, modality, kind)) return p;
   }
-  const candidates = mediaProvidersFor(ctx, modality);
+  const candidates = mediaProvidersFor(ctx, modality).filter((x) => supports(x, modality, kind));
   if (candidates.length === 1) return candidates[0]!;
   throw new Error(
     `${modality} node "${nodeId}": set provider:. ` +
       (candidates.length
         ? `Candidates: ${candidates.map((c) => c.name).join(", ")}.`
-        : `No media provider supports ${modality}; declare one under providers: (e.g. a langchain xai/openai entry or kind: media).`),
+        : `No media provider supports ${what}; declare one under providers: (e.g. a langchain xai/openai entry or kind: media).`),
   );
 }
 
@@ -146,6 +168,7 @@ function buildMediaNode(spec: ModalitySpec) {
             modality,
             nodeId,
             typeof nodeSpec["provider"] === "string" ? nodeSpec["provider"] : undefined,
+            modality === "audio" ? config.kind : undefined,
           );
           const model = typeof nodeSpec["model"] === "string" ? nodeSpec["model"] : undefined;
 
@@ -171,7 +194,12 @@ function buildMediaNode(spec: ModalitySpec) {
             duration: config.duration,
             resolution: str(config.resolution),
             mode,
-            format: modality === "model3d" ? str(config.format) : undefined,
+            format: modality === "model3d" || modality === "audio" ? str(config.format) : undefined,
+            audioKind: modality === "audio" ? config.kind : undefined,
+            text: str(config.text),
+            voice: str(config.voice),
+            language: str(config.language),
+            instrumental: config.instrumental,
             texture: config.texture,
             params: (renderDeep((config.params ?? {}) as never, scope) as Record<string, unknown>) ?? {},
           };
@@ -242,3 +270,4 @@ function buildMediaNode(spec: ModalitySpec) {
 export const imageNode = buildMediaNode(MODALITIES.image);
 export const videoNode = buildMediaNode(MODALITIES.video);
 export const model3dNode = buildMediaNode(MODALITIES.model3d);
+export const audioNode = buildMediaNode(MODALITIES.audio);
