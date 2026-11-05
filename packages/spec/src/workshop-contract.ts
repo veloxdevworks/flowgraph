@@ -37,6 +37,8 @@ export type WorkshopContract = {
   schema?: Record<string, unknown> | undefined;
   /** A session ended early (`human_ended` / `timeout` / `skipped`) may resume with an unfinished output. */
   allowPartial?: boolean | undefined;
+  /** A `completed` session must cover every agenda item. */
+  requireCoverage?: boolean | undefined;
   context?: unknown;
   facilitator?: string | undefined;
   voice?: WorkshopVoiceHints | undefined;

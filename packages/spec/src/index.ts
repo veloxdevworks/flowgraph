@@ -147,6 +147,7 @@ export type {
 export { validateJsonSchema, type ValidateJsonSchemaOptions } from "./validate-json-schema.js";
 export {
   checkWorkshopOutput,
+  uncoveredAgendaItems,
   WORKSHOP_PARTIAL_END_REASONS,
   type WorkshopOutputCheck,
 } from "./workshop-output.js";

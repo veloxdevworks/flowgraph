@@ -23,13 +23,19 @@ export function checkWorkshopOutput(
     endedReason?: string | undefined;
     allowPartial?: boolean | undefined;
     label?: string | undefined;
+    /** With `requireCoverage`, a full (non-partial) output also needs every agenda item covered. */
+    agenda?: readonly { id: string; title?: string }[] | undefined;
+    coverage?: Record<string, unknown> | undefined;
+    requireCoverage?: boolean | undefined;
   },
 ): WorkshopOutputCheck {
   const label = opts.label ?? "workshop output";
   let fullError: string;
   try {
     validateJsonSchema(output, opts.schema, label);
-    return { complete: true };
+    const uncovered = opts.requireCoverage ? uncoveredAgendaItems(opts.agenda, opts.coverage) : [];
+    if (uncovered.length === 0) return { complete: true };
+    fullError = `${label}: agenda item(s) not covered: ${uncovered.join(", ")}`;
   } catch (err) {
     fullError = err instanceof Error ? err.message : String(err);
   }
@@ -42,4 +48,12 @@ export function checkWorkshopOutput(
   } catch (err) {
     return { complete: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** Agenda ids whose `coverage` entry is missing or falsy. */
+export function uncoveredAgendaItems(
+  agenda: readonly { id: string }[] | undefined,
+  coverage: Record<string, unknown> | undefined,
+): string[] {
+  return (agenda ?? []).filter((item) => !coverage?.[item.id]).map((item) => item.id);
 }

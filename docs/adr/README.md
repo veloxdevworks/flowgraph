@@ -23,5 +23,6 @@ Format: [MADR](https://adr.github.io/madr/)-lite — Context · Decision · Stat
 | [0015](./0015-flowgraph-npm-scope.md) | Publish OSS packages under the `@flowgraph` scope | Accepted |
 | [0016](./0016-workshop-node.md) | `workshop` node: client-owned facilitated HITL | Accepted |
 | [0017](./0017-generative-media-nodes-and-plugin-manifest.md) | Generative media nodes, artifact contract, and node-type metadata | Proposed |
+| [0018](./0018-workshop-controller-and-facilitators.md) | Workshop controller, text facilitator, and dictation | Accepted |
 
 > All current ADRs are Accepted except where noted as superseded. New decisions are added as new ADRs.
