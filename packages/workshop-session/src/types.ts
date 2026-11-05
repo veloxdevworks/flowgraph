@@ -6,7 +6,10 @@ export type {
   WorkshopContract,
   WorkshopTranscriptTurn,
   WorkshopResume,
+  WorkshopResult,
+  WorkshopOutputCheck,
 } from "@flowgraph/spec";
+export { checkWorkshopOutput, WORKSHOP_PARTIAL_END_REASONS } from "@flowgraph/spec";
 
 /** Rough realtime voice price, for client-side cost estimates only. */
 export const WORKSHOP_VOICE_USD_PER_MINUTE = 0.05;

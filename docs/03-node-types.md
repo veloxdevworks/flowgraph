@@ -724,12 +724,31 @@ A specialized HITL node for a **bounded conversation** that produces a structure
       model: grok-voice-latest
       voice: eve
     fallback: form                 # form | text | json
+    allowPartial: false            # accept an unfinished output when the session ends early
     limits: { maxMinutes: 30 }
     maxResumeAttempts: 3           # invalid outputs re-prompt this many times (default 3)
     output: { to: brief }
 ```
 
-The interrupt payload (`payload.data`) is typed as `WorkshopContract` in `@flowgraph/spec` (re-exported by `@flowgraph/workshop-session`): `mode`, `agenda`, `fallback`, optional `schema` / `context` / `facilitator` / `voice` / `limits`, `artifactRefs` (rendered `with.artifacts`), and `diff` / `diffStat`. A git diff failure is reported on `diff.error` (no `diffStat`); patches over 256 KiB are cut and marked `diff.truncated: true`.
+The node writes `{ output, transcript, coverage, endedReason, complete }`, so the deliverable above is `state.brief.output`. `complete` says whether `output` satisfies the whole schema.
+
+**Sessions that end early.** By default every accepted output satisfies `with.schema`, however the session ended, so later nodes can rely on it. A client should not submit an output that would be rejected: `checkWorkshopOutput` in `@flowgraph/spec` is the same rule the engine applies. The `finish` facilitator tool uses it and stays open with an error naming what is missing, and the desktop opens the form prefilled with the draft when the human ends early or time runs out.
+
+With `allowPartial: true`, an output with `endedReason` of `human_ended`, `timeout` or `skipped` may omit required fields (property types are still checked). The node then writes `complete: false`, so route on it instead of assuming a finished deliverable:
+
+```yaml
+edges:
+  - from: feature-workshop
+    branch:
+      - { when: "{{ state.brief.complete }}", to: post }
+      - { default: true, to: follow-up }
+```
+
+`allowPartial` never excuses a session reported as `completed` or `form`.
+
+**Where a client opens.** A node that declares `voice` asks for a voice session. Without it, `fallback` is the starting mode, and voice is a click away. A client falls back to the form when voice cannot start.
+
+The interrupt payload (`payload.data`) is typed as `WorkshopContract` in `@flowgraph/spec` (re-exported by `@flowgraph/workshop-session`): `mode`, `agenda`, `fallback`, optional `schema` / `allowPartial` / `context` / `facilitator` / `voice` / `limits`, `artifactRefs` (rendered `with.artifacts`), and `diff` / `diffStat`. A git diff failure is reported on `diff.error` (no `diffStat`); patches over 256 KiB are cut and marked `diff.truncated: true`.
 
 `limits` are enforced by the client, not the engine (the node is a single interrupt): `WorkshopSession` closes the session and fires `onTimeLimit` after `limits.maxMinutes` (default 30). `maxTurns` is advisory. The facilitator tools are `update_draft`, `cover_agenda_item`, `add_risk`, and `finish`; `read_artifact` is only advertised when the client opts in with `READ_ARTIFACT_TOOL` and serves it in `onToolCall`.
 

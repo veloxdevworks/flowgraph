@@ -142,7 +142,14 @@ export type {
   WorkshopContract,
   WorkshopTranscriptTurn,
   WorkshopResume,
+  WorkshopResult,
 } from "./workshop-contract.js";
+export { validateJsonSchema, type ValidateJsonSchemaOptions } from "./validate-json-schema.js";
+export {
+  checkWorkshopOutput,
+  WORKSHOP_PARTIAL_END_REASONS,
+  type WorkshopOutputCheck,
+} from "./workshop-output.js";
 
 export {
   analyzeRouterMerge,

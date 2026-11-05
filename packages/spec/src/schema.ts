@@ -974,6 +974,12 @@ export const WorkshopWithSchema = BaseWithSchema.extend({
   limits: WorkshopLimitsSchema.optional(),
   /** Headless / no-mic fallback: form | text | json. Default form. */
   fallback: z.union([z.literal("form"), z.literal("text"), z.literal("json")]).optional().default("form"),
+  /**
+   * Accept an unfinished output when the session ends early (`endedReason` of
+   * human_ended, timeout or skipped). The node then writes `complete: false`, so
+   * later nodes can route on it. Property types are still checked. Default false.
+   */
+  allowPartial: z.boolean().optional(),
 });
 
 // wait node — duration / until / signal / webhook (inbound HTTP resume)

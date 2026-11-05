@@ -1,3 +1,5 @@
+import { checkWorkshopOutput } from "@flowgraph/spec";
+
 /** Facilitator tools the realtime model may call to drive the workshop UI. */
 
 export const FACILITATOR_TOOLS = [
@@ -41,7 +43,8 @@ export const FACILITATOR_TOOLS = [
   {
     type: "function",
     name: "finish",
-    description: "End the workshop. Call only when the output schema is satisfied or the human asks to stop.",
+    description:
+      "End the workshop. Call only when the output schema is satisfied or the human asks to stop. If it returns an error, the session is still open: ask the human for what is missing.",
     parameters: {
       type: "object",
       properties: {
@@ -79,6 +82,13 @@ export type FacilitatorToolCall = {
   args: Record<string, unknown>;
 };
 
+export type FacilitatorToolOptions = {
+  /** `contract.schema`: `finish` is refused while the draft does not satisfy it. */
+  schema?: Record<string, unknown> | undefined;
+  /** `contract.allowPartial`: `finish` may end early with an unfinished draft. */
+  allowPartial?: boolean | undefined;
+};
+
 export function applyFacilitatorTool(
   state: {
     draft: Record<string, unknown>;
@@ -86,6 +96,7 @@ export function applyFacilitatorTool(
     endedReason?: string;
   },
   call: FacilitatorToolCall,
+  opts: FacilitatorToolOptions = {},
 ): { ok: boolean; result: unknown; finish?: boolean } {
   if (call.name === "update_draft") {
     const patch = call.args["patch"];
@@ -108,6 +119,15 @@ export function applyFacilitatorTool(
   }
   if (call.name === "finish") {
     const reason = typeof call.args["reason"] === "string" ? call.args["reason"] : "completed";
+    const check = checkWorkshopOutput(state.draft, {
+      schema: opts.schema,
+      endedReason: reason,
+      allowPartial: opts.allowPartial,
+      label: "draft",
+    });
+    if (check.error) {
+      return { ok: false, result: { error: `Session not ended. ${check.error}` } };
+    }
     state.endedReason = reason;
     return { ok: true, result: { endedReason: reason }, finish: true };
   }

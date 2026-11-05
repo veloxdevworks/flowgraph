@@ -133,7 +133,7 @@ Each interrupt carries a **kind** so operators know how to answer:
 | `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }` |
 | `form` | `hitl` form mode | schema-validated object |
 | `review` | `hitl` review mode | `{ decision, feedback? }` |
-| `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` |
+| `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` (the node writes these plus `complete`) |
 | `custom` | advanced / hook payloads | arbitrary JSON |
 
 ```yaml

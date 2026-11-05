@@ -35,6 +35,8 @@ export type WorkshopContract = {
   agenda: WorkshopAgendaItem[];
   fallback: "form" | "text" | "json";
   schema?: Record<string, unknown> | undefined;
+  /** A session ended early (`human_ended` / `timeout` / `skipped`) may resume with an unfinished output. */
+  allowPartial?: boolean | undefined;
   context?: unknown;
   facilitator?: string | undefined;
   voice?: WorkshopVoiceHints | undefined;
@@ -63,4 +65,9 @@ export type WorkshopResume = {
   transcript: WorkshopTranscriptTurn[];
   coverage: Record<string, boolean | string>;
   endedReason: string;
+};
+
+/** What the node writes to state: the resume, plus whether `output` satisfies the schema. */
+export type WorkshopResult = WorkshopResume & {
+  complete: boolean;
 };
