@@ -2,7 +2,8 @@
 
 export const WORKSHOP_PCM_RATE = 24_000;
 
-const WORKLET_SRC = `
+/** AudioWorklet source that posts each mono input chunk (Float32Array) to the main thread. */
+export const PCM_CAPTURE_WORKLET_SRC = `
 class PcmCaptureProcessor extends AudioWorkletProcessor {
   process(inputs) {
     const input = inputs[0] && inputs[0][0];
@@ -62,7 +63,7 @@ export async function startMicCapture(
   });
   const ctx = new AudioContext();
   const source = ctx.createMediaStreamSource(stream);
-  const blob = new Blob([WORKLET_SRC], { type: "application/javascript" });
+  const blob = new Blob([PCM_CAPTURE_WORKLET_SRC], { type: "application/javascript" });
   const url = URL.createObjectURL(blob);
   await ctx.audioWorklet.addModule(url);
   URL.revokeObjectURL(url);
