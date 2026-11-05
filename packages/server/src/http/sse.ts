@@ -63,46 +63,92 @@ export function attachSse(
   return cleanup;
 }
 
-/** Write a single JSON SSE stream of events until a terminal run event (for AgentCore). */
+const TERMINAL_EVENTS = new Set([
+  "run.end",
+  "run.error",
+  "run.aborted",
+  "run.paused",
+  "interrupt.raised",
+]);
+
+export interface StreamUntilTerminalOptions {
+  /** Replay buffered events with a seq greater than this (like Last-Event-ID). */
+  afterSeq?: number | undefined;
+  /**
+   * Replay the buffered events of this run first. `start` and `resume` pass the
+   * run they just launched, so events emitted before the stream attached (a
+   * compile error, a run that fails at once) are not lost and the stream ends.
+   */
+  runId?: string | undefined;
+  /** Interval for `: ping` comments that keep idle proxies from closing the stream. */
+  heartbeatMs?: number;
+}
+
+/**
+ * Write one SSE stream of a thread's events until a terminal run event (for AgentCore).
+ *
+ * The stream also ends when the thread has no run in progress in this process
+ * once the replay is written: on AgentCore each session is its own microVM, so
+ * an `events` call that lands on a fresh one would otherwise wait forever for
+ * events no run will send.
+ */
 export function streamEventsUntilTerminal(
   res: ServerResponse,
   registry: SessionRegistry,
   threadId: string,
-  afterSeq?: number,
+  opts: StreamUntilTerminalOptions = {},
 ): Promise<void> {
   return new Promise((resolve) => {
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     });
 
-    const terminal = new Set([
-      "run.end",
-      "run.error",
-      "run.aborted",
-      "run.paused",
-      "interrupt.raised",
-    ]);
+    let done = false;
+    let unsub: (() => void) | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
 
-    const unsub = registry.subscribe(
-      threadId,
-      (event) => {
-        res.write(`id: ${event.seq}\n`);
-        res.write(`event: engine\n`);
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
-        if (terminal.has(String(event.type))) {
-          unsub();
-          res.end();
-          resolve();
-        }
-      },
-      afterSeq,
-    );
-
-    res.on("close", () => {
-      unsub();
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (heartbeat) clearInterval(heartbeat);
+      unsub?.();
+      if (!res.writableEnded) res.end();
       resolve();
-    });
+    };
+
+    const write = (event: ServerEvent) => {
+      if (done) return;
+      res.write(`id: ${event.seq}\n`);
+      res.write(`event: engine\n`);
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+      if (TERMINAL_EVENTS.has(String(event.type))) finish();
+    };
+
+    res.on("close", finish);
+
+    if (opts.runId) {
+      for (const ev of registry.get(threadId)?.events ?? []) {
+        if (ev.runId === opts.runId) write(ev);
+        if (done) return;
+      }
+    }
+
+    unsub = registry.subscribe(threadId, write, opts.afterSeq);
+    if (done) {
+      unsub();
+      return;
+    }
+
+    if (!registry.hasLiveRun(threadId)) {
+      finish();
+      return;
+    }
+
+    heartbeat = setInterval(() => {
+      if (!done) res.write(": ping\n\n");
+    }, opts.heartbeatMs ?? 15_000);
   });
 }

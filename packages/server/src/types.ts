@@ -153,6 +153,13 @@ export interface ServerConfig {
    * `authToken` / `authDisabled` decide, and the single principal is trusted.
    */
   auth?: ServerAuthConfig;
+  /**
+   * The server runs as a Bedrock AgentCore Runtime (`FLOWGRAPH_AGENTCORE=1`).
+   * Only then does `/invocations` trust the AgentCore edge (SigV4) to have
+   * checked the caller in `token` and `none` mode. Unset, `/invocations` takes
+   * the same auth as REST, so an ECS / ALB deployment does not expose it.
+   */
+  agentcore?: boolean;
   /** Postgres URL. When unset, use in-memory checkpointer (local smoke only). */
   databaseUrl?: string;
   /**
@@ -382,6 +389,7 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
     eventBufferSize: Number(env.FLOWGRAPH_EVENT_BUFFER ?? 5000),
     authDisabled: envFlag(env, "FLOWGRAPH_AUTH_DISABLED"),
     auth: authConfigFromEnv(env),
+    agentcore: envFlag(env, "FLOWGRAPH_AGENTCORE"),
     maxBodyBytes: envInt(env, "FLOWGRAPH_MAX_BODY_BYTES", 2_000_000),
     maxConcurrentRuns: envInt(env, "FLOWGRAPH_MAX_CONCURRENT_RUNS", 16),
   };

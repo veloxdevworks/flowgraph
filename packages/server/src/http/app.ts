@@ -60,10 +60,14 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
     try {
       const authenticator = service.authenticator;
       if (isAgentCorePath(url.pathname)) {
-        // Outside OIDC mode AgentCore authenticates at the edge (SigV4); with
-        // OIDC, /invocations carries the caller's bearer JWT like REST does.
+        // On AgentCore (FLOWGRAPH_AGENTCORE=1) outside OIDC mode, the edge has
+        // already checked the caller (SigV4). Anywhere else, or with OIDC,
+        // /invocations takes the same auth as REST: an ALB in front of this
+        // container does not check SigV4, so skipping it there would let
+        // anyone who reaches the port run graphs as the trusted principal.
         let principal: Principal | undefined;
-        if (url.pathname === "/invocations" && authenticator.mode === "oidc") {
+        const edgeAuthenticated = config.agentcore === true && authenticator.mode !== "oidc";
+        if (url.pathname === "/invocations" && !edgeAuthenticated) {
           const auth = await authenticator.authenticate(req.headers.authorization);
           if (!auth.ok) return writeAuthFailure(res, auth);
           principal = auth.principal;

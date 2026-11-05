@@ -57,12 +57,9 @@ export async function handleAgentCore(
             ...(body.env ? { env: body.env } : {}),
           }, principal);
           if (body.stream !== false) {
-            await streamEventsUntilTerminal(
-              res,
-              service.registry,
-              result.threadId,
-              body.afterSeq,
-            );
+            await streamEventsUntilTerminal(res, service.registry, result.threadId, {
+              runId: result.runId,
+            });
             return true;
           }
           sendJson(res, 200, result);
@@ -75,12 +72,9 @@ export async function handleAgentCore(
             ...(body.yaml ? { yaml: body.yaml } : {}),
           }, principal);
           if (body.stream !== false) {
-            await streamEventsUntilTerminal(
-              res,
-              service.registry,
-              result.threadId,
-              body.afterSeq,
-            );
+            await streamEventsUntilTerminal(res, service.registry, result.threadId, {
+              runId: result.runId,
+            });
             return true;
           }
           sendJson(res, 200, result);
@@ -114,12 +108,9 @@ export async function handleAgentCore(
         }
         case "events": {
           await service.authorizeEvents(body.threadId ?? "", principal);
-          await streamEventsUntilTerminal(
-            res,
-            service.registry,
-            body.threadId ?? "",
-            body.afterSeq,
-          );
+          await streamEventsUntilTerminal(res, service.registry, body.threadId ?? "", {
+            afterSeq: body.afterSeq,
+          });
           return true;
         }
         default:
