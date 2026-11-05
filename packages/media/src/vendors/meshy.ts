@@ -467,7 +467,7 @@ export const meshyVendor: MediaVendor = {
           ...(typeof task.consumed_credits === "number" ? { consumedCredits: task.consumed_credits } : {}),
         });
         // The signed assets.meshy.ai URL needs no Authorization header (and must never get ours).
-        return [await ctx.saveOutput({ url: modelUrl, mimeType: FORMAT_MIME[format] ?? "application/octet-stream" })];
+        return [await ctx.saveOutput({ url: modelUrl, mimeType: FORMAT_MIME[format] ?? "application/octet-stream", ext: format })];
       },
 
       async cancel(raw: JobHandle, ctx: MediaCallContext): Promise<void> {

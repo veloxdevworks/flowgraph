@@ -39,6 +39,7 @@ const MIME_EXT: Record<string, string> = {
   "model/gltf+json": "gltf",
   "model/obj": "obj",
   "model/stl": "stl",
+  "model/3mf": "3mf",
   "model/vnd.usdz+zip": "usdz",
   "application/octet-stream": "bin",
 };
@@ -63,6 +64,7 @@ const EXT_MIME: Record<string, string> = {
   gltf: "model/gltf+json",
   obj: "model/obj",
   stl: "model/stl",
+  "3mf": "model/3mf",
   usdz: "model/vnd.usdz+zip",
   fbx: "application/octet-stream",
 };
@@ -85,7 +87,7 @@ export function roleForMime(mimeType: string, ext: string): Artifact["role"] {
   if (m.startsWith("image/")) return "image";
   if (m.startsWith("video/")) return "video";
   if (m.startsWith("audio/")) return "audio";
-  if (m.startsWith("model/") || ["glb", "gltf", "fbx", "obj", "usdz", "stl"].includes(ext)) return "model3d";
+  if (m.startsWith("model/") || ["glb", "gltf", "fbx", "obj", "usdz", "stl", "3mf"].includes(ext)) return "model3d";
   return "file";
 }
 
@@ -209,7 +211,8 @@ export function createOutputWriter(opts: OutputWriterOptions): MediaCallContext[
         head = Buffer.concat(first);
       }
 
-      const ext = extensionForMime(mimeType, urlHint);
+      const explicit = out.ext?.replace(/^\./, "").toLowerCase();
+      const ext = explicit && /^[a-z0-9]{1,5}$/.test(explicit) ? explicit : extensionForMime(mimeType, urlHint);
       const finalPath = path.join(dir, `${stem}.${ext}`);
       await rename(tmp, finalPath);
       tmp = "";

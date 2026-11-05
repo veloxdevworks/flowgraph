@@ -721,7 +721,7 @@ export const VideoWithSchema = MediaCommonWithSchema.extend({
   }
 });
 
-export const Model3dFormatSchema = z.enum(["glb", "gltf", "fbx", "obj", "usdz", "stl"]);
+export const Model3dFormatSchema = z.enum(["glb", "gltf", "fbx", "obj", "usdz", "stl", "3mf"]);
 
 // model3d node
 export const Model3dWithSchema = MediaCommonWithSchema.extend({

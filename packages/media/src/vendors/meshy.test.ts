@@ -171,8 +171,8 @@ describe("meshy vendor", () => {
 
       const arts = await p.fetch!(handle, t.ctx);
       expect(arts).toHaveLength(1);
-      expect(t.saved).toEqual([{ url: `${A}/${TASK_ID}/output/model.glb?Expires=***`, mimeType: "model/gltf-binary" }]);
-      // the signed download carries no Authorization (we pass only {url, mimeType})
+      expect(t.saved).toEqual([{ url: `${A}/${TASK_ID}/output/model.glb?Expires=***`, mimeType: "model/gltf-binary", ext: "glb" }]);
+      // the signed download carries no Authorization (we pass only {url, mimeType, ext})
       expect(JSON.stringify(t.saved)).not.toContain(KEY);
       expect(t.remaining()).toBe(0);
     });
@@ -486,7 +486,7 @@ describe("meshy vendor", () => {
       const h = await p.start(req({ prompt: "x", texture: false, format: format === "glb" ? undefined : format.toUpperCase() }), t.ctx);
       expect(t.calls[0]!.body!["target_formats"]).toEqual([format]);
       await p.fetch!(h, t.ctx);
-      expect(t.saved[0]).toEqual({ url: `${A}/${TASK_ID}/output/model.${format}?Expires=***`, mimeType: mime });
+      expect(t.saved[0]).toEqual({ url: `${A}/${TASK_ID}/output/model.${format}?Expires=***`, mimeType: mime, ext: format });
     });
 
     it("accepts a leading dot in the format", async () => {

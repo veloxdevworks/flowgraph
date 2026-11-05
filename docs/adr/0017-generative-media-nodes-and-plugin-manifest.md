@@ -121,7 +121,9 @@ A `DecisionProvider` interface (`decide({ question, input, answer: choice | scor
 |---|---|
 | `Artifact`, journal/`runMediaJob`, `MediaProvider`, registry, `describeNodeTypes` | `@flowgraph/spec`, `@flowgraph/core` |
 | `image`, `video`, `model3d` nodes | `@flowgraph/core` |
-| Reference vendor adapters (xAI, OpenAI images, Tripo, Meshy, ElevenLabs, and Suno if it offers an official API) | `@flowgraph/media` (dependency-free `fetch`) |
+| Reference vendor adapters (xAI, OpenAI images, Tripo, Meshy, ElevenLabs) | `@flowgraph/media` (dependency-free `fetch`); see [08](../08-providers.md) for defaults. Not exercised against live APIs when written. |
+| Suno | No adapter: no public API (see open question 1) |
+| OpenAI video | No adapter: OpenAI's Videos API (Sora) was shut down on 2026-09-24 |
 | Other vendors, local video inference (GPU, weights, licenses) | Third-party plugins |
 | `decide` node / Jev | Follow-up |
 | Computer use | **Deferred.** Start as an agent tool or MCP server; needs `permission: ask`, HITL gating and a desktop-only capability flag before it could be a node. |
@@ -153,7 +155,7 @@ A `DecisionProvider` interface (`decide({ question, input, answer: choice | scor
 
 ## Implementation notes
 
-Implemented alongside this ADR: spec schemas (`Artifact`, `kind: media`, `image`/`video`/`model3d` `with`), `packages/core/src/media/*` (types, artifacts, journal, `runMediaJob`, inputs, registry), `packages/core/src/nodes/media.ts`, `NodeFactory.ui` + `describeNodeTypes()`, and CLI/server handling of `kind: media`. Vendor adapters and the desktop integration are tracked in the same change.
+Implemented alongside this ADR: spec schemas (`Artifact`, `kind: media`, `image`/`video`/`model3d` `with`), `packages/core/src/media/*` (types, artifacts, journal, `runMediaJob`, inputs, registry), `packages/core/src/nodes/media.ts`, `NodeFactory.ui` + `describeNodeTypes()`, and CLI/server handling of `kind: media`. The reference vendor adapters (`@flowgraph/media`) and the desktop integration (flowgraph-desktop) landed in the same change.
 
 ## Open questions
 

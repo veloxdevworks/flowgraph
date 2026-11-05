@@ -61,8 +61,9 @@ export interface MediaRequest {
 
 /** A produced file, before it is saved into the artifact store. */
 export type MediaOutput =
-  | { bytes: Uint8Array; mimeType: string; meta?: Artifact["meta"] }
-  | { url: string; mimeType?: string; headers?: Record<string, string>; meta?: Artifact["meta"] };
+  | { bytes: Uint8Array; mimeType: string; ext?: string; meta?: Artifact["meta"] }
+  | { url: string; mimeType?: string; ext?: string; headers?: Record<string, string>; meta?: Artifact["meta"] };
+// `ext` (no dot) names the file explicitly for formats with no standard MIME type (fbx, 3mf).
 
 export interface MediaCallContext {
   secrets: SecretProvider;

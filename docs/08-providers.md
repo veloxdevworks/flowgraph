@@ -154,6 +154,18 @@ providers:
 - A bare vendor name also works (`provider: xai` on a node) using that vendor's default key env var.
 - A node without `provider:` uses `config.defaults.provider` when that provider can do the modality, otherwise the only provider that can, otherwise fails listing the candidates.
 - **Third-party vendors:** a plugin loaded through `imports[].providers` calls `registerMediaVendor({ vendor, modalities, create })` (or `registerMediaProvider`) from `@flowgraph/core`; `kind: media` entries then name the vendor. A `MediaProvider` implements `start` / `poll` / `fetch` / `cancel` and persists outputs through the supplied `saveOutput`.
+**Reference vendors (`@flowgraph/media`)**, loaded automatically by the CLI and server. Written from each vendor's official docs (2026-11-05); **not yet exercised against the live APIs**. Model ids and prices move quickly, so check the vendor docs and override with `model:` on the node or `model` on the provider entry.
+
+| Vendor id | Use via | Serves | Key env (default) | Default model(s) | Notes |
+|---|---|---|---|---|---|
+| `xai` | `langchain` entry (vendor `xai`) or `kind: media` | image, video | `XAI_API_KEY` (also `GROK_API_KEY`) | `grok-imagine-image-2.0`, `grok-imagine-video-1.5` | Image generate + edit (up to 5 reference images); video is async, image-to-video with one input, reference images with several. No cancel endpoint. Reports actual cost. |
+| `openai` | `langchain` entry (vendor `openai`) or `kind: media` | image | `OPENAI_API_KEY` | `gpt-image-2.5-sunburst` | Generations and edits (up to 16 inputs). Token-priced, so the cost is reported after the call. OpenAI's video API (Sora) was shut down on 2026-09-24, so there is no OpenAI video. |
+| `tripo` | `kind: media` | model3d | `TRIPO_API_KEY` | `v3.1-20260211` | Text, single-image and multiview. GLB natively; other formats go through a paid convert step. Model URLs are short-lived, so the file is downloaded immediately. |
+| `meshy` | `kind: media` | model3d | `MESHY_API_KEY` | Meshy `latest` | Text (preview then refine run as one job), image, multi-image. Formats: glb, fbx, obj, usdz, stl, 3mf. No price per credit is published, so no cost is reported. |
+| `elevenlabs` | `kind: media` | audio (speech, sfx, music) | `ELEVENLABS_API_KEY` (also `XI_API_KEY`) | `eleven_v4`, `eleven_text_to_sound_v3`, `music_v2_5` | All synchronous. A voice may be an id or a name (looked up). Music needs a paid plan. `ogg`/`flac` are not offered; music has no `wav`. |
+
+Suno has no public API today (invite-only partner beta), so there is no Suno adapter; see ADR-0017.
+
 - On the hosted server, an untrusted author's `kind: media` entry is subject to the same endpoint checks as `langchain` entries (no `baseUrl`).
 
 ### Local CLI providers (`kind: cli`)

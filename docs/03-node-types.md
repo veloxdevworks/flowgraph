@@ -1002,7 +1002,7 @@ nodes:
 | `count` | all | Outputs wanted (image ≤ 10, video/model3d/audio ≤ 4). Split into several jobs when the vendor produces fewer per job. |
 | `size`, `aspectRatio`, `quality` | image | Vendor-interpreted strings. |
 | `duration` (seconds), `aspectRatio`, `resolution` | video | |
-| `mode` (`text`/`image`/`multiview`), `format` (`glb` default, `gltf`, `fbx`, `obj`, `usdz`, `stl`), `texture` | model3d | `mode` defaults from the number of inputs. |
+| `mode` (`text`/`image`/`multiview`), `format` (`glb` default, `gltf`, `fbx`, `obj`, `usdz`, `stl`, `3mf`), `texture` | model3d | `mode` defaults from the number of inputs. |
 | `kind` (`speech` / `sfx` / `music`), `text`, `voice`, `language`, `duration`, `instrumental`, `format` (`mp3`, `wav`, `ogg`, `flac`, `opus`) | audio | `kind` is required. `speech` needs `text` (the script) and usually a `voice`; `sfx` needs a `prompt` and optionally a `duration`; `music` needs a `prompt` and/or `text` (lyrics), and `instrumental: true` drops vocals. `input` can be reference audio where the vendor supports it. |
 | `seed`, `negativePrompt` | all | Passed when the vendor supports them. |
 | `params` | all | Vendor passthrough options. |

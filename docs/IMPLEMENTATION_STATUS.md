@@ -11,7 +11,8 @@ Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint 
 | YAML spec + Zod validation + JSON Schema | **Shipped** |
 | Compiler + runtime (`loadGraph` → `compileGraph` → `run`/`resume`) | **Shipped** |
 | Built-in node types (incl. `script`, `demo`, `service`, `port`) | **Shipped** |
-| Media nodes `image` / `video` / `model3d`, `Artifact` contract, media provider interface + job journal | **Shipped** (engine); vendor adapters see ADR-0017 |
+| Media nodes `image` / `video` / `model3d` / `audio`, `Artifact` contract, media provider interface + job journal | **Shipped** |
+| Media vendors (`@flowgraph/media`): xAI, OpenAI images, Tripo, Meshy, ElevenLabs | **Shipped, unit/e2e-tested with stubbed network; not yet run against live APIs** |
 | Skills loader, contracts, preflight | **Shipped** |
 | Expression language (`@flowgraph/expr`) | **Shipped** |
 | Events + console/jsonl sinks | **Shipped** (nested subgraph events forward with `parentSpanId`) |

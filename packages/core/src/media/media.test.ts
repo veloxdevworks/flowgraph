@@ -150,6 +150,23 @@ describe("image node", () => {
     expect((res.state["outputs"] as Outputs)["img"]!.costUSD).toBeCloseTo(0.123);
   });
 
+  it("names a file by an explicit extension when the format has no standard MIME type", async () => {
+    const calls = newCalls();
+    const provider = syncProvider(calls, {
+      async start(req: MediaRequest, ctx: MediaCallContext): Promise<JobHandle> {
+        calls.start.push(req);
+        const a = await ctx.saveOutput({ bytes: Uint8Array.from([1, 2, 3]), mimeType: "application/octet-stream", ext: "fbx" });
+        return { id: "e", done: [a] };
+      },
+    });
+    const compiled = await compileGraph(
+      graph([{ id: "m", type: "model3d", provider: "fake", with: { prompt: "x", format: "fbx" } }]),
+      { cwd: dir, mediaProviders: [provider] },
+    );
+    const res = await compiled.run({ threadId: "text" });
+    expect((res.state["outputs"] as Outputs)["m"]!.artifact.path.endsWith(".fbx")).toBe(true);
+  });
+
   it("splits a count larger than maxPerJob into separate jobs", async () => {
     const calls = newCalls();
     const compiled = await compileGraph(
