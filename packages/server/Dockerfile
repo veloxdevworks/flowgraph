@@ -14,7 +14,8 @@ COPY packages ./packages
 RUN corepack enable && pnpm install --frozen-lockfile
 RUN pnpm --filter @flowgraph/server... build
 
-# Optional LangChain vendor SDKs for Bedrock / OpenAI / etc.
+# LangChain vendor SDKs for Bedrock / OpenAI / etc. Not `|| true`: an image
+# that silently ships without @langchain/aws cannot run Bedrock graphs.
 WORKDIR /src/packages/server
 RUN pnpm add \
   @langchain/aws@^1.0.0 \
@@ -22,11 +23,9 @@ RUN pnpm add \
   @langchain/anthropic@^1.0.0 \
   @langchain/google-genai@^1.0.0 \
   @langchain/ollama@^1.0.0 \
-  @langchain/xai@^1.0.0 \
-  || true
+  @langchain/xai@^1.0.0
 
 FROM node:22-bookworm-slim AS runtime
-WORKDIR /app
 
 ENV NODE_ENV=production \
     FLOWGRAPH_HOST=0.0.0.0 \
@@ -35,13 +34,13 @@ ENV NODE_ENV=production \
 
 RUN mkdir -p /data/graphs
 
-COPY --from=build /src/packages/server/dist ./dist
-COPY --from=build /src/packages/server/package.json ./package.json
-COPY --from=build /src/node_modules ./node_modules
-COPY --from=build /src/packages ./packages
-
-# Prefer the workspace-linked packages via NODE_PATH
-ENV NODE_PATH=/app/node_modules:/app/packages/core/dist:/app/packages/spec/dist
+# Keep the workspace layout: @flowgraph/* and the vendor SDKs resolve through
+# pnpm's relative symlinks in packages/*/node_modules into /app/node_modules/.pnpm,
+# so the server must run from /app/packages/server (NODE_PATH does not apply to
+# ES module imports).
+COPY --from=build /src/node_modules /app/node_modules
+COPY --from=build /src/packages /app/packages
+WORKDIR /app/packages/server
 
 EXPOSE 8080
 

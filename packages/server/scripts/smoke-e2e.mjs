@@ -278,9 +278,10 @@ async function main() {
   // 7) AgentCore /invocations start (stream until terminal)
   {
     const threadId = `ac-${Date.now()}`;
+    // Outside AgentCore (FLOWGRAPH_AGENTCORE unset) /invocations takes the REST token.
     const res = await fetch(`${BASE}/invocations`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream", Authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({
         action: "start",
         threadId,
