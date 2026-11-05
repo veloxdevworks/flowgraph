@@ -98,8 +98,8 @@ export class RunService {
   private graphNames: GraphNameRegistry | undefined;
   /**
    * Thread ownership, stored with the checkpoints: Postgres when DATABASE_URL
-   * is set, else the sqlite memory file, else process memory (where the
-   * in-memory checkpoints live too).
+   * is set, else the sqlite memory file (which then holds the checkpoints
+   * too), else process memory (where the in-memory checkpoints live too).
    */
   private threadOwners: ThreadOwnerRegistry | undefined;
   private singleUser: Principal | undefined;
@@ -164,6 +164,7 @@ export class RunService {
     }
     log("info", "run-service ready", {
       database: this.config.databaseUrl ? "postgres" : "memory",
+      checkpoints: this.config.databaseUrl ? "postgres" : this.config.memory?.backend === "sqlite" ? "sqlite" : "memory",
       memory: this.config.memory?.backend ?? "memory",
       graphStoreDir: this.config.graphStoreDir,
     });
@@ -523,6 +524,12 @@ export class RunService {
     });
   }
 
+  /**
+   * The one checkpoint saver for this service, opened once and shared by every
+   * compile: Postgres when DATABASE_URL is set, else the sqlite file when
+   * FLOWGRAPH_MEMORY_BACKEND=sqlite (checkpoints, memory, thread owners and
+   * graph names in one file), else process memory.
+   */
   private async getCheckpointer(): Promise<BaseCheckpointSaver> {
     if (this.checkpointer) return this.checkpointer;
     if (!this.checkpointerPromise) {
@@ -542,6 +549,13 @@ export class RunService {
           this.useDurableMemory(b.memory);
           this.graphNames = b.graphNames;
           this.threadOwners = b.threadOwners;
+          if (!this.config.databaseUrl) {
+            // Checkpoints live in the same file as the thread owners, so an
+            // interrupted run survives a restart on the same graph store.
+            // DATABASE_URL still wins below: replicas share Postgres.
+            this.checkpointer = b.checkpointer;
+            return b.checkpointer;
+          }
         }
         if (this.config.databaseUrl) {
           // One pool for checkpoints, thread owners and graph names (and

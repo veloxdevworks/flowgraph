@@ -233,10 +233,19 @@ describe("RunService with OIDC principals", () => {
     raw.db.prepare("DELETE FROM fg_thread_owners").run();
     raw.close();
     await expect(s.startRun({ threadId: "bound", yaml }, bob)).rejects.toMatchObject({ code: "THREAD_NOT_OWNED", message: expect.stringMatching(/saved state/) });
-    // And after a restart (in-memory checkpoints gone), a same-org principal
-    // under a fresh name gets past the server checks; memory's own thread
-    // binding refuses.
+    // Checkpoints live in the sqlite file too, so a restart alone still refuses.
     await s.close();
+    const s1 = await service(dir, { memory });
+    await expect(s1.startRun({ threadId: "bound", yaml }, bob)).rejects.toMatchObject({ code: "THREAD_NOT_OWNED", message: expect.stringMatching(/saved state/) });
+    await s1.close();
+    // With the checkpoint rows gone too (deleteThread would also drop the
+    // memory binding), a same-org principal under a fresh name gets past the
+    // server checks; memory's own thread binding refuses.
+    const wipe = await openSqliteBackend(path.join(dir, "memory.db"));
+    for (const t of ["checkpoints", "writes", "fg_checkpoint_blobs", "fg_checkpoint_pins", "fg_checkpoint_threads"]) {
+      wipe.db.prepare(`DELETE FROM ${t} WHERE thread_id = ?`).run("bound");
+    }
+    wipe.close();
     const s2 = await service(dir, { memory });
     const unsub2 = s2.registry.subscribe("bound", (ev) => {
       if (ev.type === "run.error") errors.push(JSON.stringify(ev.data));
