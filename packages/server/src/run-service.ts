@@ -163,7 +163,6 @@ export class RunService {
       await this.backfillThreadOwners().catch((err: unknown) => log("error", "thread-owners.backfill failed", errorFields(err)));
     }
     log("info", "run-service ready", {
-      database: this.config.databaseUrl ? "postgres" : "memory",
       checkpoints: this.config.databaseUrl ? "postgres" : this.config.memory?.backend === "sqlite" ? "sqlite" : "memory",
       memory: this.config.memory?.backend ?? "memory",
       graphStoreDir: this.config.graphStoreDir,

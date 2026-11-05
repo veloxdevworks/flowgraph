@@ -153,13 +153,18 @@ export interface ServerConfig {
    * `authToken` / `authDisabled` decide, and the single principal is trusted.
    */
   auth?: ServerAuthConfig;
-  /** Postgres URL. When unset, use in-memory checkpointer (local smoke only). */
+  /**
+   * Postgres URL for checkpoints (takes precedence over every other store).
+   * When unset, checkpoints go to the sqlite file with `memory.backend: "sqlite"`,
+   * else stay in process memory (local smoke only).
+   */
   databaseUrl?: string;
   /**
    * Where `runtime.memory` (and the durable `ctx.store` alias) lives. Default
    * `memory`: process-local, and graphs that declare durable memory fail to
    * compile. `postgres` shares the checkpointer's pool (needs `databaseUrl`);
-   * `sqlite` keeps memory in a local file (needs @flowgraph/checkpoint-sqlite).
+   * `sqlite` keeps memory in a local file (needs @flowgraph/checkpoint-sqlite),
+   * along with the checkpoints when `databaseUrl` is unset.
    */
   memory?: ServerMemoryConfig;
   /**
