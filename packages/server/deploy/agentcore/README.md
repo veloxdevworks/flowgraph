@@ -7,6 +7,8 @@ The same ARM64 image used for ECS/Fargate implements the AgentCore HTTP contract
 
 Share the Postgres `DATABASE_URL` with the ECS deployment so resume/state works across both.
 
+Without Postgres, a runtime whose session storage keeps the graph store (`FLOWGRAPH_GRAPH_STORE`, `/data/graphs` in `register.sh`) across idle stops can set `FLOWGRAPH_MEMORY_BACKEND=sqlite` (plus `FLOWGRAPH_ORG`, and an explicit auth mode: see the server README's *Upgrading from 0.1*). Checkpoints are then written to `<graph store>/memory.db`, so a run waiting on a human answer can be resumed after the session's microVM is stopped and started again. The file belongs to that one session: resume a thread through the same session id. `register.sh` still takes `--database-url`; set the variables yourself for this setup.
+
 ## Prerequisites
 
 - Image pushed to ECR (linux/arm64)
