@@ -72,6 +72,7 @@ export const workshopNode = defineNode<Config>({
         };
         if (schema) data.schema = schema;
         if (config.allowPartial) data.allowPartial = true;
+        if (config.requireCoverage) data.requireCoverage = true;
         if (context !== undefined) data.context = context;
         if (facilitator) data.facilitator = facilitator;
         if (voice) data.voice = voice as WorkshopContract["voice"];
@@ -93,14 +94,20 @@ export const workshopNode = defineNode<Config>({
               schema,
               nodeId: String(nodeSpec["id"]),
               allowPartial: config.allowPartial,
+              agenda,
+              requireCoverage: config.requireCoverage,
             }),
           { maxAttempts: config.maxResumeAttempts },
         );
 
-        ctx.emit("node.output", { workshop: result });
+        // `transcript: omit` keeps the (often large) transcript out of state and events.
+        const written: Partial<WorkshopResult> =
+          config.transcript === "omit" ? omitTranscript(result) : result;
+
+        ctx.emit("node.output", { workshop: written });
 
         return {
-          update: applyOutput(config.output, result, {
+          update: applyOutput(config.output, written, {
             nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
             scope,
           }),
@@ -109,6 +116,11 @@ export const workshopNode = defineNode<Config>({
     };
   },
 });
+
+function omitTranscript(result: WorkshopResult): Omit<WorkshopResult, "transcript"> {
+  const { transcript: _dropped, ...rest } = result;
+  return rest;
+}
 
 export function normalizeAgenda(raw: unknown): WorkshopAgendaItem[] {
   if (!Array.isArray(raw)) return [];
@@ -185,6 +197,8 @@ export function mapWorkshopResume(
     schema?: Record<string, unknown> | undefined;
     nodeId: string;
     allowPartial?: boolean | undefined;
+    agenda?: readonly { id: string }[] | undefined;
+    requireCoverage?: boolean | undefined;
   },
 ): WorkshopResult {
   const where = `workshop node "${opts.nodeId}" resume`;
@@ -241,6 +255,9 @@ export function mapWorkshopResume(
     schema: opts.schema,
     endedReason,
     allowPartial: opts.allowPartial,
+    agenda: opts.agenda,
+    coverage,
+    requireCoverage: opts.requireCoverage,
     label: `workshop node "${opts.nodeId}" output`,
   });
   if (check.error) throw new Error(check.error);
