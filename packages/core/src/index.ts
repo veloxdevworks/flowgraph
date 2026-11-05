@@ -14,7 +14,18 @@ export {
   ensureDeclaredOutputChannels,
   undeclaredOutputChannelDiagnostics,
   unconditionalFanOutDiagnostics,
+  hitlRouteDiagnostics,
+  hitlRouterMergeDiagnostics,
 } from "./runtime/validate-graph.js";
+export {
+  hitlOutcomes,
+  hitlOutcomeKey,
+  hitlRouteTargets,
+  normalizeHitlRoutes,
+  resolveHitlRoute,
+  HITL_DEFAULT_ROUTE,
+} from "./nodes/hitl-routes.js";
+export type { HitlRoute, HitlOutcomes } from "./nodes/hitl-routes.js";
 export { applyOutput, isOutputNone, OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
 export {
   resolveAndValidateInput,

@@ -59,6 +59,7 @@ export {
   MapWithSchema,
   WorktreeWithSchema,
   HitlWithSchema,
+  HitlRouteSchema,
   WorkshopWithSchema,
   WorkshopAgendaItemSchema,
   WorkshopVoiceSchema,
@@ -142,3 +143,18 @@ export type {
   WorkshopTranscriptTurn,
   WorkshopResume,
 } from "./workshop-contract.js";
+
+export {
+  analyzeRouterMerge,
+  findMergeableRouters,
+  mergeRouterIntoHitl,
+  answerFromCondition,
+} from "./hitl-merge.js";
+export type {
+  HitlRouteValue,
+  MergeEdge,
+  MergeNode,
+  MergeSpec,
+  RouterMergePlan,
+  RouterMergeRefusal,
+} from "./hitl-merge.js";

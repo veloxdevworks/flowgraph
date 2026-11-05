@@ -11,6 +11,7 @@ import {
   LOAD_TIME_ENV_VAR_RE,
 } from "./runtime/env-expansion-lint.js";
 import {
+  declaredRouteTargets,
   graphLintDiagnostics,
   subgraphOutputSites,
   unknownSubgraphOutputDiagnostics,
@@ -234,6 +235,10 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
   for (const edge of spec.edges) {
     if ("to" in edge) { const tos = Array.isArray(edge.to) ? edge.to : [edge.to]; for (const t of tos) allTargets.add(t); }
     if ("branch" in edge) { for (const b of edge.branch) allTargets.add(b.to); }
+  }
+  // A router's or routing hitl's own `with.routes` also lead somewhere.
+  for (const node of spec.nodes) {
+    for (const t of declaredRouteTargets(spec, node.id)) allTargets.add(t);
   }
   for (const node of spec.nodes) {
     if (!allTargets.has(node.id)) {

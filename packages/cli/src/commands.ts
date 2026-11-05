@@ -185,7 +185,8 @@ program
         printSuccess(`${graphPath} is valid`);
       } else if (!hasError) {
         printSuccess(`${graphPath} is valid`);
-        printDiagnostics(allDiags.filter((d) => d.severity === "warning"), graphPath);
+        // Recommendations (info) show alongside warnings; they never fail a run or --strict.
+        printDiagnostics(allDiags.filter((d) => d.severity === "warning" || d.severity === "info"), graphPath);
       } else {
         console.log(pc.bold(`\nValidating ${graphPath}`));
         printDiagnostics(allDiags, graphPath);

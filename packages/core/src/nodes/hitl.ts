@@ -15,6 +15,12 @@ import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
 import { assertHostExecAllowed, hostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
+import {
+  DEFAULT_REVIEW_DECISIONS,
+  hitlOutcomeKey,
+  normalizeHitlRoutes,
+  resolveHitlRoute,
+} from "./hitl-routes.js";
 
 const configSchema = HitlWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -27,18 +33,16 @@ const MODE_TO_KIND: Record<Config["mode"], InterruptKind> = {
   review: "review",
 };
 
-const DEFAULT_REVIEW_DECISIONS = ["approve", "request-changes"];
-
 export const hitlNode = defineNode<Config>({
   type: "hitl",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, routing: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, routing: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {
@@ -122,12 +126,32 @@ export const hitlNode = defineNode<Config>({
 
         ctx.emit("node.output", { hitl: { mode: config.mode, result } });
 
-        return {
-          update: applyOutput(config.output, result, {
-            nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
-            scope,
-          }),
-        };
+        const update = applyOutput(config.output, result, {
+          nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+          scope,
+        });
+
+        // `routes`: the answer picks the next node, like a router would.
+        const routes = normalizeHitlRoutes(config.routes);
+        if (Object.keys(routes).length > 0) {
+          const outcome = hitlOutcomeKey(config.mode, result);
+          const hit = resolveHitlRoute(routes, outcome);
+          if (!hit) {
+            throw new Error(
+              `hitl node "${String(nodeSpec["id"])}": no route for answer "${outcome}" and no "default" route. ` +
+                `Routes: ${Object.keys(routes).join(", ")}.`,
+            );
+          }
+          ctx.emit("router.decision", {
+            routes: Object.keys(routes),
+            chosen: hit.key,
+            to: hit.route.to,
+            mode: "hitl",
+          });
+          return { command: { goto: hit.route.to, update } };
+        }
+
+        return { update };
       },
     };
   },

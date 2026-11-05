@@ -868,6 +868,12 @@ export const WorktreeWithSchema = z.object({
   output: OutputMappingSchema.optional(),
 });
 
+/** A hitl route target: a node id, or `{ to, description }`. */
+export const HitlRouteSchema = z.union([
+  z.string(),
+  z.object({ to: z.string(), description: z.string().optional() }),
+]);
+
 // hitl node — human-in-the-loop gate (approve, question, choice, form, review)
 export const HitlWithSchema = BaseWithSchema.extend({
   mode: z
@@ -896,7 +902,17 @@ export const HitlWithSchema = BaseWithSchema.extend({
   /** `mode: review` — artifact paths or demo-manifest refs shown to the human. */
   artifacts: z.array(z.string()).optional(),
   /** `mode: review` — extra decision labels beyond approve / request-changes. */
-  decision: z.array(z.string()).optional(),  /**
+  decision: z.array(z.string()).optional(),
+  /**
+   * Route on the human's answer instead of following the node's outgoing edges. Keys are
+   * the outcomes — `approved` / `rejected` for `approve`, each entry of `choices` for
+   * `choice`, each decision for `review` — and each value is the node to go to next.
+   * `default` catches any outcome without its own route (needed when `choices` are
+   * templated). Not available for `question` / `form`. The answer is still written to
+   * `output`, so later nodes can read it.
+   */
+  routes: z.record(HitlRouteSchema).optional(),
+  /**
    * Re-prompt budget for answers that fail validation (schema / decision / choice).
    * The interrupt is re-issued with `validationError` until this many answers were
    * rejected; then the run fails but the interrupt stays pending. Default 3.

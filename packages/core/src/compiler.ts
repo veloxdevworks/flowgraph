@@ -72,6 +72,7 @@ import { createHookBus, type HookBus } from "./hooks/bus.js";
 import type { Hook } from "./hooks/types.js";
 import { hooksFromSpec, defaultGuardrailHooks } from "./hooks/builtin.js";
 import "./nodes/index.js";
+import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
 import {
@@ -1313,7 +1314,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   // Edges. Router nodes drive exclusive routing via Command{ goto } + `ends`
   // declared from with.routes — skip their static/branch edges so a UI fan-out
   // (`to: [a, b]`) cannot race with the router's decision and run both branches.
-  const routerIds = new Set(spec.nodes.filter((n) => n.type === "router").map((n) => n.id));
+  const routerIds = new Set(spec.nodes.filter(declaresRoutes).map((n) => n.id));
   for (const edge of spec.edges) {
     if (routerIds.has(edge.from)) continue;
     let from = edge.from === "START" ? START : edge.from;
@@ -1650,7 +1651,19 @@ function resultToUpdate(result: NodeResult): Record<string, unknown> {
 }
 
 /** Collect Command.goto destinations declared on a router node's `with.routes`. */
+/** A router, or a `hitl` that routes on the human's answer (`with.routes`). */
+function declaresRoutes(nodeSpec: { type: string; with?: unknown }): boolean {
+  if (nodeSpec.type === "router") return true;
+  if (nodeSpec.type !== "hitl") return false;
+  return hitlRouteTargets((nodeSpec.with ?? {}) as Record<string, unknown>).length > 0;
+}
+
 function collectRouteEnds(nodeSpec: { type: string; with?: unknown }): string[] {
+  if (nodeSpec.type === "hitl") {
+    return hitlRouteTargets((nodeSpec.with ?? {}) as Record<string, unknown>).map((to) =>
+      to === "END" ? END : to,
+    );
+  }
   if (nodeSpec.type !== "router") return [];
   const withBlock = (nodeSpec.with ?? {}) as Record<string, unknown>;
   const routes = withBlock["routes"];
