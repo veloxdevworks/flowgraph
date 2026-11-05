@@ -1,3 +1,4 @@
+import type { ZodTypeAny } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { GraphSpecSchema } from "./schema.js";
 
@@ -10,4 +11,12 @@ export function generateJsonSchema(): Record<string, unknown> {
     name: "GraphSpec",
     $refStrategy: "none",
   }) as Record<string, unknown>;
+}
+
+/**
+ * JSON Schema for one node type's `with` block (used by UIs to render a
+ * generic inspector for plugin node types).
+ */
+export function zodToConfigJsonSchema(schema: ZodTypeAny): Record<string, unknown> {
+  return zodToJsonSchema(schema, { $refStrategy: "none", target: "jsonSchema7" }) as Record<string, unknown>;
 }

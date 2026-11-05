@@ -21,10 +21,9 @@ you pay while a session's microVM is up, and callers authenticate with IAM (SigV
 - **Sessions stop.** A microVM is stopped after `--idle-timeout` with no request and no
   run in progress (default 15 min), and after `--max-lifetime` regardless (default 8 h).
   The next call for that thread gets a fresh microVM.
-- **What survives a stop.** Without `DATABASE_URL`, checkpoints are in memory, so a run
-  that was waiting for a human answer cannot be resumed after its microVM stops. Pick an
-  idle timeout longer than you expect to wait. With `--session-storage`, the thread's
-  graph YAML and event journal survive a stop (but are wiped when you update the runtime).
+- **What survives a stop.** By default checkpoints are in memory, so a run waiting for a
+  human answer cannot be resumed after its microVM stops: pick an idle timeout longer than
+  you expect to wait, or keep checkpoints on session storage (below).
 - **Who can call it.** Anyone with `bedrock-agentcore:InvokeAgentRuntime` on the runtime.
   They act as the server's single trusted principal: their graphs can read the
   container's environment through `${VAR}`. Grant invoke access accordingly.
@@ -89,6 +88,23 @@ and `region` in `hello-bedrock.graph.yaml`, then:
 The `node.output` / `run.end` events carry the reply. An `AccessDeniedException` means the
 model is not enabled or the role's Bedrock statement does not cover it.
 
+## Resume after a stop (session storage + SQLite)
+
+To let a waiting run survive its microVM being stopped, without a database, keep the graph
+store on session storage and the checkpoints in a SQLite file there:
+
+```bash
+packages/server/deploy/agentcore/register.sh --image-uri "$REPO:$TAG" --role-arn "$ROLE_ARN" \
+  --session-storage /mnt/flowgraph \
+  --env FLOWGRAPH_MEMORY_BACKEND=sqlite --env FLOWGRAPH_ORG=<your-org>
+```
+
+Checkpoints then go to `/mnt/flowgraph/graphs/memory.db` next to the thread's YAML and journal,
+and `resume` works on the fresh microVM. The file belongs to one session, so resume a thread
+through the same session id (`invoke.sh` does). Session storage is a Preview feature, and it is
+wiped when you update the runtime (and after 14 days idle): deploy when no run is waiting.
+Without `FLOWGRAPH_ORG` the server refuses to start with `FLOWGRAPH_MEMORY_BACKEND=sqlite`.
+
 ## Day two
 
 - **Deploy a new image:** build and push a new tag, then run `register.sh` again with it. It
@@ -109,14 +125,14 @@ model is not enabled or the role's Bedrock statement does not cover it.
 | `register.sh` flag | Use |
 |--------------------|-----|
 | `--idle-timeout S` | How long a session may sit idle (waiting on a human counts as idle). |
-| `--session-storage /mnt/flowgraph` | Keep each thread's YAML and event journal across microVM stops (AgentCore Preview feature). |
+| `--session-storage /mnt/flowgraph` | Keep each thread's YAML and event journal (and, with SQLite, its checkpoints) across microVM stops (AgentCore Preview feature). |
 | `--subnets … --security-groups …` | VPC mode, to reach private resources such as a database. |
 | `--env KEY=VALUE` | Extra environment. Stored in plain text on the runtime: no secrets. |
 | `--dry-run` | Print the request without calling AWS. |
 
 ## Not covered yet
 
-- **Shared Postgres.** Durable checkpoints across microVMs need `DATABASE_URL` and VPC mode
+- **Shared Postgres.** Checkpoints shared across sessions (or with the ECS deployment) need `DATABASE_URL` and VPC mode
   with a security group the database allows. Passing the URL with `--env` puts the password
   in plain text on the runtime; fetch it from Secrets Manager at startup instead before
   relying on it.
