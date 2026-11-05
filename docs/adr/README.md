@@ -22,5 +22,6 @@ Format: [MADR](https://adr.github.io/madr/)-lite — Context · Decision · Stat
 | [0014](./0014-oss-control-plane-client.md) | OSS control-plane client in flowgraph-server | Accepted |
 | [0015](./0015-flowgraph-npm-scope.md) | Publish OSS packages under the `@flowgraph` scope | Accepted |
 | [0016](./0016-workshop-node.md) | `workshop` node: client-owned facilitated HITL | Accepted |
+| [0017](./0017-generative-media-nodes-and-plugin-manifest.md) | Generative media nodes, artifact contract, and node-type metadata | Proposed |
 
 > All current ADRs are Accepted except where noted as superseded. New decisions are added as new ADRs.

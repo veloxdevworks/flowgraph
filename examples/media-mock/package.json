@@ -1,0 +1,19 @@
+{
+  "name": "media-mock-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "flowgraph run media.graph.yaml",
+    "validate": "flowgraph validate media.graph.yaml",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@flowgraph/cli": "workspace:*",
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/testing": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
+  }
+}

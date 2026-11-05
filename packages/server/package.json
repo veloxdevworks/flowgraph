@@ -24,11 +24,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@langchain/langgraph": "^1.4.7",
     "@flowgraph/checkpoint-postgres": "workspace:*",
     "@flowgraph/core": "workspace:*",
+    "@flowgraph/media": "workspace:*",
     "@flowgraph/spec": "workspace:*",
     "@flowgraph/workshop-session": "workspace:*",
+    "@langchain/langgraph": "^1.4.7",
     "jose": "^6.2.14",
     "yaml": "^2.9.0"
   },

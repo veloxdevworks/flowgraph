@@ -61,6 +61,8 @@ import { terminateThreadServices, startService, statusService, type ServiceStart
 import { cleanupWorktrees } from "./nodes/worktree.js";
 import { registerProvider, type ProviderAdapter } from "./providers/index.js";
 import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
+import { GRAPH_MEDIA_PROVIDERS, deriveMediaProviders, type GraphMediaProviders } from "./media/registry.js";
+import type { MediaProvider } from "./media/types.js";
 import { ReplayStore, RUN_SCOPE_KEY, replayNodeKey, replayStoreFromInterrupts, runScopeOf, type RunScope } from "./providers/replay-cache.js";
 import { collectMapResults, mapSyntheticIds, runMapItem, type MapTask } from "./nodes/map.js";
 import type { ToolWiring } from "./providers/tools.js";
@@ -147,6 +149,11 @@ export interface CompileOptions {
   memoryUnavailableHint?: string;
   extraFactories?: NodeFactory[];
   providers?: ProviderAdapter[];
+  /**
+   * Media providers (image/video/model3d) this graph may use, in addition to
+   * those derived from its `providers:` block.
+   */
+  mediaProviders?: MediaProvider[];
   interruptBefore?: string[];
   interruptAfter?: string[];
   /** Programmatic hooks registered in addition to YAML-bound + default hooks. */
@@ -1014,6 +1021,15 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       exclusive: !!opts.nodePolicy,
     };
     (baseCtx as Record<symbol, unknown>)[GRAPH_PROVIDERS] = graphProviders;
+  }
+  {
+    // Media providers: explicit ones first, then those implied by `providers:`
+    // (a langchain xai/openai entry doubles as an image/video provider).
+    const media = [...(opts.mediaProviders ?? []), ...deriveMediaProviders(spec.providers)];
+    if (media.length) {
+      const graphMedia: GraphMediaProviders = { byName: new Map(media.map((p) => [p.name, p])) };
+      (baseCtx as Record<symbol, unknown>)[GRAPH_MEDIA_PROVIDERS] = graphMedia;
+    }
   }
 
   const defaultRetry = spec.runtime?.retry;

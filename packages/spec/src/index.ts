@@ -20,6 +20,15 @@ export {
   RouterWithSchema,
   HttpWithSchema,
   DemoWithSchema,
+  ArtifactSchema,
+  ArtifactRoleSchema,
+  ImageWithSchema,
+  VideoWithSchema,
+  Model3dWithSchema,
+  AudioWithSchema,
+  AudioKindSchema,
+  Model3dFormatSchema,
+  MediaProviderConfigSchema,
   FunctionWithSchema,
   MemoryWithSchema,
   MemoryScopeSchema,
@@ -112,11 +121,17 @@ export type {
   CursorProviderConfig,
   CliProviderConfig,
   DeepAgentsProviderConfig,
+  MediaProviderConfig,
+  Artifact,
+  ImageWith,
+  VideoWith,
+  Model3dWith,
+  AudioWith,
   CliVendor,
   LangChainVendor,
 } from "./schema.js";
 
-export { generateJsonSchema } from "./json-schema.js";
+export { generateJsonSchema, zodToConfigJsonSchema } from "./json-schema.js";
 
 export type {
   WorkshopAgendaItem,
