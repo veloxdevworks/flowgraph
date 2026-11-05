@@ -17,6 +17,9 @@ import {
   type CliVendor,
 } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
+// Registers the media vendors (xai, openai, tripo, meshy, elevenlabs) so `image`/`video`/`model3d`/`audio`
+// nodes can resolve providers declared in the graph.
+import "@flowgraph/media";
 
 async function loadClaudeFactory() {
   try {

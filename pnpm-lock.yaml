@@ -367,6 +367,9 @@ importers:
       '@flowgraph/expr':
         specifier: workspace:*
         version: link:../expr
+      '@flowgraph/media':
+        specifier: workspace:*
+        version: link:../media
       '@flowgraph/skills':
         specifier: workspace:*
         version: link:../skills
@@ -496,6 +499,27 @@ importers:
         specifier: ^4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
 
+  packages/media:
+    devDependencies:
+      '@flowgraph/core':
+        specifier: workspace:*
+        version: link:../core
+      '@flowgraph/spec':
+        specifier: workspace:*
+        version: link:../spec
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.1.0
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(postcss@8.5.16)(typescript@5.8.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.8.0
+        version: 5.8.3
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(vite@6.4.3(@types/node@26.1.0)(yaml@2.9.0))
+
   packages/observability-otel:
     dependencies:
       '@opentelemetry/api':
@@ -608,6 +632,9 @@ importers:
       '@flowgraph/core':
         specifier: workspace:*
         version: link:../core
+      '@flowgraph/media':
+        specifier: workspace:*
+        version: link:../media
       '@flowgraph/spec':
         specifier: workspace:*
         version: link:../spec

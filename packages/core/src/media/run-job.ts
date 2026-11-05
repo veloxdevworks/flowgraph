@@ -43,16 +43,18 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
   }
 
   let handle: JobHandle;
+  let submittedAt = existing?.submittedAt ?? new Date().toISOString();
   if (existing?.state === "submitted") {
     handle = existing.handle;
     opts.emit("resumed", { provider: provider.name, jobId: handle.id });
   } else {
     handle = await provider.start(req, mctx);
+    submittedAt = new Date().toISOString();
     await journal.write({
       version: 1,
       state: handle.done ? "done" : "submitted",
       provider: provider.name,
-      submittedAt: new Date().toISOString(),
+      submittedAt,
       handle,
       ...(handle.done ? { artifacts: handle.done } : {}),
     });
@@ -77,6 +79,11 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
     for (;;) {
       mctx.signal?.throwIfAborted();
       status = await provider.poll(handle, mctx);
+      if (status.handle) {
+        handle = status.handle;
+        await journal.write({ version: 1, state: "submitted", provider: provider.name, submittedAt, handle });
+        opts.emit("stage", { provider: provider.name, jobId: handle.id });
+      }
       if (status.progress !== undefined && status.progress !== lastProgress) {
         lastProgress = status.progress;
         opts.emit("progress", { provider: provider.name, jobId: handle.id, progress: status.progress });
@@ -112,7 +119,7 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
     version: 1,
     state: "done",
     provider: provider.name,
-    submittedAt: new Date().toISOString(),
+    submittedAt,
     handle,
     artifacts,
     costUSD,

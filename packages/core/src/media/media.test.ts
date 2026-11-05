@@ -212,6 +212,38 @@ describe("async jobs and the journal", () => {
     expect(calls.fetch).toBe(1);
   });
 
+  it("journals a replacement handle from poll so a crash after a stage switch does not repeat the paid stage", async () => {
+    const calls = newCalls();
+    const created: string[] = [];
+    let crashAfterStage = true;
+    const provider = asyncProvider(calls, [], {
+      async start(req: MediaRequest): Promise<JobHandle> {
+        calls.start.push(req);
+        return { id: "preview-1", stage: "preview" };
+      },
+      async poll(h: JobHandle): Promise<JobStatus> {
+        calls.poll++;
+        if (h["stage"] === "preview") {
+          created.push("refine"); // the paid second stage is created here
+          return { state: "running", progress: 50, handle: { id: "refine-1", stage: "refine" } };
+        }
+        if (crashAfterStage) {
+          crashAfterStage = false;
+          throw new Error("simulated crash right after the stage switch");
+        }
+        return { state: "done" };
+      },
+    });
+    const g = graph([{ id: "m", type: "model3d", provider: "fake", with: { prompt: "a chair" } }]);
+
+    const first = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "ts" });
+    expect(first.status).toBe("error");
+    const second = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "ts" });
+    expect(second.status).toBe("completed");
+    expect(calls.start).toHaveLength(1);
+    expect(created).toEqual(["refine"]); // created once, not again after the crash
+  });
+
   it("clears the journal when a job fails so a retry submits a fresh job", async () => {
     const calls = newCalls();
     const provider = asyncProvider(calls, [{ state: "failed", error: "content policy" }]);

@@ -99,6 +99,13 @@ export interface JobStatus {
   error?: string;
   /** Actual cost, when the vendor reports it. */
   costUSD?: number;
+  /**
+   * A replacement handle to journal before polling continues. Multi-stage
+   * vendors (for example Meshy's preview then refine) return it right after
+   * they create the next paid stage, so a crash re-attaches to that stage
+   * instead of creating it again.
+   */
+  handle?: JobHandle;
 }
 
 export interface MediaProvider {

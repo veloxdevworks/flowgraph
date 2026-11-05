@@ -10,6 +10,9 @@ import {
   mockProvider,
 } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
+// Registers the media vendors (xai, openai, tripo, meshy, elevenlabs) so `image`/`video`/`model3d`/`audio`
+// nodes can resolve providers declared in the graph.
+import "@flowgraph/media";
 import { ServerRequestError } from "./errors.js";
 
 /** Refuse providers an untrusted author may not configure (checked again when the graph runs). */
