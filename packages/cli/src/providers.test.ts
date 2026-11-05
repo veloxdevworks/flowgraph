@@ -83,4 +83,18 @@ describe("buildProviders", () => {
     expect(providers).toHaveLength(1);
     expect(providers[0]!.name).toBe("claude");
   });
+  it("leaves kind: media entries to compileGraph (no agent adapter, no error)", async () => {
+    const spec = {
+      metadata: { name: "test" },
+      nodes: [],
+      edges: [],
+      providers: {
+        main: { kind: "langchain" as const, vendor: "anthropic" as const },
+        art: { kind: "media" as const, vendor: "tripo" },
+      },
+    } as unknown as GraphSpec;
+
+    const providers = await buildProviders(spec);
+    expect(providers.map((p) => p.name)).toEqual(["main"]);
+  });
 });

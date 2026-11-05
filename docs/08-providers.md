@@ -137,6 +137,25 @@ Install the vendor package you reference (`@langchain/anthropic`, `@langchain/op
 
 MCP OAuth tokens (`.flowgraph/mcp-oauth/`) are independent of LLM API keys — agent nodes reuse the same MCP hub as deterministic `mcp` nodes.
 
+### Media providers (image / video / 3D)
+
+`image`, `video` and `model3d` nodes use **media providers**, a separate interface from the agent `ProviderAdapter` (media generation is an async job, not an agent loop; see [ADR-0017](./adr/0017-generative-media-nodes-and-plugin-manifest.md)). Credentials are configured **once** in the same `providers:` block:
+
+```yaml
+providers:
+  grok:   { kind: langchain, vendor: xai }      # agents AND images/video use this one entry
+  gpt:    { kind: langchain, vendor: openai }   # agents AND image generation
+  tripo:  { kind: media, vendor: tripo }        # dedicated media backend, no LLM side
+  meshy:  { kind: media, vendor: meshy, apiKeyEnv: MESHY_KEY }
+```
+
+- A `langchain` entry whose vendor has a registered media adapter (`xai`, `openai`) automatically **also** serves media under the same name, reusing its `apiKeyEnv` and `baseUrl`. The entry's `model` is an LLM model id and is not used for media; set `model:` on the media node instead.
+- `kind: media` is for backends with no LLM side, or to pin separate credentials. Fields: `vendor`, `model`, `baseUrl`, `apiKeyEnv`, `options`. The key is read at call time through the run's secret provider (`env`/`dotenv`).
+- A bare vendor name also works (`provider: xai` on a node) using that vendor's default key env var.
+- A node without `provider:` uses `config.defaults.provider` when that provider can do the modality, otherwise the only provider that can, otherwise fails listing the candidates.
+- **Third-party vendors:** a plugin loaded through `imports[].providers` calls `registerMediaVendor({ vendor, modalities, create })` (or `registerMediaProvider`) from `@flowgraph/core`; `kind: media` entries then name the vendor. A `MediaProvider` implements `start` / `poll` / `fetch` / `cancel` and persists outputs through the supplied `saveOutput`.
+- On the hosted server, an untrusted author's `kind: media` entry is subject to the same endpoint checks as `langchain` entries (no `baseUrl`).
+
 ### Local CLI providers (`kind: cli`)
 
 When Claude Code, Cursor CLI, Codex, or Grok Build is installed on `PATH`, you can run agent nodes against that local CLI instead of an API key:

@@ -959,6 +959,66 @@ runtime:
 
 ---
 
+## 9d. `image` / `video` / `model3d` — generative media
+
+Generate images, video clips and 3D assets. All three share one contract (see [ADR-0017](./adr/0017-generative-media-nodes-and-plugin-manifest.md)): pick a **media provider**, run (or re-attach to) a job, save the results as **Artifacts**.
+
+```yaml
+providers:
+  grok:  { kind: langchain, vendor: xai }   # one entry: LLM + image + video, configured once
+  tripo: { kind: media, vendor: tripo }     # dedicated media backend (apiKeyEnv: TRIPO_API_KEY by default)
+
+nodes:
+  - id: concept
+    type: image
+    provider: grok                 # any provider that supports images
+    # model: <vendor model id>    # optional; the vendor default otherwise
+    with:
+      prompt: "a lighthouse at dusk, painterly"
+      aspectRatio: "16:9"
+      count: 2
+
+  - id: mesh
+    type: model3d
+    provider: tripo
+    with:
+      input: "{{ state.outputs.concept.artifact }}"   # image-to-3D from the previous node
+      format: glb
+      texture: true
+```
+
+| Field | Applies to | Notes |
+|---|---|---|
+| `prompt` | all | Required for `image`; `video`/`model3d` need a `prompt`, an `input`, or both. Templates allowed. |
+| `input` | all | Reference input(s): an Artifact, a media node's whole output, a `{ path }`/`{ url }` object, a workspace path, an http(s) URL or a `data:` URI. Local paths must resolve **inside the run workspace**. |
+| `count` | all | Outputs wanted (image ≤ 10, video/model3d ≤ 4). Split into several jobs when the vendor produces fewer per job. |
+| `size`, `aspectRatio`, `quality` | image | Vendor-interpreted strings. |
+| `duration` (seconds), `aspectRatio`, `resolution` | video | |
+| `mode` (`text`/`image`/`multiview`), `format` (`glb` default, `gltf`, `fbx`, `obj`, `usdz`, `stl`), `texture` | model3d | `mode` defaults from the number of inputs. |
+| `seed`, `negativePrompt` | all | Passed when the vendor supports them. |
+| `params` | all | Vendor passthrough options. |
+| `timeout` | all | Whole-job limit (defaults: image 5m, video/model3d 15m). On timeout the job is left running and a retry re-attaches. |
+
+**Output** (`state.outputs.<id>`, or per `output:`):
+
+```jsonc
+{
+  "artifact": { "kind": "artifact", "path": ".flowgraph/artifacts/<thread>/<node>/<job>-0.png", "mimeType": "image/png", "sizeBytes": 123456, "role": "image", "sha256": "…", "meta": { "width": 1024, "height": 1024, "source": { "provider": "grok", "model": "…" } } },
+  "artifacts": [ /* every output */ ],
+  "count": 2, "provider": "grok", "vendor": "xai", "costUSD": 0.04, "reused": false
+}
+```
+
+Files live under `<workspace>/.flowgraph/artifacts/<thread>/<node>/`; state holds only the record.
+
+**Durability and cost.** Media nodes are `sideEffecting` and spend money. A **write-ahead job journal** (`.flowgraph/jobs/<thread>/…`) is written the moment a vendor accepts a job, so a crash, retry or resume **re-attaches to the job in flight instead of submitting (and paying for) a second one**, and re-running the same request in the same thread reuses the finished files (`reused: true`, no cost charged). A failed or canceled job clears its journal entry so a retry submits fresh. Reported or estimated cost is charged to `runtime.budget` (`maxUSD`). One narrow window remains: a crash between the vendor accepting a job and the journal write finishing (milliseconds) can orphan a billed job.
+
+**Events:** `custom.media.job` with `phase` = `submitted | resumed | progress | done | reused`.
+
+**Under a host node policy** (`outboundHttp`), URL inputs are refused; pass an Artifact or workspace path instead.
+
+---
+
 ## 9. Built-in node summary
 
 | `type` | Purpose | Capabilities | Package |
@@ -981,6 +1041,9 @@ runtime:
 | `wait` | Delay / condition / signal / inbound webhook gate | interruptible | core |
 | `workshop` | Facilitated agenda session (human answers per item) | interruptible | core |
 | `worktree` | Add / remove / list isolated git worktrees | side-effecting | core |
+| `image` | Generate / edit images | side-effecting | core (+ a media provider) |
+| `video` | Generate video clips | side-effecting | core (+ a media provider) |
+| `model3d` | Generate 3D assets (GLB, FBX, …) | side-effecting | core (+ a media provider) |
 
 ---
 

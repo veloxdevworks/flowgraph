@@ -181,6 +181,16 @@ describe("untrusted outbound targets and provider endpoints", () => {
     await expect(buildServerProviders(parse(`config:\n  defaults: { provider: ollama, model: llama3 }\n`), process.cwd(), {})).resolves.toBeDefined();
   });
 
+  it("accepts kind: media entries but refuses a custom endpoint on them for an untrusted author", async () => {
+    const parse = (extra: string) => parseGraphYaml(graph(`  - { id: a, type: hitl, with: { mode: approve, message: "ok?" } }`, extra), { expandEnv: false }).spec!;
+    await expect(
+      buildServerProviders(parse(`providers:\n  art: { kind: media, vendor: tripo }\n`), process.cwd(), { untrusted: true }),
+    ).resolves.toEqual([]);
+    await expect(
+      buildServerProviders(parse(`providers:\n  art: { kind: media, vendor: tripo, baseUrl: "http://10.0.0.1" }\n`), process.cwd(), { untrusted: true }),
+    ).rejects.toMatchObject({ status: 403, code: "PROVIDER_ENDPOINT_BLOCKED" });
+  });
+
   it("builds the compile policy with the operator allow list", () => {
     expect(UNTRUSTED_NODE_POLICY.outboundHttp).toEqual({ publicOnly: true });
     expect(untrustedNodePolicy([]).outboundHttp).toEqual({ publicOnly: true });
