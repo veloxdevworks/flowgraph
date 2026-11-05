@@ -27,6 +27,7 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, ActiveSession>();
   private readonly maxEvents: number;
   private readonly globalListeners = new Set<GlobalEventListener>();
+  private readonly statusListeners = new Set<(threadId: string, status: RunStatus) => void>();
   private readonly onPersist: ((threadId: string, event: ServerEvent) => void) | undefined;
   private readonly loadJournal: ((threadId: string) => ServerEvent[]) | undefined;
 
@@ -121,7 +122,27 @@ export class SessionRegistry {
 
   setStatus(threadId: string, status: RunStatus): void {
     const s = this.sessions.get(threadId);
-    if (s) s.status = status;
+    if (!s) return;
+    s.status = status;
+    for (const listener of this.statusListeners) {
+      try {
+        listener(threadId, status);
+      } catch {
+        // ignore listener errors
+      }
+    }
+  }
+
+  /**
+   * Be told whenever a thread's run status changes. A run's last event is pushed
+   * before its status leaves "running" (the meta file is written in between), so
+   * a stream that must end with the run watches this as well as the events.
+   */
+  onStatus(listener: (threadId: string, status: RunStatus) => void): () => void {
+    this.statusListeners.add(listener);
+    return () => {
+      this.statusListeners.delete(listener);
+    };
   }
 
   pushEvent(threadId: string, event: ServerEvent): void {

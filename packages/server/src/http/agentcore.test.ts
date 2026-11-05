@@ -8,6 +8,10 @@ import { defaultServerConfig } from "../types.js";
 import { RunService } from "../run-service.js";
 import { SessionRegistry } from "../session-registry.js";
 import { createHttpServer } from "./app.js";
+import { streamEventsUntilTerminal } from "./sse.js";
+import { EventEmitter } from "node:events";
+import type { ServerResponse } from "node:http";
+import type { ServerEvent } from "../types.js";
 
 const TOKEN = "agentcore-test-token";
 
@@ -136,5 +140,41 @@ describe("SessionRegistry", () => {
     expect(registry.hasLiveRun("live")).toBe(true);
     registry.setStatus("live", "completed");
     expect(registry.hasLiveRun("live")).toBe(false);
+  });
+});
+
+describe("streamEventsUntilTerminal", () => {
+  function fakeRes(): ServerResponse & { chunks: string[] } {
+    const res = new EventEmitter() as EventEmitter & { chunks: string[]; writableEnded: boolean };
+    res.chunks = [];
+    res.writableEnded = false;
+    Object.assign(res, {
+      writeHead: () => res,
+      write: (c: string) => res.chunks.push(c),
+      end: () => {
+        res.writableEnded = true;
+      },
+    });
+    return res as unknown as ServerResponse & { chunks: string[] };
+  }
+
+  function ev(type: string, seq: number, runId = "r1"): ServerEvent {
+    return { id: `e${seq}`, type, ts: "", runId, threadId: "t", graph: "g", scope: {}, data: {}, seq } as unknown as ServerEvent;
+  }
+
+  it("ends when the run stops being live after its last event was already sent", async () => {
+    const registry = new SessionRegistry();
+    registry.create({ threadId: "t", runId: "r1", graphName: "g", yaml: "" });
+    registry.setStatus("t", "running");
+    registry.pushEvent("t", ev("run.start", 1));
+    registry.pushEvent("t", ev("run.end", 2));
+    // The client already has run.end (seq 2) and reconnects before the status flips.
+    const done = streamEventsUntilTerminal(fakeRes(), registry, "t", { afterSeq: 2 });
+    let ended = false;
+    void done.then(() => (ended = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ended).toBe(false);
+    registry.setStatus("t", "completed");
+    await done;
   });
 });

@@ -41,12 +41,15 @@ Options:
                             a private database or other VPC resources. Default: PUBLIC network mode.
   --security-groups a,b     VPC mode: security group ids
   --env KEY=VALUE           extra container environment (repeatable). Values are stored in plain text
-                            on the runtime and shown by get-agent-runtime: no secrets here.
+                            on the runtime and shown by get-agent-runtime: no secrets here. An update
+                            replaces the environment, so pass the same --env flags on every run.
   --wait SECONDS            how long to wait for READY (default 600; 0 = do not wait)
   --dry-run                 print the request instead of sending it
 EOF
   exit "${1:-1}"
 }
+# Usage after a bad invocation goes to stderr.
+usage_error() { usage 1 >&2; }
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -65,22 +68,23 @@ while [[ $# -gt 0 ]]; do
     --wait) WAIT_SECONDS="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage 0 ;;
-    *) echo "unknown option: $1" >&2; usage ;;
+    *) echo "unknown option: $1" >&2; usage_error ;;
   esac
 done
 
-[[ -n "$IMAGE_URI" && -n "$ROLE_ARN" ]] || usage
+[[ -n "$IMAGE_URI" && -n "$ROLE_ARN" ]] || usage_error
 command -v jq >/dev/null || die "jq is required"
 [[ "$NAME" =~ ^[a-zA-Z][a-zA-Z0-9_]{0,47}$ ]] \
   || die "--name \"$NAME\": AgentCore runtime names are letters, digits and _ only, starting with a letter (max 48)"
 [[ "$ROLE_ARN" =~ ^arn:aws(-[^:]+)?:iam::[0-9]{12}:role/.+ ]] || die "--role-arn does not look like an IAM role ARN"
-if ! [[ "$IDLE_TIMEOUT" =~ ^[0-9]+$ ]] || (( IDLE_TIMEOUT < 60 || IDLE_TIMEOUT > 1209600 )); then
+# No leading zeros: bash arithmetic would read them as octal, and jq rejects them.
+if ! [[ "$IDLE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || (( IDLE_TIMEOUT < 60 || IDLE_TIMEOUT > 1209600 )); then
   die "--idle-timeout must be 60..1209600 seconds"
 fi
-if ! [[ "$MAX_LIFETIME" =~ ^[0-9]+$ ]] || (( MAX_LIFETIME < 60 )); then
+if ! [[ "$MAX_LIFETIME" =~ ^[1-9][0-9]*$ ]] || (( MAX_LIFETIME < 60 )); then
   die "--max-lifetime must be at least 60 seconds"
 fi
-[[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || die "--wait must be a number of seconds"
+[[ "$WAIT_SECONDS" =~ ^(0|[1-9][0-9]*)$ ]] || die "--wait must be a number of seconds"
 if [[ -n "$SESSION_STORAGE" ]]; then
   [[ "$SESSION_STORAGE" =~ ^/mnt/[a-zA-Z0-9._-]+/?$ ]] \
     || die "--session-storage must be one directory under /mnt (e.g. /mnt/flowgraph)"
@@ -174,15 +178,47 @@ find_runtime_id() {
   done
 }
 
+# A role created moments ago (create-role.sh) can take a few seconds to reach
+# AgentCore; retry while the error is about the role.
+call_with_role_retry() {
+  local attempt out err
+  err=$(mktemp)
+  for attempt in 1 2 3 4 5 6; do
+    if out=$("$@" 2>"$err"); then
+      rm -f "$err"
+      printf '%s' "$out"
+      return 0
+    fi
+    if (( attempt < 6 )) && grep -qiE 'role|assume' "$err"; then
+      echo "AgentCore rejected the role (attempt $attempt; IAM may still be propagating), retrying in 10s:" >&2
+      sed 's/^/  /' "$err" >&2
+      sleep 10
+      continue
+    fi
+    cat "$err" >&2
+    rm -f "$err"
+    return 1
+  done
+}
+
 RUNTIME_ID=$(find_runtime_id)
 if [[ -n "$RUNTIME_ID" ]]; then
   echo "Updating AgentCore runtime $NAME ($RUNTIME_ID) in $REGION"
-  RESULT=$("${CTRL[@]}" update-agent-runtime \
-    --cli-input-json "$(jq --arg id "$RUNTIME_ID" '{agentRuntimeId: $id} + .' <<<"$BODY")")
+  # An update replaces the configuration. Keep inbound auth and header settings
+  # this script does not manage (set up in the console or by hand).
+  CURRENT=$("${CTRL[@]}" get-agent-runtime --agent-runtime-id "$RUNTIME_ID")
+  UPDATE=$(jq --arg id "$RUNTIME_ID" --argjson cur "$CURRENT" \
+    '{agentRuntimeId: $id} + .
+     + (if $cur.authorizerConfiguration then {authorizerConfiguration: $cur.authorizerConfiguration} else {} end)
+     + (if $cur.requestHeaderConfiguration then {requestHeaderConfiguration: $cur.requestHeaderConfiguration} else {} end)' \
+    <<<"$BODY")
+  RESULT=$(call_with_role_retry "${CTRL[@]}" update-agent-runtime --cli-input-json "$UPDATE") \
+    || die "update-agent-runtime failed"
 else
   echo "Creating AgentCore runtime $NAME in $REGION"
-  RESULT=$("${CTRL[@]}" create-agent-runtime \
-    --cli-input-json "$(jq --arg name "$NAME" '{agentRuntimeName: $name} + .' <<<"$BODY")")
+  RESULT=$(call_with_role_retry "${CTRL[@]}" create-agent-runtime \
+    --cli-input-json "$(jq --arg name "$NAME" '{agentRuntimeName: $name} + .' <<<"$BODY")") \
+    || die "create-agent-runtime failed"
 fi
 
 RUNTIME_ID=$(jq -r '.agentRuntimeId' <<<"$RESULT")

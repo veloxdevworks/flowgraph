@@ -4,8 +4,9 @@
 # AgentCore runs each runtime session in its own microVM, and a run lives in the
 # memory of the microVM that started it. This script derives the session id from
 # the thread id, so every call for a thread (start, events, cancel, resume, ...)
-# reaches the same microVM. Response events stream to stdout as SSE; AWS CLI
-# response metadata goes to stderr.
+# reaches the same microVM. The response (SSE events) is written to stdout as
+# the AWS CLI receives it, which may be in bursts rather than event by event;
+# AWS CLI response metadata goes to stderr.
 set -euo pipefail
 
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
@@ -98,13 +99,20 @@ case "$ACTION" in
   resume) [[ -n "$RESUME_JSON" ]] || die "resume needs --resume" ;;
 esac
 
+# The payload goes through a file: one command-line argument is capped at 128 KB
+# on Linux, and graph YAML can be larger.
+PAYLOAD_FILE=$(mktemp)
+trap 'rm -f "$PAYLOAD_FILE"' EXIT
+printf '%s' "$PAYLOAD" >"$PAYLOAD_FILE"
+
 # The body goes to fd 3 (our stdout); the CLI's own JSON output (status code,
 # session id) goes to stderr.
 aws bedrock-agentcore invoke-agent-runtime \
+  --no-cli-pager \
   --region "$REGION" \
   --agent-runtime-arn "$RUNTIME_ARN" \
   --runtime-session-id "$SESSION_ID" \
   --content-type application/json \
   --cli-binary-format raw-in-base64-out \
-  --payload "$PAYLOAD" \
+  --payload "file://$PAYLOAD_FILE" \
   /dev/fd/3 3>&1 1>&2

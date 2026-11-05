@@ -116,6 +116,7 @@ export function streamEventsUntilTerminal(
 
     let done = false;
     let unsub: (() => void) | undefined;
+    let unsubStatus: (() => void) | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
 
     const finish = () => {
@@ -123,6 +124,7 @@ export function streamEventsUntilTerminal(
       done = true;
       if (heartbeat) clearInterval(heartbeat);
       unsub?.();
+      unsubStatus?.();
       if (!res.writableEnded) res.end();
       resolve();
     };
@@ -144,12 +146,24 @@ export function streamEventsUntilTerminal(
       }
     }
 
-    unsub = registry.subscribe(threadId, write, opts.afterSeq);
+    try {
+      unsub = registry.subscribe(threadId, write, opts.afterSeq);
+    } catch (err) {
+      log("warn", "events.subscribe-failed", { threadId, error: err instanceof Error ? err.message : String(err) });
+      finish();
+      return;
+    }
     if (done) {
       unsub();
       return;
     }
 
+    // End when the run stops being live, too: its terminal event can come before
+    // the status changes (a client reconnecting with afterSeq past it sees none),
+    // and some paths (a failed continue, a cancel) change the status without one.
+    unsubStatus = registry.onStatus((id) => {
+      if (id === threadId && !registry.hasLiveRun(threadId)) finish();
+    });
     if (!registry.hasLiveRun(threadId)) {
       finish();
       return;
