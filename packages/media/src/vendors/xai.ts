@@ -101,6 +101,7 @@ interface ImageItem {
 interface ImageResponse {
   data?: ImageItem[] | null;
   request_id?: string;
+  usage?: { cost_in_usd_ticks?: number | null } | null;
 }
 
 interface VideoPollResponse {
@@ -226,7 +227,12 @@ export const xaiVendor: MediaVendor = {
       if (done.length === 0) {
         throw new Error("xai: the response contained no images (the result may have been filtered by moderation)");
       }
-      return { id: res.request_id ?? `xai-image-${Date.now()}`, done };
+      const ticks = res.usage?.cost_in_usd_ticks;
+      return {
+        id: res.request_id ?? `xai-image-${Date.now()}`,
+        done,
+        ...(typeof ticks === "number" ? { costUSD: ticks / TICKS_PER_USD } : {}),
+      };
     }
 
     async function startVideo(req: MediaRequest, ctx: MediaCallContext): Promise<JobHandle> {

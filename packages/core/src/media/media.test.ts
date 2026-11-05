@@ -134,6 +134,22 @@ describe("image node", () => {
     expect(out.costUSD).toBeCloseTo(0.08);
   });
 
+  it("charges the vendor-reported cost of a synchronous call instead of the estimate", async () => {
+    const calls = newCalls();
+    const provider = syncProvider(calls, {
+      async start(req: MediaRequest, ctx: MediaCallContext): Promise<JobHandle> {
+        calls.start.push(req);
+        return { id: "s", costUSD: 0.123, done: [await ctx.saveOutput({ bytes: PNG_1x1, mimeType: "image/png" })] };
+      },
+    });
+    const compiled = await compileGraph(
+      graph([{ id: "img", type: "image", provider: "fake", with: { prompt: "x" } }]),
+      { cwd: dir, mediaProviders: [provider] },
+    );
+    const res = await compiled.run({ threadId: "tcost" });
+    expect((res.state["outputs"] as Outputs)["img"]!.costUSD).toBeCloseTo(0.123);
+  });
+
   it("splits a count larger than maxPerJob into separate jobs", async () => {
     const calls = newCalls();
     const compiled = await compileGraph(

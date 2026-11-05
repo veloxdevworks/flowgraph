@@ -64,7 +64,8 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
   const estimate = provider.estimateCostUSD?.(req);
 
   if (handle.done) {
-    return { artifacts: handle.done, costUSD: estimate ?? 0, reused: false };
+    const reported = typeof handle.costUSD === "number" ? handle.costUSD : undefined;
+    return { artifacts: handle.done, costUSD: reported ?? estimate ?? 0, reused: false };
   }
   if (!provider.poll || !provider.fetch) {
     throw new Error(`media provider "${provider.name}" returned a pending job but has no poll/fetch`);

@@ -54,7 +54,7 @@
  *   - JSON edit mode (selected here only when `params` carries object values such as `mask`/`markup`) works as the
  *     API reference describes; data URLs are limited to 20,971,520 characters per the schema.
  *   - A response `id` is not documented; we use one if present, else generate a local id.
- *   - Cost: `estimateCostUSD` is computed after the call from the vendor-reported `usage` and the rates above, and
+ *   - Cost: the cost is computed after the call from the vendor-reported `usage` and the rates above, and returned as the job handle's `costUSD` (no up-front estimate is possible), and
  *     only against the official API host; it is undefined for unknown models, a custom `baseUrl`, or journal resumes.
  *   - `aspectRatio` -> size conversion for arbitrary ratios relies on the gpt-image-2 "any resolution" rule.
  *
@@ -215,8 +215,6 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
   const defaultParams =
     o["params"] && typeof o["params"] === "object" && !Array.isArray(o["params"]) ? (o["params"] as Record<string, unknown>) : {};
 
-  /** Costs computed from the vendor-reported usage, read back by estimateCostUSD(req) after start(). */
-  const costs = new WeakMap<MediaRequest, number>();
 
   async function start(req: MediaRequest, ctx: MediaCallContext): Promise<JobHandle> {
     if (req.modality !== "image") throw new Error(`${VENDOR}: only the image modality is supported (got ${req.modality}).`);
@@ -300,7 +298,7 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
           if (v === null || v === undefined) continue;
           form.append(k, String(v));
         }
-        for (const im of images) form.append("image[]", new Blob([im.bytes as BlobPart], { type: im.mime }), im.name);
+        for (const im of images) form.append("image[]", new Blob([new Uint8Array(im.bytes)], { type: im.mime }), im.name);
         body = form;
       }
     }
@@ -328,7 +326,6 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
     const mimeType = OUTPUT_MIME[format] ?? "image/png";
 
     const cost = customBase ? undefined : costFromUsage(model, res.usage);
-    if (cost !== undefined) costs.set(req, cost);
 
     const dims = /^(\d+)x(\d+)$/.exec(res.size ?? "");
     const baseMeta = {
@@ -354,7 +351,7 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
       done.push(await ctx.saveOutput(out));
     }
 
-    return { id: res.id ?? `openai-img-${res.created ?? Math.floor(Date.now() / 1000)}-${randomUUID().slice(0, 8)}`, done };
+    return { id: res.id ?? `openai-img-${res.created ?? Math.floor(Date.now() / 1000)}-${randomUUID().slice(0, 8)}`, done, ...(cost !== undefined ? { costUSD: cost } : {}) };
   }
 
   return {
@@ -364,7 +361,6 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
     models: { image: MODELS },
     maxPerJob: { image: MAX_PER_JOB },
     start,
-    estimateCostUSD: (req) => costs.get(req),
   };
 }
 

@@ -87,6 +87,8 @@ export interface JobHandle {
   id: string;
   /** Set by vendors whose call is synchronous: the finished artifacts. */
   done?: Artifact[];
+  /** Actual cost of a synchronous call, when the vendor reports it (preferred over `estimateCostUSD`). */
+  costUSD?: number;
   [extra: string]: unknown;
 }
 
