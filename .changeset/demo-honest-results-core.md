@@ -17,6 +17,6 @@ Fixes:
 - `http.timeout` is honored, and defaults to 30s.
 - `http` transcripts and results mask sensitive response headers such as `Set-Cookie`, URL credentials and sensitive query parameters, string fields with sensitive names, and any `{{ secret.* }}` value the node rendered. A `Set-Cookie` header used to be saved in plaintext.
 - Gates list failed captures in their message and in a new `captureFailures` field instead of dropping them, and present a capture's `extra` files.
-- Preflight checks that Playwright and its browser are ready for `screenshot` and `video`, and that `simctl` really exists rather than only macOS's `xcrun` stub. Missing tools are a preflight error when the capture is `strict`.
+- Preflight starts the browser that `screenshot` and `video` use, and opens a recording page when the capture records video, so it reports a missing or broken browser or ffmpeg before the run. It also checks that `simctl` really exists rather than only macOS's `xcrun` stub. Missing tools are a preflight error when the capture is `strict`.
 - Run issues suggest installing something only when a tool is really missing, and tell a missing Playwright browser apart from a missing package. iOS now points at Xcode, since the command-line tools do not include `simctl`.
 - `video` no longer leaves a second copy of each recording in the artifact directory. `strict` failures now reach the manifest.

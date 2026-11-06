@@ -4,11 +4,17 @@
  */
 
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const BROWSER_INSTALL_COMMAND = "npx playwright install chromium ffmpeg";
+
+/** How captures launch, shared with preflight so the two check the same browser. */
+export const CAPTURE_BROWSER = { headless: true } as const;
+
+const PREFLIGHT_LAUNCH_MS = 30_000;
 
 export type PlaywrightResponse = { status: () => number };
 
@@ -24,7 +30,6 @@ export type PlaywrightPage = {
 
 export type PlaywrightModule = {
   chromium: {
-    executablePath?: () => string;
     launch: (opts?: Record<string, unknown>) => Promise<{
       newContext: (opts?: Record<string, unknown>) => Promise<{
         newPage: () => Promise<PlaywrightPage>;
@@ -86,18 +91,40 @@ export function missingBrowserMessage(): string {
   return `Playwright's browser is not installed. Run \`${BROWSER_INSTALL_COMMAND}\` in the graph workspace.`;
 }
 
-/** Why a capture could not start, or undefined when Playwright looks ready. Starts no browser. */
-export async function playwrightProblem(cwd: string): Promise<string | undefined> {
+/**
+ * Why a capture could not start, or undefined when it can. Starts the browser the
+ * capture uses and closes it, because `chromium.executablePath()` names full Chrome
+ * while headless launches run a separate download. Recording also needs ffmpeg,
+ * which Playwright only looks for when a page opens with video on.
+ */
+export async function playwrightProblem(
+  cwd: string,
+  opts: { video?: boolean } = {},
+): Promise<string | undefined> {
   let pw: PlaywrightModule;
   try {
     pw = await importPlaywright(cwd);
   } catch (err) {
     return errMessage(err);
   }
+  let videoDir: string | undefined;
   try {
-    const executable = pw.chromium.executablePath?.();
-    return executable && !existsSync(executable) ? missingBrowserMessage() : undefined;
+    const browser = await pw.chromium.launch({ ...CAPTURE_BROWSER, timeout: PREFLIGHT_LAUNCH_MS });
+    try {
+      if (opts.video) {
+        videoDir = await mkdtemp(join(tmpdir(), "flowgraph-preflight-"));
+        const context = await browser.newContext({ recordVideo: { dir: videoDir } });
+        await context.newPage();
+        await context.close();
+      }
+    } finally {
+      await browser.close().catch(() => {});
+    }
+    return undefined;
   } catch (err) {
-    return isMissingBrowserError(err) ? missingBrowserMessage() : errMessage(err);
+    if (isMissingBrowserError(err)) return missingBrowserMessage();
+    return `Playwright's browser could not start: ${errMessage(err).split("\n")[0]}`;
+  } finally {
+    if (videoDir) await rm(videoDir, { recursive: true, force: true }).catch(() => {});
   }
 }

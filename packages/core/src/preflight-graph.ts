@@ -235,7 +235,8 @@ async function checkNodeRequires(
 
     const browserMode = withBlock["screenshot"] ? "screenshot" : withBlock["video"] ? "video" : undefined;
     if (browserMode) {
-      const problem = await playwrightProblem(cwd);
+      const shot = withBlock["screenshot"] as { video?: unknown } | undefined;
+      const problem = await playwrightProblem(cwd, { video: browserMode === "video" || Boolean(shot?.video) });
       if (problem) report(problem, `${path}.with.${browserMode}`);
     }
   }

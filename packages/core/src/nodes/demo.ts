@@ -42,6 +42,7 @@ import { createRedactor, DEFAULT_REDACT_PATTERNS } from "../secrets.js";
 import { WORKTREES_CHANNEL } from "../runtime/state-annotation.js";
 import {
   BROWSER_INSTALL_COMMAND,
+  CAPTURE_BROWSER,
   importPlaywright,
   isMissingBrowserError,
   missingBrowserMessage,
@@ -299,7 +300,7 @@ async function captureScreenshot(
   const shotName = `${timestampSlug()}-${slug}.png`;
   const shotPath = join(dir, shotName);
 
-  const browser = await pw.chromium.launch({ headless: true });
+  const browser = await pw.chromium.launch(CAPTURE_BROWSER);
   let extra: DemoExtraArtifact | undefined;
   let pageStatus: number | undefined;
   try {
@@ -381,7 +382,7 @@ async function captureVideo(
   const dir = ensureArtifactDir(ctx.workspace, nodeId);
   const slug = slugify(label ?? "video");
 
-  const browser = await pw.chromium.launch({ headless: true });
+  const browser = await pw.chromium.launch(CAPTURE_BROWSER);
   let videoPath: string | undefined;
   let pageStatus: number | undefined;
   try {

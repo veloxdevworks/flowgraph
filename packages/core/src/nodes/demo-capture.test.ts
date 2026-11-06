@@ -151,6 +151,8 @@ function fakePlaywrightWorkspace(
   opts: {
     status?: number | null;
     launchError?: string;
+    /** Thrown when a page opens with video on, as a missing ffmpeg is. */
+    videoError?: string;
     gotoError?: string;
     emptyScreenshot?: boolean;
     executablePath?: string;
@@ -174,7 +176,9 @@ function fakePlaywrightWorkspace(
           const raw = contextOpts.recordVideo ? join(contextOpts.recordVideo.dir, "random-playwright-name.webm") : null;
           return {
             close: async () => { if (raw) writeFileSync(raw, "webm"); },
-            newPage: async () => ({
+            newPage: async () => {
+              ${opts.videoError ? `if (raw) throw new Error(${JSON.stringify(opts.videoError)});` : ""}
+              return {
               goto: async () => {
                 ${opts.gotoError ? `throw new Error(${JSON.stringify(opts.gotoError)});` : ""}
                 return ${status === null ? "null" : `{ status: () => ${status} }`};
@@ -185,7 +189,8 @@ function fakePlaywrightWorkspace(
               mouse: { wheel: async () => {} },
               screenshot: async ({ path }) => writeFileSync(path, ${opts.emptyScreenshot ? '""' : '"png"'}),
               video: () => (raw ? { path: async () => raw } : null),
-            }),
+              };
+            },
           };
         },
       };
@@ -604,8 +609,10 @@ function graphWith(withConfig: Record<string, unknown>): GraphSpec {
 describe("preflight for browser captures", () => {
   const screenshot = { screenshot: { url: "http://app/" } };
 
+  const missing = "browserType.launch: Executable doesn't exist at /browsers/chrome-headless-shell";
+
   it("warns before the run when the browser is missing", async () => {
-    const cwd = fakePlaywrightWorkspace({ executablePath: "/nonexistent/chromium" });
+    const cwd = fakePlaywrightWorkspace({ launchError: missing });
     const res = await preflightGraphRequires(graphWith(screenshot), { cwd });
 
     expect(res.ok).toBe(true);
@@ -614,19 +621,50 @@ describe("preflight for browser captures", () => {
   });
 
   it("blocks the run when the capture is strict", async () => {
-    const cwd = fakePlaywrightWorkspace({ executablePath: "/nonexistent/chromium" });
+    const cwd = fakePlaywrightWorkspace({ launchError: missing });
     const res = await preflightGraphRequires(graphWith({ strict: true, ...screenshot }), { cwd });
 
     expect(res.ok).toBe(false);
     expect(res.diagnostics[0]).toMatchObject({ severity: "error", code: "BIN_NOT_FOUND" });
   });
 
-  it("stays quiet when the browser is there, and for modes that need none", async () => {
-    const browser = path.join(mkdir(), "chromium");
-    fs.writeFileSync(browser, "");
-    const cwd = fakePlaywrightWorkspace({ executablePath: browser });
+  it("goes by whether the capture's browser starts, not by where full Chrome is", async () => {
+    const onlyHeadless = fakePlaywrightWorkspace({ executablePath: "/nonexistent/full-chrome" });
+    expect((await preflightGraphRequires(graphWith(screenshot), { cwd: onlyHeadless })).diagnostics).toEqual([]);
+
+    const fullChrome = path.join(mkdir(), "full-chrome");
+    fs.writeFileSync(fullChrome, "");
+    const onlyFull = fakePlaywrightWorkspace({ executablePath: fullChrome, launchError: missing });
+    const res = await preflightGraphRequires(graphWith(screenshot), { cwd: onlyFull });
+    expect(res.diagnostics[0]?.message).toMatch(/browser is not installed/);
+  });
+
+  it("does not suggest installing a browser that is there but will not start", async () => {
+    const cwd = fakePlaywrightWorkspace({ launchError: "browserType.launch: Target closed\nCall log:\n  - details" });
+    const res = await preflightGraphRequires(graphWith(screenshot), { cwd });
+
+    expect(res.diagnostics[0]?.message).toContain("could not start: browserType.launch: Target closed");
+    expect(res.diagnostics[0]?.message).not.toMatch(/npx playwright install|Call log/);
+  });
+
+  it("checks ffmpeg only for captures that record", async () => {
+    const cwd = fakePlaywrightWorkspace({
+      videoError: "browserContext.newPage: Executable doesn't exist at /browsers/ffmpeg-mac",
+    });
+    const video = { video: { url: "http://app/" } };
 
     expect((await preflightGraphRequires(graphWith(screenshot), { cwd })).diagnostics).toEqual([]);
+    for (const withConfig of [video, { screenshot: { url: "http://app/", video: true } }]) {
+      const res = await preflightGraphRequires(graphWith(withConfig), { cwd });
+      expect(res.diagnostics[0]?.message).toMatch(/browser is not installed/);
+    }
+  });
+
+  it("stays quiet when captures can run, and for modes that need no browser", async () => {
+    const cwd = fakePlaywrightWorkspace();
+
+    expect((await preflightGraphRequires(graphWith(screenshot), { cwd })).diagnostics).toEqual([]);
+    expect((await preflightGraphRequires(graphWith({ video: { url: "http://app/" } }), { cwd })).diagnostics).toEqual([]);
     expect((await preflightGraphRequires(graphWith({ file: { path: "a" } }), { cwd: mkdir() })).diagnostics).toEqual([]);
   });
 });
