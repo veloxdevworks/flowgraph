@@ -15,6 +15,7 @@ export {
   undeclaredOutputChannelDiagnostics,
   unconditionalFanOutDiagnostics,
   hitlRouteDiagnostics,
+  hitlSelectDiagnostics,
   hitlRouterMergeDiagnostics,
 } from "./runtime/validate-graph.js";
 export {

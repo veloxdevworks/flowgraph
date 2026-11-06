@@ -696,6 +696,12 @@ const MediaCommonWithSchema = BaseWithSchema.extend({
     "Reference input(s): a template resolving to an Artifact, a workspace path, or a URL",
   ),
   seed: z.number().int().optional(),
+  variant: z
+    .union([z.string(), z.number()])
+    .optional()
+    .describe(
+      "Templated cache-buster. Part of the job fingerprint but never sent to the vendor: change it (for example `{{ state.check.round }}`) to force a new job for an otherwise identical request. Unset, null or empty keeps the previous fingerprint.",
+    ),
   params: z.record(z.unknown()).optional().describe("Vendor passthrough options"),
   timeout: DurationSchema.optional().describe("Max wall time for the whole job (default per node type)"),
 });
@@ -899,8 +905,18 @@ export const HitlWithSchema = BaseWithSchema.extend({
       after: z.string().optional(),
     })
     .optional(),
-  /** `mode: review` — artifact paths or demo-manifest refs shown to the human. */
+  /**
+   * `approve` / `choice` / `review` — files shown to the human. Each entry is a template that
+   * may render to an Artifact, an array of Artifacts, a media node's whole output
+   * (`{ artifact, artifacts }`), a workspace-relative path, demo-manifest ref, or an array of those.
+   */
   artifacts: z.array(z.string()).optional(),
+  /**
+   * Let the human pick from `artifacts`: `one` or `many` (default `none`). The answer carries
+   * `selected` (a path, `{ path }`, or an array); only presented artifacts are accepted, and the
+   * node outputs the matching Artifact record(s) as `selected`.
+   */
+  select: z.enum(["none", "one", "many"]).optional(),
   /** `mode: review` — extra decision labels beyond approve / request-changes. */
   decision: z.array(z.string()).optional(),
   /**
