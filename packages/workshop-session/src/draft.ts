@@ -71,3 +71,27 @@ export function appendPath(obj: Record<string, unknown>, path: string, item: unk
   }
   return setPath(obj, path, [...((existing as unknown[] | undefined | null) ?? []), item]);
 }
+
+/** Return a copy of `obj` without the value at `path`; unchanged when the path is absent. */
+export function unsetPath(obj: Record<string, unknown>, path: string): Record<string, unknown> {
+  const segs = parsePath(path);
+  const strip = (node: unknown, i: number): unknown => {
+    const seg = segs[i]!;
+    const last = i === segs.length - 1;
+    if (Array.isArray(node)) {
+      const idx = Number(seg);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= node.length) return node;
+      const copy = node.slice();
+      if (last) copy.splice(idx, 1);
+      else copy[idx] = strip(node[idx], i + 1);
+      return copy;
+    }
+    if (!isPlainObject(node) || !Object.hasOwn(node, seg)) return node;
+    if (last) {
+      const { [seg]: _removed, ...rest } = node;
+      return rest;
+    }
+    return { ...node, [seg]: strip(node[seg], i + 1) };
+  };
+  return strip(obj, 0) as Record<string, unknown>;
+}

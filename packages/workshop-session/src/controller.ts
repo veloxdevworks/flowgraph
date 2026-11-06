@@ -1,5 +1,5 @@
 import { checkWorkshopOutput, uncoveredAgendaItems } from "@flowgraph/spec";
-import { appendPath, deepMerge, isPlainObject, setPath } from "./draft.js";
+import { appendPath, deepMerge, isPlainObject, setPath, unsetPath } from "./draft.js";
 import {
   CONTROLLER_TOOL_NAMES,
   schemaHasRisksList,
@@ -208,7 +208,8 @@ export class WorkshopController {
     const required = this.contract.schema?.["required"];
     if (!Array.isArray(required)) return [];
     return required.filter(
-      (k): k is string => typeof k === "string" && (this.s.draft[k] === undefined || this.s.draft[k] === null),
+      // Same rule as the engine's validateJsonSchema: only an absent key is missing.
+      (k): k is string => typeof k === "string" && this.s.draft[k] === undefined,
     );
   }
 
@@ -250,6 +251,12 @@ export class WorkshopController {
   setField(path: string, value: unknown): void {
     this.assertOpen();
     this.update({ draft: setPath(this.s.draft as Record<string, unknown>, path, value) });
+  }
+
+  /** Remove the value at a dot path (no-op when absent). Throws on a bad path or after the session ended. */
+  unsetField(path: string): void {
+    this.assertOpen();
+    this.update({ draft: unsetPath(this.s.draft as Record<string, unknown>, path) });
   }
 
   /** Deep-merge a patch (arrays replaced). */
