@@ -18,11 +18,21 @@ import { mimeForExtension, roleForMime, toPosix } from "../media/artifacts.js";
 
 export type HitlSelect = "none" | "one" | "many";
 
+/** A `demo` capture that failed: the human must see this, not an absent preview. */
+export interface GateCaptureFailure {
+  reason: string;
+  kind?: string;
+  label?: string;
+  path?: string;
+}
+
 export interface GateArtifacts {
   /** Full records, de-duplicated by path, in the order they were given. */
   artifacts: Artifact[];
   /** Record paths plus every string that could not become a record. */
   artifactRefs: string[];
+  /** `demo` outputs with `ok: false`. Any file they kept is also in `artifacts`. */
+  captureFailures: GateCaptureFailure[];
 }
 
 type Item = { kind: "record"; record: Artifact } | { kind: "path"; value: string };
@@ -37,10 +47,20 @@ function isArtifactRecord(o: Record<string, unknown>): boolean {
   );
 }
 
-function flatten(value: unknown, out: Item[]): void {
+function captureFailureOf(o: Record<string, unknown>): GateCaptureFailure | undefined {
+  if (o["ok"] !== false || typeof o["reason"] !== "string") return undefined;
+  return {
+    reason: o["reason"],
+    ...(typeof o["kind"] === "string" ? { kind: o["kind"] } : {}),
+    ...(typeof o["label"] === "string" ? { label: o["label"] } : {}),
+    ...(typeof o["path"] === "string" ? { path: o["path"] } : {}),
+  };
+}
+
+function flatten(value: unknown, out: Item[], failures: GateCaptureFailure[]): void {
   if (value == null || value === "") return;
   if (Array.isArray(value)) {
-    for (const v of value) flatten(v, out);
+    for (const v of value) flatten(v, out, failures);
     return;
   }
   if (typeof value === "string") {
@@ -55,9 +75,14 @@ function flatten(value: unknown, out: Item[]): void {
       return;
     }
     // A media node's whole output: `artifacts` already contains `artifact`.
-    if (Array.isArray(o["artifacts"])) return flatten(o["artifacts"], out);
-    if (o["artifact"] && typeof o["artifact"] === "object") return flatten(o["artifact"], out);
-    if (typeof o["path"] === "string") return flatten(o["path"], out);
+    if (Array.isArray(o["artifacts"])) return flatten(o["artifacts"], out, failures);
+    if (o["artifact"] && typeof o["artifact"] === "object") return flatten(o["artifact"], out, failures);
+    // A `demo` node's output: its file, the recording kept beside it, and whether it failed.
+    const failure = captureFailureOf(o);
+    if (failure) failures.push(failure);
+    if (typeof o["path"] === "string") flatten(o["path"], out, failures);
+    if (Array.isArray(o["extra"])) flatten(o["extra"], out, failures);
+    return;
   }
   // Numbers, booleans and unrecognised objects have no sane string form here: drop them.
 }
@@ -112,7 +137,8 @@ async function recordConfined(workspace: string, workspaceReal: string, rec: Art
  */
 export async function resolveGateArtifacts(rendered: unknown[], workspace: string): Promise<GateArtifacts> {
   const items: Item[] = [];
-  flatten(rendered, items);
+  const captureFailures: GateCaptureFailure[] = [];
+  flatten(rendered, items, captureFailures);
 
   const workspaceReal = await realpath(workspace).catch(() => path.resolve(workspace));
   const out: Array<{ key: string; record?: Artifact; ref: string }> = [];
@@ -146,7 +172,17 @@ export async function resolveGateArtifacts(rendered: unknown[], workspace: strin
   return {
     artifacts: out.flatMap((o) => (o.record ? [o.record] : [])),
     artifactRefs: out.map((o) => o.ref),
+    captureFailures,
   };
+}
+
+/** Plain text every client shows, so a failed capture never looks like nothing to review. */
+export function captureFailuresNotice(failures: readonly GateCaptureFailure[]): string {
+  const lines = failures.map((f) => {
+    const name = f.label ?? f.kind ?? "capture";
+    return `- ${name}: ${f.reason}`;
+  });
+  return `Capture problems (${failures.length}):\n${lines.join("\n")}`;
 }
 
 function selectedPaths(raw: unknown): string[] {

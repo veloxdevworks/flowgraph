@@ -656,6 +656,7 @@ The interrupt payload (`payload.data`) then carries:
 
 - `artifacts` — full `Artifact` records. A path string that is a file inside the run workspace (after symlink resolution) becomes a record (size, MIME type and role from the extension). A path that is missing or outside the workspace does not, and is never an error.
 - `artifactRefs` — the record paths plus any string that could not become a record (for example a demo-manifest ref). For older clients; never `[object Object]`.
+- `captureFailures` — only when a `demo` output in `with.artifacts` has `ok: false`: `{ reason, kind?, label?, path? }` for each. The same failures are appended to the gate's message, so every client shows them. A `demo` output's `extra` files are presented too.
 - `select` — `"one"` / `"many"` when `with.select` asks for a pick.
 
 Never file bytes: the payload is checkpointed.
@@ -914,7 +915,7 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
   with:
     simulator:
       platform: ios
-      device: "iPhone 15"
+      device: "iPhone 15"      # Android: adb serial of a running device, e.g. emulator-5554
       app: com.example.app
       capture: video
       duration: 15s
@@ -924,15 +925,37 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
 
 | Mode | What it does | Extra deps |
 |---|---|---|
-| `http` | Re-issues the request; writes a JSON transcript (redacted headers) under `.flowgraph/demo/<nodeId>/` | none |
-| `screenshot` | Headless Chromium via Playwright; PNG screenshot (+ tracked `.webm` extra when `video: true`) | optional peer `playwright` (+ `npx playwright install chromium`) |
-| `video` | Headless Chromium page recording; `.webm` is the primary artifact | optional peer `playwright` |
-| `simulator` | iOS (`xcrun simctl`) or Android (`adb`) screenshot / `recordVideo` / `screenrecord` | Xcode CLT or Android SDK platform-tools |
-| `file` | Copies an existing path into the demo artifact dir | none |
+| `http` | Re-issues the request; writes a JSON transcript (credentials masked, see below) under `.flowgraph/demo/<nodeId>/`. `timeout` defaults to 30s | none |
+| `screenshot` | Headless Chromium via Playwright; PNG screenshot (+ tracked `.webm` extra when `video: true`) | optional peer `playwright` (+ `npx playwright install chromium ffmpeg`) |
+| `video` | Headless Chromium page recording; `.webm` is the primary artifact. It covers the page load and `waitFor`, then `duration` more | optional peer `playwright` |
+| `simulator` | iOS (`xcrun simctl`) or Android (`adb`) screenshot / `recordVideo` / `screenrecord`. An iOS `device` is booted if needed; an Android `device` is the serial of one already running. A failed launch or deep link fails the capture instead of recording whatever is on screen. After a launch or deep link the capture waits up to `settle` (default 30s) for the screen to change and hold still; if it never does, the capture still happens and raises a warning issue. A recording starts before the app opens and covers it opening, then runs `duration` more. On iOS a still screen gives a very short clip whatever `duration` says, because `simctl` only writes frames when the screen changes. Android recordings stop at 180s | Xcode (not just the command-line tools) or Android SDK platform-tools |
+| `file` | Copies a file from the run workspace, or from a worktree this thread created, into the demo artifact dir. Anything else is refused, including through a symlink | none |
 
 ### Best effort vs `strict`
 
-By default, capture failures (Playwright missing, DNS error, source file not found, …) **do not fail the run**. The node returns `{ ok: false, kind, reason, capturedAt }` and logs a warning so the rest of the pipeline can continue. Set `with.strict: true` to throw on those same failures when the artifact is required.
+`ok` means the capture worked **and** what it recorded is not a failure:
+
+- **The capture failed** (Playwright missing, DNS error, source file not found, app did not launch, empty output, …): `{ ok: false, kind, reason, capturedAt }`.
+- **The capture recorded a failure** (`http`, `screenshot` or `video` got an HTTP status of 400 or above): `{ ok: false, reason, path, … }`. The file is kept as evidence.
+
+Neither **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
+
+Use `expect` when a different status is the point, such as proving a 404 page:
+
+```yaml
+- id: prove-404
+  type: demo
+  with:
+    screenshot:
+      url: "http://localhost:{{ state.port }}/missing"
+      expect: { status: [404] }   # also on http and video
+```
+
+A gate that lists a failed capture in `with.artifacts` adds a "Capture problems" section to its message and sets `captureFailures` in its data, so the human sees why evidence is missing. See [Reviewing generated assets](#reviewing-generated-assets-artifacts-select-round).
+
+### What transcripts mask
+
+`http` transcripts, and the `request` / `response` in the result, mask sensitive headers, sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. This is best effort: a secret under an innocent name in a response body stays visible. Screenshots and videos are not masked.
 
 ### Result shape
 
@@ -940,13 +963,14 @@ By default, capture failures (Playwright missing, DNS error, source file not fou
 {
   ok: boolean;
   kind: "http" | "screenshot" | "file" | "video" | "simulator";
-  path?: string;         // artifact file path when ok
+  path?: string;         // artifact file path; can be set with ok: false, as evidence
   mimeType?: string;
   sizeBytes?: number;
   reason?: string;       // when ok: false
   capturedAt: string;
   label?: string;
   extra?: Array<{ path, mimeType, kind, sizeBytes? }>; // e.g. screenshot + video
+  pageStatus?: number;   // screenshot and video: HTTP status of the page opened
   // http mode also includes request/response summaries (headers redacted)
 }
 ```

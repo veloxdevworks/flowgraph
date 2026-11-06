@@ -9,13 +9,22 @@
  *  - simulator: iOS (simctl) or Android (adb) screenshot / video
  *  - file: attach an existing file produced earlier in the pipeline
  *
- * Capture failures return `{ ok: false, reason }` unless `with.strict: true`.
+ * `ok` means the capture worked AND what it recorded is not a failure. A capture
+ * that recorded a failure (HTTP 500, an error page) keeps its file as evidence and
+ * reports `{ ok: false, reason, path }`. Failures return rather than throw unless
+ * `with.strict: true`.
  */
 
-import { createRequire } from "node:module";
-import { copyFileSync, mkdirSync, statSync, writeFileSync, existsSync } from "node:fs";
-import { basename, extname, isAbsolute, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { DemoWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
@@ -23,7 +32,22 @@ import { defineNode, type CompiledNode, type BuildContext, type NodeResult } fro
 import type { NodeRunContext } from "../context.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
-import { performHttpRequest, redactHeaders } from "./http-request.js";
+import {
+  performHttpRequest,
+  redactHeaders,
+  redactSensitiveFields,
+  redactUrlSecrets,
+} from "./http-request.js";
+import { createRedactor, DEFAULT_REDACT_PATTERNS } from "../secrets.js";
+import { WORKTREES_CHANNEL } from "../runtime/state-annotation.js";
+import {
+  BROWSER_INSTALL_COMMAND,
+  importPlaywright,
+  isMissingBrowserError,
+  missingBrowserMessage,
+  type PlaywrightPage,
+  type PlaywrightResponse,
+} from "./demo-playwright.js";
 import {
   appendDemoManifestEntry,
   demoManifestKey,
@@ -32,7 +56,7 @@ import {
   type DemoExtraArtifact,
 } from "./demo-manifest.js";
 import { ISSUE_CODE } from "../runtime/run-issues.js";
-import { captureSimulator } from "./demo-simulator.js";
+import { captureSimulator, type SimulatorConfig } from "./demo-simulator.js";
 
 const configSchema = DemoWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -49,6 +73,8 @@ export type DemoResult = {
   capturedAt: string;
   label?: string;
   extra?: DemoExtraArtifact[];
+  /** Screenshot and video modes: the HTTP status of the page that was opened. */
+  pageStatus?: number;
   /** Present for http mode when capture succeeded. */
   request?: {
     method: string;
@@ -115,58 +141,27 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function isMissingModuleError(err: unknown): boolean {
-  const msg = errMessage(err);
-  return (
-    msg.includes("Cannot find module") ||
-    msg.includes("Cannot find package") ||
-    msg.includes("ERR_MODULE_NOT_FOUND") ||
-    (err as NodeJS.ErrnoException)?.code === "ERR_MODULE_NOT_FOUND" ||
-    (err as NodeJS.ErrnoException)?.code === "MODULE_NOT_FOUND"
-  );
+/** Why a status is not success, or undefined when it is. */
+function statusFailure(
+  what: string,
+  status: number | undefined,
+  expected: { status: number[] } | undefined,
+): string | undefined {
+  if (status === undefined) return undefined;
+  if (expected ? expected.status.includes(status) : status < 400) return undefined;
+  const wanted = expected ? `, expected ${expected.status.join(" or ")}` : "";
+  return `${what} returned HTTP ${status}${wanted}`;
 }
 
-type PlaywrightPage = {
-  goto: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
-  waitForSelector: (sel: string, opts?: Record<string, unknown>) => Promise<unknown>;
-  waitForTimeout: (ms: number) => Promise<void>;
-  screenshot: (opts?: Record<string, unknown>) => Promise<Buffer>;
-  mouse: { wheel: (x: number, y: number) => Promise<void> };
-  evaluate: (fn: string | ((...args: unknown[]) => unknown), ...args: unknown[]) => Promise<unknown>;
-  video: () => { path: () => Promise<string> } | null;
-};
+/** An empty file proves nothing, so it never counts as a capture. */
+function assertNotEmpty(path: string, what: string): number {
+  const size = statSync(path).size;
+  if (size === 0) throw new Error(`${what} produced an empty file`);
+  return size;
+}
 
-type PlaywrightModule = {
-  chromium: {
-    launch: (opts?: Record<string, unknown>) => Promise<{
-      newContext: (opts?: Record<string, unknown>) => Promise<{
-        newPage: () => Promise<PlaywrightPage>;
-        close: () => Promise<void>;
-      }>;
-      close: () => Promise<void>;
-    }>;
-  };
-};
-
-async function importPlaywright(cwd: string): Promise<PlaywrightModule> {
-  try {
-    const req = createRequire(join(cwd, "package.json"));
-    const resolved = req.resolve("playwright");
-    return (await import(pathToFileURL(resolved).href)) as PlaywrightModule;
-  } catch {
-    // continue to bare import
-  }
-  try {
-    return (await import("playwright")) as unknown as PlaywrightModule;
-  } catch (err) {
-    if (isMissingModuleError(err)) {
-      throw new Error(
-        "playwright is not installed. Run `npm install playwright` (or `pnpm add playwright`) in the graph workspace, then `npx playwright install chromium`.",
-        { cause: err },
-      );
-    }
-    throw err;
-  }
+function pageStatusOf(response: PlaywrightResponse | null): number | undefined {
+  return response ? response.status() : undefined;
 }
 
 async function waitForPage(
@@ -182,14 +177,22 @@ async function waitForPage(
   }
 }
 
-function buildScope(state: Record<string, unknown>, ctx: NodeRunContext) {
+function buildScope(
+  state: Record<string, unknown>,
+  ctx: NodeRunContext,
+  usedSecrets: Set<string>,
+) {
   return {
     state,
     input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
     config: ctx.config,
     run: ctx.meta,
     secret: new Proxy({} as Record<string, string>, {
-      get: (_t, prop) => process.env[String(prop)] ?? "",
+      get: (_t, prop) => {
+        const value = process.env[String(prop)] ?? "";
+        if (value) usedSecrets.add(value);
+        return value;
+      },
     }),
   };
 }
@@ -200,6 +203,7 @@ async function captureHttp(
   ctx: NodeRunContext,
   nodeId: string,
   label: string | undefined,
+  usedSecrets: ReadonlySet<string>,
 ): Promise<DemoResult> {
   const url = String(renderDeep(config.url, scope));
   const method = config.method ?? "GET";
@@ -208,40 +212,65 @@ async function captureHttp(
     : undefined;
   const body = config.body != null ? renderDeep(config.body, scope) : undefined;
 
-  const httpResult = await performHttpRequest({
-    method,
-    url,
-    ...(headers ? { headers } : {}),
-    ...(body !== undefined ? { body } : {}),
-    // Demo capture: accept any status so the transcript still records failures.
-    expectStatus: "any",
-    signal: ctx.signal ?? null,
-  });
+  const timeout = config.timeout ?? "30s";
+  const timeoutSignal = AbortSignal.timeout(parseDuration(timeout));
+  let httpResult;
+  try {
+    httpResult = await performHttpRequest({
+      method,
+      url,
+      ...(headers ? { headers } : {}),
+      ...(body !== undefined ? { body } : {}),
+      // Accept any status here so the transcript still records failures; `ok` is judged below.
+      expectStatus: "any",
+      signal: ctx.signal ? AbortSignal.any([ctx.signal, timeoutSignal]) : timeoutSignal,
+    });
+  } catch (err) {
+    if (timeoutSignal.aborted) {
+      throw new Error(`${method} ${redactUrlSecrets(url)} did not respond within ${timeout}`, { cause: err });
+    }
+    throw err;
+  }
 
   const dir = ensureArtifactDir(ctx.workspace, nodeId);
   const fileName = `${timestampSlug()}-${slugify(label ?? "http")}.json`;
   const path = join(dir, fileName);
 
-  const transcript = {
+  // Transcripts are shared as evidence and also land in graph state: mask credentials
+  // by name, then any secret this node rendered, wherever a server echoed it back.
+  const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
+  const transcript = redact({
     label: label ?? null,
     capturedAt: new Date().toISOString(),
     request: {
       method: httpResult.method,
-      url: httpResult.url,
+      url: redactUrlSecrets(httpResult.url),
       headers: redactHeaders(httpResult.requestHeaders),
-      ...(httpResult.requestBody !== undefined ? { body: httpResult.requestBody } : {}),
+      ...(httpResult.requestBody !== undefined
+        ? { body: redactSensitiveFields(httpResult.requestBody) }
+        : {}),
     },
     response: {
       status: httpResult.status,
-      headers: httpResult.headers,
-      body: httpResult.body,
+      headers: redactHeaders(httpResult.headers),
+      body: redactSensitiveFields(httpResult.body),
     },
+  }) as {
+    capturedAt: string;
+    request: NonNullable<DemoResult["request"]>;
+    response: NonNullable<DemoResult["response"]>;
   };
   writeFileSync(path, JSON.stringify(transcript, null, 2), "utf8");
   const sizeBytes = statSync(path).size;
+  const failure = statusFailure(
+    `${httpResult.method} ${transcript.request.url}`,
+    httpResult.status,
+    config.expect,
+  );
 
   return {
-    ok: true,
+    ok: !failure,
+    ...(failure ? { reason: failure } : {}),
     kind: "http",
     path,
     mimeType: "application/json",
@@ -272,6 +301,7 @@ async function captureScreenshot(
 
   const browser = await pw.chromium.launch({ headless: true });
   let extra: DemoExtraArtifact | undefined;
+  let pageStatus: number | undefined;
   try {
     const contextOpts: Record<string, unknown> = {
       viewport,
@@ -281,7 +311,7 @@ async function captureScreenshot(
     const page = await context.newPage();
     const videoHandle = config.video && typeof page.video === "function" ? page.video() : null;
     try {
-      await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
+      pageStatus = pageStatusOf(await page.goto(url, { waitUntil: "load", timeout: timeoutMs }));
       await waitForPage(
         page,
         config.waitFor ? String(renderDeep(config.waitFor, scope)) : undefined,
@@ -298,11 +328,14 @@ async function captureScreenshot(
     await browser.close();
   }
 
-  const sizeBytes = statSync(shotPath).size;
+  const sizeBytes = assertNotEmpty(shotPath, "demo screenshot");
   const capturedAt = new Date().toISOString();
+  const failure = statusFailure(`page ${redactUrlSecrets(url)}`, pageStatus, config.expect);
 
   return {
-    ok: true,
+    ok: !failure,
+    ...(failure ? { reason: failure } : {}),
+    ...(pageStatus !== undefined ? { pageStatus } : {}),
     kind: "screenshot",
     path: shotPath,
     mimeType: "image/png",
@@ -322,15 +355,11 @@ async function videoHandleToExtra(
     const raw = await handle.path();
     if (!raw || !existsSync(raw)) return undefined;
     const dest = join(destDir, `${timestampSlug()}-${slug}.webm`);
-    if (resolve(raw) !== resolve(dest)) {
-      copyFileSync(raw, dest);
-    }
-    return {
-      path: dest,
-      mimeType: "video/webm",
-      kind: "video",
-      sizeBytes: statSync(dest).size,
-    };
+    // Playwright records under a random name in this same directory: move it, don't copy.
+    renameSync(raw, dest);
+    const sizeBytes = statSync(dest).size;
+    if (sizeBytes === 0) return undefined;
+    return { path: dest, mimeType: "video/webm", kind: "video", sizeBytes };
   } catch {
     return undefined;
   }
@@ -354,6 +383,7 @@ async function captureVideo(
 
   const browser = await pw.chromium.launch({ headless: true });
   let videoPath: string | undefined;
+  let pageStatus: number | undefined;
   try {
     const context = await browser.newContext({
       viewport,
@@ -362,7 +392,7 @@ async function captureVideo(
     const page = await context.newPage();
     const videoHandle = typeof page.video === "function" ? page.video() : null;
     try {
-      await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
+      pageStatus = pageStatusOf(await page.goto(url, { waitUntil: "load", timeout: timeoutMs }));
       await waitForPage(
         page,
         config.waitFor ? String(renderDeep(config.waitFor, scope)) : undefined,
@@ -391,8 +421,11 @@ async function captureVideo(
   if (!videoPath || !existsSync(videoPath)) {
     throw new Error("demo video: Playwright did not produce a recording");
   }
+  const failure = statusFailure(`page ${redactUrlSecrets(url)}`, pageStatus, config.expect);
   return {
-    ok: true,
+    ok: !failure,
+    ...(failure ? { reason: failure } : {}),
+    ...(pageStatus !== undefined ? { pageStatus } : {}),
     kind: "video",
     path: videoPath,
     mimeType: "video/webm",
@@ -402,8 +435,30 @@ async function captureVideo(
   };
 }
 
+/** Files a capture may attach: the run workspace and this thread's own worktrees. */
+function assertAttachable(source: string, state: Record<string, unknown>, workspace: string): void {
+  const worktrees = Array.isArray(state[WORKTREES_CHANNEL])
+    ? (state[WORKTREES_CHANNEL] as Array<{ path?: unknown }>).flatMap((w) =>
+        typeof w?.path === "string" ? [w.path] : [],
+      )
+    : [];
+  const real = realpathSync(source);
+  for (const root of [workspace, ...worktrees]) {
+    let realRoot: string;
+    try {
+      realRoot = realpathSync(root);
+    } catch {
+      continue;
+    }
+    const rel = relative(realRoot, real);
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return;
+  }
+  throw new Error(`demo file: source is outside the run workspace: ${source}`);
+}
+
 function captureFile(
   config: NonNullable<Config["file"]>,
+  state: Record<string, unknown>,
   scope: ReturnType<typeof buildScope>,
   ctx: NodeRunContext,
   nodeId: string,
@@ -421,6 +476,7 @@ function captureFile(
   if (!st.isFile()) {
     throw new Error(`demo file: source is not a file: ${source}`);
   }
+  assertAttachable(source, state, ctx.workspace);
 
   const dir = ensureArtifactDir(ctx.workspace, nodeId);
   const ext = extname(source) || "";
@@ -433,7 +489,7 @@ function captureFile(
     kind: "file",
     path: dest,
     mimeType: mimeForPath(dest),
-    sizeBytes: statSync(dest).size,
+    sizeBytes: assertNotEmpty(dest, "demo file"),
     capturedAt: new Date().toISOString(),
     ...(label ? { label } : {}),
   };
@@ -479,6 +535,21 @@ function trackManifest(
   }
 }
 
+/** A fix to suggest, only when the failure really is a missing tool. */
+function remediationFor(reason: string): string | undefined {
+  if (/playwright is not installed/i.test(reason)) {
+    return `Install playwright (\`npm install playwright\`), then run \`${BROWSER_INSTALL_COMMAND}\`.`;
+  }
+  if (/browser is not installed/i.test(reason)) return `Run \`${BROWSER_INSTALL_COMMAND}\`.`;
+  if (/(xcrun|simctl) is not installed/i.test(reason)) {
+    return "Install Xcode (simctl is not in the command-line tools) and select it with `sudo xcode-select -s /Applications/Xcode.app`.";
+  }
+  if (/adb is not installed/i.test(reason)) {
+    return "Install the Android SDK platform-tools and ensure adb is on PATH.";
+  }
+  return undefined;
+}
+
 export const demoNode = defineNode<Config>({
   type: "demo",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -491,7 +562,8 @@ export const demoNode = defineNode<Config>({
       capabilities: { sideEffecting: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
-        const scope = buildScope(state, ctx);
+        const usedSecrets = new Set<string>();
+        const scope = buildScope(state, ctx, usedSecrets);
         const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
         const label = config.label
           ? String(renderDeep(config.label, scope))
@@ -513,19 +585,20 @@ export const demoNode = defineNode<Config>({
             message: result.reason!,
             impact: "No demo artifact was captured.",
           });
-          if (strict) throw new Error(result.reason);
           ctx.logger.warn(result.reason!);
           trackManifest(ctx, nodeId, result);
+          if (strict) throw new Error(result.reason);
           ctx.emit("node.output", result);
           return {
             update: applyOutput(config.output, result, { nodeId, scope }),
           };
         }
 
+        let result: DemoResult;
+        let cause: unknown;
         try {
-          let result: DemoResult;
           if (kind === "http" && config.http) {
-            result = await captureHttp(config.http, scope, ctx, nodeId, label);
+            result = await captureHttp(config.http, scope, ctx, nodeId, label, usedSecrets);
           } else if (kind === "screenshot" && config.screenshot) {
             result = await captureScreenshot(config.screenshot, scope, ctx, nodeId, label);
           } else if (kind === "video" && config.video) {
@@ -533,7 +606,10 @@ export const demoNode = defineNode<Config>({
           } else if (kind === "simulator" && config.simulator) {
             const dir = ensureArtifactDir(ctx.workspace, nodeId);
             const slug = `${timestampSlug()}-${slugify(label ?? "simulator")}`;
-            const sim = await captureSimulator(config.simulator, { artifactDir: dir, fileSlug: slug });
+            const sim = await captureSimulator(renderDeep(config.simulator, scope) as SimulatorConfig, {
+              artifactDir: dir,
+              fileSlug: slug,
+            });
             result = {
               ok: true,
               kind: "simulator",
@@ -543,43 +619,56 @@ export const demoNode = defineNode<Config>({
               capturedAt: new Date().toISOString(),
               ...(label ? { label } : {}),
             };
+            if (sim.warning) {
+              ctx.issue({
+                code: ISSUE_CODE.CAPTURE_FAILED,
+                severity: "warning",
+                message: `demo simulator capture may be misleading: ${sim.warning}`,
+                impact: "Check the artifact by eye. Raise `simulator.settle` if the app needs longer to open.",
+                detail: { kind, reason: sim.warning },
+              });
+              ctx.logger.warn("demo: simulator capture may be misleading", { reason: sim.warning });
+            }
           } else {
-            result = captureFile(config.file!, scope, ctx, nodeId, label);
+            result = captureFile(config.file!, state, scope, ctx, nodeId, label);
           }
-
-          trackManifest(ctx, nodeId, result);
-          ctx.emit("node.output", result);
-          return {
-            update: applyOutput(config.output, result, { nodeId, scope }),
-          };
         } catch (err) {
-          const reason = errMessage(err);
+          cause = err;
+          const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
+          const reason = String(
+            redact(isMissingBrowserError(err) ? missingBrowserMessage() : errMessage(err)),
+          );
+          result = failureResult(kind, reason, label);
+          const remediation = remediationFor(reason);
           ctx.issue({
-            code: /is not installed|not found on PATH/i.test(reason)
-              ? ISSUE_CODE.TOOL_NOT_FOUND
-              : ISSUE_CODE.CAPTURE_FAILED,
+            code: remediation ? ISSUE_CODE.TOOL_NOT_FOUND : ISSUE_CODE.CAPTURE_FAILED,
             severity: "warning",
             message: `demo ${kind} capture failed: ${reason}`,
             impact: "The expected demo artifact is missing; the run result is harder to verify.",
-            remediation:
-              kind === "simulator"
-                ? /xcrun/i.test(reason)
-                  ? "Install Xcode command-line tools (`xcode-select --install`)."
-                  : "Install the Android SDK platform-tools and ensure adb is on PATH."
-                : kind === "screenshot" || kind === "video"
-                  ? "Install playwright (`npm install playwright` then `npx playwright install chromium`)."
-                  : undefined,
+            ...(remediation ? { remediation } : {}),
             detail: { kind, reason },
           });
-          if (strict) throw err instanceof Error ? err : new Error(reason);
-          const result = failureResult(kind, reason, label);
           ctx.logger.warn(`demo: capture failed (${kind})`, { reason });
-          trackManifest(ctx, nodeId, result);
-          ctx.emit("node.output", result);
-          return {
-            update: applyOutput(config.output, result, { nodeId, scope }),
-          };
         }
+
+        // A capture can work and still record a failure (HTTP 500): the file stays as evidence.
+        if (!cause && !result.ok) {
+          ctx.issue({
+            code: ISSUE_CODE.CAPTURE_FAILED,
+            severity: "warning",
+            message: `demo ${kind} capture recorded a failure: ${result.reason}`,
+            impact: "The artifact shows a failure, so it does not demonstrate the expected result.",
+            detail: { kind, reason: result.reason },
+          });
+          ctx.logger.warn(`demo: capture recorded a failure (${kind})`, { reason: result.reason });
+        }
+
+        trackManifest(ctx, nodeId, result);
+        if (strict && !result.ok) throw new Error(result.reason, { cause });
+        ctx.emit("node.output", result);
+        return {
+          update: applyOutput(config.output, result, { nodeId, scope }),
+        };
       },
     };
   },

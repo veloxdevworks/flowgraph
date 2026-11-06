@@ -16,7 +16,12 @@ import { collectGitDiff } from "../runtime/git-diff.js";
 import { assertHostExecAllowed, hostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
 import type { Artifact } from "@flowgraph/spec";
-import { resolveGateArtifacts, resolveSelection, type HitlSelect } from "./hitl-artifacts.js";
+import {
+  captureFailuresNotice,
+  resolveGateArtifacts,
+  resolveSelection,
+  type HitlSelect,
+} from "./hitl-artifacts.js";
 import {
   DEFAULT_REVIEW_DECISIONS,
   hitlOutcomeKey,
@@ -54,7 +59,7 @@ export const hitlNode = defineNode<Config>({
           run: ctx.meta,
         };
 
-        const message = stringifyRendered(renderDeep(config.message, scope));
+        let message = stringifyRendered(renderDeep(config.message, scope));
         const choices = config.choices
           ? (renderDeep(config.choices, scope) as string[])
           : undefined;
@@ -85,6 +90,10 @@ export const hitlNode = defineNode<Config>({
           presented = gate.artifacts;
           data["artifacts"] = gate.artifacts;
           data["artifactRefs"] = gate.artifactRefs;
+          if (gate.captureFailures.length > 0) {
+            data["captureFailures"] = gate.captureFailures;
+            message = `${message}\n\n${captureFailuresNotice(gate.captureFailures)}`;
+          }
           if (select !== "none") data["select"] = select;
         }
 

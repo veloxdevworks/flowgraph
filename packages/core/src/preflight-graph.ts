@@ -13,6 +13,8 @@ import { discoverAgentUses } from "./discover-agents.js";
 import { loadAgentDef } from "./agents/loader.js";
 import { loadGraph } from "./loader.js";
 import { checkBinOnPath } from "./runtime/which.js";
+import { playwrightProblem } from "./nodes/demo-playwright.js";
+import { iosToolchainReady } from "./nodes/demo-simulator.js";
 import type { NodeSpec } from "@flowgraph/spec";
 
 export interface PreflightGraphOptions {
@@ -148,7 +150,7 @@ function walkRequireNodes(graph: GraphSpec, visit: (node: NodeSpec, path: string
 }
 
 /**
- * Preflight `requires` on shell/script nodes and demo simulator toolchains.
+ * Preflight `requires` on shell/script nodes, and the tools `demo` nodes capture with.
  */
 export async function preflightGraphRequires(
   spec: GraphSpec,
@@ -160,7 +162,7 @@ export async function preflightGraphRequires(
   const walk = async (graph: GraphSpec, cwd: string, prefix = ""): Promise<void> => {
     const jobs: Promise<void>[] = [];
     walkRequireNodes(graph, (node, p) => {
-      jobs.push(checkNodeRequires(node, p, diagnostics));
+      jobs.push(checkNodeRequires(node, p, diagnostics, cwd));
     }, prefix);
     await Promise.all(jobs);
 
@@ -184,7 +186,12 @@ export async function preflightGraphRequires(
   return { ok, diagnostics, report: diagnostics.map((d) => `${d.severity}: ${d.message}`).join("\n") };
 }
 
-async function checkNodeRequires(node: NodeSpec, path: string, diagnostics: Diagnostic[]): Promise<void> {
+async function checkNodeRequires(
+  node: NodeSpec,
+  path: string,
+  diagnostics: Diagnostic[],
+  cwd: string,
+): Promise<void> {
   const withBlock = (node.with ?? {}) as Record<string, unknown>;
   const requires = Array.isArray(withBlock["requires"]) ? (withBlock["requires"] as Array<{ bin?: string; version?: string }>) : [];
   const onMissing = withBlock["onMissingTool"] === "skip" ? "skip" : "fail";
@@ -204,16 +211,32 @@ async function checkNodeRequires(node: NodeSpec, path: string, diagnostics: Diag
     });
   }
 
-  const sim = withBlock["simulator"] as { platform?: string } | undefined;
-  if (node.type === "demo" && sim && typeof sim === "object") {
-    const bin = sim.platform === "android" ? "adb" : sim.platform === "ios" ? "xcrun" : undefined;
-    if (bin && !(await checkBinOnPath(bin))) {
+  if (node.type === "demo") {
+    // A required capture fails the run at the end, so catch it before the run starts.
+    const strict = withBlock["strict"] === true;
+    const report = (message: string, at: string): void => {
       diagnostics.push({
-        severity: "warning",
-        code: "BIN_NOT_FOUND_OPTIONAL",
-        message: `demo node "${node.id}" simulator.${sim.platform} needs "${bin}" on PATH (capture will degrade)`,
-        path: `${path}.with.simulator`,
+        severity: strict ? "error" : "warning",
+        code: strict ? "BIN_NOT_FOUND" : "BIN_NOT_FOUND_OPTIONAL",
+        message: `demo node "${node.id}": ${message}${strict ? "" : " (capture will degrade)"}`,
+        path: at,
       });
+    };
+
+    const sim = withBlock["simulator"] as { platform?: string } | undefined;
+    if (sim && typeof sim === "object") {
+      if (sim.platform === "ios" && !(await iosToolchainReady())) {
+        report("simulator.ios needs simctl, which ships with Xcode", `${path}.with.simulator`);
+      }
+      if (sim.platform === "android" && !(await checkBinOnPath("adb"))) {
+        report('simulator.android needs "adb" on PATH', `${path}.with.simulator`);
+      }
+    }
+
+    const browserMode = withBlock["screenshot"] ? "screenshot" : withBlock["video"] ? "video" : undefined;
+    if (browserMode) {
+      const problem = await playwrightProblem(cwd);
+      if (problem) report(problem, `${path}.with.${browserMode}`);
     }
   }
 }

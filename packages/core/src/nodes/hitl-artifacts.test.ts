@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Artifact, GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
+import { resolveGateArtifacts } from "./hitl-artifacts.js";
 import { hitlSelectDiagnostics } from "../runtime/validate-graph.js";
 import type { JobHandle, MediaCallContext, MediaProvider, MediaRequest } from "../media/types.js";
 
@@ -182,6 +183,81 @@ describe("hitl with.artifacts: template shapes", () => {
     expect(refs[0]).toMatch(/^\.flowgraph\/artifacts\//);
     expect(refs[2]).toBe("demo://x");
     expect(refs.join()).not.toContain("[object Object]");
+  });
+});
+
+describe("hitl with.artifacts: demo outputs", () => {
+  /** A state channel holding a `demo` output -> gate -> END. */
+  const demoGate = (message = "Look") =>
+    ({
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "demo-gate" },
+      state: { channels: { capture: { type: "object" } } },
+      nodes: [{ id: "gate", type: "hitl", with: { mode: "approve", message, artifacts: ["{{ state.capture }}"] } }],
+      edges: [
+        { from: "START", to: "gate" },
+        { from: "gate", to: "END" },
+      ],
+    }) as unknown as GraphSpec;
+
+  const run = async (capture: Record<string, unknown>) => {
+    const res = await (await compile(demoGate())).run({ threadId: "demo", onInterrupt: "fail", input: { capture } });
+    const payload = res.interrupts![0]!.payload as { reason?: string; message?: string; data: Data & { captureFailures?: unknown[] } };
+    return { data: payload.data, message: payload.reason ?? payload.message ?? "" };
+  };
+
+  it("presents a capture's extra recording alongside its file", async () => {
+    await writeFile(path.join(dir, "shot.png"), "png");
+    await writeFile(path.join(dir, "shot.webm"), "webm");
+    const out = await resolveGateArtifacts(
+      [
+        {
+          ok: true,
+          kind: "screenshot",
+          path: path.join(dir, "shot.png"),
+          extra: [{ path: path.join(dir, "shot.webm"), mimeType: "video/webm", kind: "video" }],
+        },
+      ],
+      dir,
+    );
+    expect(out.artifacts.map((a) => a.path)).toEqual(["shot.png", "shot.webm"]);
+    expect(out.captureFailures).toEqual([]);
+  });
+
+  it("reports a failed capture with no file instead of dropping it", async () => {
+    const out = await resolveGateArtifacts(
+      [{ ok: false, kind: "screenshot", label: "home", reason: "browser is not installed" }],
+      dir,
+    );
+    expect(out.artifacts).toEqual([]);
+    expect(out.captureFailures).toEqual([{ kind: "screenshot", label: "home", reason: "browser is not installed" }]);
+  });
+
+  it("shows a failed capture's file and says that it failed", async () => {
+    await writeFile(path.join(dir, "t.json"), "{}");
+    const out = await resolveGateArtifacts(
+      [{ ok: false, kind: "http", path: path.join(dir, "t.json"), reason: "returned HTTP 500" }],
+      dir,
+    );
+    expect(out.artifacts.map((a) => a.path)).toEqual(["t.json"]);
+    expect(out.captureFailures[0]).toMatchObject({ reason: "returned HTTP 500" });
+  });
+
+  it("puts the failure in the message every client shows", async () => {
+    const { data, message } = await run({ ok: false, kind: "video", label: "checkout", reason: "page returned HTTP 502" });
+    expect(message).toContain("Look");
+    expect(message).toContain("Capture problems (1):");
+    expect(message).toContain("- checkout: page returned HTTP 502");
+    expect(data.captureFailures).toHaveLength(1);
+  });
+
+  it("leaves the message and payload alone when every capture worked", async () => {
+    await writeFile(path.join(dir, "ok.png"), "png");
+    const { data, message } = await run({ ok: true, kind: "screenshot", path: path.join(dir, "ok.png") });
+    expect(message).toBe("Look");
+    expect(data).not.toHaveProperty("captureFailures");
+    expect(data.artifacts).toHaveLength(1);
   });
 });
 

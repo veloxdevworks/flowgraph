@@ -476,10 +476,16 @@ export const OnMissingToolSchema = z
   .default("fail")
   .describe("fail (default) throws; skip records a TOOL_NOT_FOUND issue and continues");
 
+const DemoExpectSchema = z
+  .object({ status: z.array(z.number().int()).min(1) })
+  .optional()
+  .describe("HTTP statuses that count as success (default: any status below 400)");
+
 /**
  * Best-effort artifact capture. Exactly one of `http`, `screenshot`, `file`,
- * `video`, or `simulator` must be set. Capture failures return `{ ok: false }`
- * unless `strict: true`.
+ * `video`, or `simulator` must be set. `ok` is false when the capture failed or
+ * when what it recorded is a failure (an unexpected HTTP status). Such results
+ * return `{ ok: false }` unless `strict: true`.
  */
 export const DemoWithSchema = BaseWithSchema.extend({
   strict: z
@@ -493,7 +499,8 @@ export const DemoWithSchema = BaseWithSchema.extend({
       url: z.string(),
       headers: z.record(z.string()).optional(),
       body: z.unknown().optional(),
-      timeout: DurationSchema.optional(),
+      expect: DemoExpectSchema,
+      timeout: DurationSchema.optional().describe("Give up after this long (default 30s)"),
     })
     .optional(),
   screenshot: z
@@ -504,6 +511,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
         .optional()
         .describe("CSS selector or a duration to wait before capture"),
       video: z.boolean().optional(),
+      expect: DemoExpectSchema,
       viewport: z
         .object({
           width: z.number().int().positive(),
@@ -516,11 +524,12 @@ export const DemoWithSchema = BaseWithSchema.extend({
   video: z
     .object({
       url: z.string(),
-      duration: DurationSchema.optional().describe("How long to record after the page loads (default 5s)"),
+      duration: DurationSchema.optional().describe("How long to keep recording after `waitFor` (default 5s)"),
+      expect: DemoExpectSchema,
       waitFor: z
         .union([z.string(), DurationSchema])
         .optional()
-        .describe("CSS selector or a duration to wait before recording starts"),
+        .describe("CSS selector or a duration to wait before `duration` starts. The recording includes the page load and this wait"),
       viewport: z
         .object({
           width: z.number().int().positive(),
@@ -534,11 +543,14 @@ export const DemoWithSchema = BaseWithSchema.extend({
   simulator: z
     .object({
       platform: z.union([z.literal("ios"), z.literal("android")]),
-      device: z.string().optional().describe("Simulator/emulator name, UDID, or AVD"),
+      device: z.string().optional().describe("iOS: simulator name or UDID. Android: adb serial (e.g. emulator-5554) of a running device"),
       app: z.string().optional().describe("Bundle id / package to launch"),
       deepLink: z.string().optional(),
       capture: z.union([z.literal("video"), z.literal("screenshot")]).optional().default("video"),
       duration: DurationSchema.optional().describe("Recording length (default 10s)"),
+      settle: DurationSchema.optional().describe(
+        "Longest wait for the screen to change and hold still after a launch or deep link (default 30s)",
+      ),
     })
     .optional(),
   file: z
