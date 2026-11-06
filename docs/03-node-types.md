@@ -648,6 +648,57 @@ For `approve`, `choice` and `review`, the human's answer *is* the routing decisi
     output: { to: intake }
 ```
 
+### Reviewing generated assets (`artifacts`, `select`, `round`)
+
+`approve`, `choice` and `review` can show the human files and let them pick. `with.artifacts` is a list of templates; each may render to an Artifact, an array of Artifacts, a media node's whole output (`{ artifact, artifacts }`), a workspace-relative path, a demo-manifest ref, or an array of those. The gate flattens them, normalises paths and de-duplicates by path, keeping order.
+
+The interrupt payload (`payload.data`) then carries:
+
+- `artifacts` — full `Artifact` records. A path string that is a file inside the run workspace (after symlink resolution) becomes a record (size, MIME type and role from the extension). A path that is missing or outside the workspace does not, and is never an error.
+- `artifactRefs` — the record paths plus any string that could not become a record (for example a demo-manifest ref). For older clients; never `[object Object]`.
+- `select` — `"one"` / `"many"` when `with.select` asks for a pick.
+
+Never file bytes: the payload is checkpointed.
+
+`with.select: none | one | many` (default `none`) lets the human choose from what was shown. The answer carries `selected` — a path, `{ path }`, or an array of those — and only artifacts **presented at this gate** are accepted; anything else is an invalid answer and re-prompts, so a client cannot inject an arbitrary path downstream. The node outputs `selected` as the matching `Artifact` (`one`) or `Artifact[]` (`many`); with `select: none` a client-sent `selected` is dropped. A selection is required on an approving answer (`approved: true` / review `approve`) and on every `choice` answer; a rejection may omit it, and then `selected` is `null` (`one`) or `[]` (`many`) so a previous round's pick does not linger in a merged `state.outputs` entry. With `select: one` and exactly one artifact shown, an approving answer without `selected` picks it.
+
+Every gate output also has `round`: `1` for the first accepted answer at this gate in a thread, `+1` each time it is answered again (for example when a route loops back to it). Rejected answers re-prompt and do not count. `round` is read back from the node's previous `state.outputs.<id>.round`, so it survives checkpoint and resume; `output: none` opts out of that storage, and `round` is then always `1`.
+
+A worked loop: generate two images, pick one, or regenerate with a new vendor job (see `variant` under [`image` / `video`…](#9d-image--video--model3d--audio--generative-media)).
+
+```yaml
+state:
+  channels:
+    check: { type: object }          # a channel cannot share a node's id, so the gate below is `review`
+
+nodes:
+  - id: concept
+    type: image
+    provider: art
+    with:
+      prompt: "a small lighthouse, painterly"
+      count: 2
+      variant: "{{ state.check.round }}"      # unset on the first pass: same fingerprint as no variant
+
+  - id: review
+    type: hitl
+    with:
+      mode: review
+      message: "Pick the concept to turn into 3D"
+      artifacts: ["{{ state.outputs.concept }}"]
+      select: one
+      decision: [approve, request-changes, regenerate]
+      routes: { approve: mesh, request-changes: concept, regenerate: concept }
+      output: { to: check }
+
+  - id: mesh
+    type: model3d
+    provider: art
+    with: { input: "{{ state.check.selected }}", format: glb }
+```
+
+A `select` of `one`/`many` without `artifacts` is flagged by lint as `HITL_SELECT_NO_ARTIFACTS` (a warning). In the CLI, answer with JSON, for example `{ "decision": "approve", "selected": "<path>" }`. The runnable version is `examples/media-mock/media-review.graph.yaml`.
+
 ### `ask_human` tool (agent nodes)
 
 Agents can ask clarifying questions mid-loop by opting into the built-in tool:
@@ -1049,6 +1100,7 @@ nodes:
 | `mode` (`text`/`image`/`multiview`), `format` (`glb` default, `gltf`, `fbx`, `obj`, `usdz`, `stl`, `3mf`), `texture` | model3d | `mode` defaults from the number of inputs. |
 | `kind` (`speech` / `sfx` / `music`), `text`, `voice`, `language`, `duration`, `instrumental`, `format` (`mp3`, `wav`, `ogg`, `flac`, `opus`) | audio | `kind` is required. `speech` needs `text` (the script) and usually a `voice`; `sfx` needs a `prompt` and optionally a `duration`; `music` needs a `prompt` and/or `text` (lyrics), and `instrumental: true` drops vocals. `input` can be reference audio where the vendor supports it. |
 | `seed`, `negativePrompt` | all | Passed when the vendor supports them. |
+| `variant` | all | String or number (templated). Part of the job fingerprint, **never sent to the vendor**. Looping back to a media node with an unchanged request re-attaches to the finished job (no new call); change `variant`, for example `"{{ state.check.round }}"`, to force a new one. Unset, null or empty (such as before the first answer) keeps the fingerprint identical to a node without `variant`, so in-flight journal entries still match after an upgrade. |
 | `params` | all | Vendor passthrough options. |
 | `timeout` | all | Whole-job limit (defaults: image 5m, audio 10m, video/model3d 15m). On timeout the job is left running and a retry re-attaches. |
 

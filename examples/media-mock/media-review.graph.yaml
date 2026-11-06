@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: media-review
+  description: >
+    Generate two concept images, let a human look at both and pick one at a
+    review gate, then turn the pick into a 3D model. "regenerate" loops back
+    for fresh images; `variant` makes the repeat a new vendor job instead of
+    re-attaching to the finished one.
+
+imports:
+  - { providers: ./mock-vendor.ts }
+
+providers:
+  art: { kind: media, vendor: mock-media }
+
+state:
+  channels:
+    # The gate's answer, kept under a channel name so later nodes can read
+    # `state.check.selected` / `state.check.round`. (A channel cannot share a
+    # node's id, so the gate node itself is called `review`.)
+    check: { type: object }
+
+nodes:
+  - id: concept
+    type: image
+    provider: art
+    with:
+      prompt: "a small lighthouse, painterly {{ state.check.feedback }}"
+      count: 2
+      # Round 0 (no answer yet) keeps the plain fingerprint; every later pass is a new job.
+      variant: "{{ state.check.round }}"
+
+  - id: review
+    type: hitl
+    with:
+      mode: review
+      message: "Pick the concept to turn into a 3D model"
+      artifacts: ["{{ state.outputs.concept }}"]   # a media node's whole output is fine
+      select: one                                   # approve needs a pick; one image = auto-picked
+      decision: [approve, request-changes, regenerate]
+      routes:
+        approve: mesh
+        request-changes: concept                    # feedback goes into the prompt
+        regenerate: concept                         # same prompt, new variant
+      output: { to: check }
+
+  - id: mesh
+    type: model3d
+    provider: art
+    with:
+      input: "{{ state.check.selected }}"           # the validated Artifact the human picked
+      format: glb
+
+edges:
+  - { from: START, to: concept }
+  - { from: concept, to: review }
+  - { from: mesh, to: END }
+
+runtime:
+  checkpoint: { enabled: true, backend: memory }

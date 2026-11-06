@@ -649,6 +649,28 @@ export function hitlRouteDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
+/** `hitl` `with.select` one/many picks from `with.artifacts`, so it needs them. */
+export function hitlSelectDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const node of spec.nodes) {
+    if (node.type !== "hitl") continue;
+    const w = (node.with ?? {}) as Record<string, unknown>;
+    if (w["select"] !== "one" && w["select"] !== "many") continue;
+    const artifacts = w["artifacts"];
+    if (!Array.isArray(artifacts) || artifacts.length === 0) {
+      diagnostics.push({
+        severity: "warning",
+        code: "HITL_SELECT_NO_ARTIFACTS",
+        message:
+          `hitl node "${node.id}" sets select "${String(w["select"])}" but has no with.artifacts — ` +
+          `there is nothing to pick from, so no selection can be made`,
+        path: `nodes.${node.id}.with.artifacts`,
+      });
+    }
+  }
+  return diagnostics;
+}
+
 /**
  * A router straight after a human gate that only repeats the gate's answer can be folded into
  * the gate's `with.routes` — one node instead of two, no expressions. A recommendation
@@ -669,6 +691,7 @@ export function hitlRouterMergeDiagnostics(spec: GraphSpec): Diagnostic[] {
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   return [
     ...hitlRouteDiagnostics(spec),
+    ...hitlSelectDiagnostics(spec),
     ...hitlRouterMergeDiagnostics(spec),
     ...reachabilityDiagnostics(spec),
     ...channelReducerDiagnostics(spec),

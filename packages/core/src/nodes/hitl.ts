@@ -15,6 +15,8 @@ import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
 import { assertHostExecAllowed, hostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
+import type { Artifact } from "@flowgraph/spec";
+import { resolveGateArtifacts, resolveSelection, type HitlSelect } from "./hitl-artifacts.js";
 import {
   DEFAULT_REVIEW_DECISIONS,
   hitlOutcomeKey,
@@ -71,14 +73,26 @@ export const hitlNode = defineNode<Config>({
           if (schema) data["schema"] = schema;
         }
 
+        // Artifacts to preview (and optionally pick from) in the modes with a closed answer.
+        let presented: Artifact[] = [];
+        const select: HitlSelect =
+          config.mode === "approve" || config.mode === "choice" || config.mode === "review"
+            ? (config.select ?? "none")
+            : "none";
+        if (config.artifacts && (config.mode === "approve" || config.mode === "choice" || config.mode === "review")) {
+          const rendered = config.artifacts.map((a) => renderDeep(a, scope));
+          const gate = await resolveGateArtifacts(rendered, ctx.workspace);
+          presented = gate.artifacts;
+          data["artifacts"] = gate.artifacts;
+          data["artifactRefs"] = gate.artifactRefs;
+          if (select !== "none") data["select"] = select;
+        }
+
         if (config.mode === "review") {
           const decisions = config.decision?.length ? config.decision : DEFAULT_REVIEW_DECISIONS;
           data["decision"] = decisions;
           data["choices"] = decisions;
           if (config.schema) data["schema"] = renderDeep(config.schema, scope);
-          if (config.artifacts) {
-            data["artifactRefs"] = (renderDeep(config.artifacts, scope) as unknown[]).map(String);
-          }
           if (config.diff?.before != null || config.diff?.after != null) {
             const before = config.diff.before ? String(renderDeep(config.diff.before, scope)) : "";
             const after = config.diff.after ? String(renderDeep(config.diff.after, scope)) : "";
@@ -120,9 +134,20 @@ export const hitlNode = defineNode<Config>({
               decisions: (data["decision"] as string[] | undefined) ?? choices,
               schema: (data["schema"] as Record<string, unknown> | undefined) ?? config.schema,
               nodeId: String(nodeSpec["id"]),
+              select,
+              presented,
             }),
           { maxAttempts: config.maxResumeAttempts },
         );
+
+        // `round`: 1 for the first accepted answer at this gate, +1 each time it is answered again
+        // (a loop back). The previous value is the one this node wrote to `state.outputs.<id>` last
+        // time; state is as of the start of the node, so a resumed run re-reads the same value and
+        // gets the same round. Rejected answers re-prompt inside interruptUntilValid and never get here.
+        const outputs = state["outputs"] as Record<string, { round?: unknown } | undefined> | undefined;
+        const prevRound = outputs?.[String(nodeSpec["id"] ?? ctx.nodeId)]?.round;
+        const round = (typeof prevRound === "number" && Number.isInteger(prevRound) && prevRound >= 1 ? prevRound : 0) + 1;
+        result["round"] = round;
 
         ctx.emit("node.output", { hitl: { mode: config.mode, result } });
 
@@ -171,16 +196,34 @@ function mapHitlResume(
     decisions?: string[] | undefined;
     schema?: Record<string, unknown> | undefined;
     nodeId: string;
+    select: HitlSelect;
+    presented: Artifact[];
   },
 ): Record<string, unknown> {
   const mode = config.mode;
+  const rawSelected =
+    resume && typeof resume === "object" && !Array.isArray(resume)
+      ? (resume as Record<string, unknown>)["selected"]
+      : undefined;
+  // The validated records always win over whatever the client sent; `select: none` drops `selected`.
+  const withSelection = (out: Record<string, unknown>, required: boolean): Record<string, unknown> => {
+    delete out["selected"];
+    const picked = resolveSelection(rawSelected, {
+      select: opts.select,
+      presented: opts.presented,
+      required,
+      nodeId: opts.nodeId,
+    });
+    if (picked !== undefined) out["selected"] = picked;
+    return out;
+  };
 
   if (mode === "approve") {
     const approved =
       typeof resume === "boolean"
         ? resume
         : (resume as { approved?: boolean })?.approved ?? false;
-    return { approved };
+    return withSelection({ approved }, approved === true);
   }
 
   if (mode === "question") {
@@ -237,12 +280,15 @@ function mapHitlResume(
         : typeof rec["notes"] === "string"
           ? rec["notes"]
           : undefined;
-    return {
-      decision,
-      approved: decision === "approve",
-      ...(feedback != null ? { feedback } : {}),
-      ...rec,
-    };
+    return withSelection(
+      {
+        decision,
+        approved: decision === "approve",
+        ...(feedback != null ? { feedback } : {}),
+        ...rec,
+      },
+      decision === "approve",
+    );
   }
 
   // choice
@@ -259,5 +305,5 @@ function mapHitlResume(
   if (opts.choices?.length && !opts.choices.includes(choice)) {
     throw new Error(`Invalid choice "${choice}". Expected one of: ${opts.choices.join(", ")}`);
   }
-  return { choice };
+  return withSelection({ choice }, true);
 }
