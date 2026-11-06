@@ -69,7 +69,7 @@ type Data = {
   validationError?: string;
   mode: string;
 };
-const dataOf = (res: { interrupts?: Array<{ payload?: unknown }> }): Data =>
+const dataOf = (res: { interrupts?: Array<{ payload?: unknown }> | undefined }): Data =>
   (res.interrupts![0]!.payload as { data: Data }).data;
 const outputsOf = (res: { state: Record<string, unknown> }) =>
   res.state["outputs"] as Record<string, Record<string, unknown> & { artifacts: Artifact[]; artifact: Artifact }>;
