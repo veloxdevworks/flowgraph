@@ -1064,6 +1064,9 @@ describe("cancellation", () => {
   });
 
   describe("node timeout", () => {
+    // Long enough for a busy machine to have the browser open when the timeout fires.
+    const PAST_LAUNCH = "2s";
+
     async function runGraph(workspace: string, node: Record<string, unknown>) {
       const compiled = await compileGraph(
         {
@@ -1085,9 +1088,20 @@ describe("cancellation", () => {
       return fs.existsSync(folder) ? fs.readdirSync(folder) : [];
     };
 
+    it("leaves no browser open however early the timeout comes", async () => {
+      const workspace = fakePlaywrightWorkspace({ hang: "waitForTimeout" });
+      const result = await runGraph(workspace, { timeout: "1ms", with: { video: { url: "http://app/", duration: "1h" } } });
+
+      expect(result.status).toBe("error");
+      expect(result.error?.message).toContain("Node timed out");
+      // The timer can fire before or just after the launch, depending on the machine.
+      const count = (entry: string) => playwrightLog(workspace).filter((l) => l === entry).length;
+      await vi.waitFor(() => expect(count("browser.close")).toBeGreaterThanOrEqual(count("launch")));
+    }, 15_000);
+
     it("stops the capture and fails the attempt as timed out", async () => {
       const workspace = fakePlaywrightWorkspace({ hang: "waitForTimeout" });
-      const result = await runGraph(workspace, { timeout: "300ms", with: { video: { url: "http://app/", duration: "1h" } } });
+      const result = await runGraph(workspace, { timeout: PAST_LAUNCH, with: { video: { url: "http://app/", duration: "1h" } } });
 
       expect(result.status).toBe("error");
       expect(result.error?.message).toContain("Node timed out");
@@ -1107,7 +1121,7 @@ describe("cancellation", () => {
             {
               id: NODE,
               type: "map",
-              timeout: "300ms",
+              timeout: PAST_LAUNCH,
               with: {
                 over: "{{ state.items }}",
                 node: { type: "demo", with: { video: { url: "http://app/", duration: "1h" } } },
@@ -1132,7 +1146,7 @@ describe("cancellation", () => {
     it("closes the first browser before a retry opens the next", async () => {
       const workspace = fakePlaywrightWorkspace({ hang: "waitForTimeout" });
       const result = await runGraph(workspace, {
-        timeout: "300ms",
+        timeout: PAST_LAUNCH,
         retry: { maxAttempts: 2, baseMs: 1, jitter: false },
         with: { video: { url: "http://app/", duration: "1h" } },
       });
