@@ -8,9 +8,11 @@
  *  - video: record a short page-load video via Playwright
  *  - simulator: iOS (simctl) or Android (adb) screenshot / video
  *  - file: attach an existing file produced earlier in the pipeline
+ *  - steps: run a scripted flow against a `target` and check assertions (demo-steps.ts)
  *
- * `status` says what the result shows (ADR-0019 §3). These modes check nothing about
- * an objective, so they can only be:
+ * `status` says what the result shows (ADR-0019 §3). Only `steps` can reach `passed`, when
+ * every step and assertion held and at least one positive assertion ran. The other modes check
+ * nothing about an objective, so they can only be:
  *  - `inconclusive`: the capture worked and recorded no failure (`ok: true`)
  *  - `failed`: the capture worked and recorded a failure (HTTP 500, an error page).
  *    The file stays as evidence (`ok: false`)
@@ -54,14 +56,18 @@ import { runScopedKey } from "../runtime/run-key.js";
 import { WORKTREES_CHANNEL } from "../runtime/state-annotation.js";
 import {
   BROWSER_INSTALL_COMMAND,
+  RECORDER_CATCH_UP_MS,
   closeOnAbort,
   importPlaywright,
   launchCaptureBrowser,
   isMissingBrowserError,
   missingBrowserMessage,
+  isDurationText,
+  statusFailure,
   type PlaywrightPage,
   type PlaywrightResponse,
 } from "./demo-playwright.js";
+import { runFlow, type FlowAssertion, type FlowConsole, type FlowStepRecord } from "./demo-steps.js";
 import {
   appendDemoManifestEntry,
   demoManifestKey,
@@ -108,6 +114,14 @@ export type DemoResult = {
   } | null;
   /** Workspace-relative records of every file kept, the main file first. */
   artifacts: Artifact[];
+  /** The claim this capture is evidence for. */
+  objective: string | null;
+  /** `steps` mode: what ran, with the opening of the page as index 0. */
+  steps: FlowStepRecord[] | null;
+  /** `steps` mode: the literal checks, so a reviewer can judge whether they are enough. */
+  assertions: FlowAssertion[] | null;
+  /** `steps` mode: console errors and uncaught page errors during the flow. */
+  console: FlowConsole | null;
 };
 
 /** What a capture function hands back; `toResult` turns it into a `DemoResult`. */
@@ -122,6 +136,13 @@ type Captured = {
   extra?: DemoExtraArtifact[] | undefined;
   request?: DemoResult["request"];
   response?: DemoResult["response"];
+  /** `steps` mode: set when the flow held and at least one positive assertion ran. */
+  passed?: boolean | undefined;
+  steps?: FlowStepRecord[] | undefined;
+  assertions?: FlowAssertion[] | undefined;
+  console?: FlowConsole | undefined;
+  /** Evidence went missing, without changing what the capture showed. */
+  warnings?: string[] | undefined;
 };
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -176,6 +197,31 @@ function ensureArtifactDir(ctx: NodeRunContext, nodeId: string): string {
   return dir;
 }
 
+/**
+ * Masks what this node rendered, in the forms it reaches a page in: a browser shows a secret from
+ * an address percent-encoded, which the plain value doesn't match.
+ */
+function secretRedactor(usedSecrets: ReadonlySet<string>) {
+  const forms = [...usedSecrets].flatMap((secret) => [
+    secret,
+    encodeURI(secret),
+    encodeURIComponent(secret),
+    encodeURIComponent(secret).replaceAll("%20", "+"),
+  ]);
+  return createRedactor([...new Set(forms)], DEFAULT_REDACT_PATTERNS);
+}
+
+/** An error safe to chain as a `cause`, because hosts log causes, stack included. */
+function maskedError(err: unknown, redact: (value: unknown) => unknown): Error {
+  const safe = new Error(String(redact(errMessage(err))));
+  if (err instanceof Error) {
+    safe.name = err.name;
+    safe.stack = String(redact(err.stack ?? safe.message));
+    if ((err as { retryable?: unknown }).retryable === false) Object.assign(safe, { retryable: false });
+  }
+  return safe;
+}
+
 /** Remove a half-written file so a failed capture leaves nothing that looks like evidence. */
 function discard(path: string): void {
   rmSync(path, { force: true });
@@ -187,18 +233,6 @@ function resolvePath(workspace: string, p: string): string {
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Why a status is not success, or undefined when it is. */
-function statusFailure(
-  what: string,
-  status: number | undefined,
-  expected: { status: number[] } | undefined,
-): string | undefined {
-  if (status === undefined) return undefined;
-  if (expected ? expected.status.includes(status) : status < 400) return undefined;
-  const wanted = expected ? `, expected ${expected.status.join(" or ")}` : "";
-  return `${what} returned HTTP ${status}${wanted}`;
 }
 
 /** An empty file proves nothing, so it never counts as a capture. */
@@ -218,7 +252,7 @@ async function waitForPage(
   timeoutMs: number,
 ): Promise<void> {
   if (!waitFor) return;
-  if (/^\d+(\.\d+)?(ms|s|m|h|d)$/.test(waitFor)) {
+  if (isDurationText(waitFor)) {
     await page.waitForTimeout(parseDuration(waitFor));
   } else {
     await page.waitForSelector(waitFor, { timeout: timeoutMs });
@@ -289,7 +323,7 @@ async function captureHttp(
 
   // Transcripts are shared as evidence and also land in graph state: mask credentials
   // by name, then any secret this node rendered, wherever a server echoed it back.
-  const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
+  const redact = secretRedactor(usedSecrets);
   const transcript = redact({
     label: label ?? null,
     capturedAt: new Date().toISOString(),
@@ -380,6 +414,7 @@ async function captureScreenshot(
         timeoutMs,
       );
       await page.screenshot({ path: shotPath, fullPage: true });
+      if (videoHandle) await page.waitForTimeout(RECORDER_CATCH_UP_MS);
     } finally {
       await context.close();
     }
@@ -523,6 +558,72 @@ async function captureVideo(
   };
 }
 
+/** Run a scripted flow, then keep what it left as evidence: the final screenshot leads. */
+async function captureSteps(
+  config: Config,
+  scope: ReturnType<typeof buildScope>,
+  ctx: NodeRunContext,
+  nodeId: string,
+  label: string | undefined,
+  usedSecrets: ReadonlySet<string>,
+): Promise<Captured> {
+  // Rendered up front, so every secret is known before anything is recorded.
+  const web = renderDeep(config.target!.web, scope) as NonNullable<Config["target"]>["web"];
+  // A template that is only an expression renders to its value, and a step wants text: `{{ state.n }}`.
+  const asText = (value: unknown): unknown =>
+    value && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, asText(v)]))
+      : String(value ?? "");
+  const steps = (renderDeep(config.steps!, scope) as unknown[]).map(asText) as NonNullable<Config["steps"]>;
+
+  const pw = await importPlaywright(ctx.workspace);
+  ctx.signal?.throwIfAborted();
+  const dir = ensureArtifactDir(ctx, nodeId);
+  const redactor = secretRedactor(usedSecrets);
+  const flow = await runFlow(
+    pw,
+    { ...web, url: String(web.url), steps, noConsoleErrors: config.expect?.noConsoleErrors === true },
+    {
+      artifactDir: dir,
+      fileSlug: `${timestampSlug()}-${slugify(label ?? "flow")}`,
+      signal: ctx.signal,
+      redact: (text) => String(redactor(text)),
+      redactUrl: (url) => String(redactor(redactUrlSecrets(url))),
+      holdsSecret: (text) => [...usedSecrets].some((secret) => secret !== "" && text.includes(secret)),
+      slugify,
+    },
+  );
+
+  const shots = [...(flow.finalScreenshot ? [flow.finalScreenshot] : []), ...flow.namedScreenshots];
+  const main = shots[0] ?? flow.video;
+  if (!main) throw new Error(flow.failure ?? "demo steps: the flow left no evidence");
+  const extra: DemoExtraArtifact[] = [
+    ...shots.slice(1).map((path) => ({
+      path,
+      mimeType: "image/png",
+      kind: "screenshot",
+      sizeBytes: statSync(path).size,
+    })),
+    ...(flow.video && flow.video !== main
+      ? [{ path: flow.video, mimeType: "video/webm", kind: "video", sizeBytes: statSync(flow.video).size }]
+      : []),
+  ];
+  return {
+    failure: flow.failure,
+    passed: !flow.failure && flow.assertions.some((a) => a.positive && a.held),
+    pageStatus: flow.pageStatus,
+    path: main,
+    mimeType: mimeForPath(main),
+    sizeBytes: statSync(main).size,
+    capturedAt: new Date().toISOString(),
+    ...(extra.length > 0 ? { extra } : {}),
+    steps: flow.steps,
+    assertions: flow.assertions,
+    console: flow.console,
+    warnings: flow.warnings,
+  };
+}
+
 /** Files a capture may attach: the run workspace and this thread's own worktrees. */
 function assertAttachable(source: string, state: Record<string, unknown>, workspace: string): void {
   const worktrees = Array.isArray(state[WORKTREES_CHANNEL])
@@ -589,17 +690,18 @@ function okFor(status: DemoStatus): boolean {
 }
 
 /**
- * A capture that worked: `failed` when it recorded a failure, else `inconclusive`,
- * because these modes check nothing that could show an objective was met. Throws
- * when a kept file cannot be described, which makes the capture `not_captured`.
+ * A capture that worked: `failed` when it recorded a failure, `passed` when a flow proved its
+ * assertions, else `inconclusive`, because nothing checked the claim. Throws when a kept file
+ * cannot be described, which makes the capture `not_captured`.
  */
 async function toResult(
   ctx: NodeRunContext,
   kind: DemoKind,
   label: string | undefined,
+  objective: string | null,
   c: Captured,
 ): Promise<DemoResult> {
-  const status: DemoStatus = c.failure ? "failed" : "inconclusive";
+  const status: DemoStatus = c.failure ? "failed" : c.passed ? "passed" : "inconclusive";
   const artifacts = await Promise.all(
     [{ path: c.path, mimeType: c.mimeType }, ...(c.extra ?? [])].map((f) =>
       describeArtifactFile(ctx.workspace, f.path, { mimeType: f.mimeType }),
@@ -620,11 +722,15 @@ async function toResult(
     request: c.request ?? null,
     response: c.response ?? null,
     artifacts,
+    objective,
+    steps: c.steps ?? null,
+    assertions: c.assertions ?? null,
+    console: c.console ?? null,
   };
 }
 
 /** Nothing was captured: no file, so every field that describes one is `null`. */
-function failureResult(kind: DemoKind, reason: string, label?: string): DemoResult {
+function failureResult(kind: DemoKind, reason: string, label: string | undefined, objective: string | null): DemoResult {
   return {
     ok: false,
     status: "not_captured",
@@ -640,6 +746,10 @@ function failureResult(kind: DemoKind, reason: string, label?: string): DemoResu
     request: null,
     response: null,
     artifacts: [],
+    objective,
+    steps: null,
+    assertions: null,
+    console: null,
   };
 }
 
@@ -664,6 +774,7 @@ function trackManifest(
       ...(result.sizeBytes != null ? { sizeBytes: result.sizeBytes } : {}),
       ...(result.reason ? { reason: result.reason } : {}),
       ...(result.label ? { label: result.label } : {}),
+      ...(result.objective ? { objective: result.objective } : {}),
       ...(result.extra && result.extra.length > 0 ? { extra: result.extra } : {}),
       ...(result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
     };
@@ -705,10 +816,12 @@ export const demoNode = defineNode<Config>({
         const usedSecrets = new Set<string>();
         const scope = buildScope(state, ctx, usedSecrets);
         const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
-        const label = config.label
-          ? String(renderDeep(config.label, scope))
-          : undefined;
+        // Masked at once: a label names files, and is written to the result and the manifest.
+        const renderedLabel = config.label ? String(renderDeep(config.label, scope)) : undefined;
+        const label = renderedLabel === undefined ? undefined : String(secretRedactor(usedSecrets)(renderedLabel));
         const strict = config.strict === true;
+        const renderedObjective = config.objective ? String(renderDeep(config.objective, scope)) : null;
+        const objective = renderedObjective === null ? null : String(secretRedactor(usedSecrets)(renderedObjective));
 
         // A run cancelled before the capture starts touches nothing: no folder, no
         // issue, no manifest entry.
@@ -720,9 +833,10 @@ export const demoNode = defineNode<Config>({
         else if (config.video) kind = "video";
         else if (config.simulator) kind = "simulator";
         else if (config.file) kind = "file";
+        else if (config.steps) kind = "steps";
         else {
           // Schema should prevent this; treat as best-effort failure.
-          const result = failureResult("http", "demo: no capture mode configured", label);
+          const result = failureResult("http", "demo: no capture mode configured", label, objective);
           ctx.issue({
             code: ISSUE_CODE.CAPTURE_FAILED,
             severity: "warning",
@@ -741,18 +855,20 @@ export const demoNode = defineNode<Config>({
         let result: DemoResult;
         let cause: unknown;
         let simulatorWarning: string | undefined;
+        let warnings: string[] = [];
         try {
           if (kind === "http" && config.http) {
             result = await toResult(
               ctx,
               kind,
               label,
+              objective,
               await captureHttp(config.http, scope, ctx, nodeId, label, usedSecrets),
             );
           } else if (kind === "screenshot" && config.screenshot) {
-            result = await toResult(ctx, kind, label, await captureScreenshot(config.screenshot, scope, ctx, nodeId, label));
+            result = await toResult(ctx, kind, label, objective, await captureScreenshot(config.screenshot, scope, ctx, nodeId, label));
           } else if (kind === "video" && config.video) {
-            result = await toResult(ctx, kind, label, await captureVideo(config.video, scope, ctx, nodeId, label));
+            result = await toResult(ctx, kind, label, objective, await captureVideo(config.video, scope, ctx, nodeId, label));
           } else if (kind === "simulator" && config.simulator) {
             const dir = ensureArtifactDir(ctx, nodeId);
             const slug = `${timestampSlug()}-${slugify(label ?? "simulator")}`;
@@ -764,14 +880,18 @@ export const demoNode = defineNode<Config>({
             simulatorWarning = sim.warning;
             // The capture returned, but the run may have been cancelled in the meantime.
             if (ctx.signal?.aborted) discard(sim.path);
-            result = await toResult(ctx, kind, label, {
+            result = await toResult(ctx, kind, label, objective, {
               path: sim.path,
               mimeType: sim.mimeType,
               sizeBytes: sim.sizeBytes,
               capturedAt: new Date().toISOString(),
             });
+          } else if (kind === "steps") {
+            const captured = await captureSteps(config, scope, ctx, nodeId, label, usedSecrets);
+            warnings = captured.warnings ?? [];
+            result = await toResult(ctx, kind, label, objective, captured);
           } else {
-            result = await toResult(ctx, kind, label, captureFile(config.file!, state, scope, ctx, nodeId, label));
+            result = await toResult(ctx, kind, label, objective, captureFile(config.file!, state, scope, ctx, nodeId, label));
           }
           // A cancel can arrive after the capture finished and before the node returns (while the
           // last process is stopping, or the file is hashed). The run is aborted, so what the
@@ -793,17 +913,27 @@ export const demoNode = defineNode<Config>({
             });
             ctx.logger.warn("demo: simulator capture may be misleading", { reason: simulatorWarning });
           }
+          for (const warning of warnings) {
+            ctx.issue({
+              code: ISSUE_CODE.CAPTURE_FAILED,
+              severity: "warning",
+              message: `demo ${kind} capture is missing evidence: ${warning}`,
+              impact: "The status stands, but a reviewer has less to look at.",
+              detail: { kind, reason: warning },
+            });
+            ctx.logger.warn("demo: capture is missing evidence", { reason: warning });
+          }
         } catch (err) {
           // Cancelling is not a failed capture: no result, no issue, no manifest entry, and
           // `strict` has nothing to turn into an error. The run reports itself as aborted. A
           // node `timeout` aborts the same way, and the engine reports that attempt as timed out.
           if (ctx.signal?.aborted) throw ctx.signal.reason instanceof Error ? ctx.signal.reason : err;
-          cause = err;
-          const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
+          const redact = secretRedactor(usedSecrets);
+          cause = maskedError(err, redact);
           const reason = String(
             redact(isMissingBrowserError(err) ? missingBrowserMessage() : errMessage(err)),
           );
-          result = failureResult(kind, reason, label);
+          result = failureResult(kind, reason, label, objective);
           const remediation = remediationFor(reason);
           ctx.issue({
             code: remediation ? ISSUE_CODE.TOOL_NOT_FOUND : ISSUE_CODE.CAPTURE_FAILED,
@@ -819,9 +949,11 @@ export const demoNode = defineNode<Config>({
         // A capture can work and still record a failure (HTTP 500): the file stays as evidence.
         if (!cause && result.status === "failed") {
           ctx.issue({
-            code: ISSUE_CODE.CAPTURE_FAILED,
+            code: objective ? ISSUE_CODE.OBJECTIVE_FAILED : ISSUE_CODE.CAPTURE_FAILED,
             severity: "warning",
-            message: `demo ${kind} capture recorded a failure: ${result.reason}`,
+            message: objective
+              ? `objective not met: ${objective}: ${result.reason}`
+              : `demo ${kind} capture recorded a failure: ${result.reason}`,
             impact: "The artifact shows a failure, so it does not demonstrate the expected result.",
             detail: { kind, reason: result.reason },
           });
@@ -829,6 +961,9 @@ export const demoNode = defineNode<Config>({
         }
 
         trackManifest(ctx, nodeId, result);
+        if (strict && objective && result.status !== "passed") {
+          throw new Error(result.reason ?? `objective not shown: ${objective} (${result.status})`, { cause });
+        }
         if (strict && !result.ok) throw new Error(result.reason ?? undefined, { cause });
         ctx.emit("node.output", result);
         return {

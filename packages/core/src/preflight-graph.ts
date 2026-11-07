@@ -233,10 +233,16 @@ async function checkNodeRequires(
       }
     }
 
-    const browserMode = withBlock["screenshot"] ? "screenshot" : withBlock["video"] ? "video" : undefined;
+    const browserMode = withBlock["screenshot"]
+      ? "screenshot"
+      : withBlock["video"]
+        ? "video"
+        : withBlock["steps"]
+          ? "steps"
+          : undefined;
     if (browserMode) {
       const shot = withBlock["screenshot"] as { video?: unknown } | undefined;
-      const problem = await playwrightProblem(cwd, { video: browserMode === "video" || Boolean(shot?.video) });
+      const problem = await playwrightProblem(cwd, { video: browserMode !== "screenshot" || Boolean(shot?.video) });
       if (problem) report(problem, `${path}.with.${browserMode}`);
     }
   }
