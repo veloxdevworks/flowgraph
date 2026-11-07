@@ -1198,6 +1198,16 @@ describe("cancellation", () => {
       expect(fs.existsSync(`${log}.device-file`)).toBe(false); // and its temp file
       expect(calls().some((c) => c.includes("shell kill -2 4242"))).toBe(true);
       expect(calls().some((c) => c.includes("pull"))).toBe(false);
+      // The separate process that does this for a host that exits at once, which the awaited
+      // cleanup above would hide if it were never started.
+      expect(
+        calls().some(
+          (c) =>
+            c.includes("shell for s in -2 -9;") &&
+            c.includes("kill $s $p") &&
+            c.includes("rm -f /sdcard/flowgraph-demo.mp4"),
+        ),
+      ).toBe(true);
     }, 15_000);
 
     it("deletes the temp screenshot from the device when cancelled mid-capture", async () => {

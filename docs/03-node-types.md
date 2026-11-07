@@ -966,7 +966,7 @@ Aborting the run stops a `demo` capture in every mode, and it is not treated as 
 | `http` | Cancels the request, with the same effect as the other modes |
 | `file` | Checks before it copies |
 
-The engine reports the run as `aborted` the moment the signal fires, and the capture finishes cleaning up just after, usually within a few hundred milliseconds. A host that exits straight away still gets the cleanup that cannot wait: child processes are signalled, scratch files are removed, and the Android device cleanup runs as a separate process. A node-level `timeout` is not an abort, so it does not stop a capture that is still running.
+The engine reports the run as `aborted` the moment the signal fires, and the capture finishes cleaning up after that: usually within a few hundred milliseconds for a browser, and a few seconds for an Android device. A recorder that does not finish is killed after 15 seconds. A host that exits straight away still gets the cleanup that cannot wait: child processes are signalled, scratch files are removed, and the Android device cleanup runs as a separate process. A node-level `timeout` is not an abort, so it does not stop a capture that is still running.
 
 A gate that lists a failed capture in `with.artifacts` adds a "Capture problems" section to its message and sets `captureFailures` in its data, so the human sees why evidence is missing. See [Reviewing generated assets](#reviewing-generated-assets-artifacts-select-round).
 
