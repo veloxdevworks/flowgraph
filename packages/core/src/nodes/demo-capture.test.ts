@@ -5,6 +5,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -155,6 +156,7 @@ function fakePlaywrightWorkspace(
     videoError?: string;
     gotoError?: string;
     emptyScreenshot?: boolean;
+    emptyVideo?: boolean;
     executablePath?: string;
     /** Expose the API only on `default`, as a CommonJS entry can. */
     defaultOnly?: boolean;
@@ -175,7 +177,7 @@ function fakePlaywrightWorkspace(
         newContext: async (contextOpts = {}) => {
           const raw = contextOpts.recordVideo ? join(contextOpts.recordVideo.dir, "random-playwright-name.webm") : null;
           return {
-            close: async () => { if (raw) writeFileSync(raw, "webm"); },
+            close: async () => { if (raw) writeFileSync(raw, ${opts.emptyVideo ? '""' : '"webm"'}); },
             newPage: async () => {
               ${opts.videoError ? `if (raw) throw new Error(${JSON.stringify(opts.videoError)});` : ""}
               return {
@@ -237,7 +239,7 @@ describe("browser capture", () => {
 
     const noResponse = await capture(fakePlaywrightWorkspace({ status: null }), { screenshot: { url: "about:blank" } });
     expect(noResponse.out.ok).toBe(true);
-    expect(noResponse.out.pageStatus).toBeUndefined();
+    expect(noResponse.out.pageStatus).toBeNull();
   });
 
   it("rejects an empty screenshot", async () => {
@@ -308,7 +310,7 @@ describe("file capture", () => {
       expect(out.ok).toBe(false);
       expect(out.reason).toMatch(/outside the run workspace/);
     }
-    expect(fs.existsSync(path.join(workspace, ".flowgraph", "demo", NODE))).toBe(false);
+    expect(fs.existsSync(path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE))).toBe(false);
   });
 
   it("attaches from a worktree this thread created", async () => {
@@ -425,13 +427,27 @@ describe.skipIf(process.platform === "win32")("simulator capture", () => {
     );
   });
 
+  it("reports a capture that worked as inconclusive and a launch that failed as not_captured", async () => {
+    stubTools();
+    const shot = await capture(mkdir(), ios({ settle: "1ms" }));
+    expect(shot.out).toMatchObject({ status: "inconclusive", ok: true, reason: null, pageStatus: null });
+    expect(shot.out.artifacts).toHaveLength(1);
+    expect(shot.out.artifacts[0]!.path).toBe(
+      `.flowgraph/artifacts/${THREAD}/${NODE}/${path.basename(shot.out.path!)}`,
+    );
+
+    stubTools({ FAKE_LAUNCH_EXIT: "4" });
+    const failed = await capture(mkdir(), ios({ app: "com.missing.app" }));
+    expect(failed.out).toMatchObject({ status: "not_captured", ok: false, path: null, artifacts: [] });
+  });
+
   it("does not capture the screen when the app failed to launch", async () => {
     stubTools({ FAKE_LAUNCH_EXIT: "4" });
     const { out, issues } = await capture(mkdir(), ios({ app: "com.missing.app" }));
 
     expect(out.ok).toBe(false);
     expect(out.reason).toMatch(/launch of "com\.missing\.app" failed \(exit 4\): app not installed/);
-    expect(out.path).toBeUndefined();
+    expect(out.path).toBeNull();
     expect(issues[0]).toMatchObject({ code: "CAPTURE_FAILED" });
     expect(calls().filter((c) => c.includes("screenshot"))).toHaveLength(1); // the look before launching
   });
@@ -492,7 +508,7 @@ describe.skipIf(process.platform === "win32")("simulator capture", () => {
     const failed = await capture(workspace, ios({ capture: "video", app: "com.missing.app" }));
     expect(failed.out.ok).toBe(false);
     expect(failed.out.reason).toMatch(/launch of "com\.missing\.app" failed/);
-    expect(fs.readdirSync(path.join(workspace, ".flowgraph", "demo", NODE))).toEqual([]);
+    expect(fs.readdirSync(path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE))).toEqual([]);
   }, 15_000);
 
   it("rejects an empty recording", async () => {
@@ -666,5 +682,203 @@ describe("preflight for browser captures", () => {
     expect((await preflightGraphRequires(graphWith(screenshot), { cwd })).diagnostics).toEqual([]);
     expect((await preflightGraphRequires(graphWith({ video: { url: "http://app/" } }), { cwd })).diagnostics).toEqual([]);
     expect((await preflightGraphRequires(graphWith({ file: { path: "a" } }), { cwd: mkdir() })).diagnostics).toEqual([]);
+  });
+});
+
+/** A port nothing listens on: a refused connection, as when the app under test is down. */
+async function closedPort(): Promise<number> {
+  const server = http.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+const sha256Of = (file: string) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+
+describe("result status, fields and artifacts", () => {
+  let server: http.Server;
+  let base: string;
+  let refused: string;
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://x");
+      res.writeHead(Number(url.searchParams.get("status") ?? 200), { "content-type": "text/plain" });
+      res.end("body");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    refused = `http://127.0.0.1:${await closedPort()}/`;
+  });
+  afterAll(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+
+  function attachable(): { workspace: string; source: string; missing: string } {
+    const workspace = mkdir();
+    const source = path.join(workspace, "note.txt");
+    fs.writeFileSync(source, "hello", "utf8");
+    return { workspace, source, missing: path.join(workspace, "gone.txt") };
+  }
+
+  /** Every mode, in each outcome it can reach without an objective. */
+  async function outcomes(): Promise<Record<string, DemoResult>> {
+    const file = attachable();
+    const run = async (workspace: string, config: Record<string, unknown>) => (await capture(workspace, config)).out;
+    return {
+      httpOk: await run(mkdir(), { http: { url: `${base}/` } }),
+      http500: await run(mkdir(), { http: { url: `${base}/?status=500` } }),
+      httpRefused: await run(mkdir(), { http: { url: refused } }),
+      screenshotOk: await run(fakePlaywrightWorkspace(), { screenshot: { url: "http://app/" } }),
+      screenshot500: await run(fakePlaywrightWorkspace({ status: 500 }), { screenshot: { url: "http://app/" } }),
+      screenshotRefused: await run(fakePlaywrightWorkspace({ gotoError: "net::ERR_CONNECTION_REFUSED" }), {
+        screenshot: { url: "http://app/" },
+      }),
+      videoOk: await run(fakePlaywrightWorkspace(), { video: { url: "http://app/", duration: "1ms" } }),
+      video502: await run(fakePlaywrightWorkspace({ status: 502 }), { video: { url: "http://app/", duration: "1ms" } }),
+      noBrowser: await run(fakePlaywrightWorkspace({ launchError: "Executable doesn't exist at /x" }), {
+        screenshot: { url: "http://app/" },
+      }),
+      fileOk: await run(file.workspace, { file: { path: file.source } }),
+      fileMissing: await run(file.workspace, { file: { path: file.missing } }),
+    };
+  }
+
+  it("gives each existing mode only failed, inconclusive or not_captured, and derives ok from it", async () => {
+    const r = await outcomes();
+    const status = Object.fromEntries(Object.entries(r).map(([k, v]) => [k, [v.status, v.ok]]));
+    expect(status).toEqual({
+      httpOk: ["inconclusive", true],
+      http500: ["failed", false],
+      httpRefused: ["not_captured", false],
+      screenshotOk: ["inconclusive", true],
+      screenshot500: ["failed", false],
+      screenshotRefused: ["not_captured", false],
+      videoOk: ["inconclusive", true],
+      video502: ["failed", false],
+      noBrowser: ["not_captured", false],
+      fileOk: ["inconclusive", true],
+      fileMissing: ["not_captured", false],
+    });
+  });
+
+  it("writes every field in every mode and outcome, null when absent", async () => {
+    const r = await outcomes();
+    const keys = [
+      "ok", "status", "kind", "path", "mimeType", "sizeBytes", "reason", "capturedAt", "label",
+      "extra", "pageStatus", "request", "response", "artifacts",
+    ].sort();
+    for (const [name, out] of Object.entries(r)) {
+      expect(Object.keys(out).sort(), name).toEqual(keys);
+      // JSON has no undefined, so a missing field would be dropped on its way into state.
+      expect(Object.keys(JSON.parse(JSON.stringify(out))).sort(), name).toEqual(keys);
+    }
+
+    expect(r["httpOk"]).toMatchObject({ reason: null, label: null, extra: null, pageStatus: null });
+    expect(r["httpOk"]!.request).not.toBeNull();
+    expect(r["screenshotOk"]).toMatchObject({ request: null, response: null, pageStatus: 200 });
+    expect(r["fileOk"]).toMatchObject({ request: null, response: null, pageStatus: null });
+    for (const name of ["httpRefused", "screenshotRefused", "noBrowser", "fileMissing"]) {
+      expect(r[name], name).toMatchObject({
+        path: null, mimeType: null, sizeBytes: null, extra: null, pageStatus: null, request: null, response: null, artifacts: [],
+      });
+      expect(typeof r[name]!.reason).toBe("string");
+    }
+  });
+
+  it("writes under .flowgraph/artifacts/<thread>/<node>/ and describes each file", async () => {
+    const workspace = mkdir();
+    const { out } = await capture(workspace, { label: "health", http: { url: `${base}/` } });
+
+    const dir = path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE);
+    expect(path.dirname(out.path!)).toBe(dir);
+    expect(out.artifacts).toHaveLength(1);
+    const [artifact] = out.artifacts;
+    expect(artifact).toMatchObject({
+      kind: "artifact",
+      path: `.flowgraph/artifacts/${THREAD}/${NODE}/${path.basename(out.path!)}`,
+      mimeType: "application/json",
+      role: "file",
+      sizeBytes: fs.statSync(out.path!).size,
+      sha256: sha256Of(out.path!),
+    });
+    // `path` stays absolute for existing graphs and names the same file.
+    expect(path.isAbsolute(out.path!)).toBe(true);
+    expect(path.resolve(workspace, artifact!.path)).toBe(out.path);
+  });
+
+  it("lists a screenshot and its recording, main file first, and leaves no raw recording behind", async () => {
+    const workspace = fakePlaywrightWorkspace();
+    const { out } = await capture(workspace, { screenshot: { url: "http://app/", video: true } });
+
+    expect(out.artifacts.map((a) => [a.role, a.mimeType])).toEqual([
+      ["image", "image/png"],
+      ["video", "video/webm"],
+    ]);
+    expect(out.artifacts.map((a) => path.resolve(workspace, a.path))).toEqual([out.path, out.extra![0]!.path]);
+    for (const a of out.artifacts) expect(a.sha256).toBe(sha256Of(path.resolve(workspace, a.path)));
+    expect(fs.readdirSync(path.dirname(out.path!)).sort()).toEqual(
+      [path.basename(out.path!), path.basename(out.extra![0]!.path)].sort(),
+    );
+  });
+
+  it("keeps the evidence of a failed capture in artifacts, and has none for a capture that never happened", async () => {
+    const failed = await capture(fakePlaywrightWorkspace({ status: 500 }), { screenshot: { url: "http://app/" } });
+    expect(failed.out).toMatchObject({ status: "failed", ok: false });
+    expect(failed.out.artifacts).toHaveLength(1);
+    expect(fs.existsSync(failed.out.path!)).toBe(true);
+
+    const none = await capture(fakePlaywrightWorkspace({ gotoError: "net::ERR_CONNECTION_REFUSED" }), {
+      screenshot: { url: "http://app/", video: true },
+    });
+    expect(none.out).toMatchObject({ status: "not_captured", artifacts: [] });
+  });
+
+  it("leaves nothing in the artifact folder when the page cannot be reached", async () => {
+    const workspace = fakePlaywrightWorkspace({ gotoError: "net::ERR_CONNECTION_REFUSED" });
+    await capture(workspace, { screenshot: { url: "http://app/", video: true } });
+    await capture(workspace, { video: { url: "http://app/", duration: "1ms" } });
+
+    expect(fs.readdirSync(path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE))).toEqual([]);
+  });
+
+  it("leaves nothing in the artifact folder when the browser cannot start", async () => {
+    const workspace = fakePlaywrightWorkspace({
+      launchError: "browserType.launch: Executable doesn't exist at /browsers/chrome-headless-shell",
+    });
+    const shot = await capture(workspace, { screenshot: { url: "http://app/", video: true } });
+    const video = await capture(workspace, { video: { url: "http://app/", duration: "1ms" } });
+
+    expect(shot.out.status).toBe("not_captured");
+    expect(video.out.status).toBe("not_captured");
+    expect(fs.readdirSync(path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE))).toEqual([]);
+  });
+
+  it("keeps no empty recording", async () => {
+    const workspace = fakePlaywrightWorkspace({ emptyVideo: true });
+    const dir = path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE);
+
+    const video = await capture(workspace, { video: { url: "http://app/", duration: "1ms" } });
+    expect(video.out).toMatchObject({ status: "not_captured", path: null, artifacts: [] });
+    expect(fs.readdirSync(dir)).toEqual([]);
+
+    const shot = await capture(workspace, { screenshot: { url: "http://app/", video: true } });
+    expect(shot.out).toMatchObject({ status: "inconclusive", extra: null });
+    expect(shot.out.artifacts).toHaveLength(1);
+    expect(fs.readdirSync(dir).map((f) => path.extname(f))).toEqual([".png"]);
+  });
+
+  it("records status and artifacts in the manifest, which stays where Desktop reads it", async () => {
+    const workspace = mkdir();
+    const { out } = await capture(workspace, { http: { url: `${base}/?status=500` } });
+    await capture(workspace, { http: { url: refused } });
+
+    expect(fs.existsSync(path.join(workspace, ".flowgraph", "demo", "runs", THREAD, "manifest.jsonl"))).toBe(true);
+    const [failed, none] = readDemoManifest(workspace, THREAD);
+    expect(failed).toMatchObject({ ok: false, status: "failed", path: out.path, artifacts: out.artifacts });
+    expect(none).toMatchObject({ ok: false, status: "not_captured" });
+    expect(none).not.toHaveProperty("artifacts");
   });
 });

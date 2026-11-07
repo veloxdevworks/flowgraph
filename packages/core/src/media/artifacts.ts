@@ -5,7 +5,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { Readable, Transform } from "node:stream";
@@ -236,6 +236,51 @@ export function createOutputWriter(opts: OutputWriterOptions): MediaCallContext[
     } finally {
       if (tmp) await rm(tmp, { force: true }).catch(() => undefined);
     }
+  };
+}
+
+/**
+ * The `Artifact` record for a file a node already wrote into the workspace: hashes it,
+ * reads image size, and makes the path workspace-relative. Throws when the file is
+ * missing, empty, or outside the workspace, since a record for it would be false.
+ */
+export async function describeArtifactFile(
+  workspace: string,
+  absPath: string,
+  opts: { mimeType?: string; meta?: NonNullable<Artifact["meta"]> } = {},
+): Promise<Artifact> {
+  const rel = path.relative(workspace, absPath);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`artifact is outside the workspace: ${absPath}`);
+  }
+  const st = await stat(absPath);
+  if (!st.isFile() || st.size === 0) throw new Error(`artifact is empty or not a file: ${absPath}`);
+
+  const hash = createHash("sha256");
+  const first: Buffer[] = [];
+  let firstLen = 0;
+  const stream = createReadStream(absPath);
+  for await (const chunk of stream) {
+    const buf = chunk as Buffer;
+    hash.update(buf);
+    if (firstLen < 65536) {
+      first.push(buf);
+      firstLen += buf.length;
+    }
+  }
+
+  const ext = path.extname(absPath).slice(1).toLowerCase();
+  const mimeType = opts.mimeType ?? mimeForExtension(ext) ?? "application/octet-stream";
+  const dims = mimeType.startsWith("image/") ? probeImageSize(Buffer.concat(first)) : undefined;
+  const meta: NonNullable<Artifact["meta"]> = { ...(dims ?? {}), ...(opts.meta ?? {}) };
+  return {
+    kind: "artifact",
+    path: toPosix(rel),
+    mimeType,
+    sizeBytes: st.size,
+    role: roleForMime(mimeType, ext),
+    sha256: hash.digest("hex"),
+    ...(Object.keys(meta).length ? { meta } : {}),
   };
 }
 

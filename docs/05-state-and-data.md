@@ -131,7 +131,7 @@ Use explicit `output: { to: … }` when multiple parallel nodes must fan in to o
 
 **Generated media** (`image` / `video` / `model3d`) is saved under `<workspace>/.flowgraph/artifacts/<thread>/<nodeId>/` and referenced from state as an `Artifact` record (`kind`, `path`, `mimeType`, `sizeBytes`, `role`, `sha256`, `meta`); see [03 §9d](./03-node-types.md).
 
-**Artifacts (e.g. from `demo` nodes)** are files on disk under `<workspace>/.flowgraph/demo/<nodeId>/`. State holds **paths and metadata** (`path`, `mimeType`, `sizeBytes`, …) — not inline binary blobs. Downstream nodes and UIs read those paths from `state.outputs.<nodeId>` (or a projected channel). Screenshot mode with `video: true` also tracks a `.webm` extra artifact.
+**`demo` captures** are files on disk under `<workspace>/.flowgraph/artifacts/<thread>/<nodeId>/`, like generated media. State holds **paths and metadata** — not inline binary blobs: the legacy absolute `path` and `extra`, and `artifacts`, `Artifact` records with workspace-relative paths. Downstream nodes and UIs read them from `state.outputs.<nodeId>` (or a projected channel). Every field is written on every run, `null` when absent, so a later run never inherits an earlier run's file. See [03 §9b](./03-node-types.md).
 
 **Run issues** are append-only records of degradations that may affect how trustworthy a result is (missing `go`, skipped tests, failed captures). They live on disk at `<workspace>/.flowgraph/runs/<threadId>/issues.jsonl` and a capped copy is kept in the reserved `__issues` channel. Templates can read them as `{{ issues }}`. They are stripped from the public `RunResult.state` (reserved) but attached as `RunResult.issues`.
 

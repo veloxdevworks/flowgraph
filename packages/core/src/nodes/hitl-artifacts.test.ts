@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MemorySaver } from "@langchain/langgraph";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Artifact, GraphSpec } from "@flowgraph/spec";
@@ -242,6 +244,147 @@ describe("hitl with.artifacts: demo outputs", () => {
     );
     expect(out.artifacts.map((a) => a.path)).toEqual(["t.json"]);
     expect(out.captureFailures[0]).toMatchObject({ reason: "returned HTTP 500" });
+  });
+
+  it("reads a failure before it follows artifacts, so the new field cannot hide it", async () => {
+    await writeFile(path.join(dir, "t.json"), "{}");
+    const record: Artifact = { kind: "artifact", path: "t.json", mimeType: "application/json", sizeBytes: 2, role: "file" };
+    const out = await resolveGateArtifacts(
+      [
+        { ok: false, status: "failed", kind: "http", path: path.join(dir, "t.json"), reason: "returned HTTP 500", artifacts: [record] },
+        { ok: false, status: "not_captured", kind: "screenshot", label: "home", path: null, reason: "refused", artifacts: [] },
+        { ok: true, status: "inconclusive", kind: "file", path: null, reason: null, artifacts: [] },
+      ],
+      dir,
+    );
+    expect(out.captureFailures).toEqual([
+      { kind: "http", reason: "returned HTTP 500", path: path.join(dir, "t.json") },
+      { kind: "screenshot", label: "home", reason: "refused" },
+    ]);
+    // The failed capture's evidence is still shown, from its records and only once.
+    expect(out.artifacts.map((a) => a.path)).toEqual(["t.json"]);
+  });
+
+  describe("when the demo ran in another workspace", () => {
+    const rel = ".flowgraph/artifacts/t/prove";
+    /** A demo output whose files live under `root`, as `demo` writes it. */
+    async function demoOutput(root: string, over: Record<string, unknown> = {}) {
+      await mkdir(path.join(root, rel), { recursive: true });
+      await writeFile(path.join(root, rel, "shot.png"), "png");
+      await writeFile(path.join(root, rel, "shot.webm"), "webm");
+      const record = (name: string, mimeType: string, role: Artifact["role"], sha256: string): Artifact => ({
+        kind: "artifact", path: `${rel}/${name}`, mimeType, sizeBytes: 3, role, sha256,
+      });
+      return {
+        ok: true,
+        status: "inconclusive",
+        kind: "screenshot",
+        path: path.join(root, rel, "shot.png"),
+        extra: [{ path: path.join(root, rel, "shot.webm"), mimeType: "video/webm", kind: "video" }],
+        reason: null,
+        artifacts: [record("shot.png", "image/png", "image", "hash-png"), record("shot.webm", "video/webm", "video", "hash-webm")],
+        ...over,
+      };
+    }
+
+    it("keeps the producer's full records when the gate shares the workspace", async () => {
+      const out = await resolveGateArtifacts([await demoOutput(dir)], dir);
+      expect(out.artifacts.map((a) => [a.path, a.sha256])).toEqual([
+        [`${rel}/shot.png`, "hash-png"],
+        [`${rel}/shot.webm`, "hash-webm"],
+      ]);
+      expect(out.artifactRefs).toEqual([`${rel}/shot.png`, `${rel}/shot.webm`]);
+    });
+
+    it("gives the main file and each extra as a plain absolute ref, never a record that points nowhere", async () => {
+      const demo = await demoOutput(outside);
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts).toEqual([]);
+      expect(out.artifactRefs).toEqual([demo.path, (demo.extra as Array<{ path: string }>)[0]!.path]);
+      expect(out.captureFailures).toEqual([]);
+    });
+
+    it("still lists a failure from another workspace, with its files as refs", async () => {
+      const demo = await demoOutput(outside, { ok: false, status: "failed", reason: "page returned HTTP 500" });
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts).toEqual([]);
+      expect(out.artifactRefs).toHaveLength(2);
+      expect(out.captureFailures).toEqual([{ kind: "screenshot", reason: "page returned HTTP 500", path: demo.path }]);
+
+      const none = await resolveGateArtifacts(
+        [{ ok: false, status: "not_captured", kind: "screenshot", path: null, extra: null, reason: "refused", artifacts: [] }],
+        dir,
+      );
+      expect(none.captureFailures).toEqual([{ kind: "screenshot", reason: "refused" }]);
+    });
+
+    it("does not present a same-named file in the gate's workspace as the demo's", async () => {
+      const demo = await demoOutput(outside);
+      await demoOutput(dir); // a different file at the same relative paths, here
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts).toEqual([]);
+      expect(out.artifactRefs).toEqual([demo.path, (demo.extra as Array<{ path: string }>)[0]!.path]);
+    });
+
+    it("treats each file on its own: the main file here, an extra elsewhere", async () => {
+      const demo = await demoOutput(dir);
+      await mkdir(path.join(outside, rel), { recursive: true });
+      await writeFile(path.join(outside, rel, "shot.webm"), "webm");
+      (demo.extra as Array<{ path: string }>)[0]!.path = path.join(outside, rel, "shot.webm");
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts.map((a) => a.path)).toEqual([`${rel}/shot.png`]);
+      expect(out.artifactRefs).toEqual([`${rel}/shot.png`, path.join(outside, rel, "shot.webm")]);
+    });
+
+    it("presents nothing for a file that was deleted", async () => {
+      const demo = await demoOutput(dir);
+      await rm(demo.path as string);
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts.map((a) => a.path)).toEqual([`${rel}/shot.webm`]);
+      expect(out.artifactRefs).toContain(demo.path);
+    });
+  });
+
+  it("shows a real demo failure at the gate, with the evidence it kept", async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.end("boom");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+    try {
+      const spec = {
+        apiVersion: "flowgraph/v1",
+        kind: "Graph",
+        metadata: { name: "demo-then-gate" },
+        state: { channels: {} },
+        nodes: [
+          { id: "prove", type: "demo", with: { http: { url } } },
+          {
+            id: "gate",
+            type: "hitl",
+            with: { mode: "approve", message: "Ship?", artifacts: ["{{ state.outputs.prove }}"] },
+          },
+        ],
+        edges: [
+          { from: "START", to: "prove" },
+          { from: "prove", to: "gate" },
+          { from: "gate", to: "END" },
+        ],
+        runtime: { checkpoint: { enabled: true, backend: "memory" } },
+      } as unknown as GraphSpec;
+      const res = await (await compile(spec)).run({ threadId: "real-demo", onInterrupt: "fail" });
+      const payload = res.interrupts![0]!.payload as { reason?: string; message?: string; data: Data & { captureFailures: unknown[] } };
+
+      expect(payload.reason ?? payload.message).toContain("Capture problems (1):");
+      expect(payload.reason ?? payload.message).toContain("returned HTTP 500");
+      expect(payload.data.captureFailures).toHaveLength(1);
+      expect(payload.data.artifacts).toHaveLength(1);
+      expect(payload.data.artifacts[0]!.path).toMatch(/^\.flowgraph\/artifacts\/real-demo\/prove\/.+\.json$/);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
   });
 
   it("puts the failure in the message every client shows", async () => {

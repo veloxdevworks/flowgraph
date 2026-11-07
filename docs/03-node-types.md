@@ -925,20 +925,24 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
 
 | Mode | What it does | Extra deps |
 |---|---|---|
-| `http` | Re-issues the request; writes a JSON transcript (credentials masked, see below) under `.flowgraph/demo/<nodeId>/`. `timeout` defaults to 30s | none |
+| `http` | Re-issues the request; writes a JSON transcript (credentials masked, see below). `timeout` defaults to 30s | none |
 | `screenshot` | Headless Chromium via Playwright; PNG screenshot (+ tracked `.webm` extra when `video: true`) | optional peer `playwright` (+ `npx playwright install chromium ffmpeg`) |
 | `video` | Headless Chromium page recording; `.webm` is the primary artifact. It covers the page load and `waitFor`, then `duration` more | optional peer `playwright` |
 | `simulator` | iOS (`xcrun simctl`) or Android (`adb`) screenshot / `recordVideo` / `screenrecord`. An iOS `device` is booted if needed; an Android `device` is the serial of one already running. A failed launch or deep link fails the capture instead of recording whatever is on screen. After a launch or deep link the capture waits up to `settle` (default 30s) for the screen to change and hold still; if it never does, the capture still happens and raises a warning issue. A recording starts before the app opens and covers it opening, then runs `duration` more. On iOS a still screen gives a very short clip whatever `duration` says, because `simctl` only writes frames when the screen changes. Android recordings stop at 180s | Xcode (not just the command-line tools) or Android SDK platform-tools |
-| `file` | Copies a file from the run workspace, or from a worktree this thread created, into the demo artifact dir. Anything else is refused, including through a symlink | none |
+| `file` | Copies a file from the run workspace, or from a worktree this thread created, into the artifact folder. Anything else is refused, including through a symlink | none |
 
-### Best effort vs `strict`
+### Status, best effort and `strict`
 
-`ok` means the capture worked **and** what it recorded is not a failure:
+Every result has a `status` that says what it shows ([ADR-0019](./adr/0019-demo-objectives-and-evidence.md)). `ok` follows from it and nothing else: `true` for `passed` and `inconclusive`, `false` for `failed` and `not_captured`.
 
-- **The capture failed** (Playwright missing, DNS error, source file not found, app did not launch, empty output, …): `{ ok: false, kind, reason, capturedAt }`.
-- **The capture recorded a failure** (`http`, `screenshot` or `video` got an HTTP status of 400 or above): `{ ok: false, reason, path, … }`. The file is kept as evidence.
+| `status` | Meaning | `ok` | Files |
+|---|---|---|---|
+| `inconclusive` | The capture worked and recorded no failure. Nothing checked an objective, so it shows that something was captured, not that something worked. Every successful capture in the five modes above is this | `true` | yes |
+| `failed` | The capture worked and recorded a failure: `http`, `screenshot` or `video` got an HTTP status outside `expect.status`, which by default means 400 or above | `false` | kept as evidence |
+| `not_captured` | Nothing was captured: Playwright or its browser missing, connection refused, DNS error, source file not found, app did not launch, empty output, … | `false` | none |
+| `passed` | Reserved for results that checked an objective. No mode can produce it yet | `true` | yes |
 
-Neither **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
+Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
 
 Use `expect` when a different status is the point, such as proving a 404 page:
 
@@ -959,27 +963,36 @@ A gate that lists a failed capture in `with.artifacts` adds a "Capture problems"
 
 ### Result shape
 
+Every field is written on every run, `null` when it does not apply (`artifacts` is `[]`). The `outputs` channel is deep-merged, so a field left out would keep the value from an earlier run: a capture that failed on a loop-back used to show the first run's `path`. A graph can rely on `path: null` meaning there is no file.
+
 ```ts
 {
-  ok: boolean;
+  ok: boolean;                       // derived from status
+  status: "passed" | "failed" | "inconclusive" | "not_captured";
   kind: "http" | "screenshot" | "file" | "video" | "simulator";
-  path?: string;         // artifact file path; can be set with ok: false, as evidence
-  mimeType?: string;
-  sizeBytes?: number;
-  reason?: string;       // when ok: false
+  path: string | null;               // absolute path of the main file; set with status "failed", as evidence
+  mimeType: string | null;
+  sizeBytes: number | null;
+  reason: string | null;             // why status is failed or not_captured
   capturedAt: string;
-  label?: string;
-  extra?: Array<{ path, mimeType, kind, sizeBytes? }>; // e.g. screenshot + video
-  pageStatus?: number;   // screenshot and video: HTTP status of the page opened
-  // http mode also includes request/response summaries (headers redacted)
+  label: string | null;
+  extra: Array<{ path, mimeType, kind, sizeBytes? }> | null; // absolute paths, e.g. the screenshot's recording
+  pageStatus: number | null;         // screenshot and video: HTTP status of the page opened
+  request: { ... } | null;           // http mode, headers redacted
+  response: { ... } | null;
+  artifacts: Artifact[];             // workspace-relative records, main file first
 }
 ```
+
+`artifacts` holds the same files as `path` and `extra`, as `Artifact` records (`path` relative to the workspace, `mimeType`, `sizeBytes`, `role`, `sha256`), which is what gates, previews and media nodes read. Prefer it in new graphs. `request` and `response` are nested objects and still merge across runs: a key in `response.headers` from an earlier run can remain. Read them with `output.to` when a graph loops.
+
+Files live under `<workspace>/.flowgraph/artifacts/<threadId|runId>/<nodeId>/`, where media nodes write theirs. Captures made before this layout are in `.flowgraph/demo/<nodeId>/` and are not moved.
 
 Artifacts are **files on disk** (paths in state), not inline binary data. See [05 — State & Data](./05-state-and-data.md).
 
 ### Artifact manifest (run-scoped tracking)
 
-Every `demo` capture (success or best-effort failure) appends one JSON line to:
+Every `demo` capture (success or best-effort failure) appends one JSON line, with `status` and `artifacts`, to:
 
 ```
 <workspace>/.flowgraph/demo/runs/<threadId|runId>/manifest.jsonl
@@ -1036,7 +1049,7 @@ nodes:
         - node: http-transcript-tool
 ```
 
-The agent may call each tool zero or more times with different arguments. Each call runs the `demo` node with those args as `input`; files land under `.flowgraph/demo/<nodeId>/` and are tracked in the run manifest. Tool return values stay intra-agent (they do not overwrite `state.outputs.<nodeId>`).
+The agent may call each tool zero or more times with different arguments. Each call runs the `demo` node with those args as `input`; files land under `.flowgraph/artifacts/<thread>/<nodeId>/` and are tracked in the run manifest. Tool return values stay intra-agent (they do not overwrite `state.outputs.<nodeId>`).
 
 ### Compose for anything harder
 
