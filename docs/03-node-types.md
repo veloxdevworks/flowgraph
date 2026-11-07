@@ -955,6 +955,19 @@ Use `expect` when a different status is the point, such as proving a 404 page:
       expect: { status: [404] }   # also on http and video
 ```
 
+### Cancelling a run
+
+Aborting the run stops a `demo` capture in every mode, and it is not treated as a failed capture: no `CAPTURE_FAILED` issue, no manifest entry, and `strict` has nothing to turn into an error. The run ends as `aborted`, and no half-written file or `.recording-` folder is left behind.
+
+| Mode | What an abort does |
+|---|---|
+| `screenshot`, `video` | Closes the browser context, which rejects whatever Playwright call is in flight (loading the page, `waitFor`, `duration`), and closes the browser. An abort during browser launch closes the browser once it has started |
+| `simulator` | Kills the `simctl` or `adb` steps and the settle wait. Stops `simctl recordVideo`. On Android also stops `screenrecord` on the device and deletes its temp file there, because stopping the adb client alone leaves the file (and on some devices the recorder) behind |
+| `http` | Cancels the request, with the same effect as the other modes |
+| `file` | Checks before it copies |
+
+The engine reports the run as `aborted` the moment the signal fires, and the capture finishes cleaning up after that: usually within a few hundred milliseconds for a browser, and a few seconds for an Android device. A recorder that does not finish is killed after 15 seconds. A host that exits straight away still gets the cleanup that cannot wait: child processes are signalled, scratch files are removed, and the Android device cleanup runs as a separate process. A node-level `timeout` is not an abort, so it does not stop a capture that is still running.
+
 A gate that lists a failed capture in `with.artifacts` adds a "Capture problems" section to its message and sets `captureFailures` in its data, so the human sees why evidence is missing. See [Reviewing generated assets](#reviewing-generated-assets-artifacts-select-round).
 
 ### What transcripts mask

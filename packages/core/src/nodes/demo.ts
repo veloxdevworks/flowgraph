@@ -54,8 +54,9 @@ import { runScopedKey } from "../runtime/run-key.js";
 import { WORKTREES_CHANNEL } from "../runtime/state-annotation.js";
 import {
   BROWSER_INSTALL_COMMAND,
-  CAPTURE_BROWSER,
+  closeOnAbort,
   importPlaywright,
+  launchCaptureBrowser,
   isMissingBrowserError,
   missingBrowserMessage,
   type PlaywrightPage,
@@ -259,6 +260,7 @@ async function captureHttp(
     : undefined;
   const body = config.body != null ? renderDeep(config.body, scope) : undefined;
 
+  ctx.signal?.throwIfAborted();
   const timeout = config.timeout ?? "30s";
   const timeoutSignal = AbortSignal.timeout(parseDuration(timeout));
   let httpResult;
@@ -273,6 +275,8 @@ async function captureHttp(
       signal: ctx.signal ? AbortSignal.any([ctx.signal, timeoutSignal]) : timeoutSignal,
     });
   } catch (err) {
+    // A cancelled run is not a timeout, even when both fired.
+    if (ctx.signal?.aborted) throw err;
     if (timeoutSignal.aborted) {
       throw new Error(`${method} ${redactUrlSecrets(url)} did not respond within ${timeout}`, { cause: err });
     }
@@ -338,12 +342,17 @@ async function captureScreenshot(
   const viewport = config.viewport ?? { width: 1280, height: 720 };
 
   const pw = await importPlaywright(ctx.workspace);
+  ctx.signal?.throwIfAborted();
   const dir = ensureArtifactDir(ctx, nodeId);
   const slug = slugify(label ?? "screenshot");
   const shotName = `${timestampSlug()}-${slug}.png`;
   const shotPath = join(dir, shotName);
 
-  const browser = await pw.chromium.launch(CAPTURE_BROWSER);
+  const browser = await launchCaptureBrowser(pw, ctx.signal);
+  // Cancelling closes the context, which rejects whatever Playwright call is in flight.
+  const onAbort = closeOnAbort(ctx.signal);
+  onAbort.add(() => browser.close());
+  onAbort.now(() => discard(shotPath));
   let extra: DemoExtraArtifact | undefined;
   let pageStatus: number | undefined;
   let scratch: string | undefined;
@@ -351,11 +360,16 @@ async function captureScreenshot(
     // Playwright names recordings itself: let it write to a scratch folder, so a capture
     // that fails after the page opened leaves no stray recording among the artifacts.
     scratch = config.video ? mkdtempSync(join(dir, ".recording-")) : undefined;
+    if (scratch) {
+      const folder = scratch;
+      onAbort.now(() => rmSync(folder, { recursive: true, force: true }));
+    }
     const contextOpts: Record<string, unknown> = {
       viewport,
       ...(scratch ? { recordVideo: { dir: scratch, size: viewport } } : {}),
     };
     const context = await browser.newContext(contextOpts);
+    onAbort.add(() => context.close());
     const page = await context.newPage();
     const videoHandle = config.video && typeof page.video === "function" ? page.video() : null;
     try {
@@ -376,12 +390,15 @@ async function captureScreenshot(
     discard(shotPath);
     throw err;
   } finally {
+    onAbort.dispose();
     await browser.close();
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
 
   let sizeBytes: number;
   try {
+    // Cancelled while the browser was closing: the run is over, so keep nothing of it.
+    ctx.signal?.throwIfAborted();
     sizeBytes = assertNotEmpty(shotPath, "demo screenshot");
   } catch (err) {
     discard(shotPath);
@@ -437,19 +454,25 @@ async function captureVideo(
   const viewport = config.viewport ?? { width: 1280, height: 720 };
 
   const pw = await importPlaywright(ctx.workspace);
+  ctx.signal?.throwIfAborted();
   const dir = ensureArtifactDir(ctx, nodeId);
   const slug = slugify(label ?? "video");
 
-  const browser = await pw.chromium.launch(CAPTURE_BROWSER);
+  const browser = await launchCaptureBrowser(pw, ctx.signal);
+  const onAbort = closeOnAbort(ctx.signal);
+  onAbort.add(() => browser.close());
   let videoPath: string | undefined;
   let pageStatus: number | undefined;
   let scratch: string | undefined;
   try {
     scratch = mkdtempSync(join(dir, ".recording-"));
+    const folder = scratch;
+    onAbort.now(() => rmSync(folder, { recursive: true, force: true }));
     const context = await browser.newContext({
       viewport,
       recordVideo: { dir: scratch, size: viewport },
     });
+    onAbort.add(() => context.close());
     const page = await context.newPage();
     const videoHandle = typeof page.video === "function" ? page.video() : null;
     try {
@@ -476,10 +499,16 @@ async function captureVideo(
       videoPath = extra?.path;
     }
   } finally {
+    onAbort.dispose();
     await browser.close();
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
 
+  if (ctx.signal?.aborted) {
+    // Cancelled while the browser was closing: the run is over, so keep nothing of it.
+    if (videoPath) discard(videoPath);
+    ctx.signal.throwIfAborted();
+  }
   if (!videoPath || !existsSync(videoPath)) {
     throw new Error("demo video: Playwright did not produce a recording");
   }
@@ -523,6 +552,7 @@ function captureFile(
   nodeId: string,
   label: string | undefined,
 ): Captured {
+  ctx.signal?.throwIfAborted();
   const rawPath = String(renderDeep(config.path, scope));
   const source = resolvePath(ctx.workspace, rawPath);
 
@@ -680,6 +710,10 @@ export const demoNode = defineNode<Config>({
           : undefined;
         const strict = config.strict === true;
 
+        // A run cancelled before the capture starts touches nothing: no folder, no
+        // issue, no manifest entry.
+        ctx.signal?.throwIfAborted();
+
         let kind: DemoKind;
         if (config.http) kind = "http";
         else if (config.screenshot) kind = "screenshot";
@@ -706,6 +740,7 @@ export const demoNode = defineNode<Config>({
 
         let result: DemoResult;
         let cause: unknown;
+        let simulatorWarning: string | undefined;
         try {
           if (kind === "http" && config.http) {
             result = await toResult(
@@ -724,27 +759,44 @@ export const demoNode = defineNode<Config>({
             const sim = await captureSimulator(renderDeep(config.simulator, scope) as SimulatorConfig, {
               artifactDir: dir,
               fileSlug: slug,
+              ...(ctx.signal ? { signal: ctx.signal } : {}),
             });
+            simulatorWarning = sim.warning;
+            // The capture returned, but the run may have been cancelled in the meantime.
+            if (ctx.signal?.aborted) discard(sim.path);
             result = await toResult(ctx, kind, label, {
               path: sim.path,
               mimeType: sim.mimeType,
               sizeBytes: sim.sizeBytes,
               capturedAt: new Date().toISOString(),
             });
-            if (sim.warning) {
-              ctx.issue({
-                code: ISSUE_CODE.CAPTURE_FAILED,
-                severity: "warning",
-                message: `demo simulator capture may be misleading: ${sim.warning}`,
-                impact: "Check the artifact by eye. Raise `simulator.settle` if the app needs longer to open.",
-                detail: { kind, reason: sim.warning },
-              });
-              ctx.logger.warn("demo: simulator capture may be misleading", { reason: sim.warning });
-            }
           } else {
             result = await toResult(ctx, kind, label, captureFile(config.file!, state, scope, ctx, nodeId, label));
           }
+          // A cancel can arrive after the capture finished and before the node returns (while the
+          // last process is stopping, or the file is hashed). The run is aborted, so what the
+          // capture kept goes too, and nothing below reports it. No `await` separates this check
+          // from the manifest entry, so a cancel cannot slip in between.
+          if (ctx.signal?.aborted) {
+            for (const file of [result.path, ...(result.extra ?? []).map((e) => e.path)]) {
+              if (file) discard(file);
+            }
+            throw ctx.signal.reason ?? new Error("Aborted");
+          }
+          if (simulatorWarning) {
+            ctx.issue({
+              code: ISSUE_CODE.CAPTURE_FAILED,
+              severity: "warning",
+              message: `demo simulator capture may be misleading: ${simulatorWarning}`,
+              impact: "Check the artifact by eye. Raise `simulator.settle` if the app needs longer to open.",
+              detail: { kind, reason: simulatorWarning },
+            });
+            ctx.logger.warn("demo: simulator capture may be misleading", { reason: simulatorWarning });
+          }
         } catch (err) {
+          // Cancelling is not a failed capture: no result, no issue, no manifest entry, and
+          // `strict` has nothing to turn into an error. The run reports itself as aborted.
+          if (ctx.signal?.aborted) throw ctx.signal.reason instanceof Error ? ctx.signal.reason : err;
           cause = err;
           const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
           const reason = String(
