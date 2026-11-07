@@ -489,9 +489,28 @@ const DemoExpectSchema = z
  */
 export const DemoStatusSchema = z.enum(["passed", "failed", "inconclusive", "not_captured"]);
 
+/** One check in a `steps` flow. `hidden` also holds on a blank page, so it can't prove anything alone. */
+const DemoStepCheckSchema = z.union([
+  z.object({ text: z.string().min(1).describe("This text is visible on the page") }).strict(),
+  z.object({ visible: z.string().min(1).describe("An element matching this selector is visible") }).strict(),
+  z.object({ url: z.string().min(1).describe("The page URL matches this glob") }).strict(),
+  z.object({ hidden: z.string().min(1).describe("No element matching this selector is visible") }).strict(),
+]);
+
+/** One step of a `steps` flow: exactly one verb. Steps never run code in the page (ADR-0019 §2). */
+export const DemoStepSchema = z.union([
+  z.object({ goto: z.string().min(1) }).strict(),
+  z.object({ click: z.string().min(1) }).strict(),
+  z.object({ fill: z.object({ selector: z.string().min(1), value: z.string() }).strict() }).strict(),
+  z.object({ press: z.string().min(1) }).strict(),
+  z.object({ wait: z.string().min(1).describe("CSS selector or a duration") }).strict(),
+  z.object({ screenshot: z.string().min(1).describe("Name of a screenshot to save") }).strict(),
+  z.object({ expect: DemoStepCheckSchema }).strict(),
+]);
+
 /**
  * Best-effort artifact capture. Exactly one of `http`, `screenshot`, `file`,
- * `video`, or `simulator` must be set. `ok` is false when the capture failed or
+ * `video`, `simulator`, or `steps` must be set. `ok` is false when the capture failed or
  * when what it recorded is a failure (an unexpected HTTP status). Such results
  * return `{ ok: false }` unless `strict: true`.
  */
@@ -499,8 +518,45 @@ export const DemoWithSchema = BaseWithSchema.extend({
   strict: z
     .boolean()
     .optional()
-    .describe("Fail the node instead of returning ok:false on capture failure"),
+    .describe("Fail the node instead of returning ok:false on capture failure. With an `objective`, fail unless the status is passed"),
   label: z.string().optional().describe("Optional human-readable label for the artifact"),
+  objective: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("The claim this capture is evidence for. Only `steps` with a positive assertion can reach `passed`"),
+  target: z
+    .object({
+      web: z
+        .object({
+          url: z.string().min(1).describe("Where the flow starts"),
+          viewport: z
+            .object({
+              width: z.number().int().positive(),
+              height: z.number().int().positive(),
+            })
+            .optional(),
+          expect: DemoExpectSchema,
+          timeout: DurationSchema.optional().describe("Limit for the whole flow (default 2m)"),
+          stepTimeout: DurationSchema.optional().describe("Limit for each step (default 30s)"),
+        })
+        .strict(),
+    })
+    .strict()
+    .optional()
+    .describe("What `steps` run against"),
+  steps: z
+    .array(DemoStepSchema)
+    .min(1)
+    .optional()
+    .describe("Scripted flow. Always recorded, and always ends with a screenshot"),
+  expect: z
+    .object({
+      noConsoleErrors: z.boolean().optional().describe("No console error or uncaught page error during the flow"),
+    })
+    .strict()
+    .optional()
+    .describe("Checks over the whole `steps` flow"),
   http: z
     .object({
       method: DemoHttpMethodSchema.default("GET"),
@@ -567,17 +623,26 @@ export const DemoWithSchema = BaseWithSchema.extend({
     })
     .optional(),
 }).superRefine((val, ctx) => {
-  const modes = [val.http, val.screenshot, val.file, val.video, val.simulator].filter((m) => m != null);
+  const modes = [val.http, val.screenshot, val.file, val.video, val.simulator, val.steps].filter((m) => m != null);
+  if (val.steps && !val.target) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: steps needs a target", path: ["target"] });
+  }
+  if (val.target && !val.steps) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: target needs steps", path: ["steps"] });
+  }
+  if (val.expect && !val.steps) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: expect needs steps", path: ["expect"] });
+  }
   if (modes.length === 0) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "demo: set exactly one of http, screenshot, file, video, or simulator",
+      message: "demo: set exactly one of http, screenshot, file, video, simulator, or steps",
       path: [],
     });
   } else if (modes.length > 1) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "demo: set only one of http, screenshot, file, video, or simulator",
+      message: "demo: set only one of http, screenshot, file, video, simulator, or steps",
       path: [],
     });
   }
@@ -1652,6 +1717,7 @@ export type DeepAgentsProviderConfig = z.infer<typeof DeepAgentsProviderConfigSc
 export type MediaProviderConfig = z.infer<typeof MediaProviderConfigSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
 export type DemoStatus = z.infer<typeof DemoStatusSchema>;
+export type DemoStep = z.infer<typeof DemoStepSchema>;
 export type ImageWith = z.infer<typeof ImageWithSchema>;
 export type VideoWith = z.infer<typeof VideoWithSchema>;
 export type Model3dWith = z.infer<typeof Model3dWithSchema>;

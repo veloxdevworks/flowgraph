@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import type { Artifact, DemoStatus } from "@flowgraph/spec";
 import { runScopedKey, sanitizeRunKey } from "../runtime/run-key.js";
 
-export type DemoKind = "http" | "screenshot" | "file" | "video" | "simulator";
+export type DemoKind = "http" | "screenshot" | "file" | "video" | "simulator" | "steps";
 
 export type DemoExtraArtifact = {
   path: string;
@@ -32,6 +32,7 @@ export type DemoManifestEntry = {
   sizeBytes?: number;
   reason?: string;
   label?: string;
+  objective?: string;
   extra?: DemoExtraArtifact[];
   /** Workspace-relative records of the files this capture kept. */
   artifacts?: Artifact[];

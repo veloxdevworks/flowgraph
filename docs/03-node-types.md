@@ -865,9 +865,9 @@ When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTT
 
 ## 9b. `demo` — best-effort artifact capture
 
-Capture a small artifact that demonstrates what a pipeline produced — an API request/response transcript, a web screenshot, a short page-load video, a mobile-simulator recording, or an attached file/document. Modes are **explicit** (no auto-detection of "is this a web app"). Interactive flows (login, click-through) still belong in a prior `shell`/`script` node (or Playwright MCP), with `demo` attaching the resulting file via `file` mode. Simulator screenshot/video capture **is** in-scope.
+Capture a small artifact that demonstrates what a pipeline produced — an API request/response transcript, a web screenshot, a short page-load video, a mobile-simulator recording, or an attached file/document. Modes are **explicit** (no auto-detection of "is this a web app"). To show that something works rather than that it loaded, use a [`steps` flow](#proving-an-objective-with-steps): it signs in, clicks through, and checks what the page shows. Native flows still belong in a prior `shell`/`script` node, with `demo` attaching the result via `file`. Simulator screenshot/video capture **is** in-scope.
 
-**Exactly one** of `http`, `screenshot`, `file`, `video`, or `simulator` must be set.
+**Exactly one** of `http`, `screenshot`, `file`, `video`, `simulator`, or `steps` must be set.
 
 ```yaml
 # API request/response transcript
@@ -928,8 +928,9 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
 | `http` | Re-issues the request; writes a JSON transcript (credentials masked, see below). `timeout` defaults to 30s | none |
 | `screenshot` | Headless Chromium via Playwright; PNG screenshot (+ tracked `.webm` extra when `video: true`) | optional peer `playwright` (+ `npx playwright install chromium ffmpeg`) |
 | `video` | Headless Chromium page recording; `.webm` is the primary artifact. It covers the page load and `waitFor`, then `duration` more | optional peer `playwright` |
-| `simulator` | iOS (`xcrun simctl`) or Android (`adb`) screenshot / `recordVideo` / `screenrecord`. An iOS `device` is booted if needed; an Android `device` is the serial of one already running. A failed launch or deep link fails the capture instead of recording whatever is on screen. After a launch or deep link the capture waits up to `settle` (default 30s) for the screen to change and hold still; if it never does, the capture still happens and raises a warning issue. A recording starts before the app opens and covers it opening, then runs `duration` more. On iOS a still screen gives a very short clip whatever `duration` says, because `simctl` only writes frames when the screen changes. Android recordings stop at 180s | Xcode (not just the command-line tools) or Android SDK platform-tools |
+| `simulator` | iOS (`xcrun simctl`) or Android (`adb`) screenshot / `recordVideo` / `screenrecord`. An iOS `device` is booted if needed; an Android `device` is the serial of one already running. A failed launch or deep link fails the capture instead of recording whatever is on screen. After a launch or deep link the capture waits up to `settle` (default 30s) for the screen to change and hold still; if it never does, the capture still happens and raises a warning issue. A recording starts before the app opens and covers it opening, then runs `duration` more. On iOS a still screen gives a very short clip whatever `duration` says, because `simctl` only writes frames when the screen changes, and a clip under half of `duration` raises a warning issue. Android recordings stop at 180s | Xcode (not just the command-line tools) or Android SDK platform-tools |
 | `file` | Copies a file from the run workspace, or from a worktree this thread created, into the artifact folder. Anything else is refused, including through a symlink | none |
+| `steps` | Runs a scripted flow against `target.web` and checks assertions. See [below](#proving-an-objective-with-steps) | optional peer `playwright` |
 
 ### Status, best effort and `strict`
 
@@ -937,10 +938,10 @@ Every result has a `status` that says what it shows ([ADR-0019](./adr/0019-demo-
 
 | `status` | Meaning | `ok` | Files |
 |---|---|---|---|
-| `inconclusive` | The capture worked and recorded no failure. Nothing checked an objective, so it shows that something was captured, not that something worked. Every successful capture in the five modes above is this | `true` | yes |
-| `failed` | The capture worked and recorded a failure: `http`, `screenshot` or `video` got an HTTP status outside `expect.status`, which by default means 400 or above | `false` | kept as evidence |
+| `inconclusive` | The capture worked and recorded no failure. Nothing checked an objective, so it shows that something was captured, not that something worked. Every successful capture in the five shorthand modes is this, and so is a `steps` flow with no positive assertion | `true` | yes |
+| `failed` | The capture worked and recorded a failure: `http`, `screenshot` or `video` got an HTTP status outside `expect.status`, which by default means 400 or above, or a step or assertion in a `steps` flow did not hold | `false` | kept as evidence |
 | `not_captured` | Nothing was captured: Playwright or its browser missing, connection refused, DNS error, source file not found, app did not launch, empty output, … | `false` | none |
-| `passed` | Reserved for results that checked an objective. No mode can produce it yet | `true` | yes |
+| `passed` | A `steps` flow ran to the end, every assertion held, at least one positive assertion ran, and evidence exists. No other mode can produce it | `true` | yes |
 
 Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
 
@@ -955,13 +956,69 @@ Use `expect` when a different status is the point, such as proving a 404 page:
       expect: { status: [404] }   # also on http and video
 ```
 
+### Proving an objective with `steps`
+
+`objective` says what a capture is evidence for, and `steps` is the only mode that can show it holds:
+
+```yaml
+- id: prove-checkout
+  type: demo
+  with:
+    objective: "A signed-in user can complete checkout"
+    target:
+      web: { url: "{{ state.baseUrl }}/login", timeout: 2m, stepTimeout: 30s }
+    steps:
+      - fill: { selector: "#email", value: "{{ config.vars.testUser }}" }
+      - fill: { selector: "#password", value: "{{ secret.TEST_PASSWORD }}" }
+      - click: 'button:has-text("Sign in")'
+      - expect: { url: "**/account" }
+      - click: "text=Checkout"
+      - expect: { text: "Order confirmed" }
+      - screenshot: confirmation
+    expect: { noConsoleErrors: true }
+```
+
+| Step | Effect |
+|---|---|
+| `goto: <url>` | Navigate. A status of 400 or above fails unless `target.web.expect.status` allows it. `javascript:` addresses are refused |
+| `click: <selector>` | Click, waiting for the element. A selector matching several elements fails rather than guess: `text=Sign in` also matches a "Sign in" heading |
+| `fill: { selector, value }` | Fill an input |
+| `press: <key>` | Press a key on the focused element |
+| `wait: <selector or duration>` | Same rule as `waitFor` |
+| `screenshot: <name>` | Save a named screenshot |
+| `expect: { ... }` | Assert, with exactly one of the checks below |
+
+| Check | Positive? | Holds when |
+|---|---|---|
+| `text: <string>` | Yes | The text is visible on the page before the step times out; text hidden in the DOM does not count |
+| `visible: <selector>` | Yes | An element is visible |
+| `url: <glob>` | Yes | The page URL matches. A query string is part of the URL |
+| `hidden: <selector>` | No | No matching element is visible |
+| `with.expect.noConsoleErrors: true` | No | No `console.error` or uncaught page error during the flow, including the "Failed to load resource" the browser logs for any response of 400 or above |
+
+Negative checks can't produce `passed` alone, because they also hold on a blank page.
+
+**The harness chooses the evidence.** A flow is always recorded from the first navigation and always ends with a screenshot, on failure as well, where it shows the point of failure and no later steps run. It pauses for just under a second after each step that changes the page, so the recording can be followed; this counts toward the flow's time. If the recording or the final screenshot is lost, the status stands and a warning issue is raised.
+
+`target.web.timeout` bounds the whole flow (default 2m), and each step waits up to `stepTimeout` (default 30s). A node-level `timeout` is still the outer limit. A node-level `retry` re-runs the whole flow, side effects included.
+
+**What the status means here:**
+
+- Not reaching `target.web.url` at all, or losing the browser, is `not_captured`, and no files are kept. A later `goto` that can't connect is `failed`, because the target was reached.
+- A flow really clicks "Place order", so point flows at local or test environments.
+- `passed` means exactly what the assertions say. `text: "Order confirmed"` proves that text was visible, not that an order exists. The result lists the literal checks so a reviewer can judge whether they are enough.
+
+**Objectives.** `objective` is also allowed on the five shorthand modes, which suits "a human should look at this", but such a node can never be `passed`. With an `objective`, `strict` throws unless the status is `passed`, so `strict` on a shorthand capture with an `objective` always throws. A `failed` result with an `objective` raises `OBJECTIVE_FAILED` instead of `CAPTURE_FAILED`.
+
+**Agents.** A `demo` node with `objective` or `steps` can't be an agent tool, which is a compile error (`DEMO_OBJECTIVE_AS_TOOL`). A tool call writes no `state.outputs`, and an agent choosing its own assertions would make `passed` meaningless.
+
 ### Cancelling a run
 
 Aborting the run stops a `demo` capture in every mode, and it is not treated as a failed capture: no `CAPTURE_FAILED` issue, no manifest entry, and `strict` has nothing to turn into an error. The run ends as `aborted`, and no half-written file or `.recording-` folder is left behind.
 
 | Mode | What an abort does |
 |---|---|
-| `screenshot`, `video` | Closes the browser context, which rejects whatever Playwright call is in flight (loading the page, `waitFor`, `duration`), and closes the browser. An abort during browser launch closes the browser once it has started |
+| `screenshot`, `video`, `steps` | Closes the browser context, which rejects whatever Playwright call is in flight (loading the page, `waitFor`, `duration`), and closes the browser. An abort during browser launch closes the browser once it has started |
 | `simulator` | Kills the `simctl` or `adb` steps and the settle wait. Stops `simctl recordVideo`. On Android also stops `screenrecord` on the device and deletes its temp file there, because stopping the adb client alone leaves the file (and on some devices the recorder) behind |
 | `http` | Cancels the request, with the same effect as the other modes |
 | `file` | Checks before it copies |
@@ -972,7 +1029,7 @@ A gate that lists a failed capture in `with.artifacts` adds a "Capture problems"
 
 ### What transcripts mask
 
-`http` transcripts, and the `request` / `response` in the result, mask sensitive headers, sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. This is best effort: a secret under an innocent name in a response body stays visible. Screenshots and videos are not masked.
+`http` transcripts, and the `request` / `response` in the result, mask sensitive headers, sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. This is best effort: a secret under an innocent name in a response body stays visible. `steps` results mask the same way: a `fill` value holding a secret is recorded as `[REDACTED]` whatever its length, and steps, assertions, console messages and Playwright's own errors all pass through the same masking, though a secret shorter than 6 characters is only masked in `fill`. Screenshots and videos are not masked.
 
 ### Result shape
 
@@ -982,7 +1039,8 @@ Every field is written on every run, `null` when it does not apply (`artifacts` 
 {
   ok: boolean;                       // derived from status
   status: "passed" | "failed" | "inconclusive" | "not_captured";
-  kind: "http" | "screenshot" | "file" | "video" | "simulator";
+  kind: "http" | "screenshot" | "file" | "video" | "simulator" | "steps";
+  objective: string | null;          // the claim this capture is evidence for
   path: string | null;               // absolute path of the main file; set with status "failed", as evidence
   mimeType: string | null;
   sizeBytes: number | null;
@@ -994,6 +1052,9 @@ Every field is written on every run, `null` when it does not apply (`artifacts` 
   request: { ... } | null;           // http mode, headers redacted
   response: { ... } | null;
   artifacts: Artifact[];             // workspace-relative records, main file first
+  steps: Array<{ index, action, detail, ok, ms, error? }> | null;  // steps mode; index 0 opens the page
+  assertions: Array<{ check, positive, held, observed? }> | null;  // steps mode; the literal checks
+  console: { errors: number; messages: string[] } | null;          // steps mode; first 20, masked
 }
 ```
 

@@ -11,6 +11,12 @@ import { pathToFileURL } from "node:url";
 
 export const BROWSER_INSTALL_COMMAND = "npx playwright install chromium ffmpeg";
 
+/**
+ * The recorder starts late and a browser acts fast: without this wait a recording shows a blank
+ * page, or only the end of what happened, and nothing reports it. Measured on a real browser.
+ */
+export const RECORDER_CATCH_UP_MS = 800;
+
 /** How captures launch, shared with preflight so the two check the same browser. */
 export const CAPTURE_BROWSER = { headless: true } as const;
 
@@ -18,8 +24,22 @@ const PREFLIGHT_LAUNCH_MS = 30_000;
 
 export type PlaywrightResponse = { status: () => number };
 
+export type PlaywrightLocator = {
+  click: (opts?: Record<string, unknown>) => Promise<void>;
+  fill: (value: string, opts?: Record<string, unknown>) => Promise<void>;
+  waitFor: (opts?: Record<string, unknown>) => Promise<void>;
+  filter: (opts: Record<string, unknown>) => PlaywrightLocator;
+  first: () => PlaywrightLocator;
+};
+
 export type PlaywrightPage = {
   goto: (url: string, opts?: Record<string, unknown>) => Promise<PlaywrightResponse | null>;
+  locator: (selector: string) => PlaywrightLocator;
+  getByText: (text: string) => PlaywrightLocator;
+  keyboard: { press: (key: string) => Promise<void> };
+  url: () => string;
+  waitForURL: (url: string, opts?: Record<string, unknown>) => Promise<void>;
+  on: (event: string, listener: (arg: unknown) => void) => void;
   waitForSelector: (sel: string, opts?: Record<string, unknown>) => Promise<unknown>;
   waitForTimeout: (ms: number) => Promise<void>;
   screenshot: (opts?: Record<string, unknown>) => Promise<Buffer>;
@@ -131,6 +151,23 @@ export function closeOnAbort(signal: AbortSignal | undefined): {
       signal?.removeEventListener("abort", onAbort);
     },
   };
+}
+
+/** The rule for a wait written as text: a duration, otherwise a selector. */
+export function isDurationText(text: string): boolean {
+  return /^\d+(\.\d+)?(ms|s|m|h|d)$/.test(text);
+}
+
+/** Why a status is not success, or undefined when it is. */
+export function statusFailure(
+  what: string,
+  status: number | undefined,
+  expected: { status: number[] } | undefined,
+): string | undefined {
+  if (status === undefined) return undefined;
+  if (expected ? expected.status.includes(status) : status < 400) return undefined;
+  const wanted = expected ? `, expected ${expected.status.join(" or ")}` : "";
+  return `${what} returned HTTP ${status}${wanted}`;
 }
 
 function errMessage(err: unknown): string {

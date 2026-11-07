@@ -19,6 +19,7 @@ import type { FlowgraphEvent } from "../events.js";
 import { demoNode, type DemoResult } from "./demo.js";
 import { readDemoManifest } from "./demo-manifest.js";
 import { launchCaptureBrowser } from "./demo-playwright.js";
+import { mp4DurationMs } from "./demo-simulator.js";
 
 const THREAD = "capture-thread";
 const NODE = "capture";
@@ -388,6 +389,7 @@ case "$*" in
     echo $$ >> "$FAKE_LOG.pids"
     case "$FAKE_RECORD" in
       fail) printf 'partial' > "$dest"; echo "record broke" >&2; exit 1 ;;
+      fixture) trap 'cp "$FAKE_MP4" "$dest"; kill $pid; exit 0' INT ;;
       empty) trap ': > "$dest"; kill $pid; exit 0' INT ;;
       slowstop) trap 'touch "$FAKE_LOG.stopping"; sleep 1.5; printf mp4 > "$dest"; kill $pid; exit 0' INT ;;
       *) trap 'printf mp4 > "$dest"; kill $pid; exit 0' INT ;;
@@ -545,6 +547,72 @@ describe.skipIf(process.platform === "win32")("simulator capture", () => {
     stubTools({ FAKE_BOOT_EXIT: "148" });
     const boot = await capture(mkdir(), ios({ device: "No Such Phone" }));
     expect(boot.out.reason).toMatch(/boot of "No Such Phone" failed/);
+  });
+
+  describe("a clip shorter than asked for", () => {
+    /**
+     * The layout of a real `simctl` file: `mvhd` says how long the recorder ran, 4.75s here
+     * whatever the clip holds, and only the track's `mdhd` says how much video there is.
+     */
+    const mp4 = (ms: number, opts: { wide?: boolean; mdatFirst?: boolean } = {}): Buffer => {
+      const box = (type: string, ...body: Buffer[]): Buffer => {
+        const content = Buffer.concat(body);
+        const head = Buffer.alloc(8);
+        head.writeUInt32BE(content.length + 8, 0);
+        head.write(type, 4, "latin1");
+        return Buffer.concat([head, content]);
+      };
+      const times = (units: number, wide = false): Buffer => {
+        const body = Buffer.alloc(wide ? 32 : 24);
+        body[0] = wide ? 1 : 0;
+        body.writeUInt32BE(1000, wide ? 20 : 12);
+        if (wide) body.writeBigUInt64BE(BigInt(units), 24);
+        else body.writeUInt32BE(units, 16);
+        return body;
+      };
+      const moov = box(
+        "moov",
+        box("mvhd", times(4750)),
+        box("trak", box("tkhd", Buffer.alloc(8)), box("mdia", box("mdhd", times(ms, opts.wide)), box("hdlr", Buffer.alloc(4)))),
+      );
+      // A 64-bit `mdat`, as a long recording has.
+      const bigMdat = Buffer.alloc(16);
+      bigMdat.writeUInt32BE(1, 0);
+      bigMdat.write("mdat", 4, "latin1");
+      bigMdat.writeBigUInt64BE(16n, 8);
+      return opts.mdatFirst
+        ? Buffer.concat([box("ftyp", Buffer.from("isom")), bigMdat, moov])
+        : Buffer.concat([box("ftyp", Buffer.from("isom")), moov, box("wide"), box("mdat", Buffer.from("data"))]);
+    };
+
+    it("reads how much video an MP4 holds, not how long the recorder ran", () => {
+      expect(mp4DurationMs(mp4(67))).toBe(67);
+      expect(mp4DurationMs(mp4(90_000, { wide: true }))).toBe(90_000);
+      expect(mp4DurationMs(mp4(67, { mdatFirst: true }))).toBe(67);
+      expect(mp4DurationMs(Buffer.from("mp4"))).toBeUndefined();
+      expect(mp4DurationMs(Buffer.alloc(0))).toBeUndefined();
+      expect(mp4DurationMs(mp4(67).subarray(0, 40))).toBeUndefined();
+    });
+
+    const recordedFor = (ms: number): void => {
+      const fixture = path.join(mkdir(), "clip.mp4");
+      fs.writeFileSync(fixture, mp4(ms));
+      stubTools({ FAKE_RECORD: "fixture", FAKE_MP4: fixture });
+    };
+
+    it("warns that a still screen gave a clip of almost nothing, and keeps it", async () => {
+      recordedFor(67);
+      const { out, issues } = await capture(mkdir(), ios({ capture: "video", duration: "1s" }));
+      expect(out).toMatchObject({ status: "inconclusive", ok: true, mimeType: "video/mp4" });
+      expect(issues).toEqual([expect.objectContaining({ code: "CAPTURE_FAILED", severity: "warning" })]);
+      expect(String(issues[0]!["message"])).toContain("0.1s long, not the 1s asked for");
+    });
+
+    it("says nothing about a clip of about the length asked for", async () => {
+      recordedFor(900);
+      const { issues } = await capture(mkdir(), ios({ capture: "video", duration: "1s" }));
+      expect(issues).toEqual([]);
+    });
   });
 
   it("keeps a recording stopped by us", async () => {
@@ -826,7 +894,7 @@ describe("result status, fields and artifacts", () => {
     const r = await outcomes();
     const keys = [
       "ok", "status", "kind", "path", "mimeType", "sizeBytes", "reason", "capturedAt", "label",
-      "extra", "pageStatus", "request", "response", "artifacts",
+      "extra", "pageStatus", "request", "response", "artifacts", "objective", "steps", "assertions", "console",
     ].sort();
     for (const [name, out] of Object.entries(r)) {
       expect(Object.keys(out).sort(), name).toEqual(keys);

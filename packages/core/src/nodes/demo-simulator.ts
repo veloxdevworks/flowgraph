@@ -137,6 +137,60 @@ function assertNotEmpty(path: string, what: string): number {
  * True when simctl is usable. `xcrun` alone proves nothing: macOS ships a stub of it,
  * and simctl comes with Xcode, not the command-line tools.
  */
+/**
+ * How much video an MP4 file holds, in milliseconds, or undefined when the file doesn't say.
+ * Read from each track's `mdhd`, because `mvhd` holds how long the recorder ran: a real `simctl`
+ * file with one 67ms frame has 4.75s there. Read here because no video tool can be assumed.
+ */
+export function mp4DurationMs(file: Buffer): number | undefined {
+  const boxes = (start: number, end: number, visit: (type: string, body: number, stop: number) => void): void => {
+    let at = start;
+    while (at + 8 <= end) {
+      let size = file.readUInt32BE(at);
+      let head = 8;
+      if (size === 1) {
+        if (at + 16 > end) return;
+        size = Number(file.readBigUInt64BE(at + 8));
+        head = 16;
+      } else if (size === 0) {
+        size = end - at;
+      }
+      if (size < head || at + size > end) return;
+      visit(file.toString("latin1", at + 4, at + 8), at + head, at + size);
+      at += size;
+    }
+  };
+  let longest: number | undefined;
+  const inside = (name: string, next: (body: number, stop: number) => void) => (type: string, body: number, stop: number) => {
+    if (type === name) next(body, stop);
+  };
+  boxes(0, file.length, inside("moov", (moov, moovEnd) =>
+    boxes(moov, moovEnd, inside("trak", (trak, trakEnd) =>
+      boxes(trak, trakEnd, inside("mdia", (mdia, mdiaEnd) =>
+        boxes(mdia, mdiaEnd, inside("mdhd", (mdhd, mdhdEnd) => {
+          const wide = file[mdhd] === 1;
+          const timescaleAt = mdhd + (wide ? 20 : 12);
+          if (timescaleAt + (wide ? 12 : 8) > mdhdEnd) return;
+          const timescale = file.readUInt32BE(timescaleAt);
+          const units = wide ? Number(file.readBigUInt64BE(timescaleAt + 4)) : file.readUInt32BE(timescaleAt + 4);
+          if (timescale > 0) longest = Math.max(longest ?? 0, (units / timescale) * 1000);
+        })),
+      )),
+    )),
+  ));
+  return longest;
+}
+
+/**
+ * `simctl` writes a frame only when the screen changes, so a still screen gives a clip of a frame
+ * or two whatever was asked for. Checked on a real simulator: 5s asked, 1 frame and 67ms kept.
+ */
+function shortClipWarning(path: string, wantedMs: number): string | undefined {
+  const actual = mp4DurationMs(readFileSync(path));
+  if (actual === undefined || actual >= wantedMs / 2) return undefined;
+  return `the recording is ${(actual / 1000).toFixed(1)}s long, not the ${wantedMs / 1000}s asked for, because the screen barely changed, so it shows little more than a still image`;
+}
+
 export async function iosToolchainReady(): Promise<boolean> {
   if (!(await checkBinOnPath("xcrun"))) return false;
   try {
@@ -277,6 +331,7 @@ async function captureIosOnDevice(
     throw err;
   }
   const sizeBytes = assertNotEmpty(video, "simctl recordVideo");
+  warning = [warning, shortClipWarning(video, opts.durationMs)].filter(Boolean).join("; ") || undefined;
   const dest = join(opts.artifactDir, `${opts.fileSlug}.mp4`);
   renameSync(video, dest);
   return { path: dest, mimeType: "video/mp4", sizeBytes, ...(warning ? { warning } : {}) };

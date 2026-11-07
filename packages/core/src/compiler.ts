@@ -44,7 +44,12 @@ import {
   type RunIssue,
 } from "./runtime/run-issues.js";
 import { OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
-import { collectNodeWriteChannels, ensureDeclaredOutputChannels } from "./runtime/validate-graph.js";
+import {
+  collectNodeWriteChannels,
+  demoToolExposureDiagnostics,
+  ensureDeclaredOutputChannels,
+  provesObjective,
+} from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { sharedHistoryChannels } from "./context/shared.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
@@ -987,6 +992,8 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
   }
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
+  const exposed = demoToolExposureDiagnostics(spec)[0];
+  if (exposed) throw new Error(`${exposed.path}: ${exposed.message}`);
   const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
   const toolWiring: ToolWiring = { mcp: mcpHub };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();
@@ -1275,6 +1282,10 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
   toolWiring.invokeNode = async (id, args, ctx, state = {}) => {
     if (spec.nodes.find((n) => n.id === id)?.type === "map") {
       throw new Error(`node-as-tool: map node "${id}" cannot be called as a tool; put it in a subgraph and call that instead.`);
+    }
+    // Reached only by a tool list the compiler can't see, such as a reusable agent definition.
+    if (provesObjective(spec.nodes.find((n) => n.id === id))) {
+      throw new Error(`node-as-tool: demo node "${id}" has an objective or steps, so it cannot be called as a tool.`);
     }
     const target = compiledNodes.get(id);
     if (!target) throw new Error(`node-as-tool: no node "${id}" in this graph.`);
