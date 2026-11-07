@@ -700,6 +700,45 @@ nodes:
 
 A `select` of `one`/`many` without `artifacts` is flagged by lint as `HITL_SELECT_NO_ARTIFACTS` (a warning). In the CLI, answer with JSON, for example `{ "decision": "approve", "selected": "<path>" }`. The runnable version is `examples/media-mock/media-review.graph.yaml`.
 
+### Gates that need proof (`evidence`)
+
+`with.evidence` lists the [`demo`](#9b-demo--best-effort-artifact-capture) nodes whose verdicts a gate needs (ADR-0019). Use it on `approve`, `review` and `choice`:
+
+```yaml
+- id: approve-release
+  type: hitl
+  with:
+    mode: approve
+    message: "Ship this?"
+    evidence: [prove-checkout, prove-refund]
+```
+
+The gate reads each node's `state.outputs.<id>` and sends `payload.data.evidence`, one entry per id:
+
+| Field | Meaning |
+|---|---|
+| `nodeId`, `objective` | The demo node and the claim it checks |
+| `status` | `passed`, `failed`, `inconclusive`, `not_captured`, or `not_run` when the node has no result in this thread |
+| `reason` | The demo's reason, plus a note when its files are gone |
+| `capturedAt`, `assertions` | When it ran and the checks it made |
+| `artifacts` | Its files that are inside the workspace and still on disk. They are also added to `artifacts` / `artifactRefs` |
+| `needsOverride` | Whether approving past it needs an override |
+
+The verdicts are appended to the gate's message as plain text, so every client shows them. A `demo` named here is not also listed in `captureFailures`.
+
+**Approving past bad evidence takes a recorded reason.** In `approve` and `review`, an approving answer (`approved: true`, or review decision `approve`) needs `override: { reason: "<non-empty>" }` when any entry is `failed`, `not_captured` or `not_run`, or has files that are gone. `passed` and `inconclusive` with files on disk need nothing; `inconclusive` is labelled "no automated check", since the person looking at it is the check.
+
+- Without the reason, the answer is invalid and the gate re-prompts, saying which evidence does not hold and how to override. After `maxResumeAttempts` the run fails with the interrupt still pending.
+- The check runs on the finished answer, so `{ decision: "reject", approved: true }` counts as approving.
+- Rejecting never needs an override. `choice` gates show evidence but enforce nothing, since the engine can't tell which choice means "ship".
+- The output gains `override: { reason, items: [{ nodeId, status }] }`, built by the gate from the evidence (a client-sent `override` is never copied), or `null` when none was used. An accepted override raises the `EVIDENCE_OVERRIDDEN` warning.
+- `--on-interrupt approve` answers `true`, which is rejected here, so an unattended run fails rather than waving past missing evidence. A pipeline that really means to has to send a reason.
+- In the CLI prompt, answer `override: <reason>`.
+
+An override is a record, not access control: anyone who can answer the gate can give a reason.
+
+Lint errors (and compile refuses) when an id is not a node (`HITL_EVIDENCE_UNKNOWN_NODE`), not a `demo` node (`HITL_EVIDENCE_NOT_DEMO`), has no `objective` (`HITL_EVIDENCE_NO_OBJECTIVE`), or uses `output: none` (`HITL_EVIDENCE_OUTPUT_NONE`), and when the gate's mode is not one of the three (`HITL_EVIDENCE_MODE`). A demo with an objective can't be an agent tool anyway (`DEMO_OBJECTIVE_AS_TOOL`).
+
 ### `ask_human` tool (agent nodes)
 
 Agents can ask clarifying questions mid-loop by opting into the built-in tool:

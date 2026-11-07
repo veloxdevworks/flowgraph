@@ -720,10 +720,55 @@ export function demoToolExposureDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
+/**
+ * `hitl` `with.evidence` names `demo` nodes whose results the gate shows (ADR-0019 §7). Each
+ * must be a top-level `demo` node with an `objective` that writes `state.outputs.<id>`, so its
+ * verdict is there to read. Agent-tool exposure is already refused by `DEMO_OBJECTIVE_AS_TOOL`.
+ */
+export function hitlEvidenceDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const node of spec.nodes) {
+    if (node.type !== "hitl") continue;
+    const w = (node.with ?? {}) as Record<string, unknown>;
+    const evidence = w["evidence"];
+    if (!Array.isArray(evidence) || evidence.length === 0) continue;
+    const path = `nodes.${node.id}.with.evidence`;
+    const mode = typeof w["mode"] === "string" ? w["mode"] : "approve";
+    if (mode !== "approve" && mode !== "review" && mode !== "choice") {
+      diagnostics.push({
+        severity: "error",
+        code: "HITL_EVIDENCE_MODE",
+        message: `hitl node "${node.id}" sets with.evidence, which only applies to modes approve, review and choice (this one is "${mode}")`,
+        path,
+      });
+      continue;
+    }
+    for (const id of evidence) {
+      const target = typeof id === "string" ? spec.nodes.find((n) => n.id === id) : undefined;
+      const tw = (target?.with ?? {}) as Record<string, unknown>;
+      let problem: [code: string, message: string] | undefined;
+      if (!target) {
+        problem = ["HITL_EVIDENCE_UNKNOWN_NODE", `names "${String(id)}", which is not a node in this graph`];
+      } else if (target.type !== "demo") {
+        problem = ["HITL_EVIDENCE_NOT_DEMO", `names "${target.id}", a ${String(target.type)} node; evidence must come from a demo node`];
+      } else if (typeof tw["objective"] !== "string" || !tw["objective"].trim()) {
+        problem = ["HITL_EVIDENCE_NO_OBJECTIVE", `names demo node "${target.id}", which has no with.objective, so it proves nothing`];
+      } else if (isOutputNone(tw["output"])) {
+        problem = ["HITL_EVIDENCE_OUTPUT_NONE", `names demo node "${target.id}", which uses output: none, so its result is never stored for the gate to read`];
+      }
+      if (problem) {
+        diagnostics.push({ severity: "error", code: problem[0], message: `hitl node "${node.id}" with.evidence ${problem[1]}`, path });
+      }
+    }
+  }
+  return diagnostics;
+}
+
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   return [
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
+    ...hitlEvidenceDiagnostics(spec),
     ...hitlRouterMergeDiagnostics(spec),
     ...reachabilityDiagnostics(spec),
     ...demoToolExposureDiagnostics(spec),

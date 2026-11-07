@@ -48,6 +48,7 @@ import {
   collectNodeWriteChannels,
   demoToolExposureDiagnostics,
   ensureDeclaredOutputChannels,
+  hitlEvidenceDiagnostics,
   provesObjective,
 } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
@@ -992,8 +993,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
   }
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
-  const exposed = demoToolExposureDiagnostics(spec)[0];
-  if (exposed) throw new Error(`${exposed.path}: ${exposed.message}`);
+  // Both are lint errors, but a spec can reach compile without going through the loader.
+  const refused = demoToolExposureDiagnostics(spec)[0] ?? hitlEvidenceDiagnostics(spec)[0];
+  if (refused) throw new Error(`${refused.path}: ${refused.message}`);
   const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
   const toolWiring: ToolWiring = { mcp: mcpHub };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();

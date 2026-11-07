@@ -120,6 +120,20 @@ function selectHint(data: Record<string, unknown> | undefined, key: string): str
   return `\nSelect ${select === "many" ? "one or more" : "one"} of the artifacts: answer with JSON { "${key}": ..., "selected": ${shape} }`;
 }
 
+/** The gate lists `with.evidence` and at least one entry needs an override to approve. */
+function needsOverride(data: Record<string, unknown> | undefined): boolean {
+  const evidence = data?.["evidence"];
+  return Array.isArray(evidence) && evidence.some((e) => !!e && typeof e === "object" && (e as { needsOverride?: unknown }).needsOverride === true);
+}
+
+/** `override: <reason>` approves past evidence that does not hold, and records why. */
+const OVERRIDE_ANSWER = /^override\s*:\s*(.*)$/is;
+
+function overrideHint(data: Record<string, unknown> | undefined): string {
+  if (!needsOverride(data)) return "";
+  return `\nSome evidence does not hold, so approving needs an override: answer "override: <reason>"`;
+}
+
 function formatInterruptBody(it: InterruptInfo): string {
   const kind = it.kind ?? "approval";
   const reason = it.reason ?? it.id;
@@ -146,7 +160,7 @@ function formatInterruptBody(it: InterruptInfo): string {
     const decisions = Array.isArray(data?.["decision"])
       ? (data["decision"] as string[]).join(", ")
       : "approve, request-changes";
-    return `${reason}${stat}${artifacts}${selectHint(data, "decision")}\nDecision (${decisions}) or JSON { "decision", "feedback" }: `;
+    return `${reason}${stat}${artifacts}${selectHint(data, "decision")}${overrideHint(data)}\nDecision (${decisions}) or JSON { "decision", "feedback" }: `;
   }
 
   if (kind === "workshop") {
@@ -165,7 +179,7 @@ function formatInterruptBody(it: InterruptInfo): string {
   }
 
   if (kind === "approval" && Array.isArray(data?.["artifactRefs"])) {
-    return `${reason}${artifactBlock(data)}${selectHint(data, "approved")}\nApprove? (yes/no, or JSON resume value): `;
+    return `${reason}${artifactBlock(data)}${selectHint(data, "approved")}${overrideHint(data)}\nApprove? (yes/no, or JSON resume value): `;
   }
 
   const tool = typeof data?.["tool"] === "string" ? data["tool"] : undefined;
@@ -181,6 +195,14 @@ function formatInterruptBody(it: InterruptInfo): string {
 export function parseInterruptAnswer(it: InterruptInfo, raw: string): unknown {
   const trimmed = raw.trim();
   const kind = it.kind ?? "approval";
+
+  // Only at a gate with evidence, so "override: ..." means nothing special anywhere else.
+  const data = interruptData(it);
+  const overrideMatch = Array.isArray(data?.["evidence"]) ? OVERRIDE_ANSWER.exec(trimmed) : null;
+  if (overrideMatch && (kind === "approval" || kind === "review")) {
+    const override = { reason: overrideMatch[1]!.trim() };
+    return kind === "review" ? { decision: "approve", override } : { approved: true, override };
+  }
 
   if (kind === "question") {
     if (trimmed === "") return { answer: "" };

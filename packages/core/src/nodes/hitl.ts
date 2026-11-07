@@ -23,6 +23,14 @@ import {
   type HitlSelect,
 } from "./hitl-artifacts.js";
 import {
+  collectGateEvidence,
+  evidenceNotice,
+  isEvidenceOutput,
+  requiredOverride,
+  type GateEvidence,
+} from "./hitl-evidence.js";
+import { ISSUE_CODE } from "../runtime/run-issues.js";
+import {
   DEFAULT_REVIEW_DECISIONS,
   hitlOutcomeKey,
   normalizeHitlRoutes,
@@ -84,9 +92,14 @@ export const hitlNode = defineNode<Config>({
           config.mode === "approve" || config.mode === "choice" || config.mode === "review"
             ? (config.select ?? "none")
             : "none";
-        if (config.artifacts && (config.mode === "approve" || config.mode === "choice" || config.mode === "review")) {
+        const closedAnswer = config.mode === "approve" || config.mode === "choice" || config.mode === "review";
+        const evidenceIds = closedAnswer ? (config.evidence ?? []) : [];
+        const outputsNow = state["outputs"] as Record<string, unknown> | undefined;
+        if (config.artifacts && closedAnswer) {
           const rendered = config.artifacts.map((a) => renderDeep(a, scope));
-          const gate = await resolveGateArtifacts(rendered, ctx.workspace);
+          const gate = await resolveGateArtifacts(rendered, ctx.workspace, {
+            skipFailure: isEvidenceOutput(evidenceIds, outputsNow),
+          });
           presented = gate.artifacts;
           data["artifacts"] = gate.artifacts;
           data["artifactRefs"] = gate.artifactRefs;
@@ -95,6 +108,26 @@ export const hitlNode = defineNode<Config>({
             message = `${message}\n\n${captureFailuresNotice(gate.captureFailures)}`;
           }
           if (select !== "none") data["select"] = select;
+        }
+
+        // `with.evidence`: the verdict of each named demo node, read as it stands now.
+        let evidence: GateEvidence[] | undefined;
+        if (evidenceIds.length > 0) {
+          evidence = await collectGateEvidence(evidenceIds, outputsNow, ctx.workspace);
+          data["evidence"] = evidence;
+          // Evidence files are presented like any other, so older clients still show them.
+          const seen = new Set(presented.map((a) => a.path));
+          const refs = (data["artifactRefs"] as string[] | undefined) ?? [];
+          for (const a of evidence.flatMap((e) => e.artifacts)) {
+            if (seen.has(a.path)) continue;
+            seen.add(a.path);
+            presented = [...presented, a];
+            if (!refs.includes(a.path)) refs.push(a.path);
+          }
+          data["artifacts"] = presented;
+          data["artifactRefs"] = refs;
+          if (select !== "none") data["select"] = select;
+          message = `${message}\n\n${evidenceNotice(evidence)}`;
         }
 
         if (config.mode === "review") {
@@ -145,9 +178,23 @@ export const hitlNode = defineNode<Config>({
               nodeId: String(nodeSpec["id"]),
               select,
               presented,
+              evidence,
             }),
           { maxAttempts: config.maxResumeAttempts },
         );
+
+        const override = result["override"] as { reason: string; items: Array<{ nodeId: string; status: string }> } | null | undefined;
+        if (override) {
+          ctx.issue({
+            code: ISSUE_CODE.EVIDENCE_OVERRIDDEN,
+            severity: "warning",
+            message:
+              `approved past evidence that does not hold: ` +
+              `${override.items.map((i) => `${i.nodeId} (${i.status})`).join(", ")}. Reason: ${override.reason}`,
+            impact: "The approval was given without evidence that the objective was met.",
+            detail: { override },
+          });
+        }
 
         // `round`: 1 for the first accepted answer at this gate, +1 each time it is answered again
         // (a loop back). The previous value is the one this node wrote to `state.outputs.<id>` last
@@ -198,6 +245,32 @@ function summarizeInlineDiff(before: string, after: string): string {
 }
 
 function mapHitlResume(
+  config: Config,
+  resume: unknown,
+  opts: {
+    choices?: string[] | undefined;
+    decisions?: string[] | undefined;
+    schema?: Record<string, unknown> | undefined;
+    nodeId: string;
+    select: HitlSelect;
+    presented: Artifact[];
+    evidence?: GateEvidence[] | undefined;
+  },
+): Record<string, unknown> {
+  const out = mapAnswer(config, resume, opts);
+  if (!opts.evidence) return out;
+  // Checked on the finished answer, after the client's fields were merged in, so neither
+  // `approved: true` nor `decision: "approve"` can slip past, and `override` is never the client's.
+  const mode = config.mode;
+  const approving =
+    (mode === "approve" || mode === "review") && (out["approved"] === true || (mode === "review" && out["decision"] === "approve"));
+  out["override"] = approving
+    ? requiredOverride(opts.evidence, resume, { nodeId: opts.nodeId, mode: mode as "approve" | "review" })
+    : null;
+  return out;
+}
+
+function mapAnswer(
   config: Config,
   resume: unknown,
   opts: {
