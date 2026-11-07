@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildSkillsCommand } from "./skills-command.js";
+import { abortOnSignals } from "./run-signal.js";
 import { checkpointerOption, CLI_MEMORY_BACKENDS, promptResolver, serializePendingInterrupts } from "./interrupts.js";
 import { mcpHubForRun, closeMcpHub, loginMcpServer, mcpOAuthStatus, logoutMcpServer } from "./mcp.js";
 import { buildProviders } from "./providers.js";
@@ -103,6 +104,20 @@ async function awaitWebhookIfNeeded(result: RunResult): Promise<RunResult> {
   }
   // Another interrupt after resume, etc.
   return { ...result, status: done.status as RunResult["status"] };
+}
+
+/** Run with Ctrl-C and SIGTERM cancelling it, for as long as it runs. */
+async function withCtrlC<T>(json: boolean | undefined, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const cancel = abortOnSignals(() => {
+    // Keeps stdout pure JSONL under --json.
+    const say = json ? (text: string) => console.error(text) : printWarning;
+    say("Stopping… (Ctrl-C again to exit now)");
+  });
+  try {
+    return await run(cancel.signal);
+  } finally {
+    cancel.dispose();
+  }
 }
 
 const program = new Command()
@@ -327,7 +342,7 @@ program
     if (policy === "prompt") runOpts.resolveInterrupt = promptResolver;
     let result;
     try {
-      result = await compiled.run(runOpts);
+      result = await withCtrlC(opts.json, (signal) => compiled.run({ ...runOpts, signal }));
 
       if (!opts.json) {
         if (result.status === "completed") {
@@ -504,9 +519,11 @@ program
     if (policy === "prompt") resumeOpts.resolveInterrupt = promptResolver;
     let result;
     try {
-      result = opts.from
-        ? await compiled.resumeFrom({ ...resumeOpts, checkpointId: opts.from })
-        : await compiled.resume(resumeOpts);
+      result = await withCtrlC(opts.json, (signal) =>
+        opts.from
+          ? compiled.resumeFrom({ ...resumeOpts, signal, checkpointId: opts.from })
+          : compiled.resume({ ...resumeOpts, signal }),
+      );
 
       if (!opts.json) {
         if (result.status === "completed") {

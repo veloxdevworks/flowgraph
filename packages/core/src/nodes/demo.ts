@@ -694,12 +694,12 @@ export const demoNode = defineNode<Config>({
   type: "demo",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { sideEffecting: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { sideEffecting: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const usedSecrets = new Set<string>();
@@ -795,7 +795,8 @@ export const demoNode = defineNode<Config>({
           }
         } catch (err) {
           // Cancelling is not a failed capture: no result, no issue, no manifest entry, and
-          // `strict` has nothing to turn into an error. The run reports itself as aborted.
+          // `strict` has nothing to turn into an error. The run reports itself as aborted. A
+          // node `timeout` aborts the same way, and the engine reports that attempt as timed out.
           if (ctx.signal?.aborted) throw ctx.signal.reason instanceof Error ? ctx.signal.reason : err;
           cause = err;
           const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);

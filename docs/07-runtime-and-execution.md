@@ -234,6 +234,10 @@ The same flow is available via the programmatic API: `compiled.getState(threadId
 
 `runGraph({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written (so the run is resumable), and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this.
 
+A node `timeout` is not a cancel. The attempt fails with `Node timed out`, and the run fails unless a retry succeeds or `on.error` handles it, but for most node types the timed-out work keeps running in the background, and `ctx.signal` stays the run's own, so aborting it always means the run was cancelled. That keeps a timed-out `image` or `video` job alive for a retry to re-attach to, and a `service` able to finish a graceful stop.
+
+A node type that can stop cleanly declares `capabilities.stopsOnTimeout`; today that is only `demo`. Its `ctx.signal` is per attempt and also aborts on timeout, with the timeout error as `signal.reason` (`isTimeoutError(reason)` tells it from a cancelled run). The engine waits up to 20 seconds for the attempt to stop before it retries or reports the failure, so the two don't overlap. Nothing retries once the run itself is cancelled.
+
 ## 8. Secrets & redaction
 
 - Secrets come from a `SecretProvider` (default: env vars; pluggable: file/keychain/vault). Accessed via `ctx.secrets.get(name)` or `secret.NAME` in expressions.

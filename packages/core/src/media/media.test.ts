@@ -304,6 +304,22 @@ describe("async jobs and the journal", () => {
     expect(left).toHaveLength(1);
   });
 
+  it("does not cancel the vendor job on a node timeout, so a retry can re-attach", async () => {
+    const calls = newCalls();
+    const provider = asyncProvider(calls, [{ state: "running" }], { pollIntervalMs: 20 });
+    const g = graph([
+      { id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x", timeout: "300ms" } },
+    ]);
+    const res = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "tn" });
+    expect(res.status).toBe("error");
+    expect(String(res.error?.message ?? res.error)).toMatch(/Node timed out/);
+    // Let the attempt reach the end of its own wait: a cancel would come from there.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(calls.cancel).toBe(0);
+    const left = await readdir(path.join(dir, ".flowgraph", "jobs", "tn"));
+    expect(left).toHaveLength(1);
+  });
+
   it("cancels the vendor job and drops the journal on abort", async () => {
     const calls = newCalls();
     const ac = new AbortController();
