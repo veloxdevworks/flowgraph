@@ -86,15 +86,23 @@ export interface RetryRunnerOptions {
   retry?: RetryConfig | undefined;
   timeout?: string | undefined;
   signal?: AbortSignal | undefined;
+  /**
+   * How long a retry waits for a timed-out attempt to stop before starting the next one, so
+   * side effects of the two don't overlap. Default 0: an attempt that ignores its signal would
+   * otherwise hold up every retry.
+   */
+  stopGraceMs?: number | undefined;
   onRetry?: (info: { attempt: number; error: string; delayMs: number }) => void;
   onTimeout?: (info: { attempt: number; timeoutMs: number }) => void;
 }
 
 /**
- * Run `fn` with timeout and retry policy. `fn` receives the 1-based attempt number.
+ * Run `fn` with timeout and retry policy. `fn` receives the 1-based attempt number and the
+ * signal for that attempt, which aborts when the attempt times out or `opts.signal` aborts.
+ * The reason tells them apart: `isTimeoutError(signal.reason)` for a timeout.
  */
 export async function runWithPolicy<T>(
-  fn: (attempt: number) => Promise<T>,
+  fn: (attempt: number, signal: AbortSignal | undefined) => Promise<T>,
   opts: RetryRunnerOptions = {},
 ): Promise<T> {
   const maxAttempts = Math.max(1, opts.retry?.maxAttempts ?? 1);
@@ -110,23 +118,31 @@ export async function runWithPolicy<T>(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const timedOut = timeoutMs === undefined ? undefined : new AbortController();
+    let signal = opts.signal;
+    if (timedOut) signal = opts.signal ? AbortSignal.any([opts.signal, timedOut.signal]) : timedOut.signal;
+    let running: Promise<T> | undefined;
     try {
-      if (timeoutMs === undefined) {
-        return await fn(attempt);
-      }
-      return await withTimeout(fn(attempt), timeoutMs, () => {
-        opts.onTimeout?.({ attempt, timeoutMs });
+      running = fn(attempt, signal);
+      if (!timedOut) return await running;
+      return await withTimeout(running, timeoutMs!, timedOut, () => {
+        opts.onTimeout?.({ attempt, timeoutMs: timeoutMs! });
       });
     } catch (err) {
       // Never swallow interrupts — they are control flow, not failures.
       if (isInterruptLike(err)) throw err;
 
       lastError = err;
+      // The run was cancelled: another attempt would only fail the same way.
+      if (opts.signal?.aborted) break;
       const canRetry = attempt < maxAttempts && shouldRetry(err, opts.retry?.retryOn);
       if (!canRetry) break;
 
       const delayMs = computeDelay(attempt, backoffCfg);
       opts.onRetry?.({ attempt, error: err instanceof Error ? err.message : String(err), delayMs });
+      if (isTimeoutError(err) && running && opts.stopGraceMs) {
+        await settledWithin(running, opts.stopGraceMs, opts.signal);
+      }
       await sleep(delayMs, opts.signal);
     }
   }
@@ -134,12 +150,34 @@ export async function runWithPolicy<T>(
   throw lastError;
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
+/** Wait for `promise` to settle either way, for at most `ms`, or until `signal` aborts. */
+function settledWithin(promise: Promise<unknown>, ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+    if (signal?.aborted) done();
+    promise.then(done, done);
+  });
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  timedOut: AbortController,
+  onTimeout: () => void,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       onTimeout();
       const err = new Error(`Node timed out after ${ms}ms`) as TimeoutError;
       err.__timeout = true;
+      // Stop the attempt too: rejecting only stops waiting for it, and it would carry on.
+      timedOut.abort(err);
       reject(err);
     }, ms);
 

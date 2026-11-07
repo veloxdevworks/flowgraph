@@ -141,8 +141,9 @@ Upgrades a graph spec toward `apiVersion: flowgraph/v1`. Prints migration notes;
 | `1` | Runtime / operational error | Run failed, MCP OAuth error, skills doctor failure |
 | `2` | Validation / compile error | Bad spec, missing checkpoint thread |
 | `3` | Interrupted & unresolved | HITL under `--on-interrupt fail` |
+| `130` | Cancelled | Ctrl-C or SIGTERM during `run` or `resume`. The first one cancels the run, so nodes stop what they started; a second exits at once |
 
-**Planned (not yet mapped by CLI):** `4` preflight/env, `5` budget exceeded, `130` SIGINT.
+**Planned (not yet mapped by CLI):** `4` preflight/env, `5` budget exceeded.
 
 ## 8. `flowgraph skills` — **partial**
 

@@ -49,6 +49,12 @@ import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { sharedHistoryChannels } from "./context/shared.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
+
+/**
+ * How long a retry of a side-effecting node waits for its timed-out attempt to stop. A capture
+ * gives a recorder 15 seconds to finish, and a device a few more to clean up.
+ */
+const TIMED_OUT_ATTEMPT_STOP_MS = 20_000;
 import {
   ensureWebhookServer,
   registerWebhookRoute,
@@ -1105,14 +1111,16 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       lgConfig?: LangGraphRunnableConfig,
     ): Promise<NodeRun> =>
       runWithPolicy<NodeRun>(
-        (attempt) => {
+        (attempt, signal) => {
           const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attempt, inputOverride, lgConfig);
+          if (signal) ctx.signal = signal;
           return compiled.run(state, ctx).then((res) => ({ res, ctx }));
         },
         {
           retry: nodeRetry as RetryConfigInput,
           timeout: nodeTimeout,
           signal: baseCtx.signal,
+          stopGraceMs: compiled.capabilities?.sideEffecting ? TIMED_OUT_ATTEMPT_STOP_MS : 0,
           onRetry: (info) => events.emit("node.retry", { nodeId: nodeSpec.id, ...info }, scope),
           onTimeout: (info) => events.emit("node.timeout", { nodeId: nodeSpec.id, ...info }, scope),
         },
@@ -2267,7 +2275,7 @@ function addCheckpointedMap(
 
     try {
       const run = await runWithPolicy(
-        (attempt) => {
+        (attempt, signal) => {
           const nodeCtx = buildNodeCtx(
             {
               ...(config.node as Record<string, unknown>),
@@ -2283,6 +2291,7 @@ function addCheckpointedMap(
             undefined,
             itemLgConfig,
           );
+          if (signal) nodeCtx.signal = signal;
           return runMapItem(buildCtx, mapId, config, state, nodeCtx, task).then((value) => ({
             value,
             onceUpdates: nodeCtx._onceUpdates,

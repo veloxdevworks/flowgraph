@@ -234,6 +234,8 @@ The same flow is available via the programmatic API: `compiled.getState(threadId
 
 `runGraph({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written (so the run is resumable), and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this.
 
+A node `timeout` also stops the attempt, through the same `ctx.signal`: `signal.reason` is the timeout error (`isTimeoutError(reason)` tells it from a cancelled run). The attempt fails with `Node timed out`, and the run fails unless a retry succeeds or `on.error` handles it. A retry of a side-effecting node first waits for the timed-out attempt to stop, for up to 20 seconds, so the two don't overlap. Nothing retries once the run itself is cancelled.
+
 ## 8. Secrets & redaction
 
 - Secrets come from a `SecretProvider` (default: env vars; pluggable: file/keychain/vault). Accessed via `ctx.secrets.get(name)` or `secret.NAME` in expressions.

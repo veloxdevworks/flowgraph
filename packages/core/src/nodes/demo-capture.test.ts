@@ -18,6 +18,7 @@ import { compileGraph } from "../compiler.js";
 import type { FlowgraphEvent } from "../events.js";
 import { demoNode, type DemoResult } from "./demo.js";
 import { readDemoManifest } from "./demo-manifest.js";
+import { launchCaptureBrowser } from "./demo-playwright.js";
 
 const THREAD = "capture-thread";
 const NODE = "capture";
@@ -1060,6 +1061,78 @@ describe("cancellation", () => {
       expect(ms).toBeLessThan(3_000);
       expect(playwrightLog(workspace)).toEqual(["launch", "browser.close"]);
     }, 10_000);
+  });
+
+  describe("node timeout", () => {
+    async function runGraph(workspace: string, node: Record<string, unknown>) {
+      const compiled = await compileGraph(
+        {
+          metadata: { name: "timeout-demo" },
+          state: { channels: {} },
+          nodes: [{ id: NODE, type: "demo", ...node }],
+          edges: [
+            { from: "START", to: NODE },
+            { from: NODE, to: "END" },
+          ],
+          runtime: { workspace, checkpoint: { enabled: false } },
+        } as unknown as GraphSpec,
+        {},
+      );
+      return compiled.run({ threadId: THREAD });
+    }
+    const folderFiles = (workspace: string) => {
+      const folder = artifactFolder(workspace);
+      return fs.existsSync(folder) ? fs.readdirSync(folder) : [];
+    };
+
+    it("stops the capture and fails the attempt as timed out", async () => {
+      const workspace = fakePlaywrightWorkspace({ hang: "waitForTimeout" });
+      const result = await runGraph(workspace, { timeout: "300ms", with: { video: { url: "http://app/", duration: "1h" } } });
+
+      expect(result.status).toBe("error");
+      expect(result.error?.message).toContain("Node timed out");
+      await vi.waitFor(() => expect(playwrightLog(workspace)).toContain("browser.close"));
+      expect(playwrightLog(workspace)).toContain("context.close");
+      expect(folderFiles(workspace)).toEqual([]);
+      expect(readDemoManifest(workspace, THREAD)).toEqual([]);
+    }, 15_000);
+
+    it("closes the first browser before a retry opens the next", async () => {
+      const workspace = fakePlaywrightWorkspace({ hang: "waitForTimeout" });
+      const result = await runGraph(workspace, {
+        timeout: "300ms",
+        retry: { maxAttempts: 2, baseMs: 1, jitter: false },
+        with: { video: { url: "http://app/", duration: "1h" } },
+      });
+
+      expect(result.status).toBe("error");
+      await vi.waitFor(() => expect(playwrightLog(workspace).filter((l) => l === "launch")).toHaveLength(2));
+      const log = playwrightLog(workspace);
+      expect(log.indexOf("browser.close")).toBeGreaterThan(-1);
+      expect(log.indexOf("browser.close")).toBeLessThan(log.lastIndexOf("launch"));
+    }, 15_000);
+  });
+
+  describe("signal handling in the browser", () => {
+    const launchOptions = async (signal?: AbortSignal) => {
+      const launch = vi.fn(async () => ({ newContext: vi.fn(), close: vi.fn() }));
+      await launchCaptureBrowser({ chromium: { launch } } as never, signal);
+      return launch.mock.calls[0] as unknown[];
+    };
+
+    it("leaves Ctrl-C to the host when the host passes a signal", async () => {
+      // Playwright's own handlers would close the browser and exit before the abort could clean up.
+      expect((await launchOptions(new AbortController().signal))[0]).toMatchObject({
+        headless: true,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+      });
+    });
+
+    it("keeps Playwright's handlers when nothing else would close the browser", async () => {
+      const [options] = await launchOptions();
+      expect(options).toEqual({ headless: true });
+    });
   });
 
   describe("http and file modes", () => {

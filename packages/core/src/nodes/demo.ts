@@ -795,7 +795,8 @@ export const demoNode = defineNode<Config>({
           }
         } catch (err) {
           // Cancelling is not a failed capture: no result, no issue, no manifest entry, and
-          // `strict` has nothing to turn into an error. The run reports itself as aborted.
+          // `strict` has nothing to turn into an error. The run reports itself as aborted. A
+          // node `timeout` aborts the same way, and the engine reports that attempt as timed out.
           if (ctx.signal?.aborted) throw ctx.signal.reason instanceof Error ? ctx.signal.reason : err;
           cause = err;
           const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
