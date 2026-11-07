@@ -74,12 +74,15 @@ function flatten(value: unknown, out: Item[], failures: GateCaptureFailure[]): v
       out.push({ kind: "record", record: o as unknown as Artifact });
       return;
     }
-    // A media node's whole output: `artifacts` already contains `artifact`.
-    if (Array.isArray(o["artifacts"])) return flatten(o["artifacts"], out, failures);
-    if (o["artifact"] && typeof o["artifact"] === "object") return flatten(o["artifact"], out, failures);
-    // A `demo` node's output: its file, the recording kept beside it, and whether it failed.
+    // A `demo` node's output also carries `artifacts`, so a failure has to be read before
+    // that list is followed: the list would otherwise hide that the capture failed.
     const failure = captureFailureOf(o);
     if (failure) failures.push(failure);
+    // A media node's whole output: `artifacts` already contains `artifact`. For `demo`, it
+    // holds the main file and the recording kept beside it.
+    if (Array.isArray(o["artifacts"])) return flatten(o["artifacts"], out, failures);
+    if (o["artifact"] && typeof o["artifact"] === "object") return flatten(o["artifact"], out, failures);
+    // A `demo` output without `artifacts` (a run from before they existed): its file and recording.
     if (typeof o["path"] === "string") flatten(o["path"], out, failures);
     if (Array.isArray(o["extra"])) flatten(o["extra"], out, failures);
     return;

@@ -482,6 +482,14 @@ const DemoExpectSchema = z
   .describe("HTTP statuses that count as success (default: any status below 400)");
 
 /**
+ * What a `demo` result shows about its objective (ADR-0019 §3). `ok` is derived from
+ * it: true for `passed` and `inconclusive`, false for `failed` and `not_captured`.
+ * Captures without assertions (every mode today) can only be `failed`,
+ * `inconclusive` or `not_captured`.
+ */
+export const DemoStatusSchema = z.enum(["passed", "failed", "inconclusive", "not_captured"]);
+
+/**
  * Best-effort artifact capture. Exactly one of `http`, `screenshot`, `file`,
  * `video`, or `simulator` must be set. `ok` is false when the capture failed or
  * when what it recorded is a failure (an unexpected HTTP status). Such results
@@ -1643,6 +1651,7 @@ export type CliProviderConfig = z.infer<typeof CliProviderConfigSchema>;
 export type DeepAgentsProviderConfig = z.infer<typeof DeepAgentsProviderConfigSchema>;
 export type MediaProviderConfig = z.infer<typeof MediaProviderConfigSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
+export type DemoStatus = z.infer<typeof DemoStatusSchema>;
 export type ImageWith = z.infer<typeof ImageWithSchema>;
 export type VideoWith = z.infer<typeof VideoWithSchema>;
 export type Model3dWith = z.infer<typeof Model3dWithSchema>;

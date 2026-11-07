@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MemorySaver } from "@langchain/langgraph";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Artifact, GraphSpec } from "@flowgraph/spec";
@@ -242,6 +244,67 @@ describe("hitl with.artifacts: demo outputs", () => {
     );
     expect(out.artifacts.map((a) => a.path)).toEqual(["t.json"]);
     expect(out.captureFailures[0]).toMatchObject({ reason: "returned HTTP 500" });
+  });
+
+  it("reads a failure before it follows artifacts, so the new field cannot hide it", async () => {
+    await writeFile(path.join(dir, "t.json"), "{}");
+    const record: Artifact = { kind: "artifact", path: "t.json", mimeType: "application/json", sizeBytes: 2, role: "file" };
+    const out = await resolveGateArtifacts(
+      [
+        { ok: false, status: "failed", kind: "http", path: path.join(dir, "t.json"), reason: "returned HTTP 500", artifacts: [record] },
+        { ok: false, status: "not_captured", kind: "screenshot", label: "home", path: null, reason: "refused", artifacts: [] },
+        { ok: true, status: "inconclusive", kind: "file", path: null, reason: null, artifacts: [] },
+      ],
+      dir,
+    );
+    expect(out.captureFailures).toEqual([
+      { kind: "http", reason: "returned HTTP 500", path: path.join(dir, "t.json") },
+      { kind: "screenshot", label: "home", reason: "refused" },
+    ]);
+    // The failed capture's evidence is still shown, from its records and only once.
+    expect(out.artifacts.map((a) => a.path)).toEqual(["t.json"]);
+  });
+
+  it("shows a real demo failure at the gate, with the evidence it kept", async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.end("boom");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+    try {
+      const spec = {
+        apiVersion: "flowgraph/v1",
+        kind: "Graph",
+        metadata: { name: "demo-then-gate" },
+        state: { channels: {} },
+        nodes: [
+          { id: "prove", type: "demo", with: { http: { url } } },
+          {
+            id: "gate",
+            type: "hitl",
+            with: { mode: "approve", message: "Ship?", artifacts: ["{{ state.outputs.prove }}"] },
+          },
+        ],
+        edges: [
+          { from: "START", to: "prove" },
+          { from: "prove", to: "gate" },
+          { from: "gate", to: "END" },
+        ],
+        runtime: { checkpoint: { enabled: true, backend: "memory" } },
+      } as unknown as GraphSpec;
+      const res = await (await compile(spec)).run({ threadId: "real-demo", onInterrupt: "fail" });
+      const payload = res.interrupts![0]!.payload as { reason?: string; message?: string; data: Data & { captureFailures: unknown[] } };
+
+      expect(payload.reason ?? payload.message).toContain("Capture problems (1):");
+      expect(payload.reason ?? payload.message).toContain("returned HTTP 500");
+      expect(payload.data.captureFailures).toHaveLength(1);
+      expect(payload.data.artifacts).toHaveLength(1);
+      expect(payload.data.artifacts[0]!.path).toMatch(/^\.flowgraph\/artifacts\/real-demo\/prove\/.+\.json$/);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
   });
 
   it("puts the failure in the message every client shows", async () => {

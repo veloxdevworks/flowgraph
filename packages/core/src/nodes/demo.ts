@@ -9,24 +9,34 @@
  *  - simulator: iOS (simctl) or Android (adb) screenshot / video
  *  - file: attach an existing file produced earlier in the pipeline
  *
- * `ok` means the capture worked AND what it recorded is not a failure. A capture
- * that recorded a failure (HTTP 500, an error page) keeps its file as evidence and
- * reports `{ ok: false, reason, path }`. Failures return rather than throw unless
+ * `status` says what the result shows (ADR-0019 §3). These modes check nothing about
+ * an objective, so they can only be:
+ *  - `inconclusive`: the capture worked and recorded no failure (`ok: true`)
+ *  - `failed`: the capture worked and recorded a failure (HTTP 500, an error page).
+ *    The file stays as evidence (`ok: false`)
+ *  - `not_captured`: nothing was captured, so there is no file (`ok: false`)
+ * `ok` is derived from `status`. Failures return rather than throw unless
  * `with.strict: true`.
+ *
+ * Every field is written on every run, `null` when absent, because `outputs` is
+ * deep-merged and a missing field would keep the previous run's value. Files go under
+ * `.flowgraph/artifacts/<threadKey>/<nodeId>/` and `artifacts` lists their records.
  */
 
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
-import { DemoWithSchema } from "@flowgraph/spec";
+import { DemoWithSchema, type Artifact, type DemoStatus } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
@@ -39,6 +49,8 @@ import {
   redactUrlSecrets,
 } from "./http-request.js";
 import { createRedactor, DEFAULT_REDACT_PATTERNS } from "../secrets.js";
+import { artifactDir, describeArtifactFile } from "../media/artifacts.js";
+import { runScopedKey } from "../runtime/run-key.js";
 import { WORKTREES_CHANNEL } from "../runtime/state-annotation.js";
 import {
   BROWSER_INSTALL_COMMAND,
@@ -64,30 +76,51 @@ type Config = z.infer<typeof configSchema>;
 
 export type { DemoKind };
 
+/** Every field is always present: `null` (or `[]` for `artifacts`) when it does not apply. */
 export type DemoResult = {
+  /** Derived from `status`: true for `passed` and `inconclusive`. */
   ok: boolean;
+  status: DemoStatus;
   kind: DemoKind;
-  path?: string;
-  mimeType?: string;
-  sizeBytes?: number;
-  reason?: string;
+  /** Absolute path of the main file. Kept for existing graphs: prefer `artifacts`. */
+  path: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  reason: string | null;
   capturedAt: string;
-  label?: string;
-  extra?: DemoExtraArtifact[];
+  label: string | null;
+  /** Absolute paths of files kept beside the main one, such as a page-load recording. */
+  extra: DemoExtraArtifact[] | null;
   /** Screenshot and video modes: the HTTP status of the page that was opened. */
-  pageStatus?: number;
-  /** Present for http mode when capture succeeded. */
-  request?: {
+  pageStatus: number | null;
+  /** http mode, when the request was made. */
+  request: {
     method: string;
     url: string;
     headers: Record<string, string>;
     body?: unknown;
-  };
-  response?: {
+  } | null;
+  response: {
     status: number;
     headers: Record<string, string>;
     body: unknown;
-  };
+  } | null;
+  /** Workspace-relative records of every file kept, the main file first. */
+  artifacts: Artifact[];
+};
+
+/** What a capture function hands back; `toResult` turns it into a `DemoResult`. */
+type Captured = {
+  path: string;
+  mimeType: string;
+  sizeBytes: number;
+  capturedAt: string;
+  /** Set when the capture worked but recorded a failure. */
+  failure?: string | undefined;
+  pageStatus?: number | undefined;
+  extra?: DemoExtraArtifact[] | undefined;
+  request?: DemoResult["request"];
+  response?: DemoResult["response"];
 };
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -123,15 +156,28 @@ function timestampSlug(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-/** Artifact dir: `<workspace>/.flowgraph/demo/<nodeId>/` */
-export function demoArtifactDir(workspace: string, nodeId: string): string {
-  return join(workspace, ".flowgraph", "demo", nodeId);
+/** Artifact dir: `<workspace>/.flowgraph/artifacts/<threadKey>/<nodeId>/`, as for media nodes. */
+export function demoArtifactDir(workspace: string, threadKey: string, nodeId: string): string {
+  return artifactDir(workspace, threadKey, nodeId);
 }
 
-function ensureArtifactDir(workspace: string, nodeId: string): string {
-  const dir = demoArtifactDir(workspace, nodeId);
+/** The key that scopes this run's files and manifest: the thread, so resumes share it. */
+function threadKeyOf(ctx: NodeRunContext): string {
+  return runScopedKey({
+    ...(ctx.meta?.threadId ? { threadId: ctx.meta.threadId } : {}),
+    ...(ctx.meta?.runId ? { runId: ctx.meta.runId } : {}),
+  });
+}
+
+function ensureArtifactDir(ctx: NodeRunContext, nodeId: string): string {
+  const dir = demoArtifactDir(ctx.workspace, threadKeyOf(ctx), nodeId);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/** Remove a half-written file so a failed capture leaves nothing that looks like evidence. */
+function discard(path: string): void {
+  rmSync(path, { force: true });
 }
 
 function resolvePath(workspace: string, p: string): string {
@@ -205,7 +251,7 @@ async function captureHttp(
   nodeId: string,
   label: string | undefined,
   usedSecrets: ReadonlySet<string>,
-): Promise<DemoResult> {
+): Promise<Captured> {
   const url = String(renderDeep(config.url, scope));
   const method = config.method ?? "GET";
   const headers = config.headers
@@ -233,7 +279,7 @@ async function captureHttp(
     throw err;
   }
 
-  const dir = ensureArtifactDir(ctx.workspace, nodeId);
+  const dir = ensureArtifactDir(ctx, nodeId);
   const fileName = `${timestampSlug()}-${slugify(label ?? "http")}.json`;
   const path = join(dir, fileName);
 
@@ -270,14 +316,11 @@ async function captureHttp(
   );
 
   return {
-    ok: !failure,
-    ...(failure ? { reason: failure } : {}),
-    kind: "http",
+    failure,
     path,
     mimeType: "application/json",
     sizeBytes,
     capturedAt: transcript.capturedAt,
-    ...(label ? { label } : {}),
     request: transcript.request,
     response: transcript.response,
   };
@@ -289,16 +332,19 @@ async function captureScreenshot(
   ctx: NodeRunContext,
   nodeId: string,
   label: string | undefined,
-): Promise<DemoResult> {
+): Promise<Captured> {
   const url = String(renderDeep(config.url, scope));
   const timeoutMs = config.timeout ? parseDuration(config.timeout) : 30_000;
   const viewport = config.viewport ?? { width: 1280, height: 720 };
 
   const pw = await importPlaywright(ctx.workspace);
-  const dir = ensureArtifactDir(ctx.workspace, nodeId);
+  const dir = ensureArtifactDir(ctx, nodeId);
   const slug = slugify(label ?? "screenshot");
   const shotName = `${timestampSlug()}-${slug}.png`;
   const shotPath = join(dir, shotName);
+  // Playwright names recordings itself: let it write to a scratch folder, so a capture
+  // that fails after the page opened leaves no stray recording among the artifacts.
+  const scratch = config.video ? mkdtempSync(join(dir, ".recording-")) : undefined;
 
   const browser = await pw.chromium.launch(CAPTURE_BROWSER);
   let extra: DemoExtraArtifact | undefined;
@@ -306,7 +352,7 @@ async function captureScreenshot(
   try {
     const contextOpts: Record<string, unknown> = {
       viewport,
-      ...(config.video ? { recordVideo: { dir, size: viewport } } : {}),
+      ...(scratch ? { recordVideo: { dir: scratch, size: viewport } } : {}),
     };
     const context = await browser.newContext(contextOpts);
     const page = await context.newPage();
@@ -325,24 +371,32 @@ async function captureScreenshot(
     if (videoHandle) {
       extra = await videoHandleToExtra(videoHandle, dir, slug);
     }
+  } catch (err) {
+    discard(shotPath);
+    throw err;
   } finally {
     await browser.close();
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
 
-  const sizeBytes = assertNotEmpty(shotPath, "demo screenshot");
+  let sizeBytes: number;
+  try {
+    sizeBytes = assertNotEmpty(shotPath, "demo screenshot");
+  } catch (err) {
+    discard(shotPath);
+    if (extra) discard(extra.path);
+    throw err;
+  }
   const capturedAt = new Date().toISOString();
   const failure = statusFailure(`page ${redactUrlSecrets(url)}`, pageStatus, config.expect);
 
   return {
-    ok: !failure,
-    ...(failure ? { reason: failure } : {}),
-    ...(pageStatus !== undefined ? { pageStatus } : {}),
-    kind: "screenshot",
+    failure,
+    pageStatus,
     path: shotPath,
     mimeType: "image/png",
     sizeBytes,
     capturedAt,
-    ...(label ? { label } : {}),
     ...(extra ? { extra: [extra] } : {}),
   };
 }
@@ -372,15 +426,16 @@ async function captureVideo(
   ctx: NodeRunContext,
   nodeId: string,
   label: string | undefined,
-): Promise<DemoResult> {
+): Promise<Captured> {
   const url = String(renderDeep(config.url, scope));
   const timeoutMs = config.timeout ? parseDuration(config.timeout) : 30_000;
   const durationMs = config.duration ? parseDuration(config.duration) : 5_000;
   const viewport = config.viewport ?? { width: 1280, height: 720 };
 
   const pw = await importPlaywright(ctx.workspace);
-  const dir = ensureArtifactDir(ctx.workspace, nodeId);
+  const dir = ensureArtifactDir(ctx, nodeId);
   const slug = slugify(label ?? "video");
+  const scratch = mkdtempSync(join(dir, ".recording-"));
 
   const browser = await pw.chromium.launch(CAPTURE_BROWSER);
   let videoPath: string | undefined;
@@ -388,7 +443,7 @@ async function captureVideo(
   try {
     const context = await browser.newContext({
       viewport,
-      recordVideo: { dir, size: viewport },
+      recordVideo: { dir: scratch, size: viewport },
     });
     const page = await context.newPage();
     const videoHandle = typeof page.video === "function" ? page.video() : null;
@@ -417,6 +472,7 @@ async function captureVideo(
     }
   } finally {
     await browser.close();
+    rmSync(scratch, { recursive: true, force: true });
   }
 
   if (!videoPath || !existsSync(videoPath)) {
@@ -424,15 +480,12 @@ async function captureVideo(
   }
   const failure = statusFailure(`page ${redactUrlSecrets(url)}`, pageStatus, config.expect);
   return {
-    ok: !failure,
-    ...(failure ? { reason: failure } : {}),
-    ...(pageStatus !== undefined ? { pageStatus } : {}),
-    kind: "video",
+    failure,
+    pageStatus,
     path: videoPath,
     mimeType: "video/webm",
     sizeBytes: statSync(videoPath).size,
     capturedAt: new Date().toISOString(),
-    ...(label ? { label } : {}),
   };
 }
 
@@ -464,7 +517,7 @@ function captureFile(
   ctx: NodeRunContext,
   nodeId: string,
   label: string | undefined,
-): DemoResult {
+): Captured {
   const rawPath = String(renderDeep(config.path, scope));
   const source = resolvePath(ctx.workspace, rawPath);
 
@@ -479,30 +532,79 @@ function captureFile(
   }
   assertAttachable(source, state, ctx.workspace);
 
-  const dir = ensureArtifactDir(ctx.workspace, nodeId);
+  const dir = ensureArtifactDir(ctx, nodeId);
   const ext = extname(source) || "";
   const base = basename(source, ext);
   const dest = join(dir, `${timestampSlug()}-${slugify(label ?? base)}${ext}`);
   copyFileSync(source, dest);
+  let sizeBytes: number;
+  try {
+    sizeBytes = assertNotEmpty(dest, "demo file");
+  } catch (err) {
+    discard(dest);
+    throw err;
+  }
 
+  return { path: dest, mimeType: mimeForPath(dest), sizeBytes, capturedAt: new Date().toISOString() };
+}
+
+/** `ok` follows from `status` and nothing else. */
+function okFor(status: DemoStatus): boolean {
+  return status === "passed" || status === "inconclusive";
+}
+
+/**
+ * A capture that worked: `failed` when it recorded a failure, else `inconclusive`,
+ * because these modes check nothing that could show an objective was met. Throws
+ * when a kept file cannot be described, which makes the capture `not_captured`.
+ */
+async function toResult(
+  ctx: NodeRunContext,
+  kind: DemoKind,
+  label: string | undefined,
+  c: Captured,
+): Promise<DemoResult> {
+  const status: DemoStatus = c.failure ? "failed" : "inconclusive";
+  const artifacts = await Promise.all(
+    [{ path: c.path, mimeType: c.mimeType }, ...(c.extra ?? [])].map((f) =>
+      describeArtifactFile(ctx.workspace, f.path, { mimeType: f.mimeType }),
+    ),
+  );
   return {
-    ok: true,
-    kind: "file",
-    path: dest,
-    mimeType: mimeForPath(dest),
-    sizeBytes: assertNotEmpty(dest, "demo file"),
-    capturedAt: new Date().toISOString(),
-    ...(label ? { label } : {}),
+    ok: okFor(status),
+    status,
+    kind,
+    path: c.path,
+    mimeType: c.mimeType,
+    sizeBytes: c.sizeBytes,
+    reason: c.failure ?? null,
+    capturedAt: c.capturedAt,
+    label: label ?? null,
+    extra: c.extra && c.extra.length > 0 ? c.extra : null,
+    pageStatus: c.pageStatus ?? null,
+    request: c.request ?? null,
+    response: c.response ?? null,
+    artifacts,
   };
 }
 
+/** Nothing was captured: no file, so every field that describes one is `null`. */
 function failureResult(kind: DemoKind, reason: string, label?: string): DemoResult {
   return {
     ok: false,
+    status: "not_captured",
     kind,
+    path: null,
+    mimeType: null,
+    sizeBytes: null,
     reason,
     capturedAt: new Date().toISOString(),
-    ...(label ? { label } : {}),
+    label: label ?? null,
+    extra: null,
+    pageStatus: null,
+    request: null,
+    response: null,
+    artifacts: [],
   };
 }
 
@@ -518,6 +620,7 @@ function trackManifest(
     });
     const entry: DemoManifestEntry = {
       ok: result.ok,
+      status: result.status,
       kind: result.kind,
       nodeId,
       capturedAt: result.capturedAt,
@@ -527,6 +630,7 @@ function trackManifest(
       ...(result.reason ? { reason: result.reason } : {}),
       ...(result.label ? { label: result.label } : {}),
       ...(result.extra && result.extra.length > 0 ? { extra: result.extra } : {}),
+      ...(result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
     };
     appendDemoManifestEntry(ctx.workspace, key, entry);
   } catch (err) {
@@ -588,7 +692,7 @@ export const demoNode = defineNode<Config>({
           });
           ctx.logger.warn(result.reason!);
           trackManifest(ctx, nodeId, result);
-          if (strict) throw new Error(result.reason);
+          if (strict) throw new Error(result.reason ?? undefined);
           ctx.emit("node.output", result);
           return {
             update: applyOutput(config.output, result, { nodeId, scope }),
@@ -599,27 +703,29 @@ export const demoNode = defineNode<Config>({
         let cause: unknown;
         try {
           if (kind === "http" && config.http) {
-            result = await captureHttp(config.http, scope, ctx, nodeId, label, usedSecrets);
+            result = await toResult(
+              ctx,
+              kind,
+              label,
+              await captureHttp(config.http, scope, ctx, nodeId, label, usedSecrets),
+            );
           } else if (kind === "screenshot" && config.screenshot) {
-            result = await captureScreenshot(config.screenshot, scope, ctx, nodeId, label);
+            result = await toResult(ctx, kind, label, await captureScreenshot(config.screenshot, scope, ctx, nodeId, label));
           } else if (kind === "video" && config.video) {
-            result = await captureVideo(config.video, scope, ctx, nodeId, label);
+            result = await toResult(ctx, kind, label, await captureVideo(config.video, scope, ctx, nodeId, label));
           } else if (kind === "simulator" && config.simulator) {
-            const dir = ensureArtifactDir(ctx.workspace, nodeId);
+            const dir = ensureArtifactDir(ctx, nodeId);
             const slug = `${timestampSlug()}-${slugify(label ?? "simulator")}`;
             const sim = await captureSimulator(renderDeep(config.simulator, scope) as SimulatorConfig, {
               artifactDir: dir,
               fileSlug: slug,
             });
-            result = {
-              ok: true,
-              kind: "simulator",
+            result = await toResult(ctx, kind, label, {
               path: sim.path,
               mimeType: sim.mimeType,
               sizeBytes: sim.sizeBytes,
               capturedAt: new Date().toISOString(),
-              ...(label ? { label } : {}),
-            };
+            });
             if (sim.warning) {
               ctx.issue({
                 code: ISSUE_CODE.CAPTURE_FAILED,
@@ -631,7 +737,7 @@ export const demoNode = defineNode<Config>({
               ctx.logger.warn("demo: simulator capture may be misleading", { reason: sim.warning });
             }
           } else {
-            result = captureFile(config.file!, state, scope, ctx, nodeId, label);
+            result = await toResult(ctx, kind, label, captureFile(config.file!, state, scope, ctx, nodeId, label));
           }
         } catch (err) {
           cause = err;
@@ -653,7 +759,7 @@ export const demoNode = defineNode<Config>({
         }
 
         // A capture can work and still record a failure (HTTP 500): the file stays as evidence.
-        if (!cause && !result.ok) {
+        if (!cause && result.status === "failed") {
           ctx.issue({
             code: ISSUE_CODE.CAPTURE_FAILED,
             severity: "warning",
@@ -665,7 +771,7 @@ export const demoNode = defineNode<Config>({
         }
 
         trackManifest(ctx, nodeId, result);
-        if (strict && !result.ok) throw new Error(result.reason, { cause });
+        if (strict && !result.ok) throw new Error(result.reason ?? undefined, { cause });
         ctx.emit("node.output", result);
         return {
           update: applyOutput(config.output, result, { nodeId, scope }),
