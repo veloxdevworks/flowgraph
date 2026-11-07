@@ -87,9 +87,9 @@ export interface RetryRunnerOptions {
   timeout?: string | undefined;
   signal?: AbortSignal | undefined;
   /**
-   * How long a retry waits for a timed-out attempt to stop before starting the next one, so
-   * side effects of the two don't overlap. Default 0: an attempt that ignores its signal would
-   * otherwise hold up every retry.
+   * How long a timed-out attempt gets to stop before the next attempt or the failure, so its
+   * side effects don't overlap what comes next. Default 0: an attempt that ignores its signal
+   * would otherwise hold up every timeout.
    */
   stopGraceMs?: number | undefined;
   onRetry?: (info: { attempt: number; error: string; delayMs: number }) => void;
@@ -135,14 +135,15 @@ export async function runWithPolicy<T>(
       lastError = err;
       // The run was cancelled: another attempt would only fail the same way.
       if (opts.signal?.aborted) break;
+      if (isTimeoutError(err) && running && opts.stopGraceMs) {
+        await settledWithin(running, opts.stopGraceMs, opts.signal);
+        if (opts.signal?.aborted) break;
+      }
       const canRetry = attempt < maxAttempts && shouldRetry(err, opts.retry?.retryOn);
       if (!canRetry) break;
 
       const delayMs = computeDelay(attempt, backoffCfg);
       opts.onRetry?.({ attempt, error: err instanceof Error ? err.message : String(err), delayMs });
-      if (isTimeoutError(err) && running && opts.stopGraceMs) {
-        await settledWithin(running, opts.stopGraceMs, opts.signal);
-      }
       await sleep(delayMs, opts.signal);
     }
   }

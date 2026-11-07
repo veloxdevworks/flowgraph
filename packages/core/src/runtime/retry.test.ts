@@ -68,9 +68,9 @@ describe("runWithPolicy", () => {
       (attempt, signal) => {
         signals.push(signal);
         if (attempt === 1) return Promise.reject(new Error("transient"));
-        run.abort(new Error("cancelled"));
         return new Promise((_resolve, reject) => {
-          if (signal?.aborted) reject(signal.reason);
+          signal?.addEventListener("abort", () => reject(signal.reason));
+          run.abort(new Error("cancelled"));
         });
       },
       { timeout: "1h", signal: run.signal, retry: { maxAttempts: 2, baseMs: 1, jitter: false } },
@@ -136,7 +136,53 @@ describe("runWithPolicy", () => {
       { timeout: "10ms", stopGraceMs: 100, retry: { maxAttempts: 2, baseMs: 1, jitter: false } },
     );
     expect(calls).toBe(2);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+    const took = Date.now() - started;
+    expect(took).toBeGreaterThanOrEqual(100);
+    expect(took).toBeLessThan(5_000);
+  });
+
+  it("waits for a timed-out attempt to stop even with no retry to come", async () => {
+    const events: string[] = [];
+    const failed = runWithPolicy(
+      (_attempt, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            setTimeout(() => {
+              events.push("stopped");
+              reject(signal.reason);
+            }, 50);
+          });
+        }),
+      { timeout: "10ms", stopGraceMs: 5_000 },
+    ).catch((err: unknown) => {
+      events.push("failed");
+      throw err;
+    });
+    await expect(failed).rejects.toThrow("Node timed out");
+    expect(events).toEqual(["stopped", "failed"]);
+  });
+
+  it("announces a retry only once the timed-out attempt has stopped, and not after a cancel", async () => {
+    const run = new AbortController();
+    const retries: unknown[] = [];
+    const failed = runWithPolicy(
+      (_attempt, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            if (signal.reason === run.signal.reason) reject(signal.reason);
+            else run.abort(new Error("cancelled"));
+          });
+        }),
+      {
+        timeout: "10ms",
+        signal: run.signal,
+        stopGraceMs: 5_000,
+        retry: { maxAttempts: 2, baseMs: 1, jitter: false },
+        onRetry: (info) => retries.push(info),
+      },
+    );
+    await expect(failed).rejects.toThrow("Node timed out");
+    expect(retries).toEqual([]);
   });
 
   it("does not wait for an attempt that failed by itself", async () => {

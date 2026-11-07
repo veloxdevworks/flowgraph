@@ -51,8 +51,8 @@ import { loadGraphImports } from "./runtime/load-imports.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
 
 /**
- * How long a retry of a side-effecting node waits for its timed-out attempt to stop. A capture
- * gives a recorder 15 seconds to finish, and a device a few more to clean up.
+ * How long a node that stops on timeout gets to do so before the run moves on. A capture gives
+ * a recorder 15 seconds to finish, and a device a few more to clean up.
  */
 const TIMED_OUT_ATTEMPT_STOP_MS = 20_000;
 import {
@@ -1105,6 +1105,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     const nsRecord = nodeSpec as unknown as Record<string, unknown>;
 
     type NodeRun = { res: NodeResult; ctx: NodeRunContext & { _onceUpdates: Record<string, unknown>; _issueUpdates: RunIssue[] } };
+    const stopsOnTimeout = compiled.capabilities?.stopsOnTimeout === true;
     const runOnce = (
       state: Record<string, unknown>,
       inputOverride?: Record<string, unknown>,
@@ -1113,14 +1114,14 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       runWithPolicy<NodeRun>(
         (attempt, signal) => {
           const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attempt, inputOverride, lgConfig);
-          if (signal) ctx.signal = signal;
+          if (signal && stopsOnTimeout) ctx.signal = signal;
           return compiled.run(state, ctx).then((res) => ({ res, ctx }));
         },
         {
           retry: nodeRetry as RetryConfigInput,
           timeout: nodeTimeout,
           signal: baseCtx.signal,
-          stopGraceMs: compiled.capabilities?.sideEffecting ? TIMED_OUT_ATTEMPT_STOP_MS : 0,
+          stopGraceMs: stopsOnTimeout ? TIMED_OUT_ATTEMPT_STOP_MS : 0,
           onRetry: (info) => events.emit("node.retry", { nodeId: nodeSpec.id, ...info }, scope),
           onTimeout: (info) => events.emit("node.timeout", { nodeId: nodeSpec.id, ...info }, scope),
         },
@@ -2226,6 +2227,7 @@ function addCheckpointedMap(
   mapJoinById.set(mapId, joinId);
 
   const innerType = String((config.node as Record<string, unknown>)["type"] ?? "");
+  const innerStopsOnTimeout = registry.get(innerType)?.capabilities?.stopsOnTimeout === true;
   const buildCtx = {
     graphName: spec.metadata.name,
     toolWiring: ctx.toolWiring,
@@ -2291,7 +2293,7 @@ function addCheckpointedMap(
             undefined,
             itemLgConfig,
           );
-          if (signal) nodeCtx.signal = signal;
+          if (signal && innerStopsOnTimeout) nodeCtx.signal = signal;
           return runMapItem(buildCtx, mapId, config, state, nodeCtx, task).then((value) => ({
             value,
             onceUpdates: nodeCtx._onceUpdates,
@@ -2302,6 +2304,7 @@ function addCheckpointedMap(
           retry: nodeRetry,
           timeout: nodeTimeout,
           signal: ctx.baseCtx.signal,
+          stopGraceMs: innerStopsOnTimeout ? TIMED_OUT_ATTEMPT_STOP_MS : 0,
           onRetry: (info) => ctx.events.emit("node.retry", { nodeId: itemId, ...info }, itemScope),
           onTimeout: (info) => ctx.events.emit("node.timeout", { nodeId: itemId, ...info }, itemScope),
         },

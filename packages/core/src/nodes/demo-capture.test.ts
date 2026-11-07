@@ -1097,6 +1097,38 @@ describe("cancellation", () => {
       expect(readDemoManifest(workspace, THREAD)).toEqual([]);
     }, 15_000);
 
+    it("stops a capture inside a map too", async () => {
+      const workspace = fakePlaywrightWorkspace({ hang: "waitForTimeout" });
+      const compiled = await compileGraph(
+        {
+          metadata: { name: "timeout-map" },
+          state: { channels: { items: { type: "array" } } },
+          nodes: [
+            {
+              id: NODE,
+              type: "map",
+              timeout: "300ms",
+              with: {
+                over: "{{ state.items }}",
+                node: { type: "demo", with: { video: { url: "http://app/", duration: "1h" } } },
+              },
+            },
+          ],
+          edges: [
+            { from: "START", to: NODE },
+            { from: NODE, to: "END" },
+          ],
+          runtime: { workspace, checkpoint: { enabled: false } },
+        } as unknown as GraphSpec,
+        {},
+      );
+      const result = await compiled.run({ threadId: THREAD, input: { items: ["one"] } });
+
+      expect(result.status).toBe("error");
+      expect(result.error?.message).toContain("Node timed out");
+      await vi.waitFor(() => expect(playwrightLog(workspace)).toContain("browser.close"));
+    }, 15_000);
+
     it("closes the first browser before a retry opens the next", async () => {
       const workspace = fakePlaywrightWorkspace({ hang: "waitForTimeout" });
       const result = await runGraph(workspace, {
