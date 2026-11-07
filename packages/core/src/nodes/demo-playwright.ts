@@ -57,7 +57,12 @@ export async function launchCaptureBrowser(
   signal?: AbortSignal,
 ): Promise<PlaywrightBrowser> {
   signal?.throwIfAborted();
-  const launching = pw.chromium.launch(CAPTURE_BROWSER);
+  // Left on, Playwright's handlers close the browser and exit the process on Ctrl-C, before an
+  // abort can stop the capture cleanly. A signal can also come from a node timeout alone, with a
+  // host that handles nothing: the browser still goes, because it exits when its pipe closes.
+  const launching = pw.chromium.launch(
+    signal ? { ...CAPTURE_BROWSER, handleSIGINT: false, handleSIGTERM: false } : CAPTURE_BROWSER,
+  );
   if (!signal) return launching;
   let onAbort: () => void = () => {};
   const aborted = new Promise<never>((_resolve, reject) => {
