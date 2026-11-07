@@ -206,16 +206,16 @@ function fakePlaywrightWorkspace(
               ${opts.videoError ? `if (raw) throw new Error(${JSON.stringify(opts.videoError)});` : ""}
               return {
               goto: async () => {
-                ${opts.hang === "goto" ? "await closed;" : ""}
+                ${opts.hang === "goto" ? 'log("hang"); await closed;' : ""}
                 ${opts.gotoError ? `throw new Error(${JSON.stringify(opts.gotoError)});` : ""}
                 return ${status === null ? "null" : `{ status: () => ${status} }`};
               },
-              waitForSelector: async () => { ${opts.hang === "waitForSelector" ? "await closed;" : ""} },
-              waitForTimeout: async () => { ${opts.hang === "waitForTimeout" ? "await closed;" : ""} },
+              waitForSelector: async () => { ${opts.hang === "waitForSelector" ? 'log("hang"); await closed;' : ""} },
+              waitForTimeout: async () => { ${opts.hang === "waitForTimeout" ? 'log("hang"); await closed;' : ""} },
               evaluate: async () => {},
               mouse: { wheel: async () => {} },
               screenshot: async ({ path }) => {
-                ${opts.hang === "screenshot" ? "await closed;" : ""}
+                ${opts.hang === "screenshot" ? 'log("hang"); await closed;' : ""}
                 writeFileSync(path, ${opts.emptyScreenshot ? '""' : '"png"'});
               },
               video: () => (raw ? { path: async () => raw } : null),
@@ -376,7 +376,7 @@ case "$*" in
   *"simctl openurl"*) [ "$FAKE_OPENURL_EXIT" != "" ] && { echo "no handler" >&2; exit "$FAKE_OPENURL_EXIT"; }; touch "$FAKE_LOG.opened"; exit 0 ;;
   *screenshot*)
     # The simulator service writes the picture itself: it can land after the client was killed.
-    [ "$FAKE_SHOT_LATE" = 1 ] && { ( sleep 1; printf png > "$dest" ) >/dev/null 2>&1 & exec sleep 30; }
+    [ "$FAKE_SHOT_LATE" = 1 ] && { ( sleep 1; printf png > "$dest" ) >/dev/null 2>&1 & echo $$ >> "$FAKE_LOG.pids"; exec sleep 30; }
     case "$FAKE_SCREEN" in
       frozen) printf 'home' > "$dest" ;;
       spinner) date +%s%N > "$dest" ;;
@@ -388,7 +388,7 @@ case "$*" in
     case "$FAKE_RECORD" in
       fail) printf 'partial' > "$dest"; echo "record broke" >&2; exit 1 ;;
       empty) trap ': > "$dest"; kill $pid; exit 0' INT ;;
-      slowstop) trap 'sleep 1.5; printf mp4 > "$dest"; kill $pid; exit 0' INT ;;
+      slowstop) trap 'touch "$FAKE_LOG.stopping"; sleep 1.5; printf mp4 > "$dest"; kill $pid; exit 0' INT ;;
       *) trap 'printf mp4 > "$dest"; kill $pid; exit 0' INT ;;
     esac
     sleep 5 >/dev/null 2>&1 &
@@ -411,8 +411,15 @@ case "$*" in
   *"shell screenrecord"*)
     if [ "$FAKE_DEVICE_RECORDER" = 1 ]; then
       echo $$ >> "$FAKE_LOG.pids"
-      touch "$device_recording" "$FAKE_LOG.device-file"
-      exec sleep 30
+      trap 'kill $pid; exit 0' INT
+      sleep 30 >/dev/null 2>&1 &
+      pid=$!
+      # Tests cancel as soon as the recorder file appears. Shell builtins, after the trap: bash
+      # drops a SIGINT that arrives while a foreground child such as touch is running.
+      : > "$FAKE_LOG.device-file"
+      : > "$device_recording"
+      wait $pid
+      exit 0
     fi
     exit 0 ;;
 esac
@@ -952,32 +959,50 @@ describe("cancellation", () => {
     }
   };
 
-  /** Run a capture and cancel it after `afterMs` (0: before it starts). It must not complete. */
+  /**
+   * Run a capture and cancel it. It must not complete. `ms` counts from the abort.
+   *
+   * `when` cancels as soon as the capture has reached the point being tested, so a slow machine
+   * cannot move the cancel to some other point. `before`: before it starts. `returning`: the moment
+   * `run` has been called, which for a capture that is synchronous up to its last await is after
+   * the capture and before the node returns.
+   */
   async function cancelled(
     workspace: string,
     withConfig: Record<string, unknown>,
-    /** `afterMs` 0: before it starts. Negative: the moment `run` has been called, which for a
-     *  capture that is synchronous up to its last await is after the capture and before the node returns. */
-    opts: { afterMs: number; state?: Record<string, unknown> },
+    opts: { at?: "before" | "returning"; when?: () => boolean; state?: Record<string, unknown> },
   ) {
     const controller = new AbortController();
     const issues: Array<Record<string, unknown>> = [];
-    if (opts.afterMs === 0) controller.abort();
-    else if (opts.afterMs > 0) setTimeout(() => controller.abort(), opts.afterMs);
+    let abortedAt: number | undefined;
+    controller.signal.addEventListener("abort", () => {
+      abortedAt = Date.now();
+    });
+    if (opts.at === "before") controller.abort();
     const started = Date.now();
+    const waiting = opts.when
+      ? setInterval(() => {
+          // Never reached: cancel anyway, and the test's own checks report what went wrong.
+          if (opts.when!() || Date.now() - started > 8_000) {
+            clearInterval(waiting);
+            controller.abort();
+          }
+        }, 10)
+      : undefined;
     const running = capture(workspace, withConfig, {
       signal: controller.signal,
       issues,
       ...(opts.state ? { state: opts.state } : {}),
     });
-    if (opts.afterMs < 0) controller.abort();
+    if (opts.at === "returning") controller.abort();
     const error: unknown = await running.then(
       () => {
         throw new Error("the capture finished instead of being cancelled");
       },
       (err: unknown) => err,
     );
-    const ms = Date.now() - started;
+    clearInterval(waiting);
+    const ms = Date.now() - (abortedAt ?? started);
     // The abort reaches the run as it was raised, so the run reports itself as aborted.
     expect(error).toBe(controller.signal.reason);
     expect(issues).toEqual([]);
@@ -1001,7 +1026,7 @@ describe("cancellation", () => {
 
     it.each(cases)("stops %s: closes the context and the browser, and keeps nothing", async (_name, config, hang) => {
       const workspace = fakePlaywrightWorkspace({ hang });
-      const { ms } = await cancelled(workspace, config, { afterMs: 150 });
+      const { ms } = await cancelled(workspace, config, { when: () => playwrightLog(workspace).includes("hang") });
 
       expect(ms).toBeLessThan(3_000);
       const log = playwrightLog(workspace);
@@ -1012,21 +1037,25 @@ describe("cancellation", () => {
 
     it("is a cancellation under strict too, not a capture error", async () => {
       const workspace = fakePlaywrightWorkspace({ hang: "waitForSelector" });
-      await cancelled(workspace, { strict: true, screenshot: { url: "http://app/", waitFor: "#never", timeout: "1h" } }, { afterMs: 100 });
+      await cancelled(workspace, { strict: true, screenshot: { url: "http://app/", waitFor: "#never", timeout: "1h" } }, {
+        when: () => playwrightLog(workspace).includes("hang"),
+      });
     }, 10_000);
 
     it("does not launch a browser for a run cancelled before the capture starts", async () => {
       for (const config of [{ screenshot: { url: "http://app/" } }, { video: { url: "http://app/" } }]) {
         const workspace = fakePlaywrightWorkspace();
-        await cancelled(workspace, config, { afterMs: 0 });
+        await cancelled(workspace, config, { at: "before" });
         expect(playwrightLog(workspace)).toEqual([]);
         expect(fs.existsSync(artifactFolder(workspace))).toBe(false);
       }
     });
 
     it("closes a browser that was still starting when the run was cancelled", async () => {
-      const workspace = fakePlaywrightWorkspace({ launchMs: 400 });
-      const { ms } = await cancelled(workspace, { video: { url: "http://app/" } }, { afterMs: 100 });
+      const workspace = fakePlaywrightWorkspace({ launchMs: 1_000 });
+      const { ms } = await cancelled(workspace, { video: { url: "http://app/" } }, {
+        when: () => playwrightLog(workspace).includes("launch"),
+      });
 
       expect(ms).toBeLessThan(3_000);
       expect(playwrightLog(workspace)).toEqual(["launch", "browser.close"]);
@@ -1036,8 +1065,10 @@ describe("cancellation", () => {
   describe("http and file modes", () => {
     let server: http.Server;
     let base: string;
+    let requests = 0;
     beforeAll(async () => {
       server = http.createServer((_req, res) => {
+        requests++;
         setTimeout(() => res.end("late"), 20_000).unref();
       });
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1049,25 +1080,29 @@ describe("cancellation", () => {
     });
 
     it("stops an http request in flight, even under strict and a timeout", async () => {
-      const { ms } = await cancelled(mkdir(), { strict: true, http: { url: `${base}/`, timeout: "100ms" } }, { afterMs: 20 });
+      const inFlight = () => {
+        const seen = requests;
+        return () => requests > seen;
+      };
+      const { ms } = await cancelled(mkdir(), { strict: true, http: { url: `${base}/`, timeout: "5s" } }, { when: inFlight() });
       expect(ms).toBeLessThan(2_000);
-      const slow = await cancelled(mkdir(), { http: { url: `${base}/`, timeout: "1h" } }, { afterMs: 100 });
+      const slow = await cancelled(mkdir(), { http: { url: `${base}/`, timeout: "1h" } }, { when: inFlight() });
       expect(slow.ms).toBeLessThan(2_000);
     });
 
     it("does not send a request, or copy a file, for a run cancelled before the capture starts", async () => {
-      await cancelled(mkdir(), { http: { url: `${base}/` } }, { afterMs: 0 });
+      await cancelled(mkdir(), { http: { url: `${base}/` } }, { at: "before" });
 
       const workspace = mkdir();
       fs.writeFileSync(path.join(workspace, "report.txt"), "report");
-      await cancelled(workspace, { file: { path: "./report.txt" } }, { afterMs: 0 });
+      await cancelled(workspace, { file: { path: "./report.txt" } }, { at: "before" });
       expect(fs.existsSync(artifactFolder(workspace))).toBe(false);
     });
 
     it("keeps nothing when the cancel arrives after the capture finished, before the node returns", async () => {
       const workspace = mkdir();
       fs.writeFileSync(path.join(workspace, "report.txt"), "report");
-      await cancelled(workspace, { file: { path: "./report.txt" } }, { afterMs: -1 });
+      await cancelled(workspace, { file: { path: "./report.txt" } }, { at: "returning" });
     });
 
     it("ends a compiled run as aborted, with no issue raised", async () => {
@@ -1108,6 +1143,10 @@ describe("cancellation", () => {
       fs.existsSync(`${log}.pids`)
         ? fs.readFileSync(`${log}.pids`, "utf8").trim().split("\n").map(Number)
         : [];
+    /** A fake tool has started and is now stuck, or recording. */
+    const started = () => pids().length > 0;
+    /** The settle wait is under way: frames are being grabbed after the app was opened. */
+    const polling = (frame: string) => () => calls().filter((c) => c.includes(frame)).length >= 3;
 
     function stubTools(env: Record<string, string> = {}): void {
       const bin = mkdir("fg-demo-bin-");
@@ -1125,14 +1164,14 @@ describe("cancellation", () => {
 
     it("runs no tool for a run cancelled before the capture starts", async () => {
       stubTools();
-      await cancelled(mkdir(), ios(), { afterMs: 0 });
-      await cancelled(mkdir(), android({ capture: "video" }), { afterMs: 0 });
+      await cancelled(mkdir(), ios(), { at: "before" });
+      await cancelled(mkdir(), android({ capture: "video" }), { at: "before" });
       expect(calls()).toEqual([]);
     });
 
     it("stops waiting for an iOS app to settle", async () => {
       stubTools({ FAKE_SCREEN: "spinner" });
-      const { ms } = await cancelled(mkdir(), ios({ app: "com.real.app", settle: "1h" }), { afterMs: 1_200 });
+      const { ms } = await cancelled(mkdir(), ios({ app: "com.real.app", settle: "1h" }), { when: polling("io booted screenshot") });
 
       expect(ms).toBeLessThan(3_000);
       const seen = calls().length;
@@ -1142,7 +1181,7 @@ describe("cancellation", () => {
 
     it("kills a stuck simctl step", async () => {
       stubTools({ FAKE_BOOT_HANG: "1" });
-      const { ms } = await cancelled(mkdir(), ios({ device: "iPhone 15" }), { afterMs: 300 });
+      const { ms } = await cancelled(mkdir(), ios({ device: "iPhone 15" }), { when: started });
 
       expect(ms).toBeLessThan(3_000);
       expect(pids()).toHaveLength(1);
@@ -1152,7 +1191,7 @@ describe("cancellation", () => {
     it("stops simctl recordVideo and deletes the file", async () => {
       stubTools();
       const workspace = mkdir();
-      const { ms } = await cancelled(workspace, ios({ capture: "video", duration: "1h" }), { afterMs: 500 });
+      const { ms } = await cancelled(workspace, ios({ capture: "video", duration: "1h" }), { when: started });
 
       expect(ms).toBeLessThan(5_000);
       expect(pids()).toHaveLength(1);
@@ -1162,8 +1201,8 @@ describe("cancellation", () => {
     it("keeps no recording that was still being finalized when the run was cancelled", async () => {
       stubTools({ FAKE_RECORD: "slowstop" });
       const workspace = mkdir();
-      // The recorder is told to stop at 200ms and needs 1.5s to write the file: the cancel lands in between.
-      await cancelled(workspace, ios({ capture: "video", duration: "200ms" }), { afterMs: 800 });
+      // The recorder is told to stop after 1s and needs 1.5s to write the file: the cancel lands in between.
+      await cancelled(workspace, ios({ capture: "video", duration: "1s" }), { when: () => fs.existsSync(`${log}.stopping`) });
 
       await new Promise((resolve) => setTimeout(resolve, 2_500));
       expect(fs.readdirSync(artifactFolder(workspace))).toEqual([]); // not even when the recorder writes late
@@ -1172,7 +1211,7 @@ describe("cancellation", () => {
     it("keeps no screenshot that the simulator writes after simctl was killed", async () => {
       stubTools({ FAKE_SHOT_LATE: "1" });
       const workspace = mkdir();
-      await cancelled(workspace, ios(), { afterMs: 300 });
+      await cancelled(workspace, ios(), { when: started });
 
       await new Promise((resolve) => setTimeout(resolve, 2_000)); // the late write lands in this time
       expect(fs.readdirSync(artifactFolder(workspace))).toEqual([]);
@@ -1180,7 +1219,7 @@ describe("cancellation", () => {
 
     it("stops waiting for an Android app to settle", async () => {
       stubTools({ FAKE_SCREEN: "spinner" });
-      const { ms } = await cancelled(mkdir(), android({ app: "com.app", settle: "1h" }), { afterMs: 1_200 });
+      const { ms } = await cancelled(mkdir(), android({ app: "com.app", settle: "1h" }), { when: polling("exec-out screencap") });
 
       expect(ms).toBeLessThan(3_000);
       const seen = calls().length;
@@ -1190,7 +1229,7 @@ describe("cancellation", () => {
 
     it("stops screenrecord on the device and deletes its file, not only the adb client", async () => {
       stubTools({ FAKE_DEVICE_RECORDER: "1" });
-      const { ms } = await cancelled(mkdir(), android({ capture: "video", duration: "1h" }), { afterMs: 500 });
+      const { ms } = await cancelled(mkdir(), android({ capture: "video", duration: "1h" }), { when: () => fs.existsSync(`${log}.device-recording`) });
 
       expect(ms).toBeLessThan(5_000);
       expect(alive(pids()[0]!)).toBe(false); // the adb client
@@ -1213,7 +1252,7 @@ describe("cancellation", () => {
     it("deletes the temp screenshot from the device when cancelled mid-capture", async () => {
       stubTools({ FAKE_SCREENCAP_HANG: "1" });
       fs.writeFileSync(`${log}.device-file`, "x");
-      const { ms } = await cancelled(mkdir(), android(), { afterMs: 300 });
+      const { ms } = await cancelled(mkdir(), android(), { when: started });
 
       expect(ms).toBeLessThan(3_000);
       expect(alive(pids()[0]!)).toBe(false);
