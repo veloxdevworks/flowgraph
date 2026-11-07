@@ -265,6 +265,86 @@ describe("hitl with.artifacts: demo outputs", () => {
     expect(out.artifacts.map((a) => a.path)).toEqual(["t.json"]);
   });
 
+  describe("when the demo ran in another workspace", () => {
+    const rel = ".flowgraph/artifacts/t/prove";
+    /** A demo output whose files live under `root`, as `demo` writes it. */
+    async function demoOutput(root: string, over: Record<string, unknown> = {}) {
+      await mkdir(path.join(root, rel), { recursive: true });
+      await writeFile(path.join(root, rel, "shot.png"), "png");
+      await writeFile(path.join(root, rel, "shot.webm"), "webm");
+      const record = (name: string, mimeType: string, role: Artifact["role"], sha256: string): Artifact => ({
+        kind: "artifact", path: `${rel}/${name}`, mimeType, sizeBytes: 3, role, sha256,
+      });
+      return {
+        ok: true,
+        status: "inconclusive",
+        kind: "screenshot",
+        path: path.join(root, rel, "shot.png"),
+        extra: [{ path: path.join(root, rel, "shot.webm"), mimeType: "video/webm", kind: "video" }],
+        reason: null,
+        artifacts: [record("shot.png", "image/png", "image", "hash-png"), record("shot.webm", "video/webm", "video", "hash-webm")],
+        ...over,
+      };
+    }
+
+    it("keeps the producer's full records when the gate shares the workspace", async () => {
+      const out = await resolveGateArtifacts([await demoOutput(dir)], dir);
+      expect(out.artifacts.map((a) => [a.path, a.sha256])).toEqual([
+        [`${rel}/shot.png`, "hash-png"],
+        [`${rel}/shot.webm`, "hash-webm"],
+      ]);
+      expect(out.artifactRefs).toEqual([`${rel}/shot.png`, `${rel}/shot.webm`]);
+    });
+
+    it("gives the main file and each extra as a plain absolute ref, never a record that points nowhere", async () => {
+      const demo = await demoOutput(outside);
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts).toEqual([]);
+      expect(out.artifactRefs).toEqual([demo.path, (demo.extra as Array<{ path: string }>)[0]!.path]);
+      expect(out.captureFailures).toEqual([]);
+    });
+
+    it("still lists a failure from another workspace, with its files as refs", async () => {
+      const demo = await demoOutput(outside, { ok: false, status: "failed", reason: "page returned HTTP 500" });
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts).toEqual([]);
+      expect(out.artifactRefs).toHaveLength(2);
+      expect(out.captureFailures).toEqual([{ kind: "screenshot", reason: "page returned HTTP 500", path: demo.path }]);
+
+      const none = await resolveGateArtifacts(
+        [{ ok: false, status: "not_captured", kind: "screenshot", path: null, extra: null, reason: "refused", artifacts: [] }],
+        dir,
+      );
+      expect(none.captureFailures).toEqual([{ kind: "screenshot", reason: "refused" }]);
+    });
+
+    it("does not present a same-named file in the gate's workspace as the demo's", async () => {
+      const demo = await demoOutput(outside);
+      await demoOutput(dir); // a different file at the same relative paths, here
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts).toEqual([]);
+      expect(out.artifactRefs).toEqual([demo.path, (demo.extra as Array<{ path: string }>)[0]!.path]);
+    });
+
+    it("treats each file on its own: the main file here, an extra elsewhere", async () => {
+      const demo = await demoOutput(dir);
+      await mkdir(path.join(outside, rel), { recursive: true });
+      await writeFile(path.join(outside, rel, "shot.webm"), "webm");
+      (demo.extra as Array<{ path: string }>)[0]!.path = path.join(outside, rel, "shot.webm");
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts.map((a) => a.path)).toEqual([`${rel}/shot.png`]);
+      expect(out.artifactRefs).toEqual([`${rel}/shot.png`, path.join(outside, rel, "shot.webm")]);
+    });
+
+    it("presents nothing for a file that was deleted", async () => {
+      const demo = await demoOutput(dir);
+      await rm(demo.path as string);
+      const out = await resolveGateArtifacts([demo], dir);
+      expect(out.artifacts.map((a) => a.path)).toEqual([`${rel}/shot.webm`]);
+      expect(out.artifactRefs).toContain(demo.path);
+    });
+  });
+
   it("shows a real demo failure at the gate, with the evidence it kept", async () => {
     const server = http.createServer((_req, res) => {
       res.writeHead(500, { "content-type": "text/plain" });

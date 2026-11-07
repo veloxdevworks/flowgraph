@@ -35,7 +35,15 @@ export interface GateArtifacts {
   captureFailures: GateCaptureFailure[];
 }
 
-type Item = { kind: "record"; record: Artifact } | { kind: "path"; value: string };
+/**
+ * `demoFile`: a file of a `demo` output. `abs` is the absolute path the demo recorded and
+ * `record` its workspace-relative record, relative to the *demo's* workspace, which may not
+ * be the gate's. The record is only presented when it names the same file here.
+ */
+type Item =
+  | { kind: "record"; record: Artifact }
+  | { kind: "path"; value: string }
+  | { kind: "demoFile"; abs: string; record: Artifact };
 
 function isArtifactRecord(o: Record<string, unknown>): boolean {
   return (
@@ -55,6 +63,37 @@ function captureFailureOf(o: Record<string, unknown>): GateCaptureFailure | unde
     ...(typeof o["label"] === "string" ? { label: o["label"] } : {}),
     ...(typeof o["path"] === "string" ? { path: o["path"] } : {}),
   };
+}
+
+/** A `demo` result: the only producer of `ok`, a `kind` and `artifacts` together. */
+function isDemoOutput(o: Record<string, unknown>): boolean {
+  return (
+    typeof o["kind"] === "string" &&
+    typeof o["ok"] === "boolean" &&
+    Array.isArray(o["artifacts"]) &&
+    !(o["artifact"] && typeof o["artifact"] === "object")
+  );
+}
+
+/**
+ * A `demo` output's files: its main `path` and each `extra`, each with the record that
+ * describes it. A record is found by the demo's own absolute path, which ends with the
+ * record's relative one, so no other file is taken for it.
+ */
+function flattenDemo(o: Record<string, unknown>, out: Item[]): void {
+  const records = (o["artifacts"] as unknown[]).filter(
+    (r): r is Artifact => !!r && typeof r === "object" && isArtifactRecord(r as Record<string, unknown>),
+  );
+  const extras = Array.isArray(o["extra"]) ? (o["extra"] as unknown[]) : [];
+  const files = [
+    o["path"],
+    ...extras.map((e) => (e && typeof e === "object" ? (e as { path?: unknown }).path : undefined)),
+  ].filter((f): f is string => typeof f === "string" && f.trim().length > 0);
+  for (const abs of files) {
+    const posix = abs.split("\\").join("/");
+    const record = records.find((r) => posix.endsWith(`/${normalizeArtifactPath(r.path)}`));
+    out.push(record ? { kind: "demoFile", abs, record } : { kind: "path", value: abs });
+  }
 }
 
 function flatten(value: unknown, out: Item[], failures: GateCaptureFailure[]): void {
@@ -78,8 +117,10 @@ function flatten(value: unknown, out: Item[], failures: GateCaptureFailure[]): v
     // that list is followed: the list would otherwise hide that the capture failed.
     const failure = captureFailureOf(o);
     if (failure) failures.push(failure);
-    // A media node's whole output: `artifacts` already contains `artifact`. For `demo`, it
-    // holds the main file and the recording kept beside it.
+    // A `demo` output: its main file and the recording kept beside it, each checked against
+    // the gate's workspace, because the demo node may have run in another one.
+    if (isDemoOutput(o)) return flattenDemo(o, out);
+    // A media node's whole output: `artifacts` already contains `artifact`.
     if (Array.isArray(o["artifacts"])) return flatten(o["artifacts"], out, failures);
     if (o["artifact"] && typeof o["artifact"] === "object") return flatten(o["artifact"], out, failures);
     // A `demo` output without `artifacts` (a run from before they existed): its file and recording.
@@ -134,6 +175,22 @@ async function recordConfined(workspace: string, workspaceReal: string, rec: Art
 }
 
 /**
+ * Does the record, resolved under this gate's workspace, name the very file the demo
+ * recorded? Compares real paths, so a same-named file here, or a record whose file is
+ * missing, is not taken for it.
+ */
+async function sameFileHere(workspace: string, workspaceReal: string, rec: Artifact, abs: string): Promise<boolean> {
+  try {
+    const here = await realpath(path.resolve(workspace, rec.path));
+    const rel = path.relative(workspaceReal, here);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+    return here === (await realpath(abs));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Flatten rendered `with.artifacts` entries into records + refs.
  * Never throws for a bad entry: a path that is missing or outside the workspace
  * simply stays a plain ref.
@@ -157,6 +214,15 @@ export async function resolveGateArtifacts(rendered: unknown[], workspace: strin
       } else {
         ref = item.record.path;
       }
+    } else if (item.kind === "demoFile") {
+      if (await sameFileHere(workspace, workspaceReal, item.record, item.abs)) {
+        record = { ...item.record, path: normalizeArtifactPath(item.record.path) };
+        ref = record.path;
+      } else {
+        // Another workspace, or a file that is gone: keep the real path as a plain ref.
+        record = await recordForPath(workspace, workspaceReal, item.abs);
+        ref = record ? record.path : item.abs;
+      }
     } else {
       record = await recordForPath(workspace, workspaceReal, item.value);
       ref = record ? record.path : item.value;
@@ -165,7 +231,7 @@ export async function resolveGateArtifacts(rendered: unknown[], workspace: strin
     const seen = byKey.get(key);
     if (seen !== undefined) {
       // Prefer the producer's own record (hash, dimensions, provenance) over a stat-derived one.
-      if (item.kind === "record" && record) out[seen] = { key, record, ref };
+      if ((item.kind === "record" || item.kind === "demoFile") && record) out[seen] = { key, record, ref };
       continue;
     }
     byKey.set(key, out.length);
