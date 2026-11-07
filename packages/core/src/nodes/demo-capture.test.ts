@@ -608,6 +608,17 @@ describe.skipIf(process.platform === "win32")("simulator capture", () => {
       expect(String(issues[0]!["message"])).toContain("0.1s long, not the 1s asked for");
     });
 
+    it("doesn't read a recording too big to be a clip of almost nothing", async () => {
+      const fixture = path.join(mkdir(), "clip.mp4");
+      fs.writeFileSync(fixture, mp4(67));
+      fs.truncateSync(fixture, 300 * 1024 * 1024);
+      stubTools({ FAKE_RECORD: "fixture", FAKE_MP4: fixture });
+      const { out, issues } = await capture(mkdir(), ios({ capture: "video", duration: "1s" }));
+      expect(out.status).toBe("inconclusive");
+      expect(issues).toEqual([]);
+      fs.rmSync(out.path!, { force: true });
+    }, 30_000);
+
     it("says nothing about a clip of about the length asked for", async () => {
       recordedFor(900);
       const { issues } = await capture(mkdir(), ios({ capture: "video", duration: "1s" }));

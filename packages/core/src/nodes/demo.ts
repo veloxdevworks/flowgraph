@@ -197,6 +197,31 @@ function ensureArtifactDir(ctx: NodeRunContext, nodeId: string): string {
   return dir;
 }
 
+/**
+ * Masks what this node rendered, in the forms it reaches a page in: a browser shows a secret from
+ * an address percent-encoded, which the plain value doesn't match.
+ */
+function secretRedactor(usedSecrets: ReadonlySet<string>) {
+  const forms = [...usedSecrets].flatMap((secret) => [
+    secret,
+    encodeURI(secret),
+    encodeURIComponent(secret),
+    encodeURIComponent(secret).replaceAll("%20", "+"),
+  ]);
+  return createRedactor([...new Set(forms)], DEFAULT_REDACT_PATTERNS);
+}
+
+/** An error safe to chain as a `cause`, because hosts log causes, stack included. */
+function maskedError(err: unknown, redact: (value: unknown) => unknown): Error {
+  const safe = new Error(String(redact(errMessage(err))));
+  if (err instanceof Error) {
+    safe.name = err.name;
+    safe.stack = String(redact(err.stack ?? safe.message));
+    if ((err as { retryable?: unknown }).retryable === false) Object.assign(safe, { retryable: false });
+  }
+  return safe;
+}
+
 /** Remove a half-written file so a failed capture leaves nothing that looks like evidence. */
 function discard(path: string): void {
   rmSync(path, { force: true });
@@ -298,7 +323,7 @@ async function captureHttp(
 
   // Transcripts are shared as evidence and also land in graph state: mask credentials
   // by name, then any secret this node rendered, wherever a server echoed it back.
-  const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
+  const redact = secretRedactor(usedSecrets);
   const transcript = redact({
     label: label ?? null,
     capturedAt: new Date().toISOString(),
@@ -544,15 +569,20 @@ async function captureSteps(
 ): Promise<Captured> {
   // Rendered up front, so every secret is known before anything is recorded.
   const web = renderDeep(config.target!.web, scope) as NonNullable<Config["target"]>["web"];
-  const steps = renderDeep(config.steps!, scope) as NonNullable<Config["steps"]>;
+  // A template that is only an expression renders to its value, and a step wants text: `{{ state.n }}`.
+  const asText = (value: unknown): unknown =>
+    value && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, asText(v)]))
+      : String(value ?? "");
+  const steps = (renderDeep(config.steps!, scope) as unknown[]).map(asText) as NonNullable<Config["steps"]>;
 
   const pw = await importPlaywright(ctx.workspace);
   ctx.signal?.throwIfAborted();
   const dir = ensureArtifactDir(ctx, nodeId);
-  const redactor = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
+  const redactor = secretRedactor(usedSecrets);
   const flow = await runFlow(
     pw,
-    { ...web, steps, noConsoleErrors: config.expect?.noConsoleErrors === true },
+    { ...web, url: String(web.url), steps, noConsoleErrors: config.expect?.noConsoleErrors === true },
     {
       artifactDir: dir,
       fileSlug: `${timestampSlug()}-${slugify(label ?? "flow")}`,
@@ -786,15 +816,12 @@ export const demoNode = defineNode<Config>({
         const usedSecrets = new Set<string>();
         const scope = buildScope(state, ctx, usedSecrets);
         const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
-        const label = config.label
-          ? String(renderDeep(config.label, scope))
-          : undefined;
+        // Masked at once: a label names files, and is written to the result and the manifest.
+        const renderedLabel = config.label ? String(renderDeep(config.label, scope)) : undefined;
+        const label = renderedLabel === undefined ? undefined : String(secretRedactor(usedSecrets)(renderedLabel));
         const strict = config.strict === true;
         const renderedObjective = config.objective ? String(renderDeep(config.objective, scope)) : null;
-        const objective =
-          renderedObjective === null
-            ? null
-            : String(createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS)(renderedObjective));
+        const objective = renderedObjective === null ? null : String(secretRedactor(usedSecrets)(renderedObjective));
 
         // A run cancelled before the capture starts touches nothing: no folder, no
         // issue, no manifest entry.
@@ -901,8 +928,8 @@ export const demoNode = defineNode<Config>({
           // `strict` has nothing to turn into an error. The run reports itself as aborted. A
           // node `timeout` aborts the same way, and the engine reports that attempt as timed out.
           if (ctx.signal?.aborted) throw ctx.signal.reason instanceof Error ? ctx.signal.reason : err;
-          cause = err;
-          const redact = createRedactor([...usedSecrets], DEFAULT_REDACT_PATTERNS);
+          const redact = secretRedactor(usedSecrets);
+          cause = maskedError(err, redact);
           const reason = String(
             redact(isMissingBrowserError(err) ? missingBrowserMessage() : errMessage(err)),
           );

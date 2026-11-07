@@ -32,6 +32,14 @@ type Scene = {
   pageErrors?: string[];
   /** Playwright's own error for a click, which can quote what it was given. */
   clickError?: string;
+  /** A click ends with the browser gone, as Playwright reports that. */
+  clickLosesBrowser?: boolean;
+  /** A click navigates to a page with this status. */
+  clickStatus?: number;
+  /** A click loads a resource with this status, which is not a page. */
+  clickResourceStatus?: number;
+  /** A console error raised after the last step has finished. */
+  lateConsoleError?: string;
   /** Screenshots fail, by name fragment. "*" fails all of them. */
   shotError?: string;
   noVideo?: boolean;
@@ -58,21 +66,30 @@ function fakeWorkspace(scene: Scene = {}): string {
      let shut = () => {};
      const closed = new Promise((_resolve, reject) => { shut = () => reject(new Error("Target page, context or browser has been closed")); });
      closed.catch(() => {});
+     let browserGone = false;
+     let emit = () => {};
+     const page0 = {};
+     const lost = (message) => { browserGone = true; const e = new Error(message); e.name = "TargetClosedError"; return e; };
      const locator = (selector) => {
+       const has = () => selector instanceof RegExp ? [...visible].some((v) => selector.test(v)) : visible.has(selector);
        const self = {
          filter: () => self,
          first: () => self,
          click: async ({ timeout }) => {
            log("click " + selector);
+           if (scene.clickLosesBrowser) throw lost("locator.click: Target page, context or browser has been closed");
            if (scene.clickError) throw new Error(scene.clickError);
-           if (!visible.has(selector)) throw new Error("locator.click: Timeout " + timeout + "ms exceeded.\\nCall log:\\n  waiting for " + selector);
+           if (scene.clickStatus) emit("response", { status: () => scene.clickStatus, url: () => "http://app/next", frame: () => page0, request: () => ({ isNavigationRequest: () => true }) });
+           if (scene.clickResourceStatus) emit("response", { status: () => scene.clickResourceStatus, url: () => "http://app/a.png", frame: () => page0, request: () => ({ isNavigationRequest: () => false }) });
+           if (!has()) throw new Error("locator.click: Timeout " + timeout + "ms exceeded.\\nCall log:\\n  waiting for " + selector);
          },
          fill: async (value) => {
            log("fill " + selector);
-           if (!visible.has(selector)) throw new Error("locator.fill: Timeout exceeded.");
+           if (typeof value !== "string") throw new Error("locator.fill: expected string, got " + typeof value);
+           if (!has()) throw new Error("locator.fill: Timeout exceeded.");
          },
          waitFor: async ({ state, timeout }) => {
-           const there = visible.has(selector);
+           const there = has();
            if (state === "hidden" ? there : !there) throw new Error("locator.waitFor: Timeout " + timeout + "ms exceeded.");
          },
        };
@@ -83,6 +100,7 @@ function fakeWorkspace(scene: Scene = {}): string {
          log("launch");
          ${scene.launchError ? `throw new Error(${JSON.stringify(scene.launchError)});` : ""}
          return {
+           isConnected: () => !browserGone,
            close: async () => { log("browser.close"); shut(); },
            newContext: async (options) => {
              const raw = join(options.recordVideo.dir, "raw.webm");
@@ -95,7 +113,10 @@ function fakeWorkspace(scene: Scene = {}): string {
                },
                newPage: async () => {
                  const handlers = {};
+                 emit = (event, arg) => handlers[event]?.(arg);
                  const page = {
+                   isClosed: () => false,
+                   mainFrame: () => page0,
                    on: (event, handler) => { handlers[event] = handler; },
                    goto: async (url) => {
                      log("goto " + url);
@@ -105,7 +126,7 @@ function fakeWorkspace(scene: Scene = {}): string {
                      for (const text of scene.consoleErrors ?? []) handlers.console?.({ type: () => "error", text: () => text });
                      for (const text of scene.pageErrors ?? []) handlers.pageerror?.(new Error(text));
                      handlers.console?.({ type: () => "log", text: () => "not an error" });
-                     page.at = url;
+                     page.at = encodeURI(url); // As a browser shows an address.
                      const status = scene.status?.[url] ?? 200;
                      return { status: () => status };
                    },
@@ -121,6 +142,7 @@ function fakeWorkspace(scene: Scene = {}): string {
                      log("screenshot " + path.split("/").pop());
                      if (scene.shotError === "*" || (scene.shotError && path.includes(scene.shotError))) throw new Error("screenshot failed");
                      writeFileSync(path, "png");
+                     if (path.includes("-final") && scene.lateConsoleError) handlers.console?.({ type: () => "error", text: () => scene.lateConsoleError });
                    },
                    video: () => ({ path: async () => raw }),
                  };
@@ -146,7 +168,7 @@ const filesIn = (workspace: string): string[] =>
 async function run(
   workspace: string,
   withConfig: Record<string, unknown>,
-  opts: { signal?: AbortSignal; issues?: Array<Record<string, any>> } = {},
+  opts: { signal?: AbortSignal; issues?: Array<Record<string, any>>; state?: Record<string, unknown> } = {},
 ) {
   const issues = opts.issues ?? [];
   const compiled = demoNode.build({ graphName: "g" }, { id: NODE }, DemoWithSchema.parse(withConfig) as never);
@@ -163,7 +185,7 @@ async function run(
     _input: {},
     ...(opts.signal ? { signal: opts.signal } : {}),
   } as unknown as NodeRunContext;
-  const res = await compiled.run({}, ctx);
+  const res = await compiled.run(opts.state ?? {}, ctx);
   const { update } = res as unknown as { update: { outputs: Record<string, DemoResult> } };
   return { out: update.outputs[NODE]!, issues };
 }
@@ -308,6 +330,85 @@ describe("demo steps: status", () => {
     expect(out.console).toEqual({ errors: 1, messages: ["noise"] });
   });
 
+  it("counts a console error raised after the last step", async () => {
+    const { out } = await run(
+      fakeWorkspace({ visible: ["Hi"], lateConsoleError: "late boom" }),
+      flow([{ expect: { text: "Hi" } }], { expect: { noConsoleErrors: true } }),
+    );
+    expect(out.status).toBe("failed");
+    expect(out.reason).toContain("late boom");
+  });
+
+  it("fails when a click lands on an error page, whatever the URL check says", async () => {
+    const workspace = fakeWorkspace({ visible: ["#go", "#after"], clickStatus: 500 });
+    const { out } = await run(workspace, flow([{ click: "#go" }, { expect: { url: "http://app/start" } }, { click: "#after" }]));
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("page http://app/next returned HTTP 500");
+    expect(out.steps?.at(-1)).toMatchObject({ action: "click", ok: false });
+    expect(logOf(workspace)).not.toContain("click #after");
+  });
+
+  it("lets target.web.expect.status allow an error page reached later, and doesn't require it", async () => {
+    const allow = { target: { web: { url: "http://app/start", expect: { status: [200, 404] } } } };
+    const allowed = await run(
+      fakeWorkspace({ visible: ["#go", "Gone"], clickStatus: 404 }),
+      { ...flow([{ click: "#go" }, { expect: { text: "Gone" } }]), ...allow },
+    );
+    expect(allowed.out.status).toBe("passed");
+
+    const onlyError = { target: { web: { url: "http://app/start", expect: { status: [500] } } } };
+    const ok = await run(
+      fakeWorkspace({ status: { "http://app/start": 500, "http://app/fine": 200 }, visible: ["Fine"] }),
+      { ...flow([{ goto: "http://app/fine" }, { expect: { text: "Fine" } }]), ...onlyError },
+    );
+    expect(ok.out.status).toBe("passed");
+  });
+
+  it("doesn't count a failed image or script as a page", async () => {
+    const { out } = await run(
+      fakeWorkspace({ visible: ["#go", "Hi"], clickResourceStatus: 500 }),
+      flow([{ click: "#go" }, { expect: { text: "Hi" } }]),
+    );
+    expect(out.status).toBe("passed");
+  });
+
+  it("matches text by case, so a different word doesn't hold", async () => {
+    const failed = await run(fakeWorkspace({ visible: ["Not saved"] }), flow([{ expect: { text: "Saved" } }]));
+    expect(failed.out.status).toBe("failed");
+    const within = await run(fakeWorkspace({ visible: ["Order confirmed #123"] }), flow([{ expect: { text: "Order confirmed" } }]));
+    expect(within.out.status).toBe("passed");
+    const special = await run(fakeWorkspace({ visible: ["Total (USD): $5.00"] }), flow([{ expect: { text: "(USD): $5.00" } }]));
+    expect(special.out.status).toBe("passed");
+  });
+
+  it("isn't fooled by a selector or address that mentions a crash", async () => {
+    const selector = await run(
+      fakeWorkspace({ clickError: "locator.click: strict mode violation: locator('text=crashed') has been closed" }),
+      flow([{ click: "text=crashed" }]),
+    );
+    expect(selector.out.status).toBe("failed");
+
+    const address = await run(
+      fakeWorkspace({ gotoError: { "crashed-page": "page.goto: net::ERR_CONNECTION_REFUSED at http://x/crashed-page" } }),
+      flow([{ goto: "http://x/crashed-page" }]),
+    );
+    expect(address.out.status).toBe("failed");
+  });
+
+  it("fills a value that rendered to a number, with a secret elsewhere in the node", async () => {
+    vi.stubEnv("TEST_PASSWORD", "hunter2-super-secret");
+    const { out } = await run(
+      fakeWorkspace({ visible: ["#n", "#p"] }),
+      flow([
+        { fill: { selector: "#n", value: "{{ state.n }}" } },
+        { fill: { selector: "#p", value: "{{ secret.TEST_PASSWORD }}" } },
+      ]),
+      { state: { n: 42 } },
+    );
+    expect(out.status).toBe("inconclusive");
+    expect(out.steps?.[1]?.detail).toBe("#n = 42");
+  });
+
   it("stops a flow that runs past its limit, without losing the evidence", async () => {
     const { out } = await run(fakeWorkspace(), {
       ...flow([{ wait: "1m" }, { expect: { text: "x" } }]),
@@ -358,7 +459,7 @@ describe("demo steps: nothing captured", () => {
   });
 
   it("is not_captured when the browser is lost mid-flow, and keeps nothing", async () => {
-    const workspace = fakeWorkspace({ clickError: "locator.click: Target page, context or browser has been closed" });
+    const workspace = fakeWorkspace({ clickLosesBrowser: true });
     const { out } = await run(workspace, flow([{ screenshot: "before" }, { click: "#x" }]));
     expect(out.status).toBe("not_captured");
     expect(filesIn(workspace)).toEqual([]);
@@ -429,6 +530,37 @@ describe("demo steps: secrets", () => {
     expect(out.steps?.at(-1)?.error).toContain("[REDACTED]");
     const everything = JSON.stringify({ out, issues, manifest: readDemoManifest(workspace, THREAD) });
     expect(everything).not.toContain(SECRET);
+  });
+
+  it("masks a secret in a label, including in the file names", async () => {
+    vi.stubEnv("TEST_SECRET", SECRET);
+    const workspace = fakeWorkspace({ visible: ["Hi"] });
+    const { out } = await run(workspace, flow([{ expect: { text: "Hi" } }], { label: "run {{ secret.TEST_SECRET }}" }));
+    expect(out.label).toBe("run [REDACTED]");
+    const slug = SECRET.toLowerCase();
+    expect(filesIn(workspace).join()).not.toContain(slug);
+    expect(JSON.stringify({ out, manifest: readDemoManifest(workspace, THREAD) })).not.toContain(slug);
+  });
+
+  it("masks a secret as a browser shows it in an address, percent-encoded", async () => {
+    vi.stubEnv("TEST_SECRET", "a b c d e f");
+    const { out } = await run(fakeWorkspace(), flow([{ goto: "http://app/?q={{ secret.TEST_SECRET }}" }, { expect: { text: "absent" } }]));
+    expect(out.status).toBe("failed");
+    expect(out.assertions?.[0]?.observed).toContain("[REDACTED]");
+    expect(JSON.stringify(out)).not.toContain("a%20b%20c%20d%20e%20f");
+  });
+
+  it("keeps a secret out of the error a strict node throws, cause included", async () => {
+    vi.stubEnv("TEST_SECRET", SECRET);
+    const workspace = fakeWorkspace({ gotoError: { start: `page.goto: refused ${SECRET}` } });
+    const err = await run(workspace, {
+      ...flow([{ expect: { text: "x" } }], { strict: true }),
+      target: { web: { url: "http://app/start?q={{ secret.TEST_SECRET }}" } },
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const chain: string[] = [];
+    for (let e: any = err; e; e = e.cause) chain.push(String(e.message), String(e.stack));
+    expect(chain.join("\n")).not.toContain(SECRET);
   });
 
   it("masks a whole fill value holding a secret too short for the general redactor", async () => {

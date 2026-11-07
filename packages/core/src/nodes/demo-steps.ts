@@ -18,6 +18,7 @@ import {
   isDurationText,
   launchCaptureBrowser,
   statusFailure,
+  type PlaywrightBrowser,
   type PlaywrightLocator,
   type PlaywrightModule,
   type PlaywrightPage,
@@ -92,8 +93,21 @@ function firstLine(err: unknown): string {
   return (text.split("\n")[0] ?? "").replace(/\u001b\[[0-9;]*m/g, "").trim();
 }
 
-function isBrowserGone(err: unknown): boolean {
-  return /has been closed|Target closed|Browser closed|crashed/i.test(firstLine(err));
+/**
+ * Whether the browser is gone, from its state and Playwright's error type. Never from the wording
+ * of the message, which quotes the step's selector or address: a link called "crashed" is no crash.
+ */
+function isBrowserGone(err: unknown, page: PlaywrightPage, browser: PlaywrightBrowser): boolean {
+  return (err as Error | undefined)?.name === "TargetClosedError" || page.isClosed() || !browser.isConnected();
+}
+
+/**
+ * Text as a case-sensitive substring, with spaces matching as the page lays them out. Playwright's
+ * default ignores case, so `Saved` would hold on "Not saved".
+ */
+function textPattern(text: string): RegExp {
+  const words = text.trim().split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(words.join("\\s+"));
 }
 
 /** Steps never run code in the page, and a `javascript:` address would. */
@@ -137,16 +151,17 @@ async function runCheck(
   assertions: FlowAssertion[],
   redact: (text: string) => string,
   redactUrl: (url: string) => string,
+  browser: PlaywrightBrowser,
 ): Promise<void> {
   const label = redact(describeCheck(check));
   const positive = !("hidden" in check);
   try {
-    if ("text" in check) await visibleOf(page.getByText(check.text)).waitFor({ state: "visible", timeout });
+    if ("text" in check) await visibleOf(page.getByText(textPattern(check.text))).waitFor({ state: "visible", timeout });
     else if ("visible" in check) await visibleOf(page.locator(check.visible)).waitFor({ state: "visible", timeout });
     else if ("url" in check) await page.waitForURL(check.url, { timeout, waitUntil: "commit" });
     else await visibleOf(page.locator(check.hidden)).waitFor({ state: "hidden", timeout });
   } catch (err) {
-    if (isBrowserGone(err)) throw err;
+    if (isBrowserGone(err, page, browser)) throw err;
     const at = redactUrl(page.url());
     const observed =
       "url" in check
@@ -220,6 +235,30 @@ export async function runFlow(pw: PlaywrightModule, flow: RenderedFlow, opts: Fl
     });
     page.on("pageerror", (error) => noteConsoleError(firstLine(error)));
 
+    // A page reached by a click has a status too, and `expect: { url }` holds on an error page.
+    // Unlike the first page, a later one is only held to the rule for errors: `expect.status`
+    // lists the errors that are allowed, not the only statuses that may ever appear.
+    const refusedStatus = (url: string, status: number | undefined): string | undefined =>
+      status !== undefined && status >= 400 && !flow.expect?.status.includes(status)
+        ? `page ${redactUrl(url)} returned HTTP ${status}`
+        : undefined;
+    let navigationFailure: string | undefined;
+    page.on("response", (response) => {
+      const r = response as {
+        status: () => number;
+        url: () => string;
+        frame: () => unknown;
+        request: () => { isNavigationRequest: () => boolean };
+      };
+      // A request for a page that never gets a frame, such as a download, has no frame to ask about.
+      try {
+        if (!r.request().isNavigationRequest() || r.frame() !== page.mainFrame()) return;
+      } catch {
+        return;
+      }
+      navigationFailure ??= refusedStatus(r.url(), r.status());
+    });
+
     const shoot = async (path: string, timeout: number): Promise<void> => {
       await page.screenshot({ path, fullPage: true, timeout });
       if (statSync(path).size === 0) throw new Error("the screenshot came out empty");
@@ -233,7 +272,7 @@ export async function runFlow(pw: PlaywrightModule, flow: RenderedFlow, opts: Fl
 
     const runStep = async (step: DemoStep, index: number): Promise<void> => {
       if ("goto" in step) {
-        const failure = statusFailure(`page ${redactUrl(step.goto)}`, await navigate(step.goto), flow.expect);
+        const failure = refusedStatus(step.goto, await navigate(step.goto));
         if (failure) throw new AssertionFailed(failure);
       } else if ("click" in step) {
         await page.locator(step.click).click({ timeout: stepBudget() });
@@ -258,9 +297,12 @@ export async function runFlow(pw: PlaywrightModule, flow: RenderedFlow, opts: Fl
         await shoot(path, stepBudget());
         out.namedScreenshots.push(path);
       } else {
-        await runCheck(page, step.expect, stepBudget(), out.assertions, redact, redactUrl);
+        await runCheck(page, step.expect, stepBudget(), out.assertions, redact, redactUrl, browser);
       }
     };
+
+    const browserLost = (err: unknown): Error =>
+      new Error(`the browser was lost during the flow: ${redact(firstLine(err))}`);
 
     /** Let what a step changed reach the recording, so a reviewer can follow the flow. */
     const changesThePage = (step: DemoStep): boolean =>
@@ -278,11 +320,12 @@ export async function runFlow(pw: PlaywrightModule, flow: RenderedFlow, opts: Fl
       out.steps.push(entry);
       try {
         await run();
+        if (navigationFailure) throw new AssertionFailed(navigationFailure);
         entry.ms = Date.now() - started;
         return true;
       } catch (err) {
         signal?.throwIfAborted();
-        if (crashed || isBrowserGone(err)) throw err;
+        if (crashed || isBrowserGone(err, page, browser)) throw browserLost(err);
         entry.ms = Date.now() - started;
         entry.ok = false;
         entry.error = redact(firstLine(err));
@@ -299,7 +342,8 @@ export async function runFlow(pw: PlaywrightModule, flow: RenderedFlow, opts: Fl
         opened = await navigate(flow.url);
       } catch (err) {
         signal?.throwIfAborted();
-        throw new Error(`could not open ${redactUrl(flow.url)}: ${redact(firstLine(err))}`, { cause: err });
+        // No `cause`: Playwright's own error can quote a secret, and hosts log causes.
+        throw new Error(`could not open ${redactUrl(flow.url)}: ${redact(firstLine(err))}`);
       }
       out.pageStatus = opened;
       const openFailure = statusFailure(`page ${redactUrl(flow.url)}`, opened, flow.expect);
@@ -325,6 +369,21 @@ export async function runFlow(pw: PlaywrightModule, flow: RenderedFlow, opts: Fl
         }
       }
 
+      // The screenshot of the end state, or of the point of failure, whatever the flow's author
+      // asked for. It has its own time, because a flow that ran out of time needs it most.
+      const finalPath = join(folder, `${opts.fileSlug}-final.png`);
+      try {
+        await shoot(finalPath, stepMs);
+        out.finalScreenshot = finalPath;
+      } catch (err) {
+        signal?.throwIfAborted();
+        if (crashed || isBrowserGone(err, page, browser)) throw browserLost(err);
+        out.warnings.push(`the final screenshot could not be saved: ${redact(firstLine(err))}`);
+      }
+      await page.waitForTimeout(RECORDER_CATCH_UP_MS);
+
+      // Last, because these cover the whole flow and the page can still act after the last step.
+      if (!out.failure && navigationFailure) out.failure = navigationFailure;
       if (!out.failure && flow.noConsoleErrors) {
         const held = out.console.errors === 0;
         const observed = held ? undefined : `${out.console.errors} error(s), first: ${out.console.messages[0]}`;
@@ -336,19 +395,6 @@ export async function runFlow(pw: PlaywrightModule, flow: RenderedFlow, opts: Fl
         });
         if (observed) out.failure = `noConsoleErrors did not hold: ${observed}`;
       }
-
-      // The screenshot of the end state, or of the point of failure, whatever the flow's author
-      // asked for. It has its own time, because a flow that ran out of time needs it most.
-      const finalPath = join(folder, `${opts.fileSlug}-final.png`);
-      try {
-        await shoot(finalPath, stepMs);
-        out.finalScreenshot = finalPath;
-      } catch (err) {
-        signal?.throwIfAborted();
-        if (crashed || isBrowserGone(err)) throw err;
-        out.warnings.push(`the final screenshot could not be saved: ${redact(firstLine(err))}`);
-      }
-      await page.waitForTimeout(RECORDER_CATCH_UP_MS);
     } finally {
       await context.close().catch((err: unknown) => {
         out.warnings.push(`the browser did not close cleanly: ${redact(firstLine(err))}`);
@@ -376,7 +422,7 @@ export async function runFlow(pw: PlaywrightModule, flow: RenderedFlow, opts: Fl
     return out;
   } finally {
     onAbort.dispose();
-    await browser.close();
+    await browser.close().catch(() => {});
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
 }

@@ -980,7 +980,7 @@ Use `expect` when a different status is the point, such as proving a 404 page:
 
 | Step | Effect |
 |---|---|
-| `goto: <url>` | Navigate. A status of 400 or above fails unless `target.web.expect.status` allows it. `javascript:` addresses are refused |
+| `goto: <url>` | Navigate. `javascript:` addresses are refused |
 | `click: <selector>` | Click, waiting for the element. A selector matching several elements fails rather than guess: `text=Sign in` also matches a "Sign in" heading |
 | `fill: { selector, value }` | Fill an input |
 | `press: <key>` | Press a key on the focused element |
@@ -990,13 +990,15 @@ Use `expect` when a different status is the point, such as proving a 404 page:
 
 | Check | Positive? | Holds when |
 |---|---|---|
-| `text: <string>` | Yes | The text is visible on the page before the step times out; text hidden in the DOM does not count |
+| `text: <string>` | Yes | The text is visible on the page before the step times out; text hidden in the DOM does not count. It is a case-sensitive substring, so `Saved` holds on "Not Saved" too: choose text that only the good outcome shows, or use `visible` |
 | `visible: <selector>` | Yes | An element is visible |
 | `url: <glob>` | Yes | The page URL matches. A query string is part of the URL |
 | `hidden: <selector>` | No | No matching element is visible |
 | `with.expect.noConsoleErrors: true` | No | No `console.error` or uncaught page error during the flow, including the "Failed to load resource" the browser logs for any response of 400 or above |
 
 Negative checks can't produce `passed` alone, because they also hold on a blank page.
+
+Any page the flow reaches, by `goto`, a click or a redirect, fails the flow with a status of 400 or above, unless `target.web.expect.status` lists that status. For the first page, as in the other modes, `expect.status` is the full list of what counts as success. Requests for images, scripts and other resources don't count, though the browser logs their errors, which `noConsoleErrors` sees.
 
 **The harness chooses the evidence.** A flow is always recorded from the first navigation and always ends with a screenshot, on failure as well, where it shows the point of failure and no later steps run. It pauses for just under a second after each step that changes the page, so the recording can be followed; this counts toward the flow's time. If the recording or the final screenshot is lost, the status stands and a warning issue is raised.
 
@@ -1029,7 +1031,7 @@ A gate that lists a failed capture in `with.artifacts` adds a "Capture problems"
 
 ### What transcripts mask
 
-`http` transcripts, and the `request` / `response` in the result, mask sensitive headers, sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. This is best effort: a secret under an innocent name in a response body stays visible. `steps` results mask the same way: a `fill` value holding a secret is recorded as `[REDACTED]` whatever its length, and steps, assertions, console messages and Playwright's own errors all pass through the same masking, though a secret shorter than 6 characters is only masked in `fill`. Screenshots and videos are not masked.
+`http` transcripts, and the `request` / `response` in the result, mask sensitive headers, sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. This is best effort: a secret under an innocent name in a response body stays visible. `steps` results mask the same way: a `fill` value holding a secret is recorded as `[REDACTED]` whatever its length, and steps, assertions, console messages and Playwright's own errors all pass through the same masking, including percent-encoded forms of a secret, though a secret shorter than 6 characters is only masked in `fill`. A `label` or `objective` is masked in every mode, including in the file names a label produces. Screenshots and videos are not masked.
 
 ### Result shape
 

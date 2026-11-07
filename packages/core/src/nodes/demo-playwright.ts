@@ -35,7 +35,9 @@ export type PlaywrightLocator = {
 export type PlaywrightPage = {
   goto: (url: string, opts?: Record<string, unknown>) => Promise<PlaywrightResponse | null>;
   locator: (selector: string) => PlaywrightLocator;
-  getByText: (text: string) => PlaywrightLocator;
+  getByText: (text: string | RegExp) => PlaywrightLocator;
+  isClosed: () => boolean;
+  mainFrame: () => unknown;
   keyboard: { press: (key: string) => Promise<void> };
   url: () => string;
   waitForURL: (url: string, opts?: Record<string, unknown>) => Promise<void>;
@@ -56,6 +58,7 @@ export type PlaywrightContext = {
 export type PlaywrightBrowser = {
   newContext: (opts?: Record<string, unknown>) => Promise<PlaywrightContext>;
   close: () => Promise<void>;
+  isConnected: () => boolean;
 };
 
 export type PlaywrightModule = {

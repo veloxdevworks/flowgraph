@@ -134,10 +134,6 @@ function assertNotEmpty(path: string, what: string): number {
 }
 
 /**
- * True when simctl is usable. `xcrun` alone proves nothing: macOS ships a stub of it,
- * and simctl comes with Xcode, not the command-line tools.
- */
-/**
  * How much video an MP4 file holds, in milliseconds, or undefined when the file doesn't say.
  * Read from each track's `mdhd`, because `mvhd` holds how long the recorder ran: a real `simctl`
  * file with one 67ms frame has 4.75s there. Read here because no video tool can be assumed.
@@ -181,16 +177,24 @@ export function mp4DurationMs(file: Buffer): number | undefined {
   return longest;
 }
 
+const MAX_CLIP_CHECK_BYTES = 256 * 1024 * 1024;
+
 /**
  * `simctl` writes a frame only when the screen changes, so a still screen gives a clip of a frame
  * or two whatever was asked for. Checked on a real simulator: 5s asked, 1 frame and 67ms kept.
  */
 function shortClipWarning(path: string, wantedMs: number): string | undefined {
+  // A file this big is not a clip of almost nothing, and is too big to read whole.
+  if (statSync(path).size > MAX_CLIP_CHECK_BYTES) return undefined;
   const actual = mp4DurationMs(readFileSync(path));
   if (actual === undefined || actual >= wantedMs / 2) return undefined;
   return `the recording is ${(actual / 1000).toFixed(1)}s long, not the ${wantedMs / 1000}s asked for, because the screen barely changed, so it shows little more than a still image`;
 }
 
+/**
+ * True when simctl is usable. `xcrun` alone proves nothing: macOS ships a stub of it,
+ * and simctl comes with Xcode, not the command-line tools.
+ */
 export async function iosToolchainReady(): Promise<boolean> {
   if (!(await checkBinOnPath("xcrun"))) return false;
   try {
