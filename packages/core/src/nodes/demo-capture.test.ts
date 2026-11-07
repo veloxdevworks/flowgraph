@@ -156,6 +156,7 @@ function fakePlaywrightWorkspace(
     videoError?: string;
     gotoError?: string;
     emptyScreenshot?: boolean;
+    emptyVideo?: boolean;
     executablePath?: string;
     /** Expose the API only on `default`, as a CommonJS entry can. */
     defaultOnly?: boolean;
@@ -176,7 +177,7 @@ function fakePlaywrightWorkspace(
         newContext: async (contextOpts = {}) => {
           const raw = contextOpts.recordVideo ? join(contextOpts.recordVideo.dir, "random-playwright-name.webm") : null;
           return {
-            close: async () => { if (raw) writeFileSync(raw, "webm"); },
+            close: async () => { if (raw) writeFileSync(raw, ${opts.emptyVideo ? '""' : '"webm"'}); },
             newPage: async () => {
               ${opts.videoError ? `if (raw) throw new Error(${JSON.stringify(opts.videoError)});` : ""}
               return {
@@ -841,6 +842,32 @@ describe("result status, fields and artifacts", () => {
     await capture(workspace, { video: { url: "http://app/", duration: "1ms" } });
 
     expect(fs.readdirSync(path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE))).toEqual([]);
+  });
+
+  it("leaves nothing in the artifact folder when the browser cannot start", async () => {
+    const workspace = fakePlaywrightWorkspace({
+      launchError: "browserType.launch: Executable doesn't exist at /browsers/chrome-headless-shell",
+    });
+    const shot = await capture(workspace, { screenshot: { url: "http://app/", video: true } });
+    const video = await capture(workspace, { video: { url: "http://app/", duration: "1ms" } });
+
+    expect(shot.out.status).toBe("not_captured");
+    expect(video.out.status).toBe("not_captured");
+    expect(fs.readdirSync(path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE))).toEqual([]);
+  });
+
+  it("keeps no empty recording", async () => {
+    const workspace = fakePlaywrightWorkspace({ emptyVideo: true });
+    const dir = path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE);
+
+    const video = await capture(workspace, { video: { url: "http://app/", duration: "1ms" } });
+    expect(video.out).toMatchObject({ status: "not_captured", path: null, artifacts: [] });
+    expect(fs.readdirSync(dir)).toEqual([]);
+
+    const shot = await capture(workspace, { screenshot: { url: "http://app/", video: true } });
+    expect(shot.out).toMatchObject({ status: "inconclusive", extra: null });
+    expect(shot.out.artifacts).toHaveLength(1);
+    expect(fs.readdirSync(dir).map((f) => path.extname(f))).toEqual([".png"]);
   });
 
   it("records status and artifacts in the manifest, which stays where Desktop reads it", async () => {

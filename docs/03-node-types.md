@@ -938,7 +938,7 @@ Every result has a `status` that says what it shows ([ADR-0019](./adr/0019-demo-
 | `status` | Meaning | `ok` | Files |
 |---|---|---|---|
 | `inconclusive` | The capture worked and recorded no failure. Nothing checked an objective, so it shows that something was captured, not that something worked. Every successful capture in the five modes above is this | `true` | yes |
-| `failed` | The capture worked and recorded a failure: `http`, `screenshot` or `video` got an HTTP status of 400 or above | `false` | kept as evidence |
+| `failed` | The capture worked and recorded a failure: `http`, `screenshot` or `video` got an HTTP status outside `expect.status`, which by default means 400 or above | `false` | kept as evidence |
 | `not_captured` | Nothing was captured: Playwright or its browser missing, connection refused, DNS error, source file not found, app did not launch, empty output, … | `false` | none |
 | `passed` | Reserved for results that checked an objective. No mode can produce it yet | `true` | yes |
 

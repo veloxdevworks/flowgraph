@@ -342,14 +342,15 @@ async function captureScreenshot(
   const slug = slugify(label ?? "screenshot");
   const shotName = `${timestampSlug()}-${slug}.png`;
   const shotPath = join(dir, shotName);
-  // Playwright names recordings itself: let it write to a scratch folder, so a capture
-  // that fails after the page opened leaves no stray recording among the artifacts.
-  const scratch = config.video ? mkdtempSync(join(dir, ".recording-")) : undefined;
 
   const browser = await pw.chromium.launch(CAPTURE_BROWSER);
   let extra: DemoExtraArtifact | undefined;
   let pageStatus: number | undefined;
+  let scratch: string | undefined;
   try {
+    // Playwright names recordings itself: let it write to a scratch folder, so a capture
+    // that fails after the page opened leaves no stray recording among the artifacts.
+    scratch = config.video ? mkdtempSync(join(dir, ".recording-")) : undefined;
     const contextOpts: Record<string, unknown> = {
       viewport,
       ...(scratch ? { recordVideo: { dir: scratch, size: viewport } } : {}),
@@ -410,10 +411,13 @@ async function videoHandleToExtra(
     const raw = await handle.path();
     if (!raw || !existsSync(raw)) return undefined;
     const dest = join(destDir, `${timestampSlug()}-${slug}.webm`);
-    // Playwright records under a random name in this same directory: move it, don't copy.
+    // Playwright records under a random name in the scratch folder: move it out, don't copy.
     renameSync(raw, dest);
     const sizeBytes = statSync(dest).size;
-    if (sizeBytes === 0) return undefined;
+    if (sizeBytes === 0) {
+      discard(dest);
+      return undefined;
+    }
     return { path: dest, mimeType: "video/webm", kind: "video", sizeBytes };
   } catch {
     return undefined;
@@ -435,12 +439,13 @@ async function captureVideo(
   const pw = await importPlaywright(ctx.workspace);
   const dir = ensureArtifactDir(ctx, nodeId);
   const slug = slugify(label ?? "video");
-  const scratch = mkdtempSync(join(dir, ".recording-"));
 
   const browser = await pw.chromium.launch(CAPTURE_BROWSER);
   let videoPath: string | undefined;
   let pageStatus: number | undefined;
+  let scratch: string | undefined;
   try {
+    scratch = mkdtempSync(join(dir, ".recording-"));
     const context = await browser.newContext({
       viewport,
       recordVideo: { dir: scratch, size: viewport },
@@ -472,7 +477,7 @@ async function captureVideo(
     }
   } finally {
     await browser.close();
-    rmSync(scratch, { recursive: true, force: true });
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
 
   if (!videoPath || !existsSync(videoPath)) {
