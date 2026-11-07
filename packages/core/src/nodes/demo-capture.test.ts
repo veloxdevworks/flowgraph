@@ -375,6 +375,8 @@ case "$*" in
   *"simctl launch"*) [ "$FAKE_LAUNCH_EXIT" != "" ] && { echo "app not installed" >&2; exit "$FAKE_LAUNCH_EXIT"; }; touch "$FAKE_LOG.opened"; exit 0 ;;
   *"simctl openurl"*) [ "$FAKE_OPENURL_EXIT" != "" ] && { echo "no handler" >&2; exit "$FAKE_OPENURL_EXIT"; }; touch "$FAKE_LOG.opened"; exit 0 ;;
   *screenshot*)
+    # The simulator service writes the picture itself: it can land after the client was killed.
+    [ "$FAKE_SHOT_LATE" = 1 ] && { ( sleep 1; printf png > "$dest" ) >/dev/null 2>&1 & exec sleep 30; }
     case "$FAKE_SCREEN" in
       frozen) printf 'home' > "$dest" ;;
       spinner) date +%s%N > "$dest" ;;
@@ -386,6 +388,7 @@ case "$*" in
     case "$FAKE_RECORD" in
       fail) printf 'partial' > "$dest"; echo "record broke" >&2; exit 1 ;;
       empty) trap ': > "$dest"; kill $pid; exit 0' INT ;;
+      slowstop) trap 'sleep 1.5; printf mp4 > "$dest"; kill $pid; exit 0' INT ;;
       *) trap 'printf mp4 > "$dest"; kill $pid; exit 0' INT ;;
     esac
     sleep 5 >/dev/null 2>&1 &
@@ -953,18 +956,22 @@ describe("cancellation", () => {
   async function cancelled(
     workspace: string,
     withConfig: Record<string, unknown>,
+    /** `afterMs` 0: before it starts. Negative: the moment `run` has been called, which for a
+     *  capture that is synchronous up to its last await is after the capture and before the node returns. */
     opts: { afterMs: number; state?: Record<string, unknown> },
   ) {
     const controller = new AbortController();
     const issues: Array<Record<string, unknown>> = [];
     if (opts.afterMs === 0) controller.abort();
-    else setTimeout(() => controller.abort(), opts.afterMs);
+    else if (opts.afterMs > 0) setTimeout(() => controller.abort(), opts.afterMs);
     const started = Date.now();
-    const error: unknown = await capture(workspace, withConfig, {
+    const running = capture(workspace, withConfig, {
       signal: controller.signal,
       issues,
       ...(opts.state ? { state: opts.state } : {}),
-    }).then(
+    });
+    if (opts.afterMs < 0) controller.abort();
+    const error: unknown = await running.then(
       () => {
         throw new Error("the capture finished instead of being cancelled");
       },
@@ -1057,6 +1064,12 @@ describe("cancellation", () => {
       expect(fs.existsSync(artifactFolder(workspace))).toBe(false);
     });
 
+    it("keeps nothing when the cancel arrives after the capture finished, before the node returns", async () => {
+      const workspace = mkdir();
+      fs.writeFileSync(path.join(workspace, "report.txt"), "report");
+      await cancelled(workspace, { file: { path: "./report.txt" } }, { afterMs: -1 });
+    });
+
     it("ends a compiled run as aborted, with no issue raised", async () => {
       const workspace = mkdir();
       const events: FlowgraphEvent[] = [];
@@ -1144,6 +1157,25 @@ describe("cancellation", () => {
       expect(ms).toBeLessThan(5_000);
       expect(pids()).toHaveLength(1);
       expect(alive(pids()[0]!)).toBe(false); // the recorder is gone, not left running
+    }, 15_000);
+
+    it("keeps no recording that was still being finalized when the run was cancelled", async () => {
+      stubTools({ FAKE_RECORD: "slowstop" });
+      const workspace = mkdir();
+      // The recorder is told to stop at 200ms and needs 1.5s to write the file: the cancel lands in between.
+      await cancelled(workspace, ios({ capture: "video", duration: "200ms" }), { afterMs: 800 });
+
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      expect(fs.readdirSync(artifactFolder(workspace))).toEqual([]); // not even when the recorder writes late
+    }, 15_000);
+
+    it("keeps no screenshot that the simulator writes after simctl was killed", async () => {
+      stubTools({ FAKE_SHOT_LATE: "1" });
+      const workspace = mkdir();
+      await cancelled(workspace, ios(), { afterMs: 300 });
+
+      await new Promise((resolve) => setTimeout(resolve, 2_000)); // the late write lands in this time
+      expect(fs.readdirSync(artifactFolder(workspace))).toEqual([]);
     }, 15_000);
 
     it("stops waiting for an Android app to settle", async () => {

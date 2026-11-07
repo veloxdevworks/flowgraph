@@ -5,8 +5,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parseDuration } from "../runtime/duration.js";
 import { checkBinOnPath } from "../runtime/which.js";
@@ -194,20 +193,33 @@ async function captureIos(
   mkdirSync(opts.artifactDir, { recursive: true });
   const target = device || "booted";
   const opening = Boolean(config.app || config.deepLink);
-  // Frames used to judge the settle live in a folder of their own, outside the artifacts: the
-  // simulator finishes writing a screenshot even after the `simctl` that asked for it is killed,
-  // so a cancel removes the whole folder, which leaves a late write nowhere to land.
-  const frameDir = opening ? mkdtempSync(join(tmpdir(), "flowgraph-settle-")) : undefined;
-  const frameFile = frameDir ? join(frameDir, "frame.png") : join(opts.artifactDir, `${opts.fileSlug}.settle.png`);
-  const dropFrames = (): void => {
-    if (frameDir) rmSync(frameDir, { recursive: true, force: true });
-  };
-  signal?.addEventListener("abort", dropFrames, { once: true });
+  return withScratchFolder(opts.artifactDir, signal, (scratch) =>
+    captureIosOnDevice(config, { ...opts, target, opening, scratch }),
+  );
+}
+
+/**
+ * Everything a capture writes before it is known to be good lives in a folder of its own inside
+ * the artifacts folder (not the system temp folder: a workspace on another drive would make the
+ * move into place fail), and only a finished file is moved out of it. The simulator finishes
+ * writing a screenshot or recording even after the `simctl` that asked for it is killed, so a
+ * cancel removes the whole folder, synchronously at the abort, which leaves a late write nowhere
+ * to land. It is removed on every other way out too, so it cannot be left behind.
+ */
+async function withScratchFolder<T>(
+  artifactDir: string,
+  signal: AbortSignal | undefined,
+  use: (scratch: string) => Promise<T>,
+): Promise<T> {
+  signal?.throwIfAborted();
+  const scratch = mkdtempSync(join(artifactDir, ".recording-"));
+  const drop = (): void => rmSync(scratch, { recursive: true, force: true });
+  signal?.addEventListener("abort", drop, { once: true });
   try {
-    return await captureIosOnDevice(config, { ...opts, target, opening, frameFile });
+    return await use(scratch);
   } finally {
-    signal?.removeEventListener("abort", dropFrames);
-    dropFrames();
+    signal?.removeEventListener("abort", drop);
+    drop();
   }
 }
 
@@ -221,10 +233,11 @@ async function captureIosOnDevice(
     signal?: AbortSignal | undefined;
     target: string;
     opening: boolean;
-    frameFile: string;
+    scratch: string;
   },
 ): Promise<SimulatorCapture> {
-  const { signal, target, opening, frameFile } = opts;
+  const { signal, target, opening, scratch } = opts;
+  const frameFile = join(scratch, "frame.png");
   const before = opening ? await grabIosFrame(target, frameFile, signal) : undefined;
   const open = async (): Promise<SimulatorCapture["warning"]> => {
     if (config.app) {
@@ -240,47 +253,33 @@ async function captureIosOnDevice(
 
   if (opts.capture === "screenshot") {
     const warning = await open();
+    const shot = join(scratch, "screenshot.png");
+    await runStep("simctl screenshot", "xcrun", ["simctl", "io", target, "screenshot", shot], { signal });
+    const sizeBytes = assertNotEmpty(shot, "simctl screenshot");
     const dest = join(opts.artifactDir, `${opts.fileSlug}.png`);
-    try {
-      await runStep("simctl screenshot", "xcrun", ["simctl", "io", target, "screenshot", dest], { signal });
-    } catch (err) {
-      rmSync(dest, { force: true });
-      throw err;
-    }
-    return {
-      path: dest,
-      mimeType: "image/png",
-      sizeBytes: assertNotEmpty(dest, "simctl screenshot"),
-      ...(warning ? { warning } : {}),
-    };
+    renameSync(shot, dest);
+    return { path: dest, mimeType: "image/png", sizeBytes, ...(warning ? { warning } : {}) };
   }
 
   // simctl writes a frame only when the screen changes, so recording must already be
   // running when the app opens: started after it settled, a 3s clip comes out as one frame.
-  const dest = join(opts.artifactDir, `${opts.fileSlug}.mp4`);
-  const recorder = startRecording("xcrun", ["simctl", "io", target, "recordVideo", "--codec=h264", dest], signal);
-  // At the abort itself, before a host that exits at once can leave the recording behind.
-  const dropFile = (): void => rmSync(dest, { force: true });
-  signal?.addEventListener("abort", dropFile, { once: true });
+  const video = join(scratch, "recording.mp4");
+  const recorder = startRecording("xcrun", ["simctl", "io", target, "recordVideo", "--codec=h264", video], signal);
   let warning: SimulatorCapture["warning"];
   try {
     if (opening) await recorder.ready;
     warning = await open();
     await recorder.runFor(opts.durationMs);
+    await recorder.stop();
   } catch (err) {
+    // Wait for the recorder to exit before the scratch folder goes, so it has nowhere to write late.
     await recorder.stop().catch(() => {});
-    rmSync(dest, { force: true });
     throw err;
-  } finally {
-    signal?.removeEventListener("abort", dropFile);
   }
-  await recorder.stop();
-  return {
-    path: dest,
-    mimeType: "video/mp4",
-    sizeBytes: assertNotEmpty(dest, "simctl recordVideo"),
-    ...(warning ? { warning } : {}),
-  };
+  const sizeBytes = assertNotEmpty(video, "simctl recordVideo");
+  const dest = join(opts.artifactDir, `${opts.fileSlug}.mp4`);
+  renameSync(video, dest);
+  return { path: dest, mimeType: "video/mp4", sizeBytes, ...(warning ? { warning } : {}) };
 }
 
 const DEFAULT_SETTLE = "30s";

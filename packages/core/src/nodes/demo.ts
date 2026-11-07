@@ -740,6 +740,7 @@ export const demoNode = defineNode<Config>({
 
         let result: DemoResult;
         let cause: unknown;
+        let simulatorWarning: string | undefined;
         try {
           if (kind === "http" && config.http) {
             result = await toResult(
@@ -760,24 +761,37 @@ export const demoNode = defineNode<Config>({
               fileSlug: slug,
               ...(ctx.signal ? { signal: ctx.signal } : {}),
             });
+            simulatorWarning = sim.warning;
+            // The capture returned, but the run may have been cancelled in the meantime.
+            if (ctx.signal?.aborted) discard(sim.path);
             result = await toResult(ctx, kind, label, {
               path: sim.path,
               mimeType: sim.mimeType,
               sizeBytes: sim.sizeBytes,
               capturedAt: new Date().toISOString(),
             });
-            if (sim.warning) {
-              ctx.issue({
-                code: ISSUE_CODE.CAPTURE_FAILED,
-                severity: "warning",
-                message: `demo simulator capture may be misleading: ${sim.warning}`,
-                impact: "Check the artifact by eye. Raise `simulator.settle` if the app needs longer to open.",
-                detail: { kind, reason: sim.warning },
-              });
-              ctx.logger.warn("demo: simulator capture may be misleading", { reason: sim.warning });
-            }
           } else {
             result = await toResult(ctx, kind, label, captureFile(config.file!, state, scope, ctx, nodeId, label));
+          }
+          // A cancel can arrive after the capture finished and before the node returns (while the
+          // last process is stopping, or the file is hashed). The run is aborted, so what the
+          // capture kept goes too, and nothing below reports it. No `await` separates this check
+          // from the manifest entry, so a cancel cannot slip in between.
+          if (ctx.signal?.aborted) {
+            for (const file of [result.path, ...(result.extra ?? []).map((e) => e.path)]) {
+              if (file) discard(file);
+            }
+            throw ctx.signal.reason ?? new Error("Aborted");
+          }
+          if (simulatorWarning) {
+            ctx.issue({
+              code: ISSUE_CODE.CAPTURE_FAILED,
+              severity: "warning",
+              message: `demo simulator capture may be misleading: ${simulatorWarning}`,
+              impact: "Check the artifact by eye. Raise `simulator.settle` if the app needs longer to open.",
+              detail: { kind, reason: simulatorWarning },
+            });
+            ctx.logger.warn("demo: simulator capture may be misleading", { reason: simulatorWarning });
           }
         } catch (err) {
           // Cancelling is not a failed capture: no result, no issue, no manifest entry, and
