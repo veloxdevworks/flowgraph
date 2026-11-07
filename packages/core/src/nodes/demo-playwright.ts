@@ -28,17 +28,105 @@ export type PlaywrightPage = {
   video: () => { path: () => Promise<string> } | null;
 };
 
+export type PlaywrightContext = {
+  newPage: () => Promise<PlaywrightPage>;
+  close: () => Promise<void>;
+};
+
+export type PlaywrightBrowser = {
+  newContext: (opts?: Record<string, unknown>) => Promise<PlaywrightContext>;
+  close: () => Promise<void>;
+};
+
 export type PlaywrightModule = {
   chromium: {
-    launch: (opts?: Record<string, unknown>) => Promise<{
-      newContext: (opts?: Record<string, unknown>) => Promise<{
-        newPage: () => Promise<PlaywrightPage>;
-        close: () => Promise<void>;
-      }>;
-      close: () => Promise<void>;
-    }>;
+    launch: (opts?: Record<string, unknown>) => Promise<PlaywrightBrowser>;
   };
 };
+
+/** How long a cancelled run waits for a launch it cannot interrupt, before giving up on it. */
+const LAUNCH_ABORT_GRACE_MS = 5_000;
+
+/**
+ * Launch the capture browser, honoring `signal`. Playwright cannot interrupt a launch,
+ * so an abort during one stops waiting for it and closes whatever browser it produces
+ * (giving it a moment first, so a cancelled run does not return with a browser starting).
+ */
+export async function launchCaptureBrowser(
+  pw: PlaywrightModule,
+  signal?: AbortSignal,
+): Promise<PlaywrightBrowser> {
+  signal?.throwIfAborted();
+  const launching = pw.chromium.launch(CAPTURE_BROWSER);
+  if (!signal) return launching;
+  let onAbort: () => void = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([launching, aborted]);
+  } catch (err) {
+    if (signal.aborted) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        launching.then((browser) => browser.close()).catch(() => {}),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, LAUNCH_ABORT_GRACE_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
+    throw err;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
+ * Close what a capture opened as soon as `signal` aborts, newest first: closing the
+ * context rejects every in-flight Playwright call (`goto`, `waitForSelector`,
+ * `waitForTimeout`), so a capture stops now instead of at the end of its wait.
+ *
+ * `now` registers work that must not wait: the run is reported as aborted the moment the
+ * signal fires, and a host such as the CLI may exit right after, before any `await` here
+ * finishes. Those callbacks run synchronously, inside the abort itself.
+ */
+export function closeOnAbort(signal: AbortSignal | undefined): {
+  add: (close: () => Promise<void>) => void;
+  now: (cleanup: () => void) => void;
+  dispose: () => void;
+} {
+  const closers: Array<() => Promise<void>> = [];
+  const immediate: Array<() => void> = [];
+  let closing: Promise<void> | undefined;
+  const onAbort = (): void => {
+    for (const cleanup of immediate) {
+      try {
+        cleanup();
+      } catch {
+        /* best effort: the awaited cleanup runs too */
+      }
+    }
+    closing ??= (async () => {
+      for (const close of [...closers].reverse()) await close().catch(() => {});
+    })();
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  return {
+    add(close) {
+      closers.push(close);
+      if (signal?.aborted) onAbort();
+    },
+    now(cleanup) {
+      if (signal?.aborted) cleanup();
+      else immediate.push(cleanup);
+    },
+    dispose() {
+      signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

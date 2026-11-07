@@ -14,6 +14,8 @@ import * as path from "node:path";
 import { DemoWithSchema, type GraphSpec } from "@flowgraph/spec";
 import type { NodeRunContext } from "../context.js";
 import { preflightGraphRequires } from "../preflight-graph.js";
+import { compileGraph } from "../compiler.js";
+import type { FlowgraphEvent } from "../events.js";
 import { demoNode, type DemoResult } from "./demo.js";
 import { readDemoManifest } from "./demo-manifest.js";
 
@@ -27,9 +29,15 @@ function mkdir(prefix = "fg-demo-capture-"): string {
 async function capture(
   workspace: string,
   withConfig: Record<string, unknown>,
-  opts: { state?: Record<string, unknown>; input?: Record<string, unknown> } = {},
+  opts: {
+    state?: Record<string, unknown>;
+    input?: Record<string, unknown>;
+    signal?: AbortSignal;
+    /** Filled as the node raises issues, so a run that throws can still be inspected. */
+    issues?: Array<Record<string, unknown>>;
+  } = {},
 ) {
-  const issues: Array<Record<string, unknown>> = [];
+  const issues = opts.issues ?? [];
   const config = DemoWithSchema.parse(withConfig);
   const compiled = demoNode.build({ graphName: "g" }, { id: NODE }, config as never);
   const ctx = {
@@ -43,6 +51,7 @@ async function capture(
     emit() {},
     issue: (issue: Record<string, unknown>) => issues.push(issue),
     _input: opts.input ?? {},
+    ...(opts.signal ? { signal: opts.signal } : {}),
   } as unknown as NodeRunContext;
   const res = await compiled.run(opts.state ?? {}, ctx);
   const { update } = res as unknown as { update: { outputs: Record<string, DemoResult> } };
@@ -160,6 +169,10 @@ function fakePlaywrightWorkspace(
     executablePath?: string;
     /** Expose the API only on `default`, as a CommonJS entry can. */
     defaultOnly?: boolean;
+    /** Make one call wait until the context or browser is closed, which then rejects it, as Playwright does. */
+    hang?: "goto" | "waitForSelector" | "waitForTimeout" | "screenshot";
+    /** How long the browser takes to start. */
+    launchMs?: number;
   } = {},
 ): string {
   const workspace = mkdir();
@@ -171,25 +184,40 @@ function fakePlaywrightWorkspace(
   const api = `{
     executablePath: ${opts.executablePath ? `() => ${JSON.stringify(opts.executablePath)}` : "undefined"},
     launch: async () => {
+      log("launch");
+      ${opts.launchMs ? `await new Promise((resolve) => setTimeout(resolve, ${opts.launchMs}));` : ""}
       ${opts.launchError ? `throw new Error(${JSON.stringify(opts.launchError)});` : ""}
+      let shut;
+      const closed = new Promise((_resolve, reject) => {
+        shut = () => reject(new Error("Target page, context or browser has been closed"));
+      });
+      closed.catch(() => {});
       return {
-        close: async () => {},
+        close: async () => { log("browser.close"); shut(); },
         newContext: async (contextOpts = {}) => {
           const raw = contextOpts.recordVideo ? join(contextOpts.recordVideo.dir, "random-playwright-name.webm") : null;
           return {
-            close: async () => { if (raw) writeFileSync(raw, ${opts.emptyVideo ? '""' : '"webm"'}); },
+            close: async () => {
+              log("context.close");
+              shut();
+              if (raw) writeFileSync(raw, ${opts.emptyVideo ? '""' : '"webm"'});
+            },
             newPage: async () => {
               ${opts.videoError ? `if (raw) throw new Error(${JSON.stringify(opts.videoError)});` : ""}
               return {
               goto: async () => {
+                ${opts.hang === "goto" ? "await closed;" : ""}
                 ${opts.gotoError ? `throw new Error(${JSON.stringify(opts.gotoError)});` : ""}
                 return ${status === null ? "null" : `{ status: () => ${status} }`};
               },
-              waitForSelector: async () => {},
-              waitForTimeout: async () => {},
+              waitForSelector: async () => { ${opts.hang === "waitForSelector" ? "await closed;" : ""} },
+              waitForTimeout: async () => { ${opts.hang === "waitForTimeout" ? "await closed;" : ""} },
               evaluate: async () => {},
               mouse: { wheel: async () => {} },
-              screenshot: async ({ path }) => writeFileSync(path, ${opts.emptyScreenshot ? '""' : '"png"'}),
+              screenshot: async ({ path }) => {
+                ${opts.hang === "screenshot" ? "await closed;" : ""}
+                writeFileSync(path, ${opts.emptyScreenshot ? '""' : '"png"'});
+              },
               video: () => (raw ? { path: async () => raw } : null),
               };
             },
@@ -200,8 +228,11 @@ function fakePlaywrightWorkspace(
   }`;
   fs.writeFileSync(
     path.join(dir, "index.mjs"),
-    `import { writeFileSync } from "node:fs";
+    `import { appendFileSync, writeFileSync } from "node:fs";
      import { join } from "node:path";
+     import { fileURLToPath } from "node:url";
+     // What the browser was asked to do, for tests to read: <workspace>/playwright.log
+     const log = (line) => appendFileSync(fileURLToPath(new URL("../../playwright.log", import.meta.url)), line + "\\n");
      const chromium = ${api};
      ${opts.defaultOnly ? "export default { chromium };" : "export { chromium };"}`,
   );
@@ -340,7 +371,7 @@ echo "$*" >> "$FAKE_LOG"
 dest="\${@: -1}"
 case "$*" in
   *"--find simctl"*) [ "$FAKE_NO_SIMCTL" = 1 ] && exit 1; exit 0 ;;
-  *"simctl bootstatus"*) [ "$FAKE_BOOT_EXIT" != "" ] && { echo "bad device" >&2; exit "$FAKE_BOOT_EXIT"; }; exit 0 ;;
+  *"simctl bootstatus"*) [ "$FAKE_BOOT_HANG" = 1 ] && { echo $$ >> "$FAKE_LOG.pids"; exec sleep 30; }; [ "$FAKE_BOOT_EXIT" != "" ] && { echo "bad device" >&2; exit "$FAKE_BOOT_EXIT"; }; exit 0 ;;
   *"simctl launch"*) [ "$FAKE_LAUNCH_EXIT" != "" ] && { echo "app not installed" >&2; exit "$FAKE_LAUNCH_EXIT"; }; touch "$FAKE_LOG.opened"; exit 0 ;;
   *"simctl openurl"*) [ "$FAKE_OPENURL_EXIT" != "" ] && { echo "no handler" >&2; exit "$FAKE_OPENURL_EXIT"; }; touch "$FAKE_LOG.opened"; exit 0 ;;
   *screenshot*)
@@ -351,6 +382,7 @@ case "$*" in
     esac
     exit 0 ;;
   *recordVideo*)
+    echo $$ >> "$FAKE_LOG.pids"
     case "$FAKE_RECORD" in
       fail) printf 'partial' > "$dest"; echo "record broke" >&2; exit 1 ;;
       empty) trap ': > "$dest"; kill $pid; exit 0' INT ;;
@@ -366,6 +398,21 @@ esac
 const FAKE_ADB = `#!/bin/bash
 echo "$*" >> "$FAKE_LOG"
 dest="\${@: -1}"
+# A recorder on the device outlives the adb client that started it: FAKE_DEVICE_RECORDER=1
+# keeps that state in files, which only a kill from the device side clears.
+device_recording="$FAKE_LOG.device-recording"
+case "$*" in
+  *"shell pidof screenrecord"*) [ -e "$device_recording" ] && echo 4242; exit 0 ;;
+  *"shell kill "*) [ -e "$device_recording" ] && rm -f "$device_recording"; exit 0 ;;
+  *"shell rm -f "*) rm -f "$FAKE_LOG.device-file"; exit 0 ;;
+  *"shell screenrecord"*)
+    if [ "$FAKE_DEVICE_RECORDER" = 1 ]; then
+      echo $$ >> "$FAKE_LOG.pids"
+      touch "$device_recording" "$FAKE_LOG.device-file"
+      exec sleep 30
+    fi
+    exit 0 ;;
+esac
 case "$*" in
   *"exec-out screencap"*)
     # A raw frame: a 16-byte header, then 10,000 4-byte pixels.
@@ -379,7 +426,7 @@ case "$*" in
     exit 0 ;;
   *monkey*) [ "$FAKE_MONKEY" = none ] && { echo "args: [-p, x]"; echo "** No activities found to run, monkey aborted."; exit 252; }; touch "$FAKE_LOG.opened"; exit 0 ;;
   *"am start"*) [ "$FAKE_AM" = error ] && { echo "Starting: Intent { }"; echo "Error: Activity not started, unable to resolve Intent"; exit 0; }; touch "$FAKE_LOG.opened"; exit 0 ;;
-  *screencap*) [ "$FAKE_SCREENCAP_EXIT" != "" ] && { echo "no device" >&2; exit "$FAKE_SCREENCAP_EXIT"; }; exit 0 ;;
+  *screencap*) [ "$FAKE_SCREENCAP_HANG" = 1 ] && { echo $$ >> "$FAKE_LOG.pids"; exec sleep 30; }; [ "$FAKE_SCREENCAP_EXIT" != "" ] && { echo "no device" >&2; exit "$FAKE_SCREENCAP_EXIT"; }; exit 0 ;;
   *screenrecord*) exit 0 ;;
   *pull*) printf 'data' > "$dest"; exit 0 ;;
 esac
@@ -880,5 +927,255 @@ describe("result status, fields and artifacts", () => {
     expect(failed).toMatchObject({ ok: false, status: "failed", path: out.path, artifacts: out.artifacts });
     expect(none).toMatchObject({ ok: false, status: "not_captured" });
     expect(none).not.toHaveProperty("artifacts");
+  });
+});
+
+
+// Cancelling a run (ADR-0019 §10): every mode stops its capture and leaves nothing behind. A
+// cancel is the run being aborted, not a capture that failed, so it raises no issue and writes
+// no manifest entry, and `strict` has no failure to turn into an error.
+describe("cancellation", () => {
+  const artifactFolder = (workspace: string) => path.join(workspace, ".flowgraph", "artifacts", THREAD, NODE);
+  const playwrightLog = (workspace: string) => {
+    const file = path.join(workspace, "playwright.log");
+    return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n") : [];
+  };
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /** Run a capture and cancel it after `afterMs` (0: before it starts). It must not complete. */
+  async function cancelled(
+    workspace: string,
+    withConfig: Record<string, unknown>,
+    opts: { afterMs: number; state?: Record<string, unknown> },
+  ) {
+    const controller = new AbortController();
+    const issues: Array<Record<string, unknown>> = [];
+    if (opts.afterMs === 0) controller.abort();
+    else setTimeout(() => controller.abort(), opts.afterMs);
+    const started = Date.now();
+    const error: unknown = await capture(workspace, withConfig, {
+      signal: controller.signal,
+      issues,
+      ...(opts.state ? { state: opts.state } : {}),
+    }).then(
+      () => {
+        throw new Error("the capture finished instead of being cancelled");
+      },
+      (err: unknown) => err,
+    );
+    const ms = Date.now() - started;
+    // The abort reaches the run as it was raised, so the run reports itself as aborted.
+    expect(error).toBe(controller.signal.reason);
+    expect(issues).toEqual([]);
+    expect(readDemoManifest(workspace, THREAD)).toEqual([]);
+    const folder = artifactFolder(workspace);
+    expect(fs.existsSync(folder) ? fs.readdirSync(folder) : []).toEqual([]);
+    return { ms };
+  }
+
+  describe("browser modes", () => {
+    const cases: Array<[string, Record<string, unknown>, "goto" | "waitForSelector" | "waitForTimeout" | "screenshot"]> = [
+      ["a screenshot loading the page", { screenshot: { url: "http://app/" } }, "goto"],
+      ["a screenshot waiting on a selector", { screenshot: { url: "http://app/", waitFor: "#never", timeout: "1h" } }, "waitForSelector"],
+      ["a screenshot waiting out a duration", { screenshot: { url: "http://app/", waitFor: "1h" } }, "waitForTimeout"],
+      ["a screenshot taking the picture", { screenshot: { url: "http://app/" } }, "screenshot"],
+      ["a screenshot that also records", { screenshot: { url: "http://app/", video: true, waitFor: "1h" } }, "waitForTimeout"],
+      ["a video loading the page", { video: { url: "http://app/" } }, "goto"],
+      ["a video waiting on a selector", { video: { url: "http://app/", waitFor: "#never", timeout: "1h" } }, "waitForSelector"],
+      ["a video recording for its duration", { video: { url: "http://app/", duration: "1h" } }, "waitForTimeout"],
+    ];
+
+    it.each(cases)("stops %s: closes the context and the browser, and keeps nothing", async (_name, config, hang) => {
+      const workspace = fakePlaywrightWorkspace({ hang });
+      const { ms } = await cancelled(workspace, config, { afterMs: 150 });
+
+      expect(ms).toBeLessThan(3_000);
+      const log = playwrightLog(workspace);
+      expect(log).toContain("context.close");
+      expect(log).toContain("browser.close");
+      expect(fs.readdirSync(artifactFolder(workspace))).toEqual([]); // no .recording- folder either
+    }, 10_000);
+
+    it("is a cancellation under strict too, not a capture error", async () => {
+      const workspace = fakePlaywrightWorkspace({ hang: "waitForSelector" });
+      await cancelled(workspace, { strict: true, screenshot: { url: "http://app/", waitFor: "#never", timeout: "1h" } }, { afterMs: 100 });
+    }, 10_000);
+
+    it("does not launch a browser for a run cancelled before the capture starts", async () => {
+      for (const config of [{ screenshot: { url: "http://app/" } }, { video: { url: "http://app/" } }]) {
+        const workspace = fakePlaywrightWorkspace();
+        await cancelled(workspace, config, { afterMs: 0 });
+        expect(playwrightLog(workspace)).toEqual([]);
+        expect(fs.existsSync(artifactFolder(workspace))).toBe(false);
+      }
+    });
+
+    it("closes a browser that was still starting when the run was cancelled", async () => {
+      const workspace = fakePlaywrightWorkspace({ launchMs: 400 });
+      const { ms } = await cancelled(workspace, { video: { url: "http://app/" } }, { afterMs: 100 });
+
+      expect(ms).toBeLessThan(3_000);
+      expect(playwrightLog(workspace)).toEqual(["launch", "browser.close"]);
+    }, 10_000);
+  });
+
+  describe("http and file modes", () => {
+    let server: http.Server;
+    let base: string;
+    beforeAll(async () => {
+      server = http.createServer((_req, res) => {
+        setTimeout(() => res.end("late"), 20_000).unref();
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    });
+    afterAll(() => {
+      server.closeAllConnections();
+      server.close();
+    });
+
+    it("stops an http request in flight, even under strict and a timeout", async () => {
+      const { ms } = await cancelled(mkdir(), { strict: true, http: { url: `${base}/`, timeout: "100ms" } }, { afterMs: 20 });
+      expect(ms).toBeLessThan(2_000);
+      const slow = await cancelled(mkdir(), { http: { url: `${base}/`, timeout: "1h" } }, { afterMs: 100 });
+      expect(slow.ms).toBeLessThan(2_000);
+    });
+
+    it("does not send a request, or copy a file, for a run cancelled before the capture starts", async () => {
+      await cancelled(mkdir(), { http: { url: `${base}/` } }, { afterMs: 0 });
+
+      const workspace = mkdir();
+      fs.writeFileSync(path.join(workspace, "report.txt"), "report");
+      await cancelled(workspace, { file: { path: "./report.txt" } }, { afterMs: 0 });
+      expect(fs.existsSync(artifactFolder(workspace))).toBe(false);
+    });
+
+    it("ends a compiled run as aborted, with no issue raised", async () => {
+      const workspace = mkdir();
+      const events: FlowgraphEvent[] = [];
+      const compiled = await compileGraph(
+        {
+          metadata: { name: "cancel-demo" },
+          state: { channels: {} },
+          nodes: [{ id: NODE, type: "demo", with: { strict: true, http: { url: `${base}/`, timeout: "1h" } } }],
+          edges: [
+            { from: "START", to: NODE },
+            { from: NODE, to: "END" },
+          ],
+          runtime: { workspace, checkpoint: { enabled: false } },
+        } as unknown as GraphSpec,
+        { sinks: [(ev) => void events.push(ev)] },
+      );
+      const controller = new AbortController();
+      compiled.events.subscribe((ev) => {
+        if (ev.type === "node.start") setTimeout(() => controller.abort(), 100);
+      });
+
+      const started = Date.now();
+      const result = await compiled.run({ signal: controller.signal });
+
+      expect(result.status).toBe("aborted");
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(events.some((e) => e.type === "run.issue" || e.type === "run.error")).toBe(false);
+      expect(readDemoManifest(workspace, THREAD)).toEqual([]);
+    });
+  });
+
+  describe.skipIf(process.platform === "win32")("simulator", () => {
+    let log: string;
+    const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : []);
+    const pids = () =>
+      fs.existsSync(`${log}.pids`)
+        ? fs.readFileSync(`${log}.pids`, "utf8").trim().split("\n").map(Number)
+        : [];
+
+    function stubTools(env: Record<string, string> = {}): void {
+      const bin = mkdir("fg-demo-bin-");
+      fs.writeFileSync(path.join(bin, "xcrun"), FAKE_XCRUN, { mode: 0o755 });
+      fs.writeFileSync(path.join(bin, "adb"), FAKE_ADB, { mode: 0o755 });
+      log = path.join(bin, "calls.log");
+      vi.stubEnv("PATH", `${bin}:${process.env["PATH"]}`);
+      vi.stubEnv("FAKE_LOG", log);
+      for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+    }
+    afterEach(() => vi.unstubAllEnvs());
+
+    const ios = (extra: Record<string, unknown> = {}) => ({ simulator: { platform: "ios", capture: "screenshot", ...extra } });
+    const android = (extra: Record<string, unknown> = {}) => ({ simulator: { platform: "android", capture: "screenshot", ...extra } });
+
+    it("runs no tool for a run cancelled before the capture starts", async () => {
+      stubTools();
+      await cancelled(mkdir(), ios(), { afterMs: 0 });
+      await cancelled(mkdir(), android({ capture: "video" }), { afterMs: 0 });
+      expect(calls()).toEqual([]);
+    });
+
+    it("stops waiting for an iOS app to settle", async () => {
+      stubTools({ FAKE_SCREEN: "spinner" });
+      const { ms } = await cancelled(mkdir(), ios({ app: "com.real.app", settle: "1h" }), { afterMs: 1_200 });
+
+      expect(ms).toBeLessThan(3_000);
+      const seen = calls().length;
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      expect(calls()).toHaveLength(seen); // nothing keeps polling the screen
+    }, 15_000);
+
+    it("kills a stuck simctl step", async () => {
+      stubTools({ FAKE_BOOT_HANG: "1" });
+      const { ms } = await cancelled(mkdir(), ios({ device: "iPhone 15" }), { afterMs: 300 });
+
+      expect(ms).toBeLessThan(3_000);
+      expect(pids()).toHaveLength(1);
+      expect(alive(pids()[0]!)).toBe(false);
+    }, 15_000);
+
+    it("stops simctl recordVideo and deletes the file", async () => {
+      stubTools();
+      const workspace = mkdir();
+      const { ms } = await cancelled(workspace, ios({ capture: "video", duration: "1h" }), { afterMs: 500 });
+
+      expect(ms).toBeLessThan(5_000);
+      expect(pids()).toHaveLength(1);
+      expect(alive(pids()[0]!)).toBe(false); // the recorder is gone, not left running
+    }, 15_000);
+
+    it("stops waiting for an Android app to settle", async () => {
+      stubTools({ FAKE_SCREEN: "spinner" });
+      const { ms } = await cancelled(mkdir(), android({ app: "com.app", settle: "1h" }), { afterMs: 1_200 });
+
+      expect(ms).toBeLessThan(3_000);
+      const seen = calls().length;
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      expect(calls()).toHaveLength(seen);
+    }, 15_000);
+
+    it("stops screenrecord on the device and deletes its file, not only the adb client", async () => {
+      stubTools({ FAKE_DEVICE_RECORDER: "1" });
+      const { ms } = await cancelled(mkdir(), android({ capture: "video", duration: "1h" }), { afterMs: 500 });
+
+      expect(ms).toBeLessThan(5_000);
+      expect(alive(pids()[0]!)).toBe(false); // the adb client
+      expect(fs.existsSync(`${log}.device-recording`)).toBe(false); // the recorder on the device
+      expect(fs.existsSync(`${log}.device-file`)).toBe(false); // and its temp file
+      expect(calls().some((c) => c.includes("shell kill -2 4242"))).toBe(true);
+      expect(calls().some((c) => c.includes("pull"))).toBe(false);
+    }, 15_000);
+
+    it("deletes the temp screenshot from the device when cancelled mid-capture", async () => {
+      stubTools({ FAKE_SCREENCAP_HANG: "1" });
+      fs.writeFileSync(`${log}.device-file`, "x");
+      const { ms } = await cancelled(mkdir(), android(), { afterMs: 300 });
+
+      expect(ms).toBeLessThan(3_000);
+      expect(alive(pids()[0]!)).toBe(false);
+      expect(calls().some((c) => c.includes("shell rm -f /sdcard/flowgraph-demo.png"))).toBe(true);
+    }, 15_000);
   });
 });
