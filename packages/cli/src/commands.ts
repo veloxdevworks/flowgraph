@@ -44,6 +44,18 @@ function webhookUrlFromInterrupts(interrupts: InterruptInfo[] | undefined): stri
   return undefined;
 }
 
+/** A resume value the first gate would accept, so the hint is never one it rejects. */
+export function resumeExample(interrupts: InterruptInfo[] | undefined): string {
+  const data = (interrupts?.[0]?.payload as { data?: { evidence?: unknown } } | undefined)?.data;
+  const needsOverride =
+    Array.isArray(data?.evidence) &&
+    data.evidence.some((e) => !!e && typeof e === "object" && (e as { needsOverride?: unknown }).needsOverride === true);
+  if (!needsOverride) return '{"approved":true}';
+  return interrupts?.[0]?.kind === "review"
+    ? '{"decision":"approve","override":{"reason":"<why>"}}'
+    : '{"approved":true,"override":{"reason":"<why>"}}';
+}
+
 function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: string | undefined): void {
   const webhookUrl = webhookUrlFromInterrupts(interrupts);
   if (webhookUrl) {
@@ -57,7 +69,7 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
     printInfo(`  • ${it.reason ?? it.id}`);
   }
   if (threadId) {
-    printInfo(`Resume with: flowgraph resume <graph> --thread ${threadId} --resume '{"approved":true}'`);
+    printInfo(`Resume with: flowgraph resume <graph> --thread ${threadId} --resume '${resumeExample(interrupts)}'`);
   } else {
     printInfo("Tip: pass --thread <id> so the run is resumable.");
   }

@@ -265,3 +265,13 @@ describe("gate evidence and overrides", () => {
     expect(parseInterruptAnswer(info({ id: "1", kind: "approval" }), "override: x")).toBe("override: x");
   });
 });
+
+describe("resume hint", () => {
+  it("suggests an override only when the gate's evidence needs one", async () => {
+    const { resumeExample } = await import("./commands.js");
+    const bad = { data: { evidence: [{ nodeId: "p", needsOverride: true }] } };
+    expect(resumeExample([info({ id: "1", kind: "approval" })])).toBe('{"approved":true}');
+    expect(resumeExample([info({ id: "1", kind: "approval", payload: bad })])).toBe('{"approved":true,"override":{"reason":"<why>"}}');
+    expect(resumeExample([info({ id: "1", kind: "review", payload: bad })])).toBe('{"decision":"approve","override":{"reason":"<why>"}}');
+  });
+});
