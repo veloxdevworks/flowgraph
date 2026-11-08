@@ -267,7 +267,8 @@ describe("gate evidence and overrides", () => {
 });
 
 describe("resume hint", () => {
-  it("suggests an override only when the gate's evidence needs one", async () => {
+  // The first import of commands.js loads the whole CLI, which takes several seconds on CI.
+  it("suggests an override only when the gate's evidence needs one", { timeout: 30_000 }, async () => {
     const { resumeExample } = await import("./commands.js");
     const bad = { data: { evidence: [{ nodeId: "p", needsOverride: true }] } };
     expect(resumeExample([info({ id: "1", kind: "approval" })])).toBe('{"approved":true}');
