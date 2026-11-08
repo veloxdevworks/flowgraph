@@ -231,3 +231,48 @@ describe("gate artifacts and selection", () => {
     ).toEqual({ decision: "approve", selected: { path: "a.png" } });
   });
 });
+
+describe("gate evidence and overrides", () => {
+  const bad = { artifactRefs: ["e/final.png"], evidence: [{ nodeId: "prove", status: "failed", needsOverride: true }] };
+  const good = { artifactRefs: ["e/final.png"], evidence: [{ nodeId: "prove", status: "passed", needsOverride: false }] };
+
+  it("says how to override only when some evidence needs it", () => {
+    for (const kind of ["approval", "review"] as const) {
+      expect(formatInterruptPrompt(info({ id: "1", reason: "Ship?", kind, payload: { data: bad } }))).toContain(
+        'approving needs an override: answer "override: <reason>"',
+      );
+      expect(formatInterruptPrompt(info({ id: "1", reason: "Ship?", kind, payload: { data: good } }))).not.toContain("override");
+    }
+  });
+
+  it("turns override: <reason> into an approving answer with that reason", () => {
+    expect(parseInterruptAnswer(info({ id: "1", kind: "approval", payload: { data: bad } }), "override: hotfix, checked by hand")).toEqual({
+      approved: true,
+      override: { reason: "hotfix, checked by hand" },
+    });
+    expect(parseInterruptAnswer(info({ id: "1", kind: "review", payload: { data: bad } }), "Override:  known outage ")).toEqual({
+      decision: "approve",
+      override: { reason: "known outage" },
+    });
+    // An empty reason goes to the engine as one, which re-prompts.
+    expect(parseInterruptAnswer(info({ id: "1", kind: "approval", payload: { data: bad } }), "override:")).toEqual({
+      approved: true,
+      override: { reason: "" },
+    });
+  });
+
+  it("means nothing special at a gate without evidence", () => {
+    expect(parseInterruptAnswer(info({ id: "1", kind: "approval" }), "override: x")).toBe("override: x");
+  });
+});
+
+describe("resume hint", () => {
+  // The first import of commands.js loads the whole CLI, which takes several seconds on CI.
+  it("suggests an override only when the gate's evidence needs one", { timeout: 30_000 }, async () => {
+    const { resumeExample } = await import("./commands.js");
+    const bad = { data: { evidence: [{ nodeId: "p", needsOverride: true }] } };
+    expect(resumeExample([info({ id: "1", kind: "approval" })])).toBe('{"approved":true}');
+    expect(resumeExample([info({ id: "1", kind: "approval", payload: bad })])).toBe('{"approved":true,"override":{"reason":"<why>"}}');
+    expect(resumeExample([info({ id: "1", kind: "review", payload: bad })])).toBe('{"decision":"approve","override":{"reason":"<why>"}}');
+  });
+});

@@ -23,6 +23,14 @@ import {
   type HitlSelect,
 } from "./hitl-artifacts.js";
 import {
+  collectGateEvidence,
+  evidenceNotice,
+  isEvidenceOutput,
+  requiredOverride,
+  type GateEvidence,
+} from "./hitl-evidence.js";
+import { ISSUE_CODE } from "../runtime/run-issues.js";
+import {
   DEFAULT_REVIEW_DECISIONS,
   hitlOutcomeKey,
   normalizeHitlRoutes,
@@ -46,7 +54,7 @@ export const hitlNode = defineNode<Config>({
   configSchema: configSchema as any,
   capabilities: { interruptible: true, routing: true },
 
-  build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
+  build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
       capabilities: { interruptible: true, routing: true },
@@ -84,9 +92,14 @@ export const hitlNode = defineNode<Config>({
           config.mode === "approve" || config.mode === "choice" || config.mode === "review"
             ? (config.select ?? "none")
             : "none";
-        if (config.artifacts && (config.mode === "approve" || config.mode === "choice" || config.mode === "review")) {
+        const closedAnswer = config.mode === "approve" || config.mode === "choice" || config.mode === "review";
+        const evidenceIds = closedAnswer ? (config.evidence ?? []) : [];
+        const outputsNow = state["outputs"] as Record<string, unknown> | undefined;
+        if (config.artifacts && closedAnswer) {
           const rendered = config.artifacts.map((a) => renderDeep(a, scope));
-          const gate = await resolveGateArtifacts(rendered, ctx.workspace);
+          const gate = await resolveGateArtifacts(rendered, ctx.workspace, {
+            skipFailure: isEvidenceOutput(evidenceIds, outputsNow),
+          });
           presented = gate.artifacts;
           data["artifacts"] = gate.artifacts;
           data["artifactRefs"] = gate.artifactRefs;
@@ -95,6 +108,30 @@ export const hitlNode = defineNode<Config>({
             message = `${message}\n\n${captureFailuresNotice(gate.captureFailures)}`;
           }
           if (select !== "none") data["select"] = select;
+        }
+
+        // `with.evidence`: the verdict of each named demo node, read as it stands now.
+        let evidence: GateEvidence[] | undefined;
+        if (evidenceIds.length > 0) {
+          evidence = await collectGateEvidence(evidenceIds, outputsNow, ctx.workspace, (id) => {
+            // A node that never ran has no rendered objective, so show the one it declares.
+            const objective = (buildCtx.graphNode?.(id)?.with as { objective?: unknown } | undefined)?.objective;
+            return typeof objective === "string" && objective.trim() ? objective : null;
+          });
+          data["evidence"] = evidence;
+          // Evidence files are presented like any other, so older clients still show them.
+          const seen = new Set(presented.map((a) => a.path));
+          const refs = (data["artifactRefs"] as string[] | undefined) ?? [];
+          for (const a of evidence.flatMap((e) => e.artifacts)) {
+            if (seen.has(a.path)) continue;
+            seen.add(a.path);
+            presented = [...presented, a];
+            if (!refs.includes(a.path)) refs.push(a.path);
+          }
+          data["artifacts"] = presented;
+          data["artifactRefs"] = refs;
+          if (select !== "none") data["select"] = select;
+          message = `${message}\n\n${evidenceNotice(evidence)}`;
         }
 
         if (config.mode === "review") {
@@ -145,9 +182,26 @@ export const hitlNode = defineNode<Config>({
               nodeId: String(nodeSpec["id"]),
               select,
               presented,
+              evidence,
             }),
           { maxAttempts: config.maxResumeAttempts },
         );
+
+        // Only a gate with evidence builds an override; anywhere else the field was dropped.
+        const override = evidence
+          ? (result["override"] as { reason: string; items: Array<{ nodeId: string; status: string }> } | null)
+          : null;
+        if (override) {
+          ctx.issue({
+            code: ISSUE_CODE.EVIDENCE_OVERRIDDEN,
+            severity: "warning",
+            message:
+              `approved past evidence that does not hold: ` +
+              `${override.items.map((i) => `${i.nodeId} (${i.status})`).join(", ")}. Reason: ${override.reason}`,
+            impact: "The approval was given without evidence that the objective was met.",
+            detail: { override },
+          });
+        }
 
         // `round`: 1 for the first accepted answer at this gate, +1 each time it is answered again
         // (a loop back). The previous value is the one this node wrote to `state.outputs.<id>` last
@@ -207,6 +261,36 @@ function mapHitlResume(
     nodeId: string;
     select: HitlSelect;
     presented: Artifact[];
+    evidence?: GateEvidence[] | undefined;
+  },
+): Record<string, unknown> {
+  const out = mapAnswer(config, resume, opts);
+  if (!opts.evidence) {
+    // `override` is the gate's own record, so a client can't plant one through review's merged fields.
+    delete out["override"];
+    return out;
+  }
+  // Checked on the finished answer, after the client's fields were merged in, so neither
+  // `approved: true` nor `decision: "approve"` can slip past, and `override` is never the client's.
+  const mode = config.mode;
+  const approving =
+    (mode === "approve" || mode === "review") && (out["approved"] === true || (mode === "review" && out["decision"] === "approve"));
+  out["override"] = approving
+    ? requiredOverride(opts.evidence, resume, { nodeId: opts.nodeId, mode: mode as "approve" | "review" })
+    : null;
+  return out;
+}
+
+function mapAnswer(
+  config: Config,
+  resume: unknown,
+  opts: {
+    choices?: string[] | undefined;
+    decisions?: string[] | undefined;
+    schema?: Record<string, unknown> | undefined;
+    nodeId: string;
+    select: HitlSelect;
+    presented: Artifact[];
   },
 ): Record<string, unknown> {
   const mode = config.mode;
@@ -228,11 +312,11 @@ function mapHitlResume(
   };
 
   if (mode === "approve") {
+    // Only a real `true` approves, so `"yes"` or `1` can't be stored as a truthy approval.
     const approved =
-      typeof resume === "boolean"
-        ? resume
-        : (resume as { approved?: boolean })?.approved ?? false;
-    return withSelection({ approved }, approved === true);
+      resume === true ||
+      (!!resume && typeof resume === "object" && (resume as { approved?: unknown }).approved === true);
+    return withSelection({ approved }, approved);
   }
 
   if (mode === "question") {
@@ -289,12 +373,15 @@ function mapHitlResume(
         : typeof rec["notes"] === "string"
           ? rec["notes"]
           : undefined;
+    // The client's other fields are kept, but `decision` is the one matched above (so "1" is stored
+    // as the decision it picked) and `approved` is a boolean: a sent `approved: true` still counts.
+    const approved = rec["approved"] === undefined ? decision === "approve" : rec["approved"] === true;
     return withSelection(
       {
-        decision,
-        approved: decision === "approve",
         ...(feedback != null ? { feedback } : {}),
         ...rec,
+        decision,
+        approved,
       },
       decision === "approve",
     );

@@ -1002,6 +1002,13 @@ export const HitlWithSchema = BaseWithSchema.extend({
    * node outputs the matching Artifact record(s) as `selected`.
    */
   select: z.enum(["none", "one", "many"]).optional(),
+  /**
+   * `approve` / `choice` / `review` — ids of `demo` nodes with an `objective` whose results this
+   * gate shows. A node that never ran is reported as `not_run`. In `approve` and `review`,
+   * approving past evidence that is `failed`, `not_captured`, `not_run` or whose files are gone
+   * needs `override: { reason }` in the answer.
+   */
+  evidence: z.array(z.string().min(1)).optional(),
   /** `mode: review` — extra decision labels beyond approve / request-changes. */
   decision: z.array(z.string()).optional(),
   /**

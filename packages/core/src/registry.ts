@@ -39,6 +39,8 @@ export interface CompiledNode {
 
 export interface BuildContext {
   graphName: string;
+  /** Another node of the same graph, by id (for example the `demo` nodes a gate's `evidence` names). */
+  graphNode?: (id: string) => { type?: unknown; with?: unknown } | undefined;
   /** `runtime.worktrees.root` (raw; resolved against the run workspace). */
   worktreeRoot?: string;
   resolveSkill?: (uses: string) => Promise<unknown>;

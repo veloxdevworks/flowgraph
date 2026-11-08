@@ -96,10 +96,13 @@ function flattenDemo(o: Record<string, unknown>, out: Item[]): void {
   }
 }
 
-function flatten(value: unknown, out: Item[], failures: GateCaptureFailure[]): void {
+/** A `demo` output whose failure is reported elsewhere (a gate's `evidence`), so not as a capture failure. */
+export type SkipFailure = (output: Record<string, unknown>) => boolean;
+
+function flatten(value: unknown, out: Item[], failures: GateCaptureFailure[], skip?: SkipFailure): void {
   if (value == null || value === "") return;
   if (Array.isArray(value)) {
-    for (const v of value) flatten(v, out, failures);
+    for (const v of value) flatten(v, out, failures, skip);
     return;
   }
   if (typeof value === "string") {
@@ -116,16 +119,16 @@ function flatten(value: unknown, out: Item[], failures: GateCaptureFailure[]): v
     // A `demo` node's output also carries `artifacts`, so a failure has to be read before
     // that list is followed: the list would otherwise hide that the capture failed.
     const failure = captureFailureOf(o);
-    if (failure) failures.push(failure);
+    if (failure && !skip?.(o)) failures.push(failure);
     // A `demo` output: its main file and the recording kept beside it, each checked against
     // the gate's workspace, because the demo node may have run in another one.
     if (isDemoOutput(o)) return flattenDemo(o, out);
     // A media node's whole output: `artifacts` already contains `artifact`.
-    if (Array.isArray(o["artifacts"])) return flatten(o["artifacts"], out, failures);
-    if (o["artifact"] && typeof o["artifact"] === "object") return flatten(o["artifact"], out, failures);
+    if (Array.isArray(o["artifacts"])) return flatten(o["artifacts"], out, failures, skip);
+    if (o["artifact"] && typeof o["artifact"] === "object") return flatten(o["artifact"], out, failures, skip);
     // A `demo` output without `artifacts` (a run from before they existed): its file and recording.
-    if (typeof o["path"] === "string") flatten(o["path"], out, failures);
-    if (Array.isArray(o["extra"])) flatten(o["extra"], out, failures);
+    if (typeof o["path"] === "string") flatten(o["path"], out, failures, skip);
+    if (Array.isArray(o["extra"])) flatten(o["extra"], out, failures, skip);
     return;
   }
   // Numbers, booleans and unrecognised objects have no sane string form here: drop them.
@@ -195,10 +198,14 @@ async function sameFileHere(workspace: string, workspaceReal: string, rec: Artif
  * Never throws for a bad entry: a path that is missing or outside the workspace
  * simply stays a plain ref.
  */
-export async function resolveGateArtifacts(rendered: unknown[], workspace: string): Promise<GateArtifacts> {
+export async function resolveGateArtifacts(
+  rendered: unknown[],
+  workspace: string,
+  opts: { skipFailure?: SkipFailure } = {},
+): Promise<GateArtifacts> {
   const items: Item[] = [];
   const captureFailures: GateCaptureFailure[] = [];
-  flatten(rendered, items, captureFailures);
+  flatten(rendered, items, captureFailures, opts.skipFailure);
 
   const workspaceReal = await realpath(workspace).catch(() => path.resolve(workspace));
   const out: Array<{ key: string; record?: Artifact; ref: string }> = [];

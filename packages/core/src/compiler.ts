@@ -48,6 +48,7 @@ import {
   collectNodeWriteChannels,
   demoToolExposureDiagnostics,
   ensureDeclaredOutputChannels,
+  hitlEvidenceDiagnostics,
   provesObjective,
 } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
@@ -992,8 +993,9 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
   }
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
-  const exposed = demoToolExposureDiagnostics(spec)[0];
-  if (exposed) throw new Error(`${exposed.path}: ${exposed.message}`);
+  // Both are lint errors, but a spec can reach compile without going through the loader.
+  const refused = demoToolExposureDiagnostics(spec)[0] ?? hitlEvidenceDiagnostics(spec)[0];
+  if (refused) throw new Error(`${refused.path}: ${refused.message}`);
   const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
   const toolWiring: ToolWiring = { mcp: mcpHub };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();
@@ -1096,6 +1098,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     const compiled = factory.build(
       {
         graphName: spec.metadata.name,
+        graphNode: (id: string) => spec.nodes.find((n) => n.id === id),
         toolWiring,
         ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
         ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
@@ -2241,6 +2244,7 @@ function addCheckpointedMap(
   const innerStopsOnTimeout = registry.get(innerType)?.capabilities?.stopsOnTimeout === true;
   const buildCtx = {
     graphName: spec.metadata.name,
+    graphNode: (id: string) => spec.nodes.find((n) => n.id === id),
     toolWiring: ctx.toolWiring,
     ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
     ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
