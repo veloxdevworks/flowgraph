@@ -54,7 +54,7 @@ export const hitlNode = defineNode<Config>({
   configSchema: configSchema as any,
   capabilities: { interruptible: true, routing: true },
 
-  build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
+  build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
       capabilities: { interruptible: true, routing: true },
@@ -113,7 +113,11 @@ export const hitlNode = defineNode<Config>({
         // `with.evidence`: the verdict of each named demo node, read as it stands now.
         let evidence: GateEvidence[] | undefined;
         if (evidenceIds.length > 0) {
-          evidence = await collectGateEvidence(evidenceIds, outputsNow, ctx.workspace);
+          evidence = await collectGateEvidence(evidenceIds, outputsNow, ctx.workspace, (id) => {
+            // A node that never ran has no rendered objective, so show the one it declares.
+            const objective = (buildCtx.graphNode?.(id)?.with as { objective?: unknown } | undefined)?.objective;
+            return typeof objective === "string" && objective.trim() ? objective : null;
+          });
           data["evidence"] = evidence;
           // Evidence files are presented like any other, so older clients still show them.
           const seen = new Set(presented.map((a) => a.path));

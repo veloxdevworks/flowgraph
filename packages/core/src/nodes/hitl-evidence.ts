@@ -38,6 +38,7 @@ export async function collectGateEvidence(
   ids: readonly string[],
   outputs: Record<string, unknown> | undefined,
   workspace: string,
+  declaredObjective: (nodeId: string) => string | null = () => null,
 ): Promise<GateEvidence[]> {
   const out: GateEvidence[] = [];
   for (const nodeId of [...new Set(ids)]) {
@@ -47,7 +48,7 @@ export async function collectGateEvidence(
     if (!o || !status) {
       out.push({
         nodeId,
-        objective: null,
+        objective: declaredObjective(nodeId),
         status: "not_run",
         reason: o ? "the stored result has no status" : null,
         capturedAt: null,

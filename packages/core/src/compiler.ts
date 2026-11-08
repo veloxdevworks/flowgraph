@@ -1098,6 +1098,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
     const compiled = factory.build(
       {
         graphName: spec.metadata.name,
+        graphNode: (id: string) => spec.nodes.find((n) => n.id === id),
         toolWiring,
         ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
         ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
@@ -2243,6 +2244,7 @@ function addCheckpointedMap(
   const innerStopsOnTimeout = registry.get(innerType)?.capabilities?.stopsOnTimeout === true;
   const buildCtx = {
     graphName: spec.metadata.name,
+    graphNode: (id: string) => spec.nodes.find((n) => n.id === id),
     toolWiring: ctx.toolWiring,
     ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
     ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),

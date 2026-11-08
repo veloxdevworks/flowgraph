@@ -123,7 +123,9 @@ describe("hitl with.evidence: what the gate shows", () => {
     const { first } = await gate({});
     const e = payloadOf(first).data.evidence![0]!;
     expect(e).toMatchObject({ nodeId: "prove", status: "not_run", artifacts: [], needsOverride: true, capturedAt: null });
-    expect(payloadOf(first).reason).toContain("- prove, not run [approving needs an override]");
+    // It never ran, so the gate shows the objective the node declares.
+    expect(e.objective).toBe(OBJECTIVE);
+    expect(payloadOf(first).reason).toContain(`- prove, not run: ${OBJECTIVE} [approving needs an override]`);
   });
 
   it("labels inconclusive evidence as having no automated check, without asking for an override", async () => {
@@ -291,6 +293,27 @@ describe("hitl with.evidence: compile checks", () => {
       bad({}, { id: "prove", type: "demo", with: { objective: "x", output: "none", http: { url: "http://x/" } } }),
     ).toEqual(["HITL_EVIDENCE_OUTPUT_NONE"]);
     expect(bad({ mode: "question" }, undefined)).toEqual(["HITL_EVIDENCE_MODE"]);
+  });
+
+  it("checks a gate inside a map against the graph's nodes", () => {
+    const s = spec({});
+    s.nodes.push({
+      id: "each",
+      type: "map",
+      with: { over: "{{ state.items }}", node: { type: "hitl", with: { mode: "approve", message: "ok?", evidence: ["prove", "nope"] } } },
+    } as unknown as GraphSpec["nodes"][number]);
+    expect(hitlEvidenceDiagnostics(s).map((d) => [d.code, d.path])).toEqual([
+      ["HITL_EVIDENCE_UNKNOWN_NODE", "nodes.each.with.node.with.evidence"],
+    ]);
+  });
+
+  it("checks a gate in an inline subgraph against the subgraph's own nodes", () => {
+    const child = spec({ evidence: ["prove", "outer"] });
+    const s = spec({});
+    s.nodes.push({ id: "outer", type: "subgraph", spec: child } as unknown as GraphSpec["nodes"][number]);
+    expect(hitlEvidenceDiagnostics(s).map((d) => [d.code, d.path])).toEqual([
+      ["HITL_EVIDENCE_UNKNOWN_NODE", "nodes.outer.spec.nodes.gate.with.evidence"],
+    ]);
   });
 
   it("compile refuses a gate whose evidence is wrong", async () => {

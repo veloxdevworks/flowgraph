@@ -717,7 +717,7 @@ The gate reads each node's `state.outputs.<id>` and sends `payload.data.evidence
 
 | Field | Meaning |
 |---|---|
-| `nodeId`, `objective` | The demo node and the claim it checks |
+| `nodeId`, `objective` | The demo node and the claim it checks. For `not_run`, the objective as the node declares it, unrendered |
 | `status` | `passed`, `failed`, `inconclusive`, `not_captured`, or `not_run` when the node has no result in this thread |
 | `reason` | The demo's reason, plus a note when its files are gone |
 | `capturedAt`, `assertions` | When it ran and the checks it made |
@@ -737,7 +737,7 @@ The verdicts are appended to the gate's message as plain text, so every client s
 
 An override is a record, not access control: anyone who can answer the gate can give a reason.
 
-Lint errors (and compile refuses) when an id is not a node (`HITL_EVIDENCE_UNKNOWN_NODE`), not a `demo` node (`HITL_EVIDENCE_NOT_DEMO`), has no `objective` (`HITL_EVIDENCE_NO_OBJECTIVE`), or uses `output: none` (`HITL_EVIDENCE_OUTPUT_NONE`), and when the gate's mode is not one of the three (`HITL_EVIDENCE_MODE`). A demo with an objective can't be an agent tool anyway (`DEMO_OBJECTIVE_AS_TOOL`).
+Lint errors (and compile refuses) when an id is not a node (`HITL_EVIDENCE_UNKNOWN_NODE`), not a `demo` node (`HITL_EVIDENCE_NOT_DEMO`), has no `objective` (`HITL_EVIDENCE_NO_OBJECTIVE`), or uses `output: none` (`HITL_EVIDENCE_OUTPUT_NONE`), and when the gate's mode is not one of the three (`HITL_EVIDENCE_MODE`). A gate inside a `map` is checked against the graph's nodes, and a gate in an inline subgraph against the subgraph's own, so a subgraph's demo can't be named from the parent. A demo with an objective can't be an agent tool anyway (`DEMO_OBJECTIVE_AS_TOOL`).
 
 ### `ask_human` tool (agent nodes)
 

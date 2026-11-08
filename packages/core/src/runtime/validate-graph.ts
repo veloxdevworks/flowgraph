@@ -722,26 +722,27 @@ export function demoToolExposureDiagnostics(spec: GraphSpec): Diagnostic[] {
 
 /**
  * `hitl` `with.evidence` names `demo` nodes whose results the gate shows (ADR-0019 §7). Each
- * must be a top-level `demo` node with an `objective` that writes `state.outputs.<id>`, so its
- * verdict is there to read. Agent-tool exposure is already refused by `DEMO_OBJECTIVE_AS_TOOL`.
+ * must be a `demo` node of the same graph with an `objective` that writes `state.outputs.<id>`,
+ * so its verdict is there to read. Gates inside a `map` read the graph's own outputs, so they are
+ * checked against its nodes; an inline subgraph is checked against its own. Agent-tool exposure
+ * is already refused by `DEMO_OBJECTIVE_AS_TOOL`.
  */
-export function hitlEvidenceDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function hitlEvidenceDiagnostics(spec: GraphSpec, prefix = ""): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
-  for (const node of spec.nodes) {
-    if (node.type !== "hitl") continue;
+  const checkGate = (node: NodeSpec, path: string): void => {
     const w = (node.with ?? {}) as Record<string, unknown>;
     const evidence = w["evidence"];
-    if (!Array.isArray(evidence) || evidence.length === 0) continue;
-    const path = `nodes.${node.id}.with.evidence`;
+    if (!Array.isArray(evidence) || evidence.length === 0) return;
+    const name = node.id ?? "map item";
     const mode = typeof w["mode"] === "string" ? w["mode"] : "approve";
     if (mode !== "approve" && mode !== "review" && mode !== "choice") {
       diagnostics.push({
         severity: "error",
         code: "HITL_EVIDENCE_MODE",
-        message: `hitl node "${node.id}" sets with.evidence, which only applies to modes approve, review and choice (this one is "${mode}")`,
+        message: `hitl node "${name}" sets with.evidence, which only applies to modes approve, review and choice (this one is "${mode}")`,
         path,
       });
-      continue;
+      return;
     }
     for (const id of evidence) {
       const target = typeof id === "string" ? spec.nodes.find((n) => n.id === id) : undefined;
@@ -757,10 +758,20 @@ export function hitlEvidenceDiagnostics(spec: GraphSpec): Diagnostic[] {
         problem = ["HITL_EVIDENCE_OUTPUT_NONE", `names demo node "${target.id}", which uses output: none, so its result is never stored for the gate to read`];
       }
       if (problem) {
-        diagnostics.push({ severity: "error", code: problem[0], message: `hitl node "${node.id}" with.evidence ${problem[1]}`, path });
+        diagnostics.push({ severity: "error", code: problem[0], message: `hitl node "${name}" with.evidence ${problem[1]}`, path });
       }
     }
-  }
+  };
+  const visit = (node: NodeSpec, path: string): void => {
+    if (node.type === "hitl") checkGate(node, `${path}.with.evidence`);
+    const inner = ((node.with ?? {}) as { node?: unknown }).node;
+    if (node.type === "map" && inner && typeof inner === "object") visit(inner as NodeSpec, `${path}.with.node`);
+    const child = (node as { spec?: unknown }).spec as GraphSpec | undefined;
+    if (node.type === "subgraph" && child && typeof child === "object" && Array.isArray(child.nodes)) {
+      diagnostics.push(...hitlEvidenceDiagnostics(child, `${path}.spec.`));
+    }
+  };
+  for (const node of spec.nodes) visit(node, `${prefix}nodes.${node.id}`);
   return diagnostics;
 }
 
