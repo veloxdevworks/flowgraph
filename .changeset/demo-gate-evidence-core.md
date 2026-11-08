@@ -9,3 +9,4 @@
 - In `approve` and `review`, approving past evidence that is `failed`, `not_captured`, `not_run` or whose files are gone needs `override: { reason }`, or the gate re-prompts. The output gains `override` (`null` when unused), and an accepted override raises `EVIDENCE_OVERRIDDEN`. `--on-interrupt approve` can no longer wave past such evidence.
 - Lint and compile refuse ids that aren't `demo` nodes with an `objective` and stored output.
 - The CLI prompt says when an override is needed and accepts `override: <reason>`.
+- Gate answers are stored more strictly: `approved` is always a boolean (only `true` approves, so `"yes"` or `1` is a rejection), a numbered `review` answer stores the decision it picked rather than `"1"`, and a client-sent `override` is dropped at gates without `with.evidence`.

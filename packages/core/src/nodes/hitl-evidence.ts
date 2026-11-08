@@ -97,7 +97,12 @@ export function isEvidenceOutput(
   // A template may hand back a copy, so match on what identifies one capture, not on identity.
   return (o) =>
     stored.some(
-      (s) => s === o || (s["capturedAt"] === o["capturedAt"] && s["kind"] === o["kind"] && s["reason"] === o["reason"]),
+      (s) =>
+        s === o ||
+        (typeof s["capturedAt"] === "string" &&
+          s["capturedAt"] === o["capturedAt"] &&
+          s["kind"] === o["kind"] &&
+          s["reason"] === o["reason"]),
     );
 }
 

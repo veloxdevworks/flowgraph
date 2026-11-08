@@ -13,7 +13,7 @@ import * as path from "node:path";
 import type { Artifact, GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import { hitlEvidenceDiagnostics } from "../runtime/validate-graph.js";
-import type { GateEvidence } from "./hitl-evidence.js";
+import { isEvidenceOutput, type GateEvidence } from "./hitl-evidence.js";
 
 const OBJECTIVE = "A signed-in user can complete checkout";
 
@@ -297,5 +297,47 @@ describe("hitl with.evidence: compile checks", () => {
     await expect(compileGraph(spec({ evidence: ["nope"] }), { cwd: dir })).rejects.toThrow(
       /with\.evidence names "nope", which is not a node/,
     );
+  });
+});
+
+describe("hitl answers the review found", () => {
+  it("a review gate without evidence ignores a client override instead of failing the run", async () => {
+    for (const override of [{ reason: "x" }, "x"]) {
+      const { answer } = await gate({ mode: "review", evidence: undefined });
+      const res = await answer({ decision: "approve", override });
+      expect(res.status).toBe("completed");
+      expect(gateOut(res)).not.toHaveProperty("override");
+      expect((res.issues ?? []).map((i) => i.code)).not.toContain("EVIDENCE_OVERRIDDEN");
+    }
+  });
+
+  it("stores approved only as a boolean, so 'yes' or 1 is a rejection", async () => {
+    for (const approved of ["yes", 1]) {
+      const { answer } = await gate({}, await demoResult("failed"));
+      const res = await answer({ approved });
+      expect(res.status).toBe("completed");
+      expect(gateOut(res)).toMatchObject({ approved: false, override: null });
+    }
+  });
+
+  it("review: a numbered answer stores the decision it picked", async () => {
+    const { answer } = await gate({ mode: "review" }, await demoResult("passed"));
+    const res = await answer({ decision: "1" });
+    expect(gateOut(res)).toMatchObject({ decision: "approve", approved: true, override: null });
+  });
+
+  it("review: a non-boolean approved is stored as false", async () => {
+    const { answer } = await gate({ mode: "review", evidence: undefined });
+    const res = await answer({ decision: "request-changes", approved: "yes" });
+    expect(gateOut(res)).toMatchObject({ decision: "request-changes", approved: false });
+  });
+});
+
+describe("isEvidenceOutput", () => {
+  it("matches a copy of an evidence capture, but never two captures that both lack a time", () => {
+    const stored = { kind: "steps", reason: "boom", capturedAt: "2026-11-07T00:00:00Z" };
+    expect(isEvidenceOutput(["prove"], { prove: stored })({ ...stored })).toBe(true);
+    const timeless = { kind: "video", reason: "boom" };
+    expect(isEvidenceOutput(["prove"], { prove: timeless })({ ...timeless })).toBe(false);
   });
 });

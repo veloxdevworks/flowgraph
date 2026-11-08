@@ -183,7 +183,10 @@ export const hitlNode = defineNode<Config>({
           { maxAttempts: config.maxResumeAttempts },
         );
 
-        const override = result["override"] as { reason: string; items: Array<{ nodeId: string; status: string }> } | null | undefined;
+        // Only a gate with evidence builds an override; anywhere else the field was dropped.
+        const override = evidence
+          ? (result["override"] as { reason: string; items: Array<{ nodeId: string; status: string }> } | null)
+          : null;
         if (override) {
           ctx.issue({
             code: ISSUE_CODE.EVIDENCE_OVERRIDDEN,
@@ -258,7 +261,11 @@ function mapHitlResume(
   },
 ): Record<string, unknown> {
   const out = mapAnswer(config, resume, opts);
-  if (!opts.evidence) return out;
+  if (!opts.evidence) {
+    // `override` is the gate's own record, so a client can't plant one through review's merged fields.
+    delete out["override"];
+    return out;
+  }
   // Checked on the finished answer, after the client's fields were merged in, so neither
   // `approved: true` nor `decision: "approve"` can slip past, and `override` is never the client's.
   const mode = config.mode;
@@ -301,11 +308,11 @@ function mapAnswer(
   };
 
   if (mode === "approve") {
+    // Only a real `true` approves, so `"yes"` or `1` can't be stored as a truthy approval.
     const approved =
-      typeof resume === "boolean"
-        ? resume
-        : (resume as { approved?: boolean })?.approved ?? false;
-    return withSelection({ approved }, approved === true);
+      resume === true ||
+      (!!resume && typeof resume === "object" && (resume as { approved?: unknown }).approved === true);
+    return withSelection({ approved }, approved);
   }
 
   if (mode === "question") {
@@ -362,12 +369,15 @@ function mapAnswer(
         : typeof rec["notes"] === "string"
           ? rec["notes"]
           : undefined;
+    // The client's other fields are kept, but `decision` is the one matched above (so "1" is stored
+    // as the decision it picked) and `approved` is a boolean: a sent `approved: true` still counts.
+    const approved = rec["approved"] === undefined ? decision === "approve" : rec["approved"] === true;
     return withSelection(
       {
-        decision,
-        approved: decision === "approve",
         ...(feedback != null ? { feedback } : {}),
         ...rec,
+        decision,
+        approved,
       },
       decision === "approve",
     );
