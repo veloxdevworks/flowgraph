@@ -57,6 +57,7 @@ flowgraph run ./triage.graph.yaml \
   --stream \
   --json \
   --no-mcp-oauth \
+  --targets ./targets.yaml \
   --cwd .
 ```
 
@@ -68,6 +69,7 @@ flowgraph run ./triage.graph.yaml \
 | `--json` | Emit events as JSONL on stdout (machine-readable). |
 | `--on-interrupt <policy>` | `prompt` \| `fail` (default) \| `approve` \| `webhook`. |
 | `--no-mcp-oauth` | Do not open a browser for MCP OAuth; fail if tokens are missing (CI-safe). |
+| `--targets <file>` | YAML or JSON topology naming the workers that `runsOn` nodes may be placed on ([ADR-0020](./adr/0020-node-placement.md) §4). See below. |
 | `--cwd <dir>` | Working directory (default: process cwd). |
 
 **Behavior (shipped):**
@@ -79,6 +81,25 @@ flowgraph run ./triage.graph.yaml \
 - Skill preflight runs when a **skill node executes**, not upfront at run start.
 - With `--stream` / `--json`, events go to configured sinks; otherwise a compact summary prints at the end.
 - On interrupt under `--on-interrupt fail`, exits `3` and prints resume instructions.
+
+**Placement (`--targets`):**
+
+```yaml
+# targets.yaml
+targets:
+  studio-pc:
+    url: https://studio-pc.lan:8787
+    token: env:STUDIO_PC_TOKEN       # literal, or env:NAME
+local:
+  labels: [app:blender]              # custom labels for this machine (a label with a check must pass it)
+```
+
+- The file is validated with the topology schema; an unreadable or invalid file exits `2` with diagnostics.
+- This machine's labels are the built-in ones (`os:`, `arch:`, `gpu:`, `flowgraph:`, `nodeType:`, `plugin:`) plus `local.labels` whose checks pass.
+- Before the run starts, one line per placed node is printed (to stderr under `--json`): `placement: character → studio-pc (os:windows, app:cc5)`. A node this machine can run prints `→ local`.
+- If a placed node has no matching worker, the run does not start: the `PLACEMENT_UNSATISFIED` message (node, needed labels, what each candidate reported) is printed and the CLI exits `2`, the same code as other validation and preflight failures.
+- Without `--targets` only this machine is considered: a `runsOn` node it cannot satisfy (and that does not set `fallback: local`) fails the same way.
+- Worker tokens come from the file or the environment; nothing from the coordinator's environment is sent to a worker. See [07 — Runtime §6a](./07-runtime-and-execution.md#6a-node-placement) for what runs remotely and the outcomes.
 
 **Planned flags:** `--checkpoint`, `--max-usd`, `--otel`, global `--config`, `--env-file`, `--log-level`, `--quiet`.
 

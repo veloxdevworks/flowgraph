@@ -2,9 +2,10 @@
  * Offline graph lint helpers used by validateSpec.
  */
 
-import { findMergeableRouters, type MergeSpec } from "@flowgraph/spec";
+import { findMergeableRouters, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
 import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
+import { templateRootRefs } from "../node-policy.js";
 import { childChannelRefsInMapping, stateMapOutEntries } from "../nodes/subgraph-merge.js";
 import { isOutputNone, OUTPUTS_CHANNEL } from "./apply-output.js";
 import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
@@ -720,6 +721,225 @@ export function demoToolExposureDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
+// ---------------------------------------------------------------------------
+// Placement (`runsOn`) — ADR-0020
+// ---------------------------------------------------------------------------
+
+const GATE_NODE_TYPES = new Set(["hitl", "workshop", "wait"]);
+
+/** Child nodes carried inside a node: the inline subgraph spec and a `map` inner node. */
+function childNodesOf(node: NodeSpec): NodeSpec[] {
+  const out: NodeSpec[] = [];
+  if (node.spec) out.push(...(node.spec.nodes ?? []));
+  const inner = (node.with as { node?: NodeSpec } | undefined)?.node;
+  if (node.type === "map" && inner && typeof inner === "object") out.push(inner);
+  return out;
+}
+
+/** Node types that cannot be wrapped in a one-node child graph: `map` fans out, `router` returns a goto. */
+export const UNPLACEABLE_TYPES = new Set(["map", "router"]);
+
+export function unplaceableMessage(id: string, type: string): string {
+  return (
+    `Node "${id}" (type ${type}) cannot set runsOn: ${type} nodes cannot run remotely. ` +
+    `Wrap it in a subgraph and place the subgraph.`
+  );
+}
+
+/** Scopes a worker running a wrapped node does not have: it sees only the node's `input`. */
+const COORDINATOR_ONLY_SCOPES = new Set(["state", "config", "issues"]);
+
+function withTemplates(value: unknown, at: string, out: Array<{ at: string; text: string }>, depth = 0): void {
+  if (depth > 32) return;
+  if (typeof value === "string") out.push({ at, text: value });
+  else if (Array.isArray(value)) value.forEach((v, i) => withTemplates(v, `${at}[${i}]`, out, depth + 1));
+  else if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) withTemplates(v, `${at}.${k}`, out, depth + 1);
+  }
+}
+
+/**
+ * A placed non-subgraph node runs as a one-node graph that receives only its resolved `input`
+ * (ADR-0020 §2). Templates in its `with` that read coordinator state would render empty there, and
+ * an `input` key named like the node collides with its node id as a channel.
+ * `with.output` and the node's `when` / `input` are evaluated on the coordinator, so they may read state.
+ */
+function wrappedNodeDiagnostics(node: NodeSpec, path: string): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  const found: Array<{ at: string; text: string }> = [];
+  for (const [k, v] of Object.entries((node.with ?? {}) as Record<string, unknown>)) {
+    if (k === "output") continue;
+    withTemplates(v, `with.${k}`, found);
+  }
+  for (const { at, text } of found) {
+    for (const ref of templateRootRefs(text, COORDINATOR_ONLY_SCOPES)) {
+      out.push({
+        severity: "error",
+        code: "PLACEMENT_STATE_REFERENCE",
+        message:
+          `Placed node "${node.id}" reads "${ref}" in ${at}, but on the worker it only sees its own input, so this would render empty. ` +
+          `Pass the value through the node's input (input: { x: "{{ ${ref} }}" } and read {{ input.x }}), ` +
+          `or place a subgraph with stateMap.in instead.`,
+        path: `${path}.${at}`,
+      });
+    }
+  }
+  const input = (node as { input?: unknown }).input;
+  if (input && typeof input === "object" && !Array.isArray(input) && Object.prototype.hasOwnProperty.call(input, node.id)) {
+    out.push({
+      severity: "error",
+      code: "PLACEMENT_INPUT_ID_COLLISION",
+      message:
+        `Placed node "${node.id}" has an input key named "${node.id}". Its input becomes channels of the child graph, ` +
+        `and a channel cannot share a name with a node id. Rename the input key.`,
+      path: `${path}.input.${node.id}`,
+    });
+  }
+  return out;
+}
+
+/** Describes a human gate in `node` itself or in the inline children below it, else undefined. */
+function findGate(node: NodeSpec): string | undefined {
+  const w = (node.with ?? {}) as Record<string, unknown>;
+  if (node.type === "hitl" || node.type === "workshop") return `a ${node.type} node ("${node.id}")`;
+  if (node.type === "wait" && (w["until"] != null || w["signal"] != null || w["webhook"] != null)) {
+    return `a wait node ("${node.id}") that waits on until/signal/webhook`;
+  }
+  if (node.type === "agent" && Array.isArray(w["tools"]) && JSON.stringify(w["tools"]).includes('"ask_human"')) {
+    return `an agent ("${node.id}") with the ask_human tool`;
+  }
+  for (const child of childNodesOf(node)) {
+    const found = findGate(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** True when `graph` (or any inline child below it) has a node with `runsOn`. */
+export function graphHasPlacement(graph: GraphSpec): boolean {
+  const walk = (nodes: NodeSpec[]): boolean =>
+    nodes.some((n) => n.runsOn !== undefined || walk(childNodesOf(n)));
+  return walk(graph.nodes ?? []);
+}
+
+export function placementNestedMessage(id: string): string {
+  return (
+    `Node "${id}" sets runsOn, but its subgraph also contains a node with runsOn. ` +
+    `Nested placement is not supported: place the whole subgraph, or place its inner nodes, not both.`
+  );
+}
+
+export function placementNotTopLevelMessage(id: string): string {
+  return (
+    `Node "${id}" sets runsOn inside a subgraph. Only top-level nodes are placed, so this runsOn would be ignored ` +
+    `and the node run on the coordinator. Place the subgraph node instead, or move the node to the top level.`
+  );
+}
+
+/**
+ * `runsOn` rules that need only the spec (inline children included):
+ * - not allowed on hitl / workshop / wait (PLACEMENT_NOT_ALLOWED)
+ * - a placed subgraph may not contain `runsOn` (PLACEMENT_NESTED)
+ * - `runsOn` below the top level of an unplaced graph is rejected (PLACEMENT_NOT_TOP_LEVEL)
+ * File-referenced (`uses:`) children are checked by `loadGraph`, which can read them.
+ */
+export function placementDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const warnedGate = new Set<string>();
+  const check = (node: NodeSpec, path: string, depth: number, placedAncestor: boolean) => {
+    if (node.runsOn !== undefined && depth > 0 && !placedAncestor) {
+      // Only top-level nodes are resolved; below that, runsOn would be ignored and the node run locally.
+      diagnostics.push({
+        severity: "error",
+        code: "PLACEMENT_NOT_TOP_LEVEL",
+        message: placementNotTopLevelMessage(node.id),
+        path: `${path}.runsOn`,
+      });
+    }
+    if (node.runsOn !== undefined) {
+      if (GATE_NODE_TYPES.has(node.type)) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLACEMENT_NOT_ALLOWED",
+          message:
+            `Node "${node.id}" (type ${node.type}) cannot set runsOn. ` +
+            `Gates run on the coordinator; a gate inside a placed subgraph is forwarded to the coordinator's operator.`,
+          path: `${path}.runsOn`,
+        });
+      }
+      if (node.type === "subgraph" && node.spec && graphHasPlacement(node.spec)) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLACEMENT_NESTED",
+          message: placementNestedMessage(node.id),
+          path: `${path}.runsOn`,
+        });
+      }
+      if (UNPLACEABLE_TYPES.has(node.type)) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLACEMENT_NOT_SUPPORTED",
+          message: unplaceableMessage(node.id, node.type),
+          path: `${path}.runsOn`,
+        });
+      }
+      if (node.type !== "subgraph" && !GATE_NODE_TYPES.has(node.type) && !UNPLACEABLE_TYPES.has(node.type)) {
+        diagnostics.push(...wrappedNodeDiagnostics(node, path));
+      }
+      const gate = !GATE_NODE_TYPES.has(node.type) ? findGate(node) : undefined;
+      if (gate && !warnedGate.has(node.id)) {
+        warnedGate.add(node.id);
+        diagnostics.push({
+          severity: "warning",
+          code: "PLACEMENT_GATE_PHASE2",
+          message:
+            `Placed node "${node.id}" contains ${gate}. Gates inside placed subgraphs are forwarded in phase 2 (ADR-0020); ` +
+            `until then the run fails with PLACEMENT_GATE_UNSUPPORTED if the gate is reached on the worker. ` +
+            `Move the gate out of the placed subgraph, onto the coordinator.`,
+          path: `${path}.runsOn`,
+        });
+      }
+    }
+    const placed = placedAncestor || node.runsOn !== undefined;
+    if (node.spec) for (const child of node.spec.nodes ?? []) check(child, `${path}.spec.nodes.${child.id}`, depth + 1, placed);
+    const inner = (node.with as { node?: NodeSpec } | undefined)?.node;
+    if (node.type === "map" && inner && typeof inner === "object") check(inner, `${path}.with.node`, depth + 1, placed);
+  };
+  for (const node of spec.nodes ?? []) check(node, `nodes.${node.id}`, 0, false);
+  return diagnostics;
+}
+
+/**
+ * Warn when a static edge joins two nodes placed on the same labels and target:
+ * each runs as its own hop through the coordinator.
+ */
+export function placementAdjacentHopDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const byId = new Map(spec.nodes.map((n) => [n.id, n]));
+  const key = (n: NodeSpec) => {
+    const p = normalizeRunsOn(n.runsOn!);
+    return JSON.stringify([[...p.labels].sort(), p.target ?? null]);
+  };
+  for (const [i, edge] of spec.edges.entries()) {
+    if (!("to" in edge)) continue;
+    const from = byId.get(edge.from);
+    if (!from || from.runsOn === undefined) continue;
+    for (const toId of Array.isArray(edge.to) ? edge.to : [edge.to]) {
+      const to = byId.get(toId);
+      if (!to || to.runsOn === undefined || key(from) !== key(to)) continue;
+      diagnostics.push({
+        severity: "warning",
+        code: "PLACEMENT_ADJACENT_HOPS",
+        message:
+          `Nodes "${from.id}" and "${to.id}" are adjacent and share the same runsOn, so each makes a round trip through the coordinator. ` +
+          `Group them in a subgraph and place the subgraph to run both in one hop.`,
+        path: `edges[${i}]`,
+      });
+    }
+  }
+  return diagnostics;
+}
+
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   return [
     ...hitlRouteDiagnostics(spec),
@@ -734,6 +954,8 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...unconditionalFanOutDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
     ...subgraphOutputMappingDiagnostics(spec),
+    ...placementDiagnostics(spec),
+    ...placementAdjacentHopDiagnostics(spec),
     ...memoryLintDiagnostics(spec),
     ...contextLintDiagnostics(spec),
   ];

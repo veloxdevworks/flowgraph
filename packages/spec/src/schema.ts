@@ -1155,6 +1155,55 @@ export const WebhookWithSchema = BaseWithSchema.extend({
 });
 
 // ---------------------------------------------------------------------------
+// Placement (`runsOn`) — see docs/adr/0020-node-placement.md
+// ---------------------------------------------------------------------------
+
+/** `namespace:value`, e.g. `os:windows`, `app:cc5`, `plugin:@acme/cc5-nodes`, `flowgraph:0.42`. */
+export const PLACEMENT_LABEL_PATTERN = /^[a-z][a-zA-Z0-9-]*:[A-Za-z0-9@][A-Za-z0-9._@\/+-]*$/;
+
+export const PlacementLabelSchema = z
+  .string()
+  .regex(
+    PLACEMENT_LABEL_PATTERN,
+    "Invalid placement label: use namespace:value, e.g. os:windows or app:cc5",
+  );
+
+export const RunsOnObjectSchema = z
+  .object({
+    labels: z.array(PlacementLabelSchema).min(1).describe("All of these labels must match"),
+    target: z.string().min(1).optional().describe("Pin to one named target from the topology"),
+    fallback: z
+      .enum(["error", "local"])
+      .optional()
+      .describe("`local` runs the node here when no worker matches (default: error)"),
+    wait: DurationSchema.optional().describe("Queue for a matching worker for up to this long"),
+  })
+  .strict();
+
+export const RunsOnSchema = z.union([z.array(PlacementLabelSchema).min(1), RunsOnObjectSchema]);
+
+/** `runsOn` as written: a label list, or the object form. */
+export type RunsOn = z.input<typeof RunsOnSchema>;
+
+export interface NormalizedRunsOn {
+  labels: string[];
+  target?: string;
+  fallback: "error" | "local";
+  wait?: string;
+}
+
+/** Canonical form of `runsOn`: object shape, labels deduped in order, `fallback` defaulted. */
+export function normalizeRunsOn(value: RunsOn): NormalizedRunsOn {
+  if (Array.isArray(value)) return { labels: [...new Set(value)], fallback: "error" };
+  return {
+    labels: [...new Set(value.labels)],
+    ...(value.target !== undefined ? { target: value.target } : {}),
+    fallback: value.fallback ?? "error",
+    ...(value.wait !== undefined ? { wait: value.wait } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Node spec (generic — `with` is typed per-type after resolution)
 // ---------------------------------------------------------------------------
 
@@ -1211,6 +1260,9 @@ export const NodeSpecSchema = z.object({
   with: z.record(z.unknown()).optional(),
   retry: RetrySchema.optional(),
   timeout: DurationSchema.optional(),
+  runsOn: RunsOnSchema.optional().describe(
+    "Run this node on a machine that has all these labels (ADR-0020). Not allowed on hitl, workshop or wait.",
+  ),
   when: z.string().optional().describe("Guard expression — skip node if false"),
   on: z
     .object({
@@ -1224,7 +1276,7 @@ export const NodeSpecSchema = z.object({
         .optional(),
     })
     .optional(),
-});
+}).strict();
 
 // NodeSpec is declared after GraphSpec (see below) so `spec?: GraphSpec` can
 // close the recursive type without a forward reference.
@@ -1696,7 +1748,7 @@ export const GraphSpecSchema = z.object({
   nodes: z.array(NodeSpecSchema),
   edges: z.array(EdgeSpecSchema),
   runtime: RuntimeSchema.optional(),
-});
+}).strict();
 
 export type GraphSpec = Omit<z.infer<typeof GraphSpecSchema>, "nodes"> & {
   nodes: NodeSpec[];

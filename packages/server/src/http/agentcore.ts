@@ -122,8 +122,8 @@ export async function handleAgentCore(
     } catch (err) {
       const refusal = refusalOf(err);
       if (refusal) {
-        const { status, ...rest } = refusal;
-        sendJson(res, status, { error: (err as Error).message, ...rest });
+        const { status, extra, ...rest } = refusal;
+        sendJson(res, status, { error: (err as Error).message, ...rest, ...extra });
         return true;
       }
       if (err instanceof ClientSecretsRejectedError) {

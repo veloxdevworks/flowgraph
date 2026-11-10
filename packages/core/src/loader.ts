@@ -5,7 +5,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
+import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import {
   envExpansionCollisionDiagnostics,
   LOAD_TIME_ENV_VAR_RE,
@@ -13,6 +13,8 @@ import {
 import {
   declaredRouteTargets,
   graphLintDiagnostics,
+  graphHasPlacement,
+  placementNestedMessage,
   subgraphOutputSites,
   unknownSubgraphOutputDiagnostics,
 } from "./runtime/validate-graph.js";
@@ -71,12 +73,7 @@ export async function loadGraph(
     return {
       spec: null,
       diagnostics: [
-        ...result.error.issues.map((i) => ({
-          severity: "error" as const,
-          code: "SCHEMA_ERROR",
-          message: `${i.path.join(".")}: ${i.message}`,
-          path: i.path.join("."),
-        })),
+        ...diagnosticsFromZodIssues(result.error.issues, parsed),
         ...envCollisionDiags,
       ],
     };
@@ -84,6 +81,7 @@ export async function loadGraph(
 
   const diagnostics = [...envCollisionDiags];
   diagnostics.push(...(await fileSubgraphOutputDiagnostics(result.data, path.dirname(resolved), seen)));
+  diagnostics.push(...(await fileSubgraphPlacementDiagnostics(result.data, path.dirname(resolved))));
   return { spec: result.data, diagnostics };
 }
 
@@ -128,6 +126,62 @@ async function fileSubgraphOutputDiagnostics(
     diagnostics.push(...unknownSubgraphOutputDiagnostics(site, child.spec));
   }
   return diagnostics;
+}
+
+/**
+ * A placed `uses:` subgraph whose file child (or an inline/file descendant) sets `runsOn`.
+ * Inline children are checked in `validateSpec`.
+ */
+async function fileSubgraphPlacementDiagnostics(spec: GraphSpec, dir: string): Promise<Diagnostic[]> {
+  const diagnostics: Diagnostic[] = [];
+  for (const node of spec.nodes ?? []) {
+    if (node.type !== "subgraph" || node.spec) continue;
+    const child = await loadFileChild(spec, node.uses, dir);
+    if (!child) continue;
+    if (!(await fileGraphHasPlacement(child.spec, child.dir, new Set([child.path])))) continue;
+    // Placed parent: nested placement. Unplaced parent: only top-level nodes are placed, so the
+    // child's runsOn would be ignored and its nodes run on the coordinator.
+    diagnostics.push(
+      node.runsOn !== undefined
+        ? { severity: "error", code: "PLACEMENT_NESTED", message: placementNestedMessage(node.id), path: `nodes.${node.id}.runsOn` }
+        : {
+            severity: "error",
+            code: "PLACEMENT_NOT_TOP_LEVEL",
+            message:
+              `Subgraph node "${node.id}" uses a graph that sets runsOn. Only top-level nodes are placed, so that runsOn ` +
+              `would be ignored and its nodes run on the coordinator. Set runsOn on "${node.id}" instead.`,
+            path: `nodes.${node.id}.uses`,
+          },
+    );
+  }
+  return diagnostics;
+}
+
+async function loadFileChild(
+  parent: GraphSpec,
+  uses: string | undefined,
+  dir: string,
+): Promise<{ spec: GraphSpec; dir: string; path: string } | null> {
+  if (!uses) return null;
+  const ref = subgraphAliases(parent)[uses] ?? uses;
+  if (!isGraphFileRef(ref)) return null;
+  const childPath = path.resolve(dir, ref);
+  // Fresh `seen`: the shared set would hide a child that two nodes both reference.
+  const child = await loadGraph(childPath, { cwd: path.dirname(childPath), seen: new Set() });
+  return child.spec ? { spec: child.spec, dir: path.dirname(childPath), path: childPath } : null;
+}
+
+/** True when `spec`, or any file subgraph below it, sets `runsOn`. `visited` guards cycles. */
+async function fileGraphHasPlacement(spec: GraphSpec, dir: string, visited: Set<string>): Promise<boolean> {
+  if (graphHasPlacement(spec)) return true;
+  for (const node of spec.nodes ?? []) {
+    if (node.type !== "subgraph" || node.spec) continue;
+    const child = await loadFileChild(spec, node.uses, dir);
+    if (!child || visited.has(child.path)) continue;
+    visited.add(child.path);
+    if (await fileGraphHasPlacement(child.spec, child.dir, visited)) return true;
+  }
+  return false;
 }
 
 function expandEnvVars(yaml: string): string {

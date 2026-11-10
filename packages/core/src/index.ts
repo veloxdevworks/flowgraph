@@ -33,7 +33,7 @@ export {
   isInputValidationError,
   InputValidationError,
 } from "./inputs.js";
-export { compileGraph, ResumeAttemptsExhaustedError } from "./compiler.js";
+export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError } from "./compiler.js";
 export {
   NODE_POLICY,
   NodePolicyError,
@@ -410,3 +410,8 @@ export type {
   JobStatus,
   JobState,
 } from "./media/types.js";
+
+// Node placement (ADR-0020)
+export * from "./placement/index.js";
+export { CORE_VERSION } from "./version.js";
+export { CORE_BUILTIN_NODE_TYPES } from "./nodes/index.js";

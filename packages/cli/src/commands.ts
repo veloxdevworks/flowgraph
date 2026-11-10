@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildSkillsCommand } from "./skills-command.js";
 import { abortOnSignals } from "./run-signal.js";
@@ -11,6 +11,7 @@ import { mcpHubForRun, closeMcpHub, loginMcpServer, mcpOAuthStatus, logoutMcpSer
 import { buildProviders } from "./providers.js";
 import { registerLocalTools } from "./local-tools.js";
 import { loadDotenvFromCwd } from "./env.js";
+import { loadTargetsFile, placementCompileOptions, placementLines } from "./placement.js";
 import { templateFor, listTemplates } from "./templates.js";
 import { migrateSpec } from "./migrate.js";
 import { printDiagnostics, printBanner, printSuccess, printError, printInfo, printWarning, formatDuration } from "./ui.js";
@@ -224,10 +225,12 @@ program
   .option("--on-interrupt <policy>", "HITL policy: prompt|fail|approve|webhook", "fail")
   .option("--no-mcp-oauth", "Do not prompt for MCP OAuth on connect; fail if tokens are missing")
   .option("--fail-on-issues", "Exit 1 when the run recorded any issues")
+  .option("--targets <file>", "Topology file (YAML/JSON) naming the workers that `runsOn` nodes may be placed on")
   .option("--cwd <dir>", "Working directory")
   .action(async (
     graphPath: string,
     opts: {
+      targets?: string;
       input?: string[];
       thread?: string;
       stream?: boolean;
@@ -323,14 +326,45 @@ program
     const providers = await buildProviders(spec, cwd);
     const localTools = await registerLocalTools(spec, cwd);
     for (const w of localTools.warnings) printWarning(w);
-    const compiled = await compileGraph(spec, {
-      cwd,
-      graphPath,
-      sinks,
-      providers,
-      ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
-      ...mcpOpt,
-    });
+    let placement: Awaited<ReturnType<typeof placementCompileOptions>> | undefined;
+    if (opts.targets) {
+      const targets = await loadTargetsFile(opts.targets, cwd);
+      if (!targets.topology) {
+        printError(`Invalid --targets file ${opts.targets}:`);
+        printDiagnostics(targets.diagnostics, opts.targets);
+        await closeMcpHub(mcpOpt.mcp);
+        process.exit(2);
+      }
+      placement = await placementCompileOptions(spec, targets.topology, {
+        graphDir,
+        subgraphAliases: imported.subgraphAliases,
+        loadGraph,
+      });
+    }
+    let compiled;
+    try {
+      compiled = await compileGraph(spec, {
+        cwd,
+        graphPath,
+        sinks,
+        providers,
+        ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
+        ...mcpOpt,
+        ...(placement ? { placement } : {}),
+      });
+    } catch (err) {
+      if (err instanceof PlacementUnsatisfiedError) {
+        printError(err.message);
+        await closeMcpHub(mcpOpt.mcp);
+        process.exit(2);
+      }
+      throw err;
+    }
+    // Where each placed node will run, before anything starts (stderr under --json keeps stdout JSONL).
+    for (const line of placementLines(compiled.placements)) {
+      if (opts.json) console.error(line);
+      else printInfo(line);
+    }
 
     if (!opts.json && !opts.stream) {
       printBanner(`Running ${spec.metadata.name}`);

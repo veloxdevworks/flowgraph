@@ -49,6 +49,8 @@ export interface EventScope {
   nodeType?: string;
   parentSpanId?: string;
   attempt?: number;
+  /** Set when the node ran on another machine (ADR-0020): where, and the child run's thread id. */
+  placement?: { target: string; childThreadId: string };
 }
 
 let _seq = 0;

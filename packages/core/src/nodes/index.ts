@@ -56,6 +56,9 @@ for (const node of BUILT_INS) {
   if (!registry.has(node.type)) registry.register(node);
 }
 
+/** Node types core ships; every engine has these, so placement never infers `nodeType:` for them. */
+export const CORE_BUILTIN_NODE_TYPES: ReadonlySet<string> = new Set(BUILT_INS.map((n) => n.type));
+
 /** @deprecated Use functionNode */
 export const codeNode = functionNode;
 /** @deprecated Use agentNode */

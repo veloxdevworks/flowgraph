@@ -15,6 +15,11 @@ export {
   ChannelTypeSchema,
   ReducerSchema,
   NodeSpecSchema,
+  RunsOnSchema,
+  RunsOnObjectSchema,
+  PlacementLabelSchema,
+  PLACEMENT_LABEL_PATTERN,
+  normalizeRunsOn,
   EdgeSpecSchema,
   GraphSpecSchema,
   RouterWithSchema,
@@ -101,6 +106,8 @@ export {
 } from "./schema.js";
 
 export type {
+  RunsOn,
+  NormalizedRunsOn,
   GraphSpec,
   NodeSpec,
   EdgeSpec,
@@ -169,3 +176,5 @@ export type {
   RouterMergePlan,
   RouterMergeRefusal,
 } from "./hitl-merge.js";
+
+export { diagnosticsFromZodIssues, editDistance, suggestKey } from "./zod-diagnostics.js";

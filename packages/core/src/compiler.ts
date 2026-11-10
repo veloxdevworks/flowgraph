@@ -7,7 +7,8 @@ import { START, END, StateGraph, Command, Send, type BaseCheckpointSaver, type B
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
-import type { GraphSpec, NodeSpec } from "@flowgraph/spec";
+import type { GraphSpec, NodeSpec, OutputMapping } from "@flowgraph/spec";
+import { applyOutput } from "./runtime/apply-output.js";
 import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
@@ -83,6 +84,9 @@ import { createHookBus, type HookBus } from "./hooks/bus.js";
 import type { Hook } from "./hooks/types.js";
 import { hooksFromSpec, defaultGuardrailHooks } from "./hooks/builtin.js";
 import "./nodes/index.js";
+import { planPlacements, type CompilePlacementOptions, type PlacementPlan } from "./placement/plan.js";
+import type { PlacementInfo, RemoteNodeExecutor } from "./placement/remote.js";
+import { wrapperSpecForNode } from "./placement/remote.js";
 import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
@@ -159,6 +163,12 @@ export interface CompileOptions {
    * FLOWGRAPH_MEMORY_BACKEND setting).
    */
   memoryUnavailableHint?: string;
+  /**
+   * Node placement (ADR-0020). Without `topology` and `transport`, a placed top-level node must be
+   * satisfiable by this host (or set `fallback: local`), else compile throws `PlacementUnsatisfiedError`.
+   * With them, nodes the local host cannot run are dispatched to a matching worker.
+   */
+  placement?: CompilePlacementOptions;
   extraFactories?: NodeFactory[];
   providers?: ProviderAdapter[];
   /**
@@ -295,6 +305,8 @@ export interface CompiledGraph {
    */
   step(opts: ContinueOptions): Promise<RunResult>;
   stream(opts?: RunOptions): AsyncIterable<FlowgraphEvent>;
+  /** Where each `runsOn` node was placed at compile time (ADR-0020). Empty when the graph has none. */
+  placements: import("./placement/resolve.js").PlacementDecision[];
 }
 
 type ExecuteMode = "start" | "resume" | "continue";
@@ -338,7 +350,8 @@ interface AssembledGraph {
 }
 
 export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): Promise<CompiledGraph> {
-  const assembled = await assembleCompiledLangGraph(spec, opts);
+  const plan = await planPlacements(spec, opts.placement);
+  const assembled = await assembleCompiledLangGraph(spec, opts, plan);
   const {
     spec: graphSpec,
     runId,
@@ -888,6 +901,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     spec: graphSpec,
     runId,
     events,
+    placements: plan?.decisions ?? [],
     run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, "start"),
     resume,
     continueRun: (opts: ContinueOptions) => continueRun(opts),
@@ -931,7 +945,11 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   };
 }
 
-async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions): Promise<AssembledGraph> {
+async function assembleCompiledLangGraph(
+  spec: GraphSpec,
+  opts: CompileOptions,
+  plan?: PlacementPlan,
+): Promise<AssembledGraph> {
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
   // does not silently drop node updates when authors omit state.channels entries.
   spec = ensureDeclaredOutputChannels(spec);
@@ -1093,10 +1111,12 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       continue;
     }
 
-    const compiled = factory.build(
+    const remoteExec = plan?.remote.get(nodeSpec.id);
+    const built = factory.build(
       {
         graphName: spec.metadata.name,
         toolWiring,
+        ...(remoteExec ? { remote: remoteExec } : {}),
         ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
         ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
         sharedHistoryChannels: sharedHistory,
@@ -1104,6 +1124,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       nodeSpec as unknown as Record<string, unknown>,
       configResult.data,
     );
+    const compiled = remoteExec ? placeRemotely(built, nodeSpec, configResult.data, remoteExec) : built;
     compiledNodes.set(nodeSpec.id, compiled);
 
     const nodeRetry = nodeSpec.retry ?? defaultRetry;
@@ -1117,10 +1138,11 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
       state: Record<string, unknown>,
       inputOverride?: Record<string, unknown>,
       lgConfig?: LangGraphRunnableConfig,
+      attemptBase = 0,
     ): Promise<NodeRun> =>
       runWithPolicy<NodeRun>(
         (attempt, signal) => {
-          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attempt, inputOverride, lgConfig);
+          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig);
           if (signal && stopsOnTimeout) ctx.signal = signal;
           return compiled.run(state, ctx).then((res) => ({ res, ctx }));
         },
@@ -1193,7 +1215,16 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
         inputOverride = r.payload.input as Record<string, unknown> | undefined;
       }
 
-      events.emit("node.start", { nodeId: nodeSpec.id, type: nodeSpec.type }, scope);
+      // A placed node's events say where it ran (ADR-0020): the planned child before it starts,
+      // the actual one (after retries and re-resolution) once it ends.
+      const placedScope = (ranCtx?: unknown): typeof scope => {
+        if (!remoteExec) return scope;
+        const actual = (ranCtx as { _placement?: PlacementInfo } | undefined)?._placement;
+        const childThreadId = actual?.childThreadId ?? remoteExec.plannedChildThreadId(runMeta.threadId);
+        if (!childThreadId) return scope;
+        return { ...scope, placement: { target: actual?.target ?? remoteExec.initialTarget, childThreadId } } as typeof scope;
+      };
+      events.emit("node.start", { nodeId: nodeSpec.id, type: nodeSpec.type }, placedScope());
 
       try {
         const run = await runOnce(state, inputOverride, lgConfig);
@@ -1210,7 +1241,7 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
           const r = await hooks.run("node:after", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, update } });
           const c = r.control;
           if (c?.kind === "route") {
-            events.emit("node.end", { nodeId: nodeSpec.id, update, routed: c.to }, scope);
+            events.emit("node.end", { nodeId: nodeSpec.id, update, routed: c.to }, placedScope(run.ctx));
             return new Command({ goto: c.to, update }) as unknown as Record<string, unknown>;
           }
           update = sealUpdate((r.payload.update as Record<string, unknown> | undefined) ?? update, run);
@@ -1223,11 +1254,11 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
         }
 
         if (nodeGoto != null) {
-          events.emit("node.end", { nodeId: nodeSpec.id, update, routed: nodeGoto }, scope);
+          events.emit("node.end", { nodeId: nodeSpec.id, update, routed: nodeGoto }, placedScope(run.ctx));
           return new Command({ goto: nodeGoto, update }) as unknown as Record<string, unknown>;
         }
 
-        events.emit("node.end", { nodeId: nodeSpec.id, update }, scope);
+        events.emit("node.end", { nodeId: nodeSpec.id, update }, placedScope(run.ctx));
         return update;
       } catch (err) {
         if (isInterruptLike(err)) throw err; // let LangGraph handle the suspend
@@ -1264,9 +1295,13 @@ async function assembleCompiledLangGraph(spec: GraphSpec, opts: CompileOptions):
           }
           if (c?.kind === "retry") {
             events.emit("node.retry", { nodeId: nodeSpec.id, reason: "hook" }, scope);
-            const retried = await runOnce(state, inputOverride, lgConfig);
+            // A placed node names its child run by attempt. A hook retry continues the numbering after the
+            // attempts the policy used, so it gets a new child id; the numbering is a pure function of the
+            // sequence, so a crash re-entry replays the same ids and re-attaches.
+            const hookBase = remoteExec ? Math.max(1, nodeRetry?.maxAttempts ?? 1) : 0;
+            const retried = await runOnce(state, inputOverride, lgConfig, hookBase);
             const update = finalizeUpdate(retried);
-            events.emit("node.end", { nodeId: nodeSpec.id, update }, scope);
+            events.emit("node.end", { nodeId: nodeSpec.id, update }, placedScope(retried.ctx));
             return update;
           }
         }
@@ -1663,6 +1698,38 @@ function dropUnownedReserved(
   return out ?? update;
 }
 
+/**
+ * A node decided `remote` (ADR-0020). A `subgraph` keeps its own run(): it reads `BuildContext.remote`
+ * and swaps only the child invocation, so input seeding and merge-back are the in-process ones.
+ * Any other node runs as a one-node child graph; its `outputs.<id>` is taken as the node's result
+ * and its own `output` mapping (auto-save, `to`, `map`) is applied here, as the node would in-process.
+ */
+function placeRemotely(
+  built: ReturnType<NodeFactory["build"]>,
+  nodeSpec: NodeSpec,
+  config: unknown,
+  remote: RemoteNodeExecutor,
+): ReturnType<NodeFactory["build"]> {
+  // A timeout aborts the attempt's signal; the executor then cancels the child.
+  const capabilities = { ...built.capabilities, stopsOnTimeout: true };
+  if (nodeSpec.type === "subgraph") return { ...built, capabilities };
+  return {
+    ...built,
+    capabilities,
+    async run(state, ctx) {
+      const input = (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {};
+      // `execute` stages the artifacts in `input` to the worker; the node's output is fetched back
+      // (ADR-0020 section 10), and only that: other files the child wrote stay on the worker.
+      const final = await remote.execute({ ctx, spec: wrapperSpecForNode(nodeSpec, input), input, wrapper: true });
+      const outputs = final["outputs"];
+      const returned = outputs != null && typeof outputs === "object" ? (outputs as Record<string, unknown>)[nodeSpec.id] : undefined;
+      const raw = await remote.stageOut(ctx, returned);
+      const scope = { state, input, config: ctx.config, run: ctx.meta };
+      return { update: applyOutput((config as { output?: OutputMapping } | undefined)?.output, raw, { nodeId: nodeSpec.id, scope }) };
+    },
+  };
+}
+
 function resultToUpdate(result: NodeResult): Record<string, unknown> {
   if ("update" in result) return result.update;
   if ("command" in result) return result.command.update ?? {};
@@ -2021,7 +2088,7 @@ function buildNodeCtx(
   return ctx;
 }
 
-function resolveGraphWorkspace(spec: GraphSpec, graphDir: string): string {
+export function resolveGraphWorkspace(spec: GraphSpec, graphDir: string): string {
   const raw = spec.runtime?.workspace;
   if (typeof raw !== "string" || !raw.trim()) return graphDir;
   return path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(graphDir, raw);

@@ -199,6 +199,40 @@ nodes:
 
 Full per-type configuration is documented in [03 — Node Types](./03-node-types.md).
 
+### `runsOn` (placement)
+
+`runsOn` declares what a node needs from the machine that runs it. It is optional and valid on every node type except `hitl`, `workshop` and `wait`.
+
+```yaml
+nodes:
+  - id: character
+    type: subgraph
+    uses: ./cc5-character.graph.yaml
+    runsOn: [os:windows, app:cc5]        # shorthand: all of these labels
+    with:
+      stateMap:
+        in:  { brief: characterBrief }
+        out: { characterFbx: fbx }
+
+  - id: upscale
+    type: shell
+    runsOn:
+      labels: [gpu:nvidia]               # required, at least one
+      target: render-01                  # optional: pin to one named target
+      fallback: local                    # optional: error (default) | local
+      wait: 30m                          # optional: queue for a worker, up to this long
+    with: { command: ./upscale.sh }
+```
+
+- A label is `namespace:value`, for example `os:windows`, `app:cc5`, `plugin:@acme/cc5-nodes`, `flowgraph:0.42`. The namespace starts with a lowercase letter; the value starts with a letter, digit or `@`.
+- `labels` is all-of. The graph never names hosts or URLs; `target` is a name that the host's topology resolves.
+- `runsOn` on `hitl`, `workshop` or `wait` is an error (`PLACEMENT_NOT_ALLOWED`): gates run on the coordinator, and a gate inside a placed subgraph is forwarded to it.
+- A subgraph with `runsOn` may not contain a node with `runsOn`, inline or through `uses:` (`PLACEMENT_NESTED`).
+- Only top-level nodes are placed. `runsOn` on a node inside an unplaced subgraph (inline, through `uses:`, or a `map` inner node) is an error (`PLACEMENT_NOT_TOP_LEVEL`): it would be ignored and the node run on the coordinator. Set `runsOn` on the top-level subgraph node instead.
+- Two directly connected nodes with the same labels and `target` produce the warning `PLACEMENT_ADJACENT_HOPS`: each is its own round trip through the coordinator, so group them in a subgraph.
+
+A node whose labels the local host satisfies runs in-process as usual. Otherwise the engine dispatches it to a matching worker from the host's topology, or fails before the run starts with `PLACEMENT_UNSATISFIED`. How placed nodes are resolved, named, reconnected and reported is in [07 — Runtime §6a](./07-runtime-and-execution.md#6a-node-placement); the design is [ADR-0020](./adr/0020-node-placement.md). Phase 1 does not forward gates inside a placed subgraph (`PLACEMENT_GATE_PHASE2` warns), does not support `wait`, and does not stage artifacts.
+
 ## 6. `edges`
 
 Edges define control flow. Two forms: **static** and **conditional**. `START` and `END` are reserved node ids (mapped to LangGraph's `START`/`END`).
@@ -421,10 +455,12 @@ runtime:
 | **warning** | node with no inbound edge except `START` paths; deprecated field; unused channel; missing `description` on a published skill |
 | **info** | suggestions (e.g. "consider a `router` node instead of N conditional branches") |
 
+Unknown keys are an error. The graph root, every node, and every inline subgraph `spec:` accept only the fields defined in this document; anything else is reported as `UNKNOWN_FIELD`, one diagnostic per key, with a path such as `nodes.character.runOn`. When the key is within two edits of a real one the message adds `Did you mean "runsOn"?`. Free-form blocks (`metadata`, `with`, `config`, `runtime`) are not affected. The check exists so an engine never silently drops a field it does not understand: a graph that uses a newer field (for example `runsOn`) must fail on an older engine instead of running without it.
+
 The same diagnostics power editor squiggles via the JSON Schema + a future Language Server (post-1.0).
 
 ## 12. Versioning the spec
 
 - `apiVersion: flowgraph/v1` is the stable contract. Breaking changes ⇒ `flowgraph/v2` with a documented migration and an optional `flowgraph migrate` codemod.
-- Additive fields ship within `v1` and are reflected in the JSON Schema.
+- Additive fields ship within `v1` and are reflected in the JSON Schema. Because the graph root and nodes reject unknown keys (§11), a graph that uses a new field requires an engine that knows it; older engines report `UNKNOWN_FIELD` rather than ignoring the field.
 - `@flowgraph/spec` is independently versioned; the `apiVersion` token is decoupled from the package's semver.

@@ -191,7 +191,7 @@ export class SessionRegistry {
 
   /**
    * Subscribe to live events. Optionally replay from after `afterSeq`
-   * (Last-Event-ID). Returns an unsubscribe function.
+   * (Last-Event-ID; -1 = from the start). Returns an unsubscribe function.
    */
   subscribe(
     threadId: string,
@@ -231,7 +231,8 @@ export class SessionRegistry {
       }
     }
 
-    if (afterSeq != null && afterSeq >= 0) {
+    // -1 replays everything, including seq 0 (the first event a fresh process emits).
+    if (afterSeq != null && afterSeq >= -1) {
       for (const ev of s.events) {
         if (ev.seq > afterSeq) {
           try {
