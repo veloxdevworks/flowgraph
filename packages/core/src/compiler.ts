@@ -315,6 +315,8 @@ type ExecuteMode = "start" | "resume" | "continue";
 interface InvokeOverrides {
   /** Stop after one superstep (LangGraph invoke-time `interruptAfter: "*"`). */
   singleStep?: boolean;
+  /** An HTTP callback targets one interrupt; leave sibling route registrations intact. */
+  preserveWebhookRoutes?: boolean;
 }
 
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
@@ -367,6 +369,20 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
   // Per compiled graph: two graphs that reuse a thread id must not cancel each other's timers.
   const waitTimers: WaitTimerMap = new Map();
+
+  const getCheckpointState = async (config: LangGraphRunnableConfig) => {
+    const snap = await compiledLg.getState(config);
+    if (!checkpointer || !snap.tasks.some((task) => task.interrupts.length > 0)) return snap;
+    const saved = await checkpointer.getTuple(snap.config);
+    // LangGraph can retain old interrupt writes after a task finishes in a
+    // partially answered superstep. Real channel/result writes mark it done;
+    // resume writes alone do not (a re-prompt can still be pending).
+    const completed = new Set((saved?.pendingWrites ?? []).filter(([, channel]) =>
+      Object.prototype.hasOwnProperty.call(snap.values, channel) ||
+      channel === "__no_writes__" || channel === "__return__" || channel.startsWith("branch:to:"),
+    ).map(([taskId]) => taskId));
+    return { ...snap, tasks: snap.tasks.map((task) => completed.has(task.id) ? { ...task, interrupts: [] } : task) };
+  };
 
   const executeInvoke = async (
     payload: Record<string, unknown> | Command | null,
@@ -440,7 +456,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     };
 
     // CLI/IPC resume should drop any in-process HTTP listener for this thread.
-    if (mode === "resume") {
+    if (mode === "resume" && !overrides.preserveWebhookRoutes) {
       unregisterWebhookRoute(threadId);
     }
 
@@ -515,7 +531,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // store through the invoke config, never through a process-wide cache.
     let replay = new ReplayStore();
     if (mode !== "start" && checkpointer) {
-      const snap = await compiledLg.getState(cfg);
+      const snap = await getCheckpointState(cfg);
       // `threadId` lets interrupts saved by earlier releases (keyed
       // `<threadId>:<nodeId>`) resume without re-running approved tools.
       const pending = pendingInterrupts(snap);
@@ -529,7 +545,20 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       });
       const expired = expiredWaitResume(snap);
       if (expired) {
-        payload = new Command({ resume: expired });
+        if (overrides.preserveWebhookRoutes && payload instanceof Command) {
+          // An overdue HTTP callback may time out its own gate, but must not
+          // broadcast that timeout to unrelated pending interrupts.
+          const overdue = new Set((snap.tasks ?? []).flatMap((task) => task.interrupts)
+            .filter((it) => {
+              const deadline = toInterruptInfo(it).deadlineAt;
+              return deadline !== undefined && Date.parse(deadline) <= Date.now();
+            }).map((it) => it.id));
+          const targeted = payload.resume as Record<string, unknown>;
+          payload = new Command({ resume: Object.fromEntries(Object.entries(targeted)
+            .map(([id, answer]) => [id, overdue.has(id) ? expired : answer])) });
+        } else {
+          payload = new Command({ resume: expired });
+        }
         mode = "resume";
       }
     }
@@ -867,7 +896,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   ): Promise<RunResult> => {
     let payload: Record<string, unknown> | Command | null = null;
     if (checkpointer) {
-      const snap = await compiledLg.getState({ configurable: { thread_id: continueOpts.threadId } });
+      const snap = await getCheckpointState({ configurable: { thread_id: continueOpts.threadId } });
       const hasInterrupt = (snap?.tasks ?? []).some(
         (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
       );
@@ -884,7 +913,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       resume: resumeOpts.resume,
     });
     if (checkpointer) {
-      const snap = await compiledLg.getState({ configurable: { thread_id: resumeOpts.threadId } });
+      const snap = await getCheckpointState({ configurable: { thread_id: resumeOpts.threadId } });
       const hasInterrupt = (snap?.tasks ?? []).some(
         (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
       );
@@ -912,12 +941,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     continueRun: (opts: ContinueOptions) => continueRun(opts),
     getState: async (threadId: string) => {
       if (!checkpointer) return null;
-      let snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
+      let snap = await getCheckpointState({ configurable: { thread_id: threadId } });
       await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, nodePolicy: opts.nodePolicy, rehydrateWebhooks: true });
       const expired = expiredWaitResume(snap);
       if (expired) {
         await executeInvoke(new Command({ resume: expired }), { threadId, resume: expired, onInterrupt: "fail" }, "resume");
-        snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
+        snap = await getCheckpointState({ configurable: { thread_id: threadId } });
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return toSnapshot(snap as any, threadId);
@@ -1872,11 +1901,10 @@ function setWebhookUrlOnInterrupt(info: InterruptInfo, url: string): void {
 
 /** Reattach listening URLs from the in-process route registry (e.g. getState). */
 function enrichInterruptsWithWebhookUrls(interrupts: InterruptInfo[], threadId: string): void {
-  const route = getWebhookRoute(threadId);
-  if (!route?.url) return;
   for (const info of interrupts) {
     if (!isWebhookInterrupt(info)) continue;
-    setWebhookUrlOnInterrupt(info, route.url);
+    const route = getWebhookRoute(threadId, webhookNodeIdFromInterrupt(info), info.id);
+    if (route?.url) setWebhookUrlOnInterrupt(info, route.url);
   }
 }
 
@@ -1889,6 +1917,7 @@ async function attachWebhookUrls(
       payload: Record<string, unknown> | Command | null,
       runOpts: RunOptions | ResumeOptions | ContinueOptions,
       mode: ExecuteMode,
+      overrides?: InvokeOverrides,
     ) => Promise<RunResult>;
     signal?: AbortSignal;
     sinks?: EventSink[];
@@ -1908,8 +1937,10 @@ async function attachWebhookUrls(
     const nodeId = webhookNodeIdFromInterrupt(interrupt) ?? "unknown";
     const payload = interrupt.payload as { data?: { schema?: Record<string, unknown> } } | undefined;
     const schema = payload?.data?.schema;
-    const url = buildWebhookUrl(info.host, info.port, opts.threadId, nodeId);
+    const existing = getWebhookRoute(opts.threadId, nodeId, interrupt.id);
+    const url = existing?.url ?? buildWebhookUrl(info.host, info.port, opts.threadId, nodeId, interrupt.id);
     setWebhookUrlOnInterrupt(interrupt, url);
+    if (existing) continue;
 
     const onAbort = () => unregisterWebhookRoute(opts.threadId);
     if (opts.signal) {
@@ -1923,13 +1954,14 @@ async function attachWebhookUrls(
     void registerWebhookRoute({
       threadId: opts.threadId,
       nodeId,
+      interruptId: interrupt.id,
       url,
       ...(schema ? { schema } : {}),
       ...(serverCfg?.token ? { token: serverCfg.token } : {}),
       resume: async (body) => {
         if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
         const result = await opts.executeInvoke(
-          resumeCommand(body, [interrupt]),
+          new Command({ resume: { [interrupt.id]: body } }),
           {
             threadId: opts.threadId,
             resume: body,
@@ -1937,6 +1969,7 @@ async function attachWebhookUrls(
             ...(opts.sinks ? { sinks: opts.sinks } : {}),
           },
           "resume",
+          { preserveWebhookRoutes: true },
         );
         return {
           status: result.status,
@@ -2245,6 +2278,7 @@ export async function hydrateDurableRuntime(
       payload: Record<string, unknown> | Command | null,
       runOpts: RunOptions | ResumeOptions | ContinueOptions,
       mode: ExecuteMode,
+      overrides?: InvokeOverrides,
     ) => Promise<RunResult>;
     signal?: AbortSignal;
     sinks?: EventSink[];
@@ -2257,7 +2291,7 @@ export async function hydrateDurableRuntime(
   for (const task of snap.tasks ?? []) {
     for (const it of task.interrupts ?? []) interrupts.push(toInterruptInfo(it));
   }
-  if (opts.rehydrateWebhooks !== false && interrupts.some(isWebhookInterrupt) && !getWebhookRoute(threadId)) {
+  if (opts.rehydrateWebhooks !== false && interrupts.some(isWebhookInterrupt)) {
     await attachWebhookUrls(interrupts, {
       threadId,
       graphSpec,

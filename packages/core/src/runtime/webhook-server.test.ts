@@ -54,6 +54,35 @@ async function postJson(url: string, body: unknown): Promise<{ status: number; j
   return { status: res.status, json: await res.json() };
 }
 
+function parallelWebhookGraph(human = false): GraphSpec {
+  const spec = webhookWaitGraph();
+  spec.state!.channels!["second"] = { type: "object" };
+  spec.nodes.push({
+    id: "second-gate",
+    type: human ? "hitl" : "wait",
+    with: human
+      ? { mode: "approve", message: "Approve?", output: { to: "second" } }
+      : {
+          webhook: { schema: { required: ["answer"], properties: { answer: { type: "string" } } } },
+          output: { to: "second" },
+        },
+  });
+  spec.edges = [
+    { from: "START", to: ["await-approval", "second-gate"] },
+    { from: "await-approval", to: "END" },
+    { from: "second-gate", to: "END" },
+  ];
+  return spec;
+}
+
+function callbackUrl(interrupt: { payload?: unknown }): string {
+  return (interrupt.payload as { data: { webhookUrl: string } }).data.webhookUrl;
+}
+
+function interruptNode(interrupt: { payload?: unknown }): string {
+  return (interrupt.payload as { data: { __nodeId: string } }).data.__nodeId;
+}
+
 // The automatic 100 Continue response confirms the server has received the
 // headers and entered the handler before we send the body, without sleeps.
 async function pendingPost(url: string, token?: string, payload: unknown = { approved: true }) {
@@ -98,6 +127,192 @@ describe("webhook HTTP ingress", () => {
     await closeWebhookServers();
   });
 
+  it.each([false, true])(
+    "keeps sibling gates waiting when answered in reverse order: %s",
+    async (reverse) => {
+      const compiled = await compileGraph(parallelWebhookGraph(), {});
+      const result = await compiled.run({ threadId: "parallel", onInterrupt: "fail" });
+      expect(result.interrupts).toHaveLength(2);
+      const gates = [...result.interrupts!].sort((a, b) =>
+        interruptNode(a).localeCompare(interruptNode(b)),
+      );
+      if (reverse) gates.reverse();
+      const [first, second] = gates;
+      const firstUrl = callbackUrl(first!);
+      const secondUrl = callbackUrl(second!);
+      expect(firstUrl).not.toBe(secondUrl);
+      expect((await fetch(firstUrl)).status).toBe(200);
+      expect((await fetch(secondUrl)).status).toBe(200);
+      expect(await postJson(firstUrl, { answer: "first" })).toEqual({
+        status: 200,
+        json: { status: "interrupted" },
+      });
+      const snapshot = await compiled.getState("parallel");
+      expect(snapshot?.interrupts).toHaveLength(1);
+      expect(snapshot?.interrupts[0]?.id).toBe(second!.id);
+      expect(callbackUrl(snapshot!.interrupts[0]!)).toBe(secondUrl);
+      const firstChannel = interruptNode(first!) === "await-approval" ? "approval" : "second";
+      const secondChannel = firstChannel === "approval" ? "second" : "approval";
+      expect(snapshot?.values[firstChannel]).toEqual({ answer: "first" });
+      expect(snapshot?.values[secondChannel]).toBeNull();
+      expect((await postJson(firstUrl, { answer: "duplicate" })).status).toBe(404);
+      expect((await fetch(secondUrl)).status).toBe(200);
+      if (secondChannel === "second")
+        expect((await postJson(secondUrl, { answer: false })).status).toBe(422);
+      expect(await postJson(secondUrl, { answer: "second" })).toEqual({
+        status: 200,
+        json: { status: "completed" },
+      });
+      expect((await compiled.getState("parallel"))?.values).toMatchObject({
+        [firstChannel]: { answer: "first" },
+        [secondChannel]: { answer: "second" },
+      });
+    },
+  );
+
+  it("serializes simultaneous callbacks for different interrupts in one thread", async () => {
+    const compiled = await compileGraph(parallelWebhookGraph(), {});
+    const first = await compiled.run({ threadId: "parallel-posts", onInterrupt: "fail" });
+    const gates = first.interrupts!;
+    const replies = await Promise.all(
+      gates.map((gate, i) => postJson(callbackUrl(gate), { answer: `answer-${i}` })),
+    );
+    expect(replies.every((reply) => reply.status === 200)).toBe(true);
+    expect(replies.map((reply) => (reply.json as { status: string }).status).sort()).toEqual([
+      "completed",
+      "interrupted",
+    ]);
+    const snapshot = await compiled.getState("parallel-posts");
+    expect(snapshot?.interrupts).toHaveLength(0);
+    for (const [i, gate] of gates.entries()) {
+      expect(
+        snapshot?.values[interruptNode(gate) === "await-approval" ? "approval" : "second"],
+      ).toEqual({ answer: `answer-${i}` });
+    }
+  });
+
+  it("does not answer a parallel human gate with the webhook's payload", async () => {
+    const compiled = await compileGraph(parallelWebhookGraph(true), {});
+    const first = await compiled.run({ threadId: "parallel-human", onInterrupt: "fail" });
+    const webhook = first.interrupts!.find((gate) => interruptNode(gate) === "await-approval")!;
+    const human = first.interrupts!.find((gate) => gate.kind === "approval")!;
+    expect(await postJson(callbackUrl(webhook), { answer: "external" })).toEqual({
+      status: 200,
+      json: { status: "interrupted" },
+    });
+    const snapshot = await compiled.getState("parallel-human");
+    expect(snapshot?.interrupts.map((gate) => gate.id)).toEqual([human.id]);
+    expect(snapshot?.values["second"]).toBeNull();
+    expect(
+      (
+        await compiled.resume({
+          threadId: "parallel-human",
+          resume: { [human.id]: { approved: false } },
+          onInterrupt: "fail",
+        })
+      ).status,
+    ).toBe("completed");
+  });
+
+  it("isolates equally named gates in parallel subgraphs", async () => {
+    const spec = parallelWebhookGraph();
+    spec.nodes = ["a", "b"].map((name, i) => ({
+      id: `branch-${name}`,
+      type: "subgraph",
+      spec: {
+        metadata: { name: `child-${name}` },
+        state: { channels: { answer: { type: "object" } } },
+        nodes: [
+          { id: "shared-gate", type: "wait", with: { webhook: true, output: { to: "answer" } } },
+        ],
+        edges: [
+          { from: "START", to: "shared-gate" },
+          { from: "shared-gate", to: "END" },
+        ],
+      },
+      with: { output: { to: i === 0 ? "approval" : "second" } },
+    })) as unknown as GraphSpec["nodes"];
+    spec.edges = [
+      { from: "START", to: ["branch-a", "branch-b"] },
+      { from: "branch-a", to: "END" },
+      { from: "branch-b", to: "END" },
+    ];
+    const compiled = await compileGraph(spec, {});
+    const first = await compiled.run({ threadId: "nested-gates", onInterrupt: "fail" });
+    expect(first.interrupts).toHaveLength(2);
+    const [a, b] = first.interrupts!;
+    expect(interruptNode(a!)).toBe("shared-gate");
+    expect(interruptNode(b!)).toBe("shared-gate");
+    expect(callbackUrl(a!)).not.toBe(callbackUrl(b!));
+    const legacy = callbackUrl(a!).slice(0, callbackUrl(a!).lastIndexOf("/"));
+    expect((await postJson(legacy, { answer: "ambiguous" })).status).toBe(409);
+    expect(await postJson(callbackUrl(a!), { answer: "a" })).toEqual({
+      status: 200,
+      json: { status: "interrupted" },
+    });
+    const snapshot = await compiled.getState("nested-gates");
+    expect(snapshot?.interrupts.map((gate) => gate.id)).toEqual([b!.id]);
+    expect((await postJson(callbackUrl(a!), { answer: "duplicate" })).status).toBe(404);
+    expect(await postJson(callbackUrl(b!), { answer: "b" })).toEqual({
+      status: 200,
+      json: { status: "completed" },
+    });
+    const values = (await compiled.getState("nested-gates"))!.values;
+    expect(
+      [values["approval"], values["second"]]
+        .map((value) => (value as { answer: { answer: string } }).answer.answer)
+        .sort(),
+    ).toEqual(["a", "b"]);
+  });
+
+  it("does not broadcast an overdue callback's timeout to a human sibling", async () => {
+    const spec = parallelWebhookGraph(true);
+    spec.nodes[0]!.with = { ...spec.nodes[0]!.with, timeout: "1h" };
+    const compiled = await compileGraph(spec, {});
+    const first = await compiled.run({ threadId: "overdue-callback", onInterrupt: "fail" });
+    const webhook = first.interrupts!.find((gate) => interruptNode(gate) === "await-approval")!;
+    const human = first.interrupts!.find((gate) => gate.kind === "approval")!;
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 7_200_000);
+    try {
+      expect(await postJson(callbackUrl(webhook), { answer: "late" })).toEqual({
+        status: 200,
+        json: { status: "interrupted" },
+      });
+    } finally {
+      clock.mockRestore();
+    }
+    const snapshot = await compiled.getState("overdue-callback");
+    expect(snapshot?.interrupts.map((gate) => gate.id)).toEqual([human.id]);
+    expect(snapshot?.values["approval"]).toEqual({ timedOut: true });
+    expect(snapshot?.values["second"]).toBeNull();
+    expect(
+      (
+        await compiled.resume({
+          threadId: "overdue-callback",
+          resume: { [human.id]: false },
+          onInterrupt: "fail",
+        })
+      ).status,
+    ).toBe("completed");
+  });
+
+  it("cancels all pending routes when a parallel run is aborted", async () => {
+    const compiled = await compileGraph(parallelWebhookGraph(), {});
+    const controller = new AbortController();
+    const first = await compiled.run({
+      threadId: "abort-parallel",
+      signal: controller.signal,
+      onInterrupt: "fail",
+    });
+    const waiters = first.interrupts!.map((gate) =>
+      waitForWebhookResume("abort-parallel", interruptNode(gate), gate.id),
+    );
+    controller.abort();
+    expect(await Promise.all(waiters)).toEqual([{ status: "cancelled" }, { status: "cancelled" }]);
+    for (const gate of first.interrupts!) expect((await fetch(callbackUrl(gate))).status).toBe(404);
+  });
+
   it("attaches a real webhookUrl and POST resumes the run", async () => {
     const compiled = await compileGraph(webhookWaitGraph(), {});
     const r1 = await compiled.run({ threadId: "ingress-1", onInterrupt: "fail" });
@@ -105,7 +320,7 @@ describe("webhook HTTP ingress", () => {
 
     const data = (r1.interrupts?.[0]?.payload as { data?: { webhookUrl?: string } })?.data;
     expect(data?.webhookUrl).toMatch(
-      /^http:\/\/127\.0\.0\.1:\d+\/webhooks\/ingress-1\/await-approval$/,
+      /^http:\/\/127\.0\.0\.1:\d+\/webhooks\/ingress-1\/await-approval\/[0-9a-f]{32}$/,
     );
 
     const getRes = await fetch(data!.webhookUrl!);
@@ -269,7 +484,7 @@ describe("webhook HTTP ingress", () => {
       const resume = vi.fn(async () => ({ status: "completed" }));
       const done = registerWebhookRoute({ threadId: "valid", nodeId: "gate", resume });
 
-      for (const route of [`${encoded}/gate`, `valid/${encoded}`]) {
+      for (const route of [`${encoded}/gate`, `valid/${encoded}`, `valid/gate/${encoded}`]) {
         for (const method of ["GET", "POST"]) {
           const response = await fetch(`${base}/${route}`, { method });
           expect(response.status).toBe(400);

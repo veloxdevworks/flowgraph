@@ -33,6 +33,8 @@ export type WebhookResumeFn = (body: unknown) => Promise<{ status: string; error
 export interface WebhookRoute {
   threadId: string;
   nodeId: string;
+  /** Durable LangGraph interrupt id; isolates siblings and repeated node instances. */
+  interruptId?: string;
   resume: WebhookResumeFn;
   /** Generated listening URL (set by the engine when registering). */
   url?: string;
@@ -43,6 +45,7 @@ export interface WebhookRoute {
 }
 
 interface PendingRoute extends WebhookRoute {
+  claimed: boolean;
   settle: (result: { status: string; error?: string }) => void;
   done: Promise<{ status: string; error?: string }>;
 }
@@ -56,7 +59,52 @@ interface ServerEntry {
 }
 
 const servers = new Map<string, ServerEntry>();
-const routes = new Map<string, PendingRoute>();
+const routes = new Map<string, Map<string, PendingRoute>>();
+const resumeTails = new Map<string, Promise<void>>();
+
+function routeKey(nodeId: string, interruptId?: string): string {
+  return JSON.stringify([nodeId, interruptId ?? null]);
+}
+
+function matchingRoutes(threadId: string, nodeId?: string, interruptId?: string): PendingRoute[] {
+  return [...(routes.get(threadId)?.values() ?? [])].filter(
+    (route) =>
+      (nodeId === undefined || route.nodeId === nodeId) &&
+      (interruptId === undefined || route.interruptId === interruptId),
+  );
+}
+
+function currentRoute(route: WebhookRoute): PendingRoute | undefined {
+  return routes.get(route.threadId)?.get(routeKey(route.nodeId, route.interruptId));
+}
+
+function removeRoute(route: PendingRoute): void {
+  const thread = routes.get(route.threadId);
+  if (currentRoute(route) !== route) return;
+  thread?.delete(routeKey(route.nodeId, route.interruptId));
+  if (thread?.size === 0) routes.delete(route.threadId);
+}
+
+async function resumeRoute(
+  route: PendingRoute,
+  body: unknown,
+): Promise<{ status: string; error?: string }> {
+  // Concurrent replies to different gates still write the same checkpoint.
+  const previous = resumeTails.get(route.threadId) ?? Promise.resolve();
+  const result = previous.then(() =>
+    currentRoute(route) === route ? route.resume(body) : { status: "cancelled" },
+  );
+  const tail = result.then(
+    () => {},
+    () => {},
+  );
+  resumeTails.set(route.threadId, tail);
+  try {
+    return await result;
+  } finally {
+    if (resumeTails.get(route.threadId) === tail) resumeTails.delete(route.threadId);
+  }
+}
 
 function serverKey(host: string, port: number): string {
   return `${host}:${port}`;
@@ -67,18 +115,23 @@ export function buildWebhookUrl(
   port: number,
   threadId: string,
   nodeId: string,
+  interruptId?: string,
 ): string {
-  return `http://${host}:${port}/webhooks/${encodeURIComponent(threadId)}/${encodeURIComponent(nodeId)}`;
+  const base = `http://${host}:${port}/webhooks/${encodeURIComponent(threadId)}/${encodeURIComponent(nodeId)}`;
+  return interruptId === undefined ? base : `${base}/${encodeURIComponent(interruptId)}`;
 }
 
-function parseWebhookPath(url: string | undefined): { threadId: string; nodeId: string } | null {
+function parseWebhookPath(
+  url: string | undefined,
+): { threadId: string; nodeId: string; interruptId?: string } | null {
   if (!url) return null;
   const pathOnly = url.split("?")[0] ?? url;
-  const match = /^\/webhooks\/([^/]+)\/([^/]+)\/?$/.exec(pathOnly);
+  const match = /^\/webhooks\/([^/]+)\/([^/]+)(?:\/([^/]+))?\/?$/.exec(pathOnly);
   if (!match) return null;
   return {
     threadId: decodeURIComponent(match[1]!),
     nodeId: decodeURIComponent(match[2]!),
+    ...(match[3] === undefined ? {} : { interruptId: decodeURIComponent(match[3]) }),
   };
 }
 
@@ -121,12 +174,23 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
   if (!parsed) {
-    sendJson(res, 404, { error: "not_found", message: "Expected /webhooks/:threadId/:nodeId" });
+    sendJson(res, 404, {
+      error: "not_found",
+      message: "Expected /webhooks/:threadId/:nodeId[/:interruptId]",
+    });
     return;
   }
 
-  const route = routes.get(parsed.threadId);
-  if (!route || route.nodeId !== parsed.nodeId) {
+  const matches = matchingRoutes(parsed.threadId, parsed.nodeId, parsed.interruptId);
+  if (matches.length > 1) {
+    sendJson(res, 409, {
+      error: "ambiguous_interrupt",
+      message: "Use the callback URL containing the intended interrupt id",
+    });
+    return;
+  }
+  const route = matches[0];
+  if (!route || route.claimed) {
     sendJson(res, 404, {
       error: "not_waiting",
       message: `No run waiting on thread "${parsed.threadId}" node "${parsed.nodeId}"`,
@@ -144,6 +208,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       waiting: true,
       threadId: route.threadId,
       nodeId: route.nodeId,
+      ...(route.interruptId === undefined ? {} : { interruptId: route.interruptId }),
     });
     return;
   }
@@ -169,8 +234,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   // Body reading yields: another POST, cancellation, or a new registration may
   // have consumed/replaced this route. Claim only the registration we authorized,
-  // with no await between the identity check and deletion.
-  if (routes.get(parsed.threadId) !== route) {
+  // with no await between the identity check and the claim.
+  if (currentRoute(route) !== route || route.claimed) {
     sendJson(res, 404, {
       error: "not_waiting",
       message: "Webhook route was already consumed, cancelled, or replaced",
@@ -190,10 +255,12 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     });
     return;
   }
-  routes.delete(parsed.threadId);
+  // Keep the claimed registration visible to checkpoint rehydration until resume
+  // finishes; otherwise an observer could re-register the consumed interrupt.
+  route.claimed = true;
 
   try {
-    const result = await route.resume(body);
+    const result = await resumeRoute(route, body);
     route.settle(result);
     if (result.status === "error") {
       sendJson(res, 422, {
@@ -211,6 +278,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       error: "resume_error",
       message,
     });
+  } finally {
+    removeRoute(route);
   }
 }
 
@@ -304,38 +373,56 @@ export async function ensureWebhookServer(
 export function registerWebhookRoute(
   route: WebhookRoute,
 ): Promise<{ status: string; error?: string }> {
-  const prev = routes.get(route.threadId);
+  let thread = routes.get(route.threadId);
+  if (!thread) {
+    thread = new Map();
+    routes.set(route.threadId, thread);
+  }
+  const key = routeKey(route.nodeId, route.interruptId);
+  const prev = thread.get(key);
   if (prev) prev.settle({ status: "cancelled" });
 
   let settle!: (result: { status: string; error?: string }) => void;
   const done = new Promise<{ status: string; error?: string }>((resolve) => {
     settle = resolve;
   });
-  routes.set(route.threadId, { ...route, settle, done });
+  thread.set(key, { ...route, claimed: false, settle, done });
   return done;
 }
 
-export function unregisterWebhookRoute(threadId: string): void {
-  const pending = routes.get(threadId);
-  routes.delete(threadId);
-  // If unregistered without a resume (cancel / abort), settle as cancelled.
-  pending?.settle({ status: "cancelled" });
+export function unregisterWebhookRoute(
+  threadId: string,
+  nodeId?: string,
+  interruptId?: string,
+): void {
+  for (const pending of matchingRoutes(threadId, nodeId, interruptId)) {
+    removeRoute(pending);
+    pending.settle({ status: "cancelled" });
+  }
 }
 
-export function getWebhookRoute(threadId: string): WebhookRoute | undefined {
-  return routes.get(threadId);
+/** Return one unambiguous registration, including a claimed one being resumed. */
+export function getWebhookRoute(
+  threadId: string,
+  nodeId?: string,
+  interruptId?: string,
+): WebhookRoute | undefined {
+  const matches = matchingRoutes(threadId, nodeId, interruptId);
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
-/** Await the in-flight webhook resume for a thread (CLI / tests). */
+/** Await one gate; without selectors, await the first registration (CLI / tests). */
 export function waitForWebhookResume(
   threadId: string,
+  nodeId?: string,
+  interruptId?: string,
 ): Promise<{ status: string; error?: string }> | null {
-  return routes.get(threadId)?.done ?? null;
+  return matchingRoutes(threadId, nodeId, interruptId)[0]?.done ?? null;
 }
 
 /** Close all servers and clear routes — for tests / graceful shutdown. */
 export async function closeWebhookServers(): Promise<void> {
-  routes.clear();
+  for (const threadId of routes.keys()) unregisterWebhookRoute(threadId);
   const closing = [...new Set(servers.values())].map(
     (entry) =>
       new Promise<void>((resolve, reject) => {
