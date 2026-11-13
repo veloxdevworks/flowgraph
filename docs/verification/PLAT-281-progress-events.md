@@ -42,7 +42,7 @@ The compiled API stream is separately verified to close on completion.
 - Root `pnpm typecheck`: 30 successful tasks.
 - Core: 1,169 passed, 5 skipped, one pre-existing macOS failure below.
 - CLI: 86 passed, 1 skipped.
-- Server: earlier full pass of 293 passed, 9 skipped (including database-gated integration tests). A final rerun after the last baseline/serialization changes hit fixed test deadlines under severe host contention; see the note below.
+- Server: earlier full pass of 293 passed, 9 skipped (including database-gated integration tests). A final contended rerun and its focused successful retry are recorded below.
 - New focused progress suite: 18 passed.
 - End-to-end harness: all four scenarios passed against the rebuilt packages.
 - An independent code review identified a message serialization mismatch; the
@@ -63,10 +63,20 @@ also occurs on the parent checkout. The full suite therefore exits nonzero; it
 is not reported as a completely green run. Postgres integration and the
 Node 22/Linux CI matrix are not claimed as locally verified by this report.
 
-A final server-suite rerun was still progressing when this PR was prepared. It
-hit the existing five-second test deadlines in identity, shutdown, and basic
-run-service tests while filesystem/compile operations on the shared host were
-taking multiple seconds. The earlier full server run passed, and the final
-rebuilt HTTP/SSE/journal end-to-end harness passed after the last source fixes.
-These timing failures are recorded separately, not claimed as a green final
-server-suite rerun.
+A final server-suite rerun after the last baseline/serialization changes took
+420.93 seconds under severe shared-host contention (the earlier run took 28.30
+seconds). It ended with 282 passed, 9 skipped, and 11 tests failing at their
+existing five-second deadlines; one timed-out shutdown case also reported a
+teardown `ENOTEMPTY`. No assertion failure was reported. A focused retry of all
+five affected suites with one worker passed **53 tests, 2 skipped**:
+
+```sh
+pnpm --filter @flowgraph/server exec vitest run \
+  src/run-service-host-exec.test.ts src/run-service-identity.test.ts \
+  src/run-service-shutdown.test.ts src/run-service.test.ts \
+  src/worker-placement.test.ts --maxWorkers=1
+```
+
+The final rebuilt HTTP/SSE/journal end-to-end harness also passed after the last
+source corrections. The focused retry resolves the affected suite failures;
+the contended broad run is not represented as green.
