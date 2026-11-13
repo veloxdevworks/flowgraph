@@ -136,7 +136,7 @@ Each interrupt carries a **kind** so operators know how to answer:
 | `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` (the node writes these plus `complete`) |
 | `custom` | advanced / hook payloads | arbitrary JSON |
 
-A falsy resume value (`false`, `null`, `0`, `""`) is applied as given, from `compiled.resume()`, the CLI's `--resume`, the server's resume endpoints, a webhook POST or `resolveInterrupt`: an approval records `approved: false`, and a choice re-prompts as invalid. With several interrupts pending, a falsy unkeyed value still answers each of them. A truthy unkeyed value is refused with `error.code` `RESUME_MAP_REQUIRED` so it cannot be applied to every gate; pass a map keyed by interrupt id instead. A missing answer is not a denial: `compiled.resume()` with no `resume` value (or `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` and runs nothing, and the server answers a resume request without a `resume` key with 400 `RESUME_REQUIRED`.
+A falsy resume value (`false`, `null`, `0`, `""`) is applied as given, from `compiled.resume()`, the CLI's `--resume`, the server's resume endpoints, a webhook POST or `resolveInterrupt`: an approval records `approved: false`, and a choice re-prompts as invalid. With several interrupts pending, a falsy unkeyed value still answers each of them. A truthy unkeyed value is refused with `error.code` `RESUME_MAP_REQUIRED` so it cannot be applied to every gate; pass a map keyed by interrupt id instead. A missing answer is not a denial: `compiled.resume()` with no `resume` value (or `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` and runs nothing, and the server answers a resume request without a `resume` key with 400 `RESUME_REQUIRED`. The same server endpoints answer a truthy unkeyed resume with 400 `RESUME_MAP_REQUIRED` when several interrupts are pending, and leave the thread interrupted.
 
 Two limits apply to falsy answers:
 
@@ -174,7 +174,7 @@ const result = await compiled.resume({
 });
 ```
 
-When several interrupts are pending, a scalar or object whose keys are not interrupt ids is refused with `error.code` `RESUME_MAP_REQUIRED`. The same rule applies to `flowgraph resume --resume`. Answering only a subset of the map leaves the remaining gates pending — they re-surface on the next `interrupt.raised` — and any in-process webhook URL for an unanswered gate stays listening.
+When several interrupts are pending, a scalar or object whose keys are not interrupt ids is refused with `error.code` `RESUME_MAP_REQUIRED`. A map that includes a key that is not a pending interrupt id is refused with the same code, and the error names the unknown or extra id(s). The same rules apply to `flowgraph resume --resume`. Answering only a subset of the map leaves the remaining gates pending — they re-surface on the next `interrupt.raised` — and any in-process webhook URL for an unanswered gate stays listening. After a wait deadline has passed, a later `resume()` still applies the caller's answers for gates that are not overdue and times out only the overdue interrupt(s).
 
 Static breakpoints (`runtime.hitl.breakpoints.before` / `after`) pause with a synthetic `breakpoint:…` interrupt and no `interrupt()` call. `compiled.resume()` continues past those with LangGraph's null input; the resume payload is ignored.
 

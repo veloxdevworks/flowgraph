@@ -332,6 +332,60 @@ describe("parallel HITL interrupts", () => {
     expect(snap?.interrupts).toHaveLength(2);
   });
 
+  it("names unknown or extra resume keys", async () => {
+    const compiled = await compileGraph(parallelHitlSpec(), {});
+    const r1 = await compiled.run({ threadId: "hitl-unknown-keys", onInterrupt: "fail" });
+    expect(r1.interrupts).toHaveLength(2);
+    const first = r1.interrupts![0]!;
+    const typo = "ffffffffffffffffffffffffffffffff";
+    await expect(
+      compiled.resume({
+        threadId: "hitl-unknown-keys",
+        resume: { [first.id]: { approved: true }, [typo]: { approved: true } },
+        onInterrupt: "fail",
+      }),
+    ).rejects.toMatchObject({
+      code: "RESUME_MAP_REQUIRED",
+      message: expect.stringContaining(typo),
+    });
+    await expect(
+      compiled.resume({
+        threadId: "hitl-unknown-keys",
+        resume: { [first.id]: { approved: true }, extra: true },
+        onInterrupt: "fail",
+      }),
+    ).rejects.toMatchObject({
+      code: "RESUME_MAP_REQUIRED",
+      message: expect.stringContaining("extra"),
+    });
+    const snap = await compiled.getState("hitl-unknown-keys");
+    expect(snap?.interrupts).toHaveLength(2);
+  });
+
+  it("onInterrupt approve auto-approves every pending parallel gate", async () => {
+    const spec = parallelHitlSpec();
+    const gateB = spec.nodes.find((node) => node.id === "gate-b");
+    if (gateB) gateB.with = { mode: "approve", message: "B?", output: { to: "gateB" } };
+    const compiled = await compileGraph(spec, {});
+    const r = await compiled.run({ threadId: "hitl-par-approve", onInterrupt: "approve" });
+    expect(r.status).toBe("completed");
+    expect(r.error).toBeUndefined();
+    expect(r.state["gateA"]).toMatchObject({ approved: true });
+    expect(r.state["gateB"]).toMatchObject({ approved: true });
+  });
+
+  it("continueRun keys true over every pending interrupt", async () => {
+    const compiled = await compileGraph(parallelHitlSpec(), {});
+    const first = await compiled.run({ threadId: "hitl-par-continue", onInterrupt: "fail" });
+    expect(first.status).toBe("interrupted");
+    expect(first.interrupts).toHaveLength(2);
+    const r = await compiled.continueRun({ threadId: "hitl-par-continue", onInterrupt: "fail" });
+    expect(r.status).toBe("completed");
+    expect(r.error).toBeUndefined();
+    expect((r.state["gateA"] as { approved: boolean }).approved).toBe(true);
+    expect((r.state["gateB"] as { answer: string }).answer).toBe("true");
+  });
+
   it("partial map resume re-raises the remaining interrupt", async () => {
     const compiled = await compileGraph(parallelHitlSpec(), {});
     const r1 = await compiled.run({ threadId: "hitl-partial", onInterrupt: "fail" });

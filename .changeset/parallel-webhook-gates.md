@@ -1,6 +1,7 @@
 ---
 "@flowgraph/core": patch
 "@flowgraph/cli": patch
+"@flowgraph/server": patch
 ---
 
 Isolate webhook callbacks by thread, node, and interrupt id. Each callback resumes
@@ -23,3 +24,13 @@ refused (`RESUME_MAP_REQUIRED`) so it cannot answer every gate. A falsy unkeyed
 value still denies each pending interrupt. Unregistering an in-process webhook
 route after an API or CLI resume applies only to the answered interrupt, so a
 sibling webhook URL keeps listening.
+
+The server's resume endpoints validate the same rule before the run starts and
+return 400 `RESUME_MAP_REQUIRED`, leaving the thread interrupted. A map with a
+key that is not a pending interrupt id is refused with that code, and the error
+names the unknown or extra id(s).
+
+`onInterrupt: "approve"` and `continueRun()` pass a map of `true` keyed by each
+pending interrupt id, so they approve every waiting gate instead of being
+refused. After a deadline, a later `resume()` keeps the caller's answers for
+gates that are not overdue and applies the timeout only to the overdue ones.

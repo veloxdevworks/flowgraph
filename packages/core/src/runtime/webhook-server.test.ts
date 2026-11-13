@@ -330,6 +330,83 @@ describe("webhook HTTP ingress", () => {
     });
   });
 
+  it("re-arms an early timer fire and the remaining deadline after a partial timeout", async () => {
+    let now = Date.now();
+    const queued: Array<{ fn: () => void; delayMs: number }> = [];
+    const spec = parallelWebhookGraph();
+    spec.nodes[0]!.with = { ...spec.nodes[0]!.with, timeout: "1h" };
+    spec.nodes[1]!.with = { ...spec.nodes[1]!.with, timeout: "2h" };
+    const timedOut: Array<{ status: string }> = [];
+    let sawTimeout!: (result: { status: string }) => void;
+    const nextTimeout = () =>
+      new Promise<{ status: string }>((resolve) => {
+        sawTimeout = resolve;
+      });
+    let pendingTimeout = nextTimeout();
+    const compiled = await compileGraph(spec, {
+      now: () => now,
+      scheduleTimeout: (fn, delayMs) => {
+        if (delayMs >= 30 * 60 * 1000) queued.push({ fn, delayMs });
+        else return setTimeout(fn, delayMs);
+        return { unref() {} };
+      },
+      onWaitTimeout: (result) => {
+        timedOut.push({ status: result.status });
+        sawTimeout(result);
+      },
+    });
+    const first = await compiled.run({ threadId: "timer-rearm", onInterrupt: "fail" });
+    const early = first.interrupts!.find((gate) => interruptNode(gate) === "await-approval")!;
+    const later = first.interrupts!.find((gate) => interruptNode(gate) === "second-gate")!;
+    expect(queued).toHaveLength(1);
+
+    // Fire before the deadline: overdue is empty, so the timer is re-armed.
+    queued.shift()!.fn();
+    expect(queued).toHaveLength(1);
+    expect(timedOut).toHaveLength(0);
+
+    now += queued[0]!.delayMs + 1_000;
+    queued.shift()!.fn();
+    expect((await pendingTimeout).status).toBe("interrupted");
+    pendingTimeout = nextTimeout();
+    const mid = await compiled.getState("timer-rearm");
+    expect(mid?.interrupts.map((gate) => gate.id)).toEqual([later.id]);
+    expect(mid?.values["approval"]).toEqual({ timedOut: true });
+    expect(mid?.values["second"]).toBeNull();
+    expect((await fetch(callbackUrl(early))).status).toBe(404);
+    expect((await fetch(callbackUrl(later))).status).toBe(200);
+    expect(queued).toHaveLength(1);
+
+    now += queued[0]!.delayMs + 1_000;
+    queued.shift()!.fn();
+    expect((await pendingTimeout).status).toBe("completed");
+    const snap = await compiled.getState("timer-rearm");
+    expect(snap?.interrupts).toEqual([]);
+    expect(snap?.values["approval"]).toEqual({ timedOut: true });
+    expect(snap?.values["second"]).toEqual({ timedOut: true });
+    expect(queued).toHaveLength(0);
+    expect(timedOut.map((item) => item.status)).toEqual(["interrupted", "completed"]);
+  });
+
+  it("keeps the caller's answers for gates that are not overdue when resume runs after a deadline", async () => {
+    let now = Date.now();
+    const spec = parallelWebhookGraph(true);
+    spec.nodes[0]!.with = { ...spec.nodes[0]!.with, timeout: "1h" };
+    const compiled = await compileGraph(spec, { now: () => now });
+    const first = await compiled.run({ threadId: "resume-merge", onInterrupt: "fail" });
+    const human = first.interrupts!.find((gate) => gate.kind === "approval")!;
+    now += 7_200_000;
+    // Do not call getState first: this is a later resume() after the deadline.
+    const r = await compiled.resume({
+      threadId: "resume-merge",
+      resume: { [human.id]: { approved: true } },
+      onInterrupt: "fail",
+    });
+    expect(r.status).toBe("completed");
+    expect(r.state["approval"]).toEqual({ timedOut: true });
+    expect(r.state["second"]).toMatchObject({ approved: true });
+  });
+
   it("times out only the overdue gate when getState runs after a deadline", async () => {
     let now = Date.now();
     const spec = parallelWebhookGraph();

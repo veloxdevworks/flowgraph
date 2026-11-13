@@ -33,7 +33,7 @@ export {
   isInputValidationError,
   InputValidationError,
 } from "./inputs.js";
-export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError } from "./compiler.js";
+export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError, assertResumeValue } from "./compiler.js";
 export {
   NODE_POLICY,
   NodePolicyError,

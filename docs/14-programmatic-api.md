@@ -84,7 +84,7 @@ await compiled.resume({
 });
 ```
 
-`resume: false` (or `null`, `0`, `""`) denies the approval and records `approved: false`. Leaving `resume` out (or passing `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` instead, and the interrupt stays pending. When several interrupts are pending, pass a map keyed by interrupt id; a truthy unkeyed value is refused with `error.code` `RESUME_MAP_REQUIRED` and leaves every gate pending.
+`resume: false` (or `null`, `0`, `""`) denies the approval and records `approved: false`. Leaving `resume` out (or passing `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` instead, and the interrupt stays pending. When several interrupts are pending, pass a map keyed by interrupt id; a truthy unkeyed value is refused with `error.code` `RESUME_MAP_REQUIRED` and leaves every gate pending. A map with a key that is not a pending interrupt id is refused the same way, and the error names that id. The server's resume endpoints return 400 `RESUME_MAP_REQUIRED` for those cases and do not start the run. `onInterrupt: "approve"` and `continueRun()` each build a map of `true` keyed by the pending interrupt ids, so every waiting gate is approved rather than refused.
 
 See [release-notes](../examples/release-notes/register.ts) for `ctx.interrupt()` and `ctx.once()` patterns.
 
