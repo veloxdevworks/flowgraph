@@ -602,7 +602,8 @@ async function orphanStatus(dir: string, metaName: string, orphans: { maxAgeMs: 
  * (`old`). `old` is what `listPersistedGraphs` reports as status `error`.
  */
 export function graphStoreClaim(dir: string, threadId: string, orphans: { maxAgeMs: number; now: number }): Promise<"young" | "old" | "stored"> {
-  return orphanStatus(dir, `${threadId}${GRAPH_META_SUFFIX}`, orphans);
+  // Same file as {@link metaPathFor}: unsanitized ids (`a/b`) map to `a_b.graph.yaml.meta.json`.
+  return orphanStatus(dir, path.basename(metaPathFor(dir, threadId)), orphans);
 }
 
 

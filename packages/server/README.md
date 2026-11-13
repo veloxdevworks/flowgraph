@@ -286,6 +286,8 @@ Labels in the `os:`, `arch:`, `gpu:`, `flowgraph:`, `nodeType:` and `plugin:` na
 
 `active` is true while the run is executing in this server. Only a caller allowed to see the thread gets this; another user's thread still answers `403 THREAD_NOT_OWNED`.
 
+A claim with no graph file (a create that stopped after taking the thread id) is treated the same way listing treats it. While it is younger than the sweep age, a start answers 409 `THREAD_EXISTS` (the meta file still says `running`). Once it is older than the sweep age, start treats it as `error` even though that file has not been rewritten, so the owner can start the thread again.
+
 ## Listing and reattach
 
 ```bash

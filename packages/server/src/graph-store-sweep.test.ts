@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { listPersistedGraphs, parseGraphYaml, persistGraph, readGraphMeta, type GraphStoreHooks } from "./graph-source.js";
+import { GRAPH_META_SUFFIX, listPersistedGraphs, parseGraphYaml, persistGraph, readGraphMeta, safeThreadId, type GraphStoreHooks } from "./graph-source.js";
 import {
   GRAPH_STORE_SWEEP_MAX_AGE_MS,
   startGraphStoreSweeper,
@@ -100,7 +100,7 @@ async function orphan(dir: string, threadId: string, mtime: number): Promise<voi
     },
   };
   await expect(persistGraph(dir, threadId, YAML, spec, { owner: alice, status: "running", hooks })).rejects.toThrow("process died");
-  await setMtime(path.join(dir, `${threadId}.graph.yaml.meta.json`), mtime);
+  await setMtime(path.join(dir, `${safeThreadId(threadId)}${GRAPH_META_SUFFIX}`), mtime);
 }
 
 function service(dir: string, now: () => number, extra: Partial<ServerConfig> = {}, graphStoreHooks?: GraphStoreHooks): RunService {
@@ -273,6 +273,29 @@ describe("two servers sharing a graph store", () => {
     await b.startRun({ threadId: "u", yaml: YAML, input: {} });
     expect(await files(dir)).toContain("u.graph.yaml");
     expect((await b.listRuns()).find((r) => r.threadId === "u")?.status).not.toBe("error");
+  });
+});
+
+
+describe("startRun on a graph-less claim", () => {
+  it.each(["u", "a/b"])("a young %s claim answers 409 THREAD_EXISTS, and an old one starts", async (threadId) => {
+    const dir = await storeDir();
+    await orphan(dir, threadId, T0);
+    let now = T0 + 30 * 60_000;
+    const s = service(dir, () => now);
+    await s.init();
+
+    await expect(s.startRun({ threadId, yaml: YAML, input: {} })).rejects.toMatchObject({
+      status: 409,
+      code: "THREAD_EXISTS",
+      extra: { threadId, status: "running", active: false },
+    });
+    expect(await files(dir)).not.toContain(`${safeThreadId(threadId)}.graph.yaml`);
+
+    now = T0 + 2 * HOUR;
+    await s.startRun({ threadId, yaml: YAML, input: {} });
+    expect(await files(dir)).toContain(`${safeThreadId(threadId)}.graph.yaml`);
+    expect((await s.listRuns()).find((r) => r.threadId === threadId)?.status).not.toBe("error");
   });
 });
 
