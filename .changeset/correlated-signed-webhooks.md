@@ -15,3 +15,7 @@ state. Signed ingress requires an HMAC key and durable journal, cannot be bypass
 through raw callback URLs, and coordinates manual resumes and deadline handling.
 The CLI's `resume --listen` restores pending webhook listeners without submitting
 an answer, preserving gates across process restarts.
+
+Streams observe their admitted invocation rather than replaying another owner's
+history. A rejected competing stream finishes locally while the active signed
+webhook stream continues through its callback and terminal result.
