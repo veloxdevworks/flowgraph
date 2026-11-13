@@ -34,3 +34,5 @@ names the unknown or extra id(s).
 pending interrupt id, so they approve every waiting gate instead of being
 refused. After a deadline, a later `resume()` keeps the caller's answers for
 gates that are not overdue and applies the timeout only to the overdue ones.
+
+A refused resume on a thread with no in-process session does not leave a placeholder session.

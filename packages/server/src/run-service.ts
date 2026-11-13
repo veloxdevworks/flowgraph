@@ -1073,6 +1073,33 @@ export class RunService {
     const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(req.threadId, yaml, principal);
     const graphName = spec.metadata?.name ?? "graph";
 
+    const dryRun = Boolean(existing?.dryRun);
+    const compiled = await this.compile(
+      spec,
+      cwd,
+      req.threadId,
+      (ev) => {
+        this.pushEvent(req.threadId, ev);
+      },
+      principal,
+      dryRun,
+    );
+    // Refuse an unkeyed multi-gate resume here, before a session is created
+    // or the run is marked started, so a 400 cannot leave a "started"
+    // placeholder or mark the thread error while its gates are still pending.
+    // Peek state without applying wait deadlines so a validation failure
+    // leaves the thread untouched.
+    const pending = (await compiled.getState(req.threadId, { applyWaitTimeouts: false }))?.interrupts ?? [];
+    try {
+      assertResumeValue(req.resume, pending, req.threadId);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === "RESUME_MAP_REQUIRED" || code === "RESUME_VALUE_REQUIRED") {
+        throw new ServerRequestError(400, code, (err as Error).message);
+      }
+      throw err;
+    }
+
     const abort = new AbortController();
     const pause = new AbortController();
     let session = this.registry.get(req.threadId);
@@ -1088,32 +1115,6 @@ export class RunService {
       session.abort = abort;
       session.pause = pause;
       session.yaml = resolvedYaml;
-    }
-
-    const dryRun = Boolean(existing?.dryRun);
-    const compiled = await this.compile(
-      spec,
-      cwd,
-      req.threadId,
-      (ev) => {
-        this.pushEvent(req.threadId, ev);
-      },
-      principal,
-      dryRun,
-    );
-    // Refuse an unkeyed multi-gate resume here, before the run is marked
-    // started, so the fire-and-forget path cannot set the thread to error
-    // while its gates are still pending. Peek state without applying wait
-    // deadlines so a validation failure leaves the thread untouched.
-    const pending = (await compiled.getState(req.threadId, { applyWaitTimeouts: false }))?.interrupts ?? [];
-    try {
-      assertResumeValue(req.resume, pending, req.threadId);
-    } catch (err) {
-      const code = (err as { code?: string }).code;
-      if (code === "RESUME_MAP_REQUIRED" || code === "RESUME_VALUE_REQUIRED") {
-        throw new ServerRequestError(400, code, (err as Error).message);
-      }
-      throw err;
     }
 
     session.runId = compiled.runId;

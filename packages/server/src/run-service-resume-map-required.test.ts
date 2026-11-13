@@ -143,6 +143,23 @@ describe("RunService.resumeRun with several pending interrupts", () => {
     expect(events).not.toContain("run.error");
   });
 
+  it("does not leave a session when a cold resume is refused", async () => {
+    const threadId = "resume-map-required-cold";
+    await interruptedThread(threadId);
+    service.registry.remove(threadId);
+    expect(service.registry.get(threadId)).toBeUndefined();
+
+    await expect(service.resumeRun({ threadId, resume: { approved: true } })).rejects.toMatchObject({
+      name: "ServerRequestError",
+      status: 400,
+      code: "RESUME_MAP_REQUIRED",
+    });
+    expect(service.registry.get(threadId)).toBeUndefined();
+    const state = (await service.getState(threadId)).state as { next?: string[]; interrupts?: unknown[] };
+    expect(state.next?.slice().sort()).toEqual(["gate-a", "gate-b"]);
+    expect(state.interrupts).toHaveLength(2);
+  });
+
   it("answers a connect run.resume with an unkeyed value with an error reply, not started", async () => {
     const threadId = "resume-map-required-connect";
     const events = await interruptedThread(threadId);
