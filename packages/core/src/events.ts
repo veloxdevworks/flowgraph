@@ -3,6 +3,28 @@
  * Events are read-only observations; they never block execution.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const eventThread = new AsyncLocalStorage<string>();
+
+/** @internal Keep event attribution local to an invocation, including concurrent threads. */
+export function withEventThread<T>(threadId: string, run: () => T): T {
+  return eventThread.run(threadId, run);
+}
+
+/** Post-reducer replacement values for public channels changed in one superstep. */
+export interface StateUpdateData {
+  channels: string[];
+  update: Record<string, unknown>;
+}
+
+/** A selected transition; dispatch does not promise the destination will succeed. */
+export interface EdgeTakenData {
+  from: string;
+  to: string;
+  kind: "static" | "branch" | "command";
+}
+
 export type EventType =
   | "run.start"
   | "run.end"
@@ -98,7 +120,8 @@ export function createEventBus(opts: EventBusOptions): EventBus {
       data,
       seq: _seq++,
     };
-    if (opts.threadId !== undefined) event.threadId = opts.threadId;
+    const threadId = opts.threadId ?? eventThread.getStore();
+    if (threadId !== undefined) event.threadId = threadId;
 
     buffer.push(event);
 

@@ -1,0 +1,452 @@
+{
+  "ticket": "PLAT-281",
+  "node": "v25.2.1",
+  "platform": "darwin/arm64",
+  "findings": [
+    {
+      "scenario": "built API stream, parallel reducers and terminal delivery",
+      "progress": [
+        {
+          "id": "1794610356433-s19owk",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:36.433Z",
+          "runId": "run-1794610356416-vh9ifo",
+          "graph": "progress-parallel",
+          "scope": {},
+          "data": {
+            "from": "START",
+            "to": "left",
+            "kind": "static"
+          },
+          "seq": 1,
+          "threadId": "programmatic-progress"
+        },
+        {
+          "id": "1794610356433-7br8ap",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:36.433Z",
+          "runId": "run-1794610356416-vh9ifo",
+          "graph": "progress-parallel",
+          "scope": {},
+          "data": {
+            "from": "START",
+            "to": "right",
+            "kind": "static"
+          },
+          "seq": 2,
+          "threadId": "programmatic-progress"
+        },
+        {
+          "id": "1794610356442-q4kimf",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:36.442Z",
+          "runId": "run-1794610356416-vh9ifo",
+          "graph": "progress-parallel",
+          "scope": {
+            "nodeId": "left"
+          },
+          "data": {
+            "from": "left",
+            "to": "END",
+            "kind": "static"
+          },
+          "seq": 9,
+          "threadId": "programmatic-progress"
+        },
+        {
+          "id": "1794610356442-qlbhxj",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:36.442Z",
+          "runId": "run-1794610356416-vh9ifo",
+          "graph": "progress-parallel",
+          "scope": {
+            "nodeId": "right"
+          },
+          "data": {
+            "from": "right",
+            "to": "END",
+            "kind": "static"
+          },
+          "seq": 10,
+          "threadId": "programmatic-progress"
+        },
+        {
+          "id": "1794610356444-zwbhm6",
+          "type": "state.update",
+          "ts": "2026-11-13T22:52:36.444Z",
+          "runId": "run-1794610356416-vh9ifo",
+          "graph": "progress-parallel",
+          "scope": {},
+          "data": {
+            "channels": [
+              "items",
+              "outputs"
+            ],
+            "update": {
+              "items": [
+                "seed",
+                "left",
+                "right"
+              ],
+              "outputs": {
+                "left": [
+                  "left"
+                ],
+                "right": [
+                  "right"
+                ]
+              }
+            }
+          },
+          "seq": 11,
+          "threadId": "programmatic-progress"
+        }
+      ],
+      "terminal": "run.end"
+    },
+    {
+      "scenario": "real CLI JSONL quickstart and natural exit 0",
+      "progress": [
+        {
+          "id": "1794610356729-3i5ocb",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:36.729Z",
+          "runId": "run-1794610356717-3o64o1",
+          "graph": "quickstart",
+          "scope": {},
+          "data": {
+            "from": "START",
+            "to": "make-slug",
+            "kind": "static"
+          },
+          "seq": 1,
+          "threadId": "quickstart-progress"
+        },
+        {
+          "id": "1794610356732-0av5w0",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:36.732Z",
+          "runId": "run-1794610356717-3o64o1",
+          "graph": "quickstart",
+          "scope": {
+            "nodeId": "make-slug"
+          },
+          "data": {
+            "from": "make-slug",
+            "to": "count",
+            "kind": "static"
+          },
+          "seq": 7,
+          "threadId": "quickstart-progress"
+        },
+        {
+          "id": "1794610356734-ddrnjr",
+          "type": "state.update",
+          "ts": "2026-11-13T22:52:36.734Z",
+          "runId": "run-1794610356717-3o64o1",
+          "graph": "quickstart",
+          "scope": {},
+          "data": {
+            "channels": [
+              "slug",
+              "outputs"
+            ],
+            "update": {
+              "slug": "hello-flowgraph",
+              "outputs": {
+                "make-slug": {
+                  "slug": "hello-flowgraph"
+                }
+              }
+            }
+          },
+          "seq": 9,
+          "threadId": "quickstart-progress"
+        },
+        {
+          "id": "1794610356738-9thzae",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:36.738Z",
+          "runId": "run-1794610356717-3o64o1",
+          "graph": "quickstart",
+          "scope": {
+            "nodeId": "count"
+          },
+          "data": {
+            "from": "count",
+            "to": "END",
+            "kind": "static"
+          },
+          "seq": 14,
+          "threadId": "quickstart-progress"
+        },
+        {
+          "id": "1794610356739-o9r1s8",
+          "type": "state.update",
+          "ts": "2026-11-13T22:52:36.739Z",
+          "runId": "run-1794610356717-3o64o1",
+          "graph": "quickstart",
+          "scope": {},
+          "data": {
+            "channels": [
+              "words",
+              "sentences",
+              "outputs"
+            ],
+            "update": {
+              "words": 2,
+              "sentences": 1,
+              "outputs": {
+                "make-slug": {
+                  "slug": "hello-flowgraph"
+                },
+                "count": {
+                  "words": 2,
+                  "characters": 15,
+                  "sentences": 1
+                }
+              }
+            }
+          },
+          "seq": 15,
+          "threadId": "quickstart-progress"
+        }
+      ],
+      "terminal": "run.end"
+    },
+    {
+      "scenario": "SQLite interrupt and resume in separate CLI processes",
+      "before": [
+        {
+          "id": "1794610357247-cbay7u",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:37.247Z",
+          "runId": "run-1794610357234-eqb9g2",
+          "graph": "progress-gate",
+          "scope": {},
+          "data": {
+            "from": "START",
+            "to": "route",
+            "kind": "static"
+          },
+          "seq": 1,
+          "threadId": "sqlite-progress"
+        },
+        {
+          "id": "1794610357250-zqpx62",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:37.250Z",
+          "runId": "run-1794610357234-eqb9g2",
+          "graph": "progress-gate",
+          "scope": {
+            "nodeId": "route",
+            "nodeType": "router"
+          },
+          "data": {
+            "from": "route",
+            "to": "gate",
+            "kind": "command"
+          },
+          "seq": 5,
+          "threadId": "sqlite-progress"
+        },
+        {
+          "id": "1794610357253-oo8a29",
+          "type": "state.update",
+          "ts": "2026-11-13T22:52:37.253Z",
+          "runId": "run-1794610357234-eqb9g2",
+          "graph": "progress-gate",
+          "scope": {},
+          "data": {
+            "channels": [
+              "stage",
+              "outputs"
+            ],
+            "update": {
+              "stage": "waiting",
+              "outputs": {
+                "route": "waiting"
+              }
+            }
+          },
+          "seq": 8,
+          "threadId": "sqlite-progress"
+        }
+      ],
+      "after": [
+        {
+          "id": "1794610357690-ubrvtl",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:37.690Z",
+          "runId": "run-1794610357671-2qwequ",
+          "graph": "progress-gate",
+          "scope": {
+            "nodeId": "gate"
+          },
+          "data": {
+            "from": "gate",
+            "to": "END",
+            "kind": "static"
+          },
+          "seq": 4,
+          "threadId": "sqlite-progress"
+        },
+        {
+          "id": "1794610357692-afb7h3",
+          "type": "state.update",
+          "ts": "2026-11-13T22:52:37.692Z",
+          "runId": "run-1794610357671-2qwequ",
+          "graph": "progress-gate",
+          "scope": {},
+          "data": {
+            "channels": [
+              "answer",
+              "outputs"
+            ],
+            "update": {
+              "answer": {
+                "approved": true
+              },
+              "outputs": {
+                "route": "waiting",
+                "gate": {
+                  "approved": true
+                }
+              }
+            }
+          },
+          "seq": 5,
+          "threadId": "sqlite-progress"
+        }
+      ],
+      "terminal": "run.end",
+      "baselineNotReemitted": true
+    },
+    {
+      "scenario": "real authenticated REST, live SSE across resume, Last-Event-ID replay and journal",
+      "progress": [
+        {
+          "id": "1794610357764-bkk78b",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:37.764Z",
+          "runId": "run-1794610357760-movy7u",
+          "graph": "progress-gate",
+          "scope": {},
+          "data": {
+            "from": "START",
+            "to": "route",
+            "kind": "static"
+          },
+          "seq": 14,
+          "threadId": "http-progress"
+        },
+        {
+          "id": "1794610357765-jsjkhf",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:37.765Z",
+          "runId": "run-1794610357760-movy7u",
+          "graph": "progress-gate",
+          "scope": {
+            "nodeId": "route",
+            "nodeType": "router"
+          },
+          "data": {
+            "from": "route",
+            "to": "gate",
+            "kind": "command"
+          },
+          "seq": 18,
+          "threadId": "http-progress"
+        },
+        {
+          "id": "1794610357767-c4a4cx",
+          "type": "state.update",
+          "ts": "2026-11-13T22:52:37.767Z",
+          "runId": "run-1794610357760-movy7u",
+          "graph": "progress-gate",
+          "scope": {},
+          "data": {
+            "channels": [
+              "stage",
+              "outputs"
+            ],
+            "update": {
+              "stage": "waiting",
+              "outputs": {
+                "route": "waiting"
+              }
+            }
+          },
+          "seq": 21,
+          "threadId": "http-progress"
+        },
+        {
+          "id": "1794610357810-o4z18w",
+          "type": "edge.taken",
+          "ts": "2026-11-13T22:52:37.810Z",
+          "runId": "run-1794610357804-7akpj7",
+          "graph": "progress-gate",
+          "scope": {
+            "nodeId": "gate"
+          },
+          "data": {
+            "from": "gate",
+            "to": "END",
+            "kind": "static"
+          },
+          "seq": 27,
+          "threadId": "http-progress"
+        },
+        {
+          "id": "1794610357810-wh450y",
+          "type": "state.update",
+          "ts": "2026-11-13T22:52:37.810Z",
+          "runId": "run-1794610357804-7akpj7",
+          "graph": "progress-gate",
+          "scope": {},
+          "data": {
+            "channels": [
+              "answer",
+              "outputs"
+            ],
+            "update": {
+              "answer": {
+                "approved": true
+              },
+              "outputs": {
+                "route": "waiting",
+                "gate": {
+                  "approved": true
+                }
+              }
+            }
+          },
+          "seq": 28,
+          "threadId": "http-progress"
+        }
+      ],
+      "replayedEvents": 8,
+      "journalMatchesSse": true,
+      "state": {
+        "state": {
+          "values": {
+            "stage": "waiting",
+            "answer": {
+              "approved": true
+            },
+            "outputs": {
+              "route": "waiting",
+              "gate": {
+                "approved": true
+              }
+            }
+          },
+          "next": [],
+          "checkpointId": "1f1dfb4e-c614-6121-8002-9533cbe7107d",
+          "createdAt": "2026-11-13T22:52:37.810Z",
+          "interrupts": []
+        }
+      }
+    }
+  ]
+}

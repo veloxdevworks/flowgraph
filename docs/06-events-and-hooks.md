@@ -68,6 +68,66 @@ custom.*                                     // user-emitted via ctx.emit()
 
 Events form a **tree** via `scope.parentSpanId`: a run contains nodes; an `agent` node contains steps and tool calls; a `subgraph` node contains a nested run. This tree is exactly what OTel spans mirror (§5) and what a UI renders as a timeline.
 
+### State and transition progress (PLAT-281)
+
+`state.update` and `edge.taken` are emitted by the runtime on the same event bus as
+`node.start` / `node.end`. They reach subscribed sinks, `compiled.stream()`, CLI
+`--json` / `--stream`, and the server's SSE and event journal surfaces.
+
+```ts
+interface StateUpdateData {
+  channels: string[];
+  update: Record<string, unknown>;
+}
+interface EdgeTakenData {
+  from: string;
+  to: string;
+  kind: "static" | "branch" | "command";
+}
+```
+
+- **State changes:** after LangGraph applies a superstep's writes, one
+  `state.update` reports the public channels whose values changed by deep
+  equality. `update` contains their complete **post-reducer replacement values**.
+  A consumer replaces those channels; it must not apply an `append` or `merge`
+  reducer again. Parallel writes appear as their combined result, after
+  `node:after` and `state:beforeUpdate` transformations. A no-op write produces
+  no event. The public `outputs` channel is included when it changes; internal
+  `__once`, map bags, service bookkeeping, and other reserved `__*` channels are
+  excluded.
+- **Baselines:** initial graph input/defaults and the checkpoint loaded on
+  resume/continue establish a baseline, rather than producing a change event.
+  Get initial state from the run input/state API. Failed attempts do not produce
+  proposed state deltas; earlier applied steps remain observable if a later node
+  fails. Event values use the same JSON representation as the state API,
+  including LangChain messages and Buffer; programmatic listeners receive those
+  JSON snapshots rather than class instances. Custom non-JSON, non-cloneable
+  values are treated as opaque references.
+- **Transitions:** `edge.taken` records the selected dispatch, with public node
+  ids and the literal boundary names `START` / `END`. Static fan-out emits one
+  event per selected destination; conditional edges emit only the chosen branch
+  (including implicit fall-through to `END`); router/HITL/hook commands emit
+  `kind: "command"`. Repeated loop iterations emit repeated transitions. A
+  skipped node still dispatches its outgoing edges. A node that throws or parks
+  at an interrupt has no outgoing transition until it returns successfully;
+  an error hook that routes is an explicit command dispatch. Dispatch does not
+  promise that the destination starts or succeeds: cancellation, breakpoints,
+  errors, or another interrupt may intervene. Existing command-plus-static-edge
+  semantics are preserved; each selected dispatch path is observable.
+- **Scope and ordering:** top-level state events describe a whole superstep and
+  have no single `scope.nodeId`. Transitions identify their source in
+  `scope.nodeId`, except `START`. Every event emitted during execution carries
+  that invocation's `threadId`, including when one compiled graph runs multiple
+  threads concurrently. A state update precedes the corresponding terminal
+  `run.end` / `run.paused` event. Edge selections can precede the state event for
+  their source step; consumers should not infer state commit order from them.
+- **Nested work:** child graphs emit their own progress and use the existing
+  `scope.parentSpanId` forwarding. A parent's merge-back is a separate parent
+  state change. Map worker and join implementation edges are hidden: only the
+  graph-declared incoming/outgoing map transitions and the joined public state
+  change appear. These payloads contain graph structure and state channels only;
+  no integration-specific field names are built into the event contract.
+
 ### Nested subgraph events
 
 When a `subgraph` node embeds a child graph, the child's `node.*` / `skill.*` / `intelligent.*` / etc. events are **forwarded onto the parent run's EventBus** with:
