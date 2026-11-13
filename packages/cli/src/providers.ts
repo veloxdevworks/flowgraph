@@ -17,6 +17,9 @@ import {
   type CliVendor,
 } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
+// Registers the media vendors (xai, openai, tripo, meshy, elevenlabs) so `image`/`video`/`model3d`/`audio`
+// nodes can resolve providers declared in the graph.
+import "@flowgraph/media";
 
 async function loadClaudeFactory() {
   try {
@@ -165,6 +168,10 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
         providers.push(await createDeep(name, cfg, { cwd, spec }));
         break;
       }
+      case "media":
+        // Media (image/video/3D) providers are built by compileGraph from the
+        // same providers: block; there is no agent adapter to create here.
+        continue;
       default:
         throw new Error(`Provider "${name}": unsupported kind "${(cfg as { kind?: string }).kind}".`);
     }

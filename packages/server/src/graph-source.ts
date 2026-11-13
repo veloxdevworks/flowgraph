@@ -14,7 +14,7 @@ import {
   normalizeNodeTypeAliases,
   validateSpec,
 } from "@flowgraph/core";
-import { GraphSpecSchema, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
+import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import { ServerRequestError } from "./errors.js";
 import { errorFields, log } from "./metrics.js";
 import type { GraphMeta, PersistedGraph, RunStatus, ServerEvent, ThreadOwner } from "./types.js";
@@ -93,12 +93,7 @@ export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}):
     return {
       spec: null,
       yaml: raw,
-      diagnostics: result.error.issues.map((i) => ({
-        severity: "error" as const,
-        code: "SCHEMA_ERROR",
-        message: `${i.path.join(".")}: ${i.message}`,
-        path: i.path.join("."),
-      })),
+      diagnostics: diagnosticsFromZodIssues(result.error.issues, parsed),
       importsStripped,
     };
   }
@@ -577,6 +572,16 @@ async function orphanStatus(dir: string, metaName: string, orphans: { maxAgeMs: 
     return "young";
   }
 }
+
+/**
+ * Whether a thread id's graph-store claim has a graph file (`stored`), is
+ * still being written (`young`), or was left with no graph past `maxAgeMs`
+ * (`old`). `old` is what `listPersistedGraphs` reports as status `error`.
+ */
+export function graphStoreClaim(dir: string, threadId: string, orphans: { maxAgeMs: number; now: number }): Promise<"young" | "old" | "stored"> {
+  return orphanStatus(dir, `${threadId}${GRAPH_META_SUFFIX}`, orphans);
+}
+
 
 /**
  * List persisted run metadata (graph store + `.meta.json` files). Meta files

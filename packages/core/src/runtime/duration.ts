@@ -22,10 +22,14 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new Error("Aborted"));
       return;
     }
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    const onAbort = (): void => {
       clearTimeout(timer);
       reject(new Error("Aborted"));
-    });
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

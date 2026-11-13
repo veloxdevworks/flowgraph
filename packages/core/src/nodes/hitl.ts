@@ -15,6 +15,19 @@ import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
 import { assertHostExecAllowed, hostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
+import type { Artifact } from "@flowgraph/spec";
+import {
+  captureFailuresNotice,
+  resolveGateArtifacts,
+  resolveSelection,
+  type HitlSelect,
+} from "./hitl-artifacts.js";
+import {
+  DEFAULT_REVIEW_DECISIONS,
+  hitlOutcomeKey,
+  normalizeHitlRoutes,
+  resolveHitlRoute,
+} from "./hitl-routes.js";
 
 const configSchema = HitlWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -27,18 +40,16 @@ const MODE_TO_KIND: Record<Config["mode"], InterruptKind> = {
   review: "review",
 };
 
-const DEFAULT_REVIEW_DECISIONS = ["approve", "request-changes"];
-
 export const hitlNode = defineNode<Config>({
   type: "hitl",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, routing: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, routing: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {
@@ -48,7 +59,7 @@ export const hitlNode = defineNode<Config>({
           run: ctx.meta,
         };
 
-        const message = stringifyRendered(renderDeep(config.message, scope));
+        let message = stringifyRendered(renderDeep(config.message, scope));
         const choices = config.choices
           ? (renderDeep(config.choices, scope) as string[])
           : undefined;
@@ -67,14 +78,30 @@ export const hitlNode = defineNode<Config>({
           if (schema) data["schema"] = schema;
         }
 
+        // Artifacts to preview (and optionally pick from) in the modes with a closed answer.
+        let presented: Artifact[] = [];
+        const select: HitlSelect =
+          config.mode === "approve" || config.mode === "choice" || config.mode === "review"
+            ? (config.select ?? "none")
+            : "none";
+        if (config.artifacts && (config.mode === "approve" || config.mode === "choice" || config.mode === "review")) {
+          const rendered = config.artifacts.map((a) => renderDeep(a, scope));
+          const gate = await resolveGateArtifacts(rendered, ctx.workspace);
+          presented = gate.artifacts;
+          data["artifacts"] = gate.artifacts;
+          data["artifactRefs"] = gate.artifactRefs;
+          if (gate.captureFailures.length > 0) {
+            data["captureFailures"] = gate.captureFailures;
+            message = `${message}\n\n${captureFailuresNotice(gate.captureFailures)}`;
+          }
+          if (select !== "none") data["select"] = select;
+        }
+
         if (config.mode === "review") {
           const decisions = config.decision?.length ? config.decision : DEFAULT_REVIEW_DECISIONS;
           data["decision"] = decisions;
           data["choices"] = decisions;
           if (config.schema) data["schema"] = renderDeep(config.schema, scope);
-          if (config.artifacts) {
-            data["artifactRefs"] = (renderDeep(config.artifacts, scope) as unknown[]).map(String);
-          }
           if (config.diff?.before != null || config.diff?.after != null) {
             const before = config.diff.before ? String(renderDeep(config.diff.before, scope)) : "";
             const after = config.diff.after ? String(renderDeep(config.diff.after, scope)) : "";
@@ -116,18 +143,49 @@ export const hitlNode = defineNode<Config>({
               decisions: (data["decision"] as string[] | undefined) ?? choices,
               schema: (data["schema"] as Record<string, unknown> | undefined) ?? config.schema,
               nodeId: String(nodeSpec["id"]),
+              select,
+              presented,
             }),
           { maxAttempts: config.maxResumeAttempts },
         );
 
+        // `round`: 1 for the first accepted answer at this gate, +1 each time it is answered again
+        // (a loop back). The previous value is the one this node wrote to `state.outputs.<id>` last
+        // time; state is as of the start of the node, so a resumed run re-reads the same value and
+        // gets the same round. Rejected answers re-prompt inside interruptUntilValid and never get here.
+        const outputs = state["outputs"] as Record<string, { round?: unknown } | undefined> | undefined;
+        const prevRound = outputs?.[String(nodeSpec["id"] ?? ctx.nodeId)]?.round;
+        const round = (typeof prevRound === "number" && Number.isInteger(prevRound) && prevRound >= 1 ? prevRound : 0) + 1;
+        result["round"] = round;
+
         ctx.emit("node.output", { hitl: { mode: config.mode, result } });
 
-        return {
-          update: applyOutput(config.output, result, {
-            nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
-            scope,
-          }),
-        };
+        const update = applyOutput(config.output, result, {
+          nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+          scope,
+        });
+
+        // `routes`: the answer picks the next node, like a router would.
+        const routes = normalizeHitlRoutes(config.routes);
+        if (Object.keys(routes).length > 0) {
+          const outcome = hitlOutcomeKey(config.mode, result);
+          const hit = resolveHitlRoute(routes, outcome);
+          if (!hit) {
+            throw new Error(
+              `hitl node "${String(nodeSpec["id"])}": no route for answer "${outcome}" and no "default" route. ` +
+                `Routes: ${Object.keys(routes).join(", ")}.`,
+            );
+          }
+          ctx.emit("router.decision", {
+            routes: Object.keys(routes),
+            chosen: hit.key,
+            to: hit.route.to,
+            mode: "hitl",
+          });
+          return { command: { goto: hit.route.to, update } };
+        }
+
+        return { update };
       },
     };
   },
@@ -147,16 +205,34 @@ function mapHitlResume(
     decisions?: string[] | undefined;
     schema?: Record<string, unknown> | undefined;
     nodeId: string;
+    select: HitlSelect;
+    presented: Artifact[];
   },
 ): Record<string, unknown> {
   const mode = config.mode;
+  const rawSelected =
+    resume && typeof resume === "object" && !Array.isArray(resume)
+      ? (resume as Record<string, unknown>)["selected"]
+      : undefined;
+  // The validated records always win over whatever the client sent; `select: none` drops `selected`.
+  const withSelection = (out: Record<string, unknown>, required: boolean): Record<string, unknown> => {
+    delete out["selected"];
+    const picked = resolveSelection(rawSelected, {
+      select: opts.select,
+      presented: opts.presented,
+      required,
+      nodeId: opts.nodeId,
+    });
+    if (picked !== undefined) out["selected"] = picked;
+    return out;
+  };
 
   if (mode === "approve") {
     const approved =
       typeof resume === "boolean"
         ? resume
         : (resume as { approved?: boolean })?.approved ?? false;
-    return { approved };
+    return withSelection({ approved }, approved === true);
   }
 
   if (mode === "question") {
@@ -213,19 +289,28 @@ function mapHitlResume(
         : typeof rec["notes"] === "string"
           ? rec["notes"]
           : undefined;
-    return {
-      decision,
-      approved: decision === "approve",
-      ...(feedback != null ? { feedback } : {}),
-      ...rec,
-    };
+    return withSelection(
+      {
+        decision,
+        approved: decision === "approve",
+        ...(feedback != null ? { feedback } : {}),
+        ...rec,
+      },
+      decision === "approve",
+    );
   }
 
-  // choice
-  let choice =
-    typeof resume === "string"
-      ? resume
-      : (resume as { choice?: string })?.choice ?? "";
+  // choice: a string or number answer, bare or as `{ choice }`. A number is
+  // only a 1-based index; a string matches a label first, then an index.
+  const raw = resume !== null && typeof resume === "object" ? (resume as { choice?: unknown }).choice : resume;
+  if (typeof raw === "number" && opts.choices?.length) {
+    const picked = Number.isInteger(raw) && raw >= 1 ? opts.choices[raw - 1] : undefined;
+    if (picked === undefined) {
+      throw new Error(`Invalid choice ${raw}. Expected an index from 1 to ${opts.choices.length}`);
+    }
+    return { choice: picked };
+  }
+  let choice = typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
   if (opts.choices?.length && !opts.choices.includes(choice)) {
     const idx = Number(choice) - 1;
     if (Number.isInteger(idx) && idx >= 0 && idx < opts.choices.length) {
@@ -235,5 +320,5 @@ function mapHitlResume(
   if (opts.choices?.length && !opts.choices.includes(choice)) {
     throw new Error(`Invalid choice "${choice}". Expected one of: ${opts.choices.join(", ")}`);
   }
-  return { choice };
+  return withSelection({ choice }, true);
 }

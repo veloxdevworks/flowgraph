@@ -481,7 +481,7 @@ describe("subgraph merge-back", () => {
     const resumed = await compiled.resume({ threadId: "merge-hitl", resume: { approved: true } });
     expect(resumed.status).toBe("completed");
     expect(resumed.state["log"]).toEqual(["seed", "before", "after"]);
-    expect(resumed.state["approval"]).toEqual({ approved: true });
+    expect(resumed.state["approval"]).toEqual({ approved: true, round: 1 });
     expect(resumed.state["gateResult"]).toBeUndefined();
   });
 });

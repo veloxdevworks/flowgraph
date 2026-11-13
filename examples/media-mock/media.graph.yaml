@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: media-mock
+  description: >
+    Image -> 3D model, using a plugin-provided media vendor. Swap the provider
+    entry for `{ kind: langchain, vendor: xai }` or `{ kind: media, vendor: tripo }`
+    once those vendor adapters are installed; the nodes do not change.
+
+imports:
+  - { providers: ./mock-vendor.ts }
+
+providers:
+  art: { kind: media, vendor: mock-media }
+
+nodes:
+  - id: concept
+    type: image
+    provider: art
+    with:
+      prompt: "a small lighthouse, painterly"
+      count: 2
+
+  - id: mesh
+    type: model3d
+    provider: art
+    with:
+      input: "{{ state.outputs.concept.artifact }}"   # image-to-3D from the first image
+      format: glb
+
+edges:
+  - { from: START, to: concept }
+  - { from: concept, to: mesh }
+  - { from: mesh, to: END }
+
+runtime:
+  checkpoint: { enabled: false, backend: memory }

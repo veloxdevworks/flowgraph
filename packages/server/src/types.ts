@@ -2,10 +2,12 @@ import {
   MEMORY_SWEEP_MAX_INTERVAL_MS,
   type CheckpointRetentionInput,
   type FlowgraphEvent,
+  type CustomLabelsConfig,
   type RunResult,
   type StateSnapshot,
 } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
+import { workerLabelsFromEnv } from "./worker-labels.js";
 import {
   ASYMMETRIC_ALGORITHMS,
   DEFAULT_CLOCK_TOLERANCE_SEC,
@@ -48,6 +50,20 @@ export interface StartRunRequest {
    * Kept in the type so we can return a clear 400.
    */
   env?: Record<string, string>;
+}
+
+/** `POST /worker/preflight` body: the graph as `yaml` (JSON is valid YAML) or as a parsed `spec`. */
+export interface WorkerPreflightRequest {
+  yaml?: string;
+  spec?: Record<string, unknown>;
+  input?: Record<string, unknown>;
+}
+
+export interface WorkerPreflightResult {
+  ok: boolean;
+  diagnostics: import("@flowgraph/spec").Diagnostic[];
+  /** True when the uploaded graph had an `imports` block that was stripped (as on POST /runs). */
+  importsStripped?: boolean;
 }
 
 export interface RunListItem {
@@ -138,6 +154,19 @@ export interface ServerConfig {
   host: string;
   port: number;
   /**
+   * Custom placement labels this server advertises on `GET /worker/labels` (ADR-0020 §6), from
+   * FLOWGRAPH_WORKER_LABELS / FLOWGRAPH_WORKER_LABELS_FILE. Labels with a `check` are re-checked
+   * on their `every` interval (default 10m) and withdrawn while the check fails.
+   */
+  workerLabels?: CustomLabelsConfig;
+  /**
+   * Largest artifact a coordinator may upload to `PUT /worker/artifacts/:sha256`, in bytes (ADR-0020
+   * section 10). `0` disables the limit. Env: `FLOWGRAPH_ARTIFACT_MAX_BYTES`. Default 4 GiB.
+   */
+  artifactMaxBytes?: number;
+  /** Per-check timeout in ms for worker label checks (default 10000). */
+  workerLabelCheckTimeoutMs?: number;
+  /**
    * Bearer token for REST. Required unless `authDisabled` is set
    * (`FLOWGRAPH_AUTH_DISABLED=1`).
    */
@@ -153,13 +182,25 @@ export interface ServerConfig {
    * `authToken` / `authDisabled` decide, and the single principal is trusted.
    */
   auth?: ServerAuthConfig;
-  /** Postgres URL. When unset, use in-memory checkpointer (local smoke only). */
+  /**
+   * The server runs as a Bedrock AgentCore Runtime (`FLOWGRAPH_AGENTCORE=1`).
+   * Only then does `/invocations` trust the AgentCore edge (SigV4) to have
+   * checked the caller in `token` and `none` mode. Unset, `/invocations` takes
+   * the same auth as REST, so an ECS / ALB deployment does not expose it.
+   */
+  agentcore?: boolean;
+  /**
+   * Postgres URL for checkpoints (takes precedence over every other store).
+   * When unset, checkpoints go to the sqlite file with `memory.backend: "sqlite"`,
+   * else stay in process memory (local smoke only).
+   */
   databaseUrl?: string;
   /**
    * Where `runtime.memory` (and the durable `ctx.store` alias) lives. Default
    * `memory`: process-local, and graphs that declare durable memory fail to
    * compile. `postgres` shares the checkpointer's pool (needs `databaseUrl`);
-   * `sqlite` keeps memory in a local file (needs @flowgraph/checkpoint-sqlite).
+   * `sqlite` keeps memory in a local file (needs @flowgraph/checkpoint-sqlite),
+   * along with the checkpoints when `databaseUrl` is unset.
    */
   memory?: ServerMemoryConfig;
   /**
@@ -392,9 +433,13 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
     eventBufferSize: Number(env.FLOWGRAPH_EVENT_BUFFER ?? 5000),
     authDisabled: envFlag(env, "FLOWGRAPH_AUTH_DISABLED"),
     auth: authConfigFromEnv(env),
+    agentcore: envFlag(env, "FLOWGRAPH_AGENTCORE"),
     maxBodyBytes: envInt(env, "FLOWGRAPH_MAX_BODY_BYTES", 2_000_000),
     maxConcurrentRuns: envInt(env, "FLOWGRAPH_MAX_CONCURRENT_RUNS", 16),
+    artifactMaxBytes: envInt(env, "FLOWGRAPH_ARTIFACT_MAX_BYTES", 4 * 1024 * 1024 * 1024),
   };
+  const workerLabels = workerLabelsFromEnv(env);
+  if (workerLabels) config.workerLabels = workerLabels;
   if (env.FLOWGRAPH_AUTH_TOKEN) config.authToken = env.FLOWGRAPH_AUTH_TOKEN;
   if (env.DATABASE_URL) config.databaseUrl = env.DATABASE_URL;
   const memBackend = (env.FLOWGRAPH_MEMORY_BACKEND?.trim().toLowerCase() || "memory") as ServerMemoryBackend;

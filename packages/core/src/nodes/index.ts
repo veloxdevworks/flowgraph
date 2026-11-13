@@ -21,6 +21,7 @@ import { workshopNode } from "./workshop.js";
 import { worktreeNode } from "./worktree.js";
 import { webhookNode } from "./webhook.js";
 import { memoryNode } from "./memory.js";
+import { imageNode, videoNode, model3dNode, audioNode } from "./media.js";
 import "../providers/ask-human.js";
 import "../providers/list-services.js";
 import "../providers/service-tools.js";
@@ -46,10 +47,17 @@ const BUILT_INS = [
   worktreeNode,
   webhookNode,
   memoryNode,
+  imageNode,
+  videoNode,
+  model3dNode,
+  audioNode,
 ];
 for (const node of BUILT_INS) {
   if (!registry.has(node.type)) registry.register(node);
 }
+
+/** Node types core ships; every engine has these, so placement never infers `nodeType:` for them. */
+export const CORE_BUILTIN_NODE_TYPES: ReadonlySet<string> = new Set(BUILT_INS.map((n) => n.type));
 
 /** @deprecated Use functionNode */
 export const codeNode = functionNode;

@@ -1,6 +1,8 @@
 import * as path from "node:path";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
-import { FlowgraphMemorySaver } from "@flowgraph/core";
+import { FlowgraphMemorySaver, findArtifacts, resolveGraphWorkspace } from "@flowgraph/core";
+import type { Readable } from "node:stream";
+import { assertSha256, DEFAULT_ARTIFACT_MAX_BYTES, hasBlob, materializeStaged, putBlob, resolveInWorkspace, storeScopeOf } from "./artifact-store.js";
 import {
   compileGraph,
   createInMemoryMemoryBackend,
@@ -21,9 +23,12 @@ import {
   type RunResult,
   MEMORY_SWEEP_MAX_INTERVAL_MS,
   assertNoReservedInput,
+  preflightGraphAgents,
+  preflightGraphRequires,
+  preflightGraphSkills,
 } from "@flowgraph/core";
 import { maybeSweepPostgres, openPostgresBackend } from "@flowgraph/checkpoint-postgres";
-import type { GraphSpec } from "@flowgraph/spec";
+import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { rejectClientSecrets, applyServerCredentials } from "./credentials.js";
 import {
   parseGraphYaml,
@@ -31,6 +36,7 @@ import {
   loadPersistedGraph,
   readPersistedGraphYaml,
   readGraphMeta,
+  graphStoreClaim,
   updateGraphMeta,
   listPersistedGraphs,
   appendEventJournal,
@@ -59,7 +65,10 @@ import type {
   StartRunRequest,
   StartRunResult,
   ResumeRunRequest,
+  WorkerPreflightRequest,
+  WorkerPreflightResult,
 } from "./types.js";
+import { WorkerLabelManager } from "./worker-labels.js";
 
 import { ServerRequestError, TooManyRunsError } from "./errors.js";
 import { assertUntrustedUploadAllowed, untrustedNodePolicy, type UntrustedUploadOptions } from "./upload-policy.js";
@@ -98,6 +107,8 @@ export interface RunServiceOptions {
 export class RunService {
   readonly registry: SessionRegistry;
   readonly metrics = createMetrics();
+  /** This server's placement labels (ADR-0020 §6), served on GET /worker/labels. */
+  readonly workerLabels: WorkerLabelManager;
   private checkpointer: BaseCheckpointSaver | null = null;
   private checkpointerPromise: Promise<BaseCheckpointSaver> | null = null;
   /**
@@ -113,8 +124,8 @@ export class RunService {
   private graphNames: GraphNameRegistry | undefined;
   /**
    * Thread ownership, stored with the checkpoints: Postgres when DATABASE_URL
-   * is set, else the sqlite memory file, else process memory (where the
-   * in-memory checkpoints live too).
+   * is set, else the sqlite memory file (which then holds the checkpoints
+   * too), else process memory (where the in-memory checkpoints live too).
    */
   private threadOwners: ThreadOwnerRegistry | undefined;
   private singleUser: Principal | undefined;
@@ -160,6 +171,10 @@ export class RunService {
     private readonly options: RunServiceOptions = {},
   ) {
     assertGraphStoreSweepConfig(config.graphStoreSweep);
+    this.workerLabels = new WorkerLabelManager({
+      custom: config.workerLabels,
+      checkTimeoutMs: config.workerLabelCheckTimeoutMs,
+    });
     this.registry = new SessionRegistry(config.eventBufferSize, {
       onPersist: (threadId, event) => {
         appendEventJournal(config.graphStoreDir, threadId, event);
@@ -193,12 +208,13 @@ export class RunService {
     });
     await this.graphStoreSweeper.sweepNow();
     await this.getCheckpointer();
+    await this.workerLabels.start();
     if (this.multiUser) {
       // A failure here is not fatal: each replica still copies its own meta owners on first access.
       await this.backfillThreadOwners().catch((err: unknown) => log("error", "thread-owners.backfill failed", errorFields(err)));
     }
     log("info", "run-service ready", {
-      database: this.config.databaseUrl ? "postgres" : "memory",
+      checkpoints: this.config.databaseUrl ? "postgres" : this.config.memory?.backend === "sqlite" ? "sqlite" : "memory",
       memory: this.config.memory?.backend ?? "memory",
       graphStoreDir: this.config.graphStoreDir,
     });
@@ -219,6 +235,7 @@ export class RunService {
 
   private async shutdown(): Promise<void> {
     this.closing = true;
+    this.workerLabels.stop();
     this.sweeper?.stop();
     this.sweeper = undefined;
     // A sweep under way finishes first: nothing is removed from the store after close().
@@ -413,6 +430,23 @@ export class RunService {
     return null;
   }
 
+  /**
+   * 409 THREAD_EXISTS when the thread is running here or has a stored run to reconnect to. A thread
+   * whose last run failed (`error`) may be started again. Callers have passed `checkThreadAccess`.
+   */
+  private assertThreadFree(threadId: string, meta: GraphMeta | null): void {
+    const live = this.registry.get(threadId);
+    const active = Boolean(live && live.runId && this.registry.hasLiveRun(threadId));
+    const stored = meta && meta.threadId === threadId && meta.status && meta.status !== "error" ? meta.status : undefined;
+    if (!active && !stored) return;
+    const status: RunStatus | "unknown" = active ? live!.status : (stored ?? "unknown");
+    throw new ServerRequestError(409, "THREAD_EXISTS", `Thread "${threadId}" already exists (status: ${status})`, undefined, {
+      threadId,
+      status,
+      active,
+    });
+  }
+
   private threadIdConflict(threadId: string, meta: GraphMeta): ServerRequestError {
     return new ServerRequestError(
       409,
@@ -560,6 +594,12 @@ export class RunService {
     });
   }
 
+  /**
+   * The one checkpoint saver for this service, opened once and shared by every
+   * compile: Postgres when DATABASE_URL is set, else the sqlite file when
+   * FLOWGRAPH_MEMORY_BACKEND=sqlite (checkpoints, memory, thread owners and
+   * graph names in one file), else process memory.
+   */
   private async getCheckpointer(): Promise<BaseCheckpointSaver> {
     if (this.checkpointer) return this.checkpointer;
     if (!this.checkpointerPromise) {
@@ -579,6 +619,13 @@ export class RunService {
           this.useDurableMemory(b.memory);
           this.graphNames = b.graphNames;
           this.threadOwners = b.threadOwners;
+          if (!this.config.databaseUrl) {
+            // Checkpoints live in the same file as the thread owners, so an
+            // interrupted run survives a restart on the same graph store.
+            // DATABASE_URL still wins below: replicas share Postgres.
+            this.checkpointer = b.checkpointer;
+            return b.checkpointer;
+          }
         }
         if (this.config.databaseUrl) {
           // One pool for checkpoints, thread owners and graph names (and
@@ -710,7 +757,17 @@ export class RunService {
     if (!req.threadId?.trim()) throw new Error("threadId is required");
     if (!req.yaml?.trim()) throw new Error("yaml is required");
     const principal = this.principalFor(caller);
-    await this.checkThreadAccess(req.threadId, principal);
+    const meta = await this.checkThreadAccess(req.threadId, principal);
+    // Past the access check the caller may see this thread (never another principal's), so tell
+    // it the thread exists instead of starting over it: a coordinator reconnects rather than re-sends.
+    // A claim with no graph file, older than the sweep age, is listed as `error` and the owner
+    // may start it again (the create never finished). The file still says `running`.
+    let freeMeta = meta;
+    if (meta && meta.status !== "error") {
+      const claim = await graphStoreClaim(this.config.graphStoreDir, req.threadId, { maxAgeMs: this.graphStoreMaxAgeMs, now: this.now() });
+      if (claim === "old") freeMeta = { ...meta, status: "error" };
+    }
+    this.assertThreadFree(req.threadId, freeMeta);
     await this.claimThread(req.threadId, principal);
 
     const max = this.config.maxConcurrentRuns ?? 16;
@@ -723,6 +780,21 @@ export class RunService {
       status: "running",
     });
     const graphName = spec.metadata?.name ?? "graph";
+
+    // Staged artifacts (ADR-0020 section 10) become files in this run's workspace before anything starts.
+    let runInput = req.input;
+    try {
+      runInput = await materializeStaged(
+        this.config.graphStoreDir,
+        this.storeScope(principal),
+        resolveGraphWorkspace(spec, cwd),
+        req.threadId,
+        req.input,
+      );
+    } catch (err) {
+      await this.patchMeta(req.threadId, { status: "error" });
+      throw err;
+    }
 
     // Pre-create session so events during compile/run are buffered.
     const placeholder = this.registry.create({
@@ -751,7 +823,7 @@ export class RunService {
     try {
       resolvedInput = resolveAndValidateInput(spec.inputs, {
         ...(spec.input ?? {}),
-        ...(req.input ?? {}),
+        ...(runInput ?? {}),
       });
     } catch (err) {
       this.registry.remove(req.threadId);
@@ -809,6 +881,139 @@ export class RunService {
     };
   }
 
+  /** Content-store scope: one per principal on multi-user servers, shared otherwise. */
+  private storeScope(principal: Principal): string {
+    return this.multiUser ? storeScopeOf(principal.id) : "";
+  }
+
+  /** Largest accepted artifact upload in bytes (`0` = unlimited). */
+  get artifactMaxBytes(): number {
+    return this.config.artifactMaxBytes ?? DEFAULT_ARTIFACT_MAX_BYTES;
+  }
+
+  /** `HEAD /worker/artifacts/:sha256`: does this worker's content store hold the blob? */
+  async hasArtifact(sha256: string, caller?: Principal): Promise<boolean> {
+    this.assertOpen();
+    assertSha256(sha256);
+    return hasBlob(this.config.graphStoreDir, this.storeScope(this.principalFor(caller)), sha256);
+  }
+
+  /** `PUT /worker/artifacts/:sha256`: stream a blob into the content store, verifying its hash. */
+  putArtifact(sha256: string, body: Readable, caller?: Principal): Promise<{ sha256: string; sizeBytes: number; existed: boolean }> {
+    try {
+      this.assertOpen();
+      assertSha256(sha256);
+      const principal = this.principalFor(caller);
+      return this.track(
+        putBlob(this.config.graphStoreDir, this.storeScope(principal), sha256, body, this.artifactMaxBytes).then((r) => ({ sha256, ...r })),
+      );
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  /**
+   * `GET /worker/runs/:threadId/artifacts/:sha256`: the file of an `Artifact` record with that hash in the
+   * thread's state. The caller must own the thread; the path is resolved inside the run's workspace only.
+   */
+  getArtifactFile(threadId: string, sha256: string, caller?: Principal): Promise<{ file: string; sizeBytes: number }> {
+    try {
+      this.assertOpen();
+      assertSha256(sha256);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.getArtifactFileNow(threadId, sha256, caller));
+  }
+
+  private async getArtifactFileNow(threadId: string, sha256: string, caller?: Principal): Promise<{ file: string; sizeBytes: number }> {
+    const principal = this.principalFor(caller);
+    await this.checkThreadAccess(threadId, principal, { mustExist: true });
+    const notFound = () => new ServerRequestError(404, "ARTIFACT_NOT_FOUND", `Thread "${threadId}" has no artifact ${sha256}`);
+    const existing = this.registry.get(threadId);
+    const { spec, cwd } = await this.resolveSpec(threadId, existing?.yaml, principal).catch(() => {
+      throw notFound();
+    });
+    const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
+    const state = await compiled.getState(threadId);
+    const workspace = resolveGraphWorkspace(spec, cwd);
+    for (const rec of findArtifacts(state?.values)) {
+      if (rec.sha256 !== sha256) continue;
+      const found = await resolveInWorkspace(workspace, rec.path);
+      if (found) return found;
+    }
+    throw notFound();
+  }
+
+  /**
+   * Worker preflight (ADR-0020 §7): validate and preflight a graph without running it. Parses and
+   * polices the upload like `startRun`, then checks node types, input, `requires` binaries, skills,
+   * agents and provider credentials on this server. Creates no run, thread, owner or checkpoint.
+   */
+  preflight(req: WorkerPreflightRequest, caller?: Principal): Promise<WorkerPreflightResult> {
+    try {
+      this.assertOpen();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return this.track(this.preflightNow(req, caller));
+  }
+
+  private async preflightNow(req: WorkerPreflightRequest, caller?: Principal): Promise<WorkerPreflightResult> {
+    assertNoReservedInput(req.input, "run input");
+    const yaml = req.yaml?.trim() ? req.yaml : req.spec ? JSON.stringify(req.spec) : "";
+    if (!yaml.trim()) throw new Error("yaml is required");
+    const principal = this.principalFor(caller);
+    const parsed = parseGraphYaml(yaml, { expandEnv: principal.trusted });
+    const importsStripped = parsed.importsStripped ? { importsStripped: true as const } : {};
+    const diagnostics: Diagnostic[] = [...parsed.diagnostics];
+    const done = (): WorkerPreflightResult => ({
+      ok: diagnostics.every((d) => d.severity !== "error"),
+      diagnostics,
+      ...importsStripped,
+    });
+    if (!parsed.spec) {
+      if (!diagnostics.some((d) => d.severity === "error")) {
+        diagnostics.push({ severity: "error", code: "INVALID_GRAPH", message: "Graph could not be parsed" });
+      }
+      return done();
+    }
+    const spec = parsed.spec;
+    if (!principal.trusted) assertUntrustedUploadAllowed(yaml, spec, this.uploadOptions);
+
+    try {
+      resolveAndValidateInput(spec.inputs, { ...(spec.input ?? {}), ...(req.input ?? {}) });
+    } catch (err) {
+      if (!isInputValidationError(err)) throw err;
+      diagnostics.push({ severity: "error", code: "INPUT_INVALID", message: err.message });
+    }
+
+    const cwd = this.config.graphStoreDir;
+    for (const [name, check] of [
+      ["requires", preflightGraphRequires],
+      ["skills", preflightGraphSkills],
+      ["agents", preflightGraphAgents],
+    ] as const) {
+      try {
+        diagnostics.push(...(await check(spec, { cwd })).diagnostics);
+      } catch (err) {
+        diagnostics.push({ severity: "error", code: "PREFLIGHT_ERROR", message: `${name} preflight failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+
+    // Building the provider adapters is what checks vendor packages and credentials; nothing is called.
+    try {
+      await buildServerProviders(spec, cwd, { untrusted: !principal.trusted });
+    } catch (err) {
+      diagnostics.push({
+        severity: "error",
+        code: err instanceof ServerRequestError ? err.code : "PROVIDER_UNAVAILABLE",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return done();
+  }
+
   private async applyResult(threadId: string, result: RunResult): Promise<void> {
     const status =
       result.status === "interrupted"
@@ -841,6 +1046,8 @@ export class RunService {
 
   private async resumeRunNow(req: ResumeRunRequest, caller?: Principal): Promise<ControlResult> {
     if (!req.threadId?.trim()) throw new Error("threadId is required");
+    // A missing answer is not a denial: refuse it here so every entry point gets the same 400.
+    if (req.resume === undefined) throw new ServerRequestError(400, "RESUME_REQUIRED", "resume is required (use false or null to deny)");
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(req.threadId, principal, { mustExist: true });
 

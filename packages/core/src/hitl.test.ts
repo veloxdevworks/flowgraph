@@ -137,6 +137,97 @@ describe("hitl node", () => {
     expect(r3.status).toBe("completed");
     expect((r3.state["gateResult"] as { choice: string }).choice).toBe("a");
   });
+
+  it("approve mode records a falsy external resume as a denial", async () => {
+    const compiled = await compileGraph(hitlGraph("approve"), {});
+    for (const [i, answer] of [false, null, 0, ""].entries()) {
+      const threadId = `hitl-ext-deny-${i}`;
+      await compiled.run({ threadId, onInterrupt: "fail" });
+      const r = await compiled.resume({ threadId, resume: answer, onInterrupt: "fail" });
+      expect(r.status).toBe("completed");
+      expect((r.state["gateResult"] as { approved: boolean }).approved).toBe(false);
+    }
+  });
+
+  it("a resume with no value fails and leaves the approval pending", async () => {
+    const compiled = await compileGraph(hitlGraph("approve"), {});
+    await compiled.run({ threadId: "hitl-no-value", onInterrupt: "fail" });
+    // A JavaScript caller can leave `resume` out entirely.
+    const noKey = { threadId: "hitl-no-value", onInterrupt: "fail" } as Parameters<typeof compiled.resume>[0];
+    await expect(compiled.resume(noKey)).rejects.toThrow(
+      /needs a value for its pending interrupt/,
+    );
+    await expect(
+      compiled.resume({ threadId: "hitl-no-value", resume: undefined, onInterrupt: "fail" }),
+    ).rejects.toMatchObject({ code: "RESUME_VALUE_REQUIRED" });
+    const snap = await compiled.getState("hitl-no-value");
+    expect(snap?.interrupts).toHaveLength(1);
+    expect(snap?.values["gateResult"] ?? null).toBeNull();
+
+    const r = await compiled.resume({ threadId: "hitl-no-value", resume: true, onInterrupt: "fail" });
+    expect(r.status).toBe("completed");
+    expect((r.state["gateResult"] as { approved: boolean }).approved).toBe(true);
+  });
+
+  it("choice mode reads a number only as a 1-based index, even with numeric labels", async () => {
+    const compiled = await compileGraph(hitlGraph("choice", { choices: ["2", "1"] }), {});
+    const cases: Array<[unknown, string]> = [[1, "2"], [{ choice: 1 }, "2"], [2, "1"], ["1", "1"], ["2", "2"]];
+    for (const [i, [answer, expected]] of cases.entries()) {
+      const threadId = `hitl-numeric-labels-${i}`;
+      await compiled.run({ threadId, onInterrupt: "fail" });
+      const r = await compiled.resume({ threadId, resume: answer, onInterrupt: "fail" });
+      expect(r.status).toBe("completed");
+      expect((r.state["gateResult"] as { choice: string }).choice).toBe(expected);
+    }
+    await compiled.run({ threadId: "hitl-numeric-out-of-range", onInterrupt: "fail" });
+    const r = await compiled.resume({ threadId: "hitl-numeric-out-of-range", resume: 3, onInterrupt: "fail" });
+    expect(r.status).toBe("interrupted");
+    expect(r.interrupts?.[0]?.validationError).toContain("Invalid choice 3");
+  });
+
+  it("choice mode maps a numeric 1-based index to the choice string", async () => {
+    const compiled = await compileGraph(hitlGraph("choice"), {});
+    await compiled.run({ threadId: "hitl-num", onInterrupt: "fail" });
+    const r = await compiled.resume({ threadId: "hitl-num", resume: 2, onInterrupt: "fail" });
+    expect(r.status).toBe("completed");
+    expect((r.state["gateResult"] as { choice: string }).choice).toBe("b");
+  });
+
+  it("choice mode accepts a valid answer after an invalid one, truthy or falsy", async () => {
+    const compiled = await compileGraph(hitlGraph("choice"), {});
+    const invalid: unknown[] = ["nope", 5, { choice: "nope" }, false, null, 0, ""];
+    const valid: Array<[unknown, string]> = [["b", "b"], [2, "b"], ["1", "a"], [{ choice: "a" }, "a"]];
+    let n = 0;
+    for (const bad of invalid) {
+      for (const [good, expected] of valid) {
+        const threadId = `hitl-retry-${n++}`;
+        await compiled.run({ threadId, onInterrupt: "fail" });
+        const r1 = await compiled.resume({ threadId, resume: bad, onInterrupt: "fail" });
+        expect(r1.status).toBe("interrupted");
+        expect(r1.interrupts?.[0]?.validationError).toContain("Invalid choice");
+        const r2 = await compiled.resume({ threadId, resume: good, onInterrupt: "fail" });
+        expect(r2.status).toBe("completed");
+        expect((r2.state["gateResult"] as { choice: string }).choice).toBe(expected);
+      }
+    }
+  });
+
+  it("choice mode re-prompts in process and accepts a valid answer after an invalid one", async () => {
+    const compiled = await compileGraph(hitlGraph("choice"), {});
+    for (const [i, answers] of [[5, 1], ["nope", 2], [0, "b"], [false, 1], [null, "a"]].entries()) {
+      let asked = 0;
+      const r = await compiled.run({
+        threadId: `hitl-inproc-retry-${i}`,
+        onInterrupt: "prompt",
+        resolveInterrupt: async () => answers[asked++],
+      });
+      expect(r.status).toBe("completed");
+      expect(asked).toBe(2);
+      expect((r.state["gateResult"] as { choice: string }).choice).toBe(
+        answers[1] === 1 || answers[1] === "a" ? "a" : "b",
+      );
+    }
+  });
 });
 
 function parallelHitlSpec(): GraphSpec {
@@ -218,6 +309,16 @@ describe("parallel HITL interrupts", () => {
     expect(asked).toBe(1);
     expect((r.state["gateA"] as { approved: boolean }).approved).toBe(false);
     expect(r.state["gateB"]).toBeDefined();
+  });
+
+  it("an external resume of false applies to every pending interrupt", async () => {
+    const compiled = await compileGraph(parallelHitlSpec(), {});
+    const r1 = await compiled.run({ threadId: "hitl-par-ext-deny", onInterrupt: "fail" });
+    expect(r1.interrupts).toHaveLength(2);
+    const r2 = await compiled.resume({ threadId: "hitl-par-ext-deny", resume: false, onInterrupt: "fail" });
+    expect(r2.status).toBe("completed");
+    expect((r2.state["gateA"] as { approved: boolean }).approved).toBe(false);
+    expect((r2.state["gateB"] as { answer: string }).answer).toBe("false");
   });
 
   it("partial map resume re-raises the remaining interrupt", async () => {

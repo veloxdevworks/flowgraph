@@ -39,7 +39,10 @@ export function tokensEqual(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
-/** AgentCore `/invocations` and `/ping` skip bearer auth (AWS SigV4 at the edge). */
+/**
+ * The AgentCore contract paths. `/ping` is always open; `/invocations` skips bearer
+ * auth only when the server runs on AgentCore (`FLOWGRAPH_AGENTCORE=1`), see `http/app.ts`.
+ */
 export function isAgentCorePath(pathname: string): boolean {
   return pathname === "/ping" || pathname === "/invocations";
 }

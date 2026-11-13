@@ -476,24 +476,95 @@ export const OnMissingToolSchema = z
   .default("fail")
   .describe("fail (default) throws; skip records a TOOL_NOT_FOUND issue and continues");
 
+const DemoExpectSchema = z
+  .object({ status: z.array(z.number().int()).min(1) })
+  .optional()
+  .describe("HTTP statuses that count as success (default: any status below 400)");
+
+/**
+ * What a `demo` result shows about its objective (ADR-0019 §3). `ok` is derived from
+ * it: true for `passed` and `inconclusive`, false for `failed` and `not_captured`.
+ * Captures without assertions (every mode today) can only be `failed`,
+ * `inconclusive` or `not_captured`.
+ */
+export const DemoStatusSchema = z.enum(["passed", "failed", "inconclusive", "not_captured"]);
+
+/** One check in a `steps` flow. `hidden` also holds on a blank page, so it can't prove anything alone. */
+const DemoStepCheckSchema = z.union([
+  z.object({ text: z.string().min(1).describe("This text is visible on the page") }).strict(),
+  z.object({ visible: z.string().min(1).describe("An element matching this selector is visible") }).strict(),
+  z.object({ url: z.string().min(1).describe("The page URL matches this glob") }).strict(),
+  z.object({ hidden: z.string().min(1).describe("No element matching this selector is visible") }).strict(),
+]);
+
+/** One step of a `steps` flow: exactly one verb. Steps never run code in the page (ADR-0019 §2). */
+export const DemoStepSchema = z.union([
+  z.object({ goto: z.string().min(1) }).strict(),
+  z.object({ click: z.string().min(1) }).strict(),
+  z.object({ fill: z.object({ selector: z.string().min(1), value: z.string() }).strict() }).strict(),
+  z.object({ press: z.string().min(1) }).strict(),
+  z.object({ wait: z.string().min(1).describe("CSS selector or a duration") }).strict(),
+  z.object({ screenshot: z.string().min(1).describe("Name of a screenshot to save") }).strict(),
+  z.object({ expect: DemoStepCheckSchema }).strict(),
+]);
+
 /**
  * Best-effort artifact capture. Exactly one of `http`, `screenshot`, `file`,
- * `video`, or `simulator` must be set. Capture failures return `{ ok: false }`
- * unless `strict: true`.
+ * `video`, `simulator`, or `steps` must be set. `ok` is false when the capture failed or
+ * when what it recorded is a failure (an unexpected HTTP status). Such results
+ * return `{ ok: false }` unless `strict: true`.
  */
 export const DemoWithSchema = BaseWithSchema.extend({
   strict: z
     .boolean()
     .optional()
-    .describe("Fail the node instead of returning ok:false on capture failure"),
+    .describe("Fail the node instead of returning ok:false on capture failure. With an `objective`, fail unless the status is passed"),
   label: z.string().optional().describe("Optional human-readable label for the artifact"),
+  objective: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("The claim this capture is evidence for. Only `steps` with a positive assertion can reach `passed`"),
+  target: z
+    .object({
+      web: z
+        .object({
+          url: z.string().min(1).describe("Where the flow starts"),
+          viewport: z
+            .object({
+              width: z.number().int().positive(),
+              height: z.number().int().positive(),
+            })
+            .optional(),
+          expect: DemoExpectSchema,
+          timeout: DurationSchema.optional().describe("Limit for the whole flow (default 2m)"),
+          stepTimeout: DurationSchema.optional().describe("Limit for each step (default 30s)"),
+        })
+        .strict(),
+    })
+    .strict()
+    .optional()
+    .describe("What `steps` run against"),
+  steps: z
+    .array(DemoStepSchema)
+    .min(1)
+    .optional()
+    .describe("Scripted flow. Always recorded, and always ends with a screenshot"),
+  expect: z
+    .object({
+      noConsoleErrors: z.boolean().optional().describe("No console error or uncaught page error during the flow"),
+    })
+    .strict()
+    .optional()
+    .describe("Checks over the whole `steps` flow"),
   http: z
     .object({
       method: DemoHttpMethodSchema.default("GET"),
       url: z.string(),
       headers: z.record(z.string()).optional(),
       body: z.unknown().optional(),
-      timeout: DurationSchema.optional(),
+      expect: DemoExpectSchema,
+      timeout: DurationSchema.optional().describe("Give up after this long (default 30s)"),
     })
     .optional(),
   screenshot: z
@@ -504,6 +575,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
         .optional()
         .describe("CSS selector or a duration to wait before capture"),
       video: z.boolean().optional(),
+      expect: DemoExpectSchema,
       viewport: z
         .object({
           width: z.number().int().positive(),
@@ -516,11 +588,12 @@ export const DemoWithSchema = BaseWithSchema.extend({
   video: z
     .object({
       url: z.string(),
-      duration: DurationSchema.optional().describe("How long to record after the page loads (default 5s)"),
+      duration: DurationSchema.optional().describe("How long to keep recording after `waitFor` (default 5s)"),
+      expect: DemoExpectSchema,
       waitFor: z
         .union([z.string(), DurationSchema])
         .optional()
-        .describe("CSS selector or a duration to wait before recording starts"),
+        .describe("CSS selector or a duration to wait before `duration` starts. The recording includes the page load and this wait"),
       viewport: z
         .object({
           width: z.number().int().positive(),
@@ -534,11 +607,14 @@ export const DemoWithSchema = BaseWithSchema.extend({
   simulator: z
     .object({
       platform: z.union([z.literal("ios"), z.literal("android")]),
-      device: z.string().optional().describe("Simulator/emulator name, UDID, or AVD"),
+      device: z.string().optional().describe("iOS: simulator name or UDID. Android: adb serial (e.g. emulator-5554) of a running device"),
       app: z.string().optional().describe("Bundle id / package to launch"),
       deepLink: z.string().optional(),
       capture: z.union([z.literal("video"), z.literal("screenshot")]).optional().default("video"),
       duration: DurationSchema.optional().describe("Recording length (default 10s)"),
+      settle: DurationSchema.optional().describe(
+        "Longest wait for the screen to change and hold still after a launch or deep link (default 30s)",
+      ),
     })
     .optional(),
   file: z
@@ -547,17 +623,26 @@ export const DemoWithSchema = BaseWithSchema.extend({
     })
     .optional(),
 }).superRefine((val, ctx) => {
-  const modes = [val.http, val.screenshot, val.file, val.video, val.simulator].filter((m) => m != null);
+  const modes = [val.http, val.screenshot, val.file, val.video, val.simulator, val.steps].filter((m) => m != null);
+  if (val.steps && !val.target) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: steps needs a target", path: ["target"] });
+  }
+  if (val.target && !val.steps) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: target needs steps", path: ["steps"] });
+  }
+  if (val.expect && !val.steps) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: expect needs steps", path: ["expect"] });
+  }
   if (modes.length === 0) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "demo: set exactly one of http, screenshot, file, video, or simulator",
+      message: "demo: set exactly one of http, screenshot, file, video, simulator, or steps",
       path: [],
     });
   } else if (modes.length > 1) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "demo: set only one of http, screenshot, file, video, or simulator",
+      message: "demo: set only one of http, screenshot, file, video, simulator, or steps",
       path: [],
     });
   }
@@ -644,6 +729,129 @@ export const PortWithSchema = BaseWithSchema.extend({
     .optional()
     .describe("Preferred port(s); falls back to an OS-assigned port when taken"),
   host: z.string().optional().describe("Bind host for the probe (default 127.0.0.1)"),
+});
+
+// ---------------------------------------------------------------------------
+// Artifacts + generative media nodes (image / video / model3d)
+// ---------------------------------------------------------------------------
+
+export const ArtifactRoleSchema = z.enum(["image", "video", "model3d", "audio", "document", "file"]);
+
+/**
+ * A file produced or consumed by a node. State holds this record, never the
+ * bytes: the file lives on disk under the run workspace.
+ */
+export const ArtifactSchema = z.object({
+  kind: z.literal("artifact"),
+  /** Workspace-relative path (posix separators). */
+  path: z.string().min(1),
+  mimeType: z.string().min(1),
+  sizeBytes: z.number().int().nonnegative(),
+  role: ArtifactRoleSchema.optional(),
+  sha256: z.string().optional(),
+  meta: z
+    .object({
+      width: z.number().optional(),
+      height: z.number().optional(),
+      durationMs: z.number().optional(),
+      /** Workspace-relative path of a preview image. */
+      thumbnail: z.string().optional(),
+      source: z
+        .object({
+          provider: z.string(),
+          vendor: z.string().optional(),
+          model: z.string().optional(),
+          jobId: z.string().optional(),
+          prompt: z.string().optional(),
+        })
+        .optional(),
+      costUSD: z.number().nonnegative().optional(),
+    })
+    .passthrough()
+    .optional(),
+});
+
+/** Reference input(s): a template resolving to an Artifact, a file path, or a URL. */
+const MediaInputRefSchema = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
+
+const MediaCommonWithSchema = BaseWithSchema.extend({
+  prompt: z.string().optional(),
+  negativePrompt: z.string().optional(),
+  input: MediaInputRefSchema.optional().describe(
+    "Reference input(s): a template resolving to an Artifact, a workspace path, or a URL",
+  ),
+  seed: z.number().int().optional(),
+  variant: z
+    .union([z.string(), z.number()])
+    .optional()
+    .describe(
+      "Templated cache-buster. Part of the job fingerprint but never sent to the vendor: change it (for example `{{ state.check.round }}`) to force a new job for an otherwise identical request. Unset, null or empty keeps the previous fingerprint.",
+    ),
+  params: z.record(z.unknown()).optional().describe("Vendor passthrough options"),
+  timeout: DurationSchema.optional().describe("Max wall time for the whole job (default per node type)"),
+});
+
+// image node
+export const ImageWithSchema = MediaCommonWithSchema.extend({
+  prompt: z.string().min(1, "image: prompt is required"),
+  count: z.number().int().min(1).max(10).optional().default(1),
+  size: z.string().optional().describe('Pixel size such as "1024x1024"'),
+  aspectRatio: z.string().optional().describe('Aspect ratio such as "16:9"'),
+  quality: z.string().optional(),
+});
+
+// video node
+export const VideoWithSchema = MediaCommonWithSchema.extend({
+  count: z.number().int().min(1).max(4).optional().default(1),
+  duration: z.number().positive().optional().describe("Clip length in seconds"),
+  aspectRatio: z.string().optional(),
+  resolution: z.string().optional().describe('e.g. "720p"'),
+}).superRefine((v, ctx) => {
+  if (!v.prompt?.trim() && v.input === undefined) {
+    ctx.addIssue({ code: "custom", path: ["prompt"], message: "video: set prompt, input, or both" });
+  }
+});
+
+export const Model3dFormatSchema = z.enum(["glb", "gltf", "fbx", "obj", "usdz", "stl", "3mf"]);
+
+// model3d node
+export const Model3dWithSchema = MediaCommonWithSchema.extend({
+  mode: z
+    .enum(["text", "image", "multiview"])
+    .optional()
+    .describe("Defaults from the inputs: no input = text, one = image, several = multiview"),
+  format: Model3dFormatSchema.optional().default("glb"),
+  texture: z.boolean().optional(),
+  quality: z.string().optional(),
+  count: z.number().int().min(1).max(4).optional().default(1),
+}).superRefine((v, ctx) => {
+  if (!v.prompt?.trim() && v.input === undefined) {
+    ctx.addIssue({ code: "custom", path: ["prompt"], message: "model3d: set prompt, input, or both" });
+  }
+});
+
+export const AudioKindSchema = z.enum(["speech", "sfx", "music"]);
+
+// audio node — speech (text to voice), sound effects, music
+export const AudioWithSchema = MediaCommonWithSchema.extend({
+  kind: AudioKindSchema.describe("speech = voice reading `text`; sfx = sound effect from `prompt`; music = song/score from `prompt` (and optional `text` lyrics)"),
+  text: z.string().optional().describe("speech: the script to speak; music: optional lyrics"),
+  voice: z.string().optional().describe("speech: voice id or name (vendor-specific)"),
+  language: z.string().optional().describe('e.g. "en"'),
+  duration: z.number().positive().optional().describe("Target length in seconds (sfx, music)"),
+  instrumental: z.boolean().optional().describe("music: no vocals"),
+  format: z.enum(["mp3", "wav", "ogg", "flac", "opus"]).optional(),
+  count: z.number().int().min(1).max(4).optional().default(1),
+}).superRefine((v, ctx) => {
+  if (v.kind === "speech" && !v.text?.trim()) {
+    ctx.addIssue({ code: "custom", path: ["text"], message: "audio: kind speech requires text" });
+  }
+  if (v.kind === "sfx" && !v.prompt?.trim()) {
+    ctx.addIssue({ code: "custom", path: ["prompt"], message: "audio: kind sfx requires prompt" });
+  }
+  if (v.kind === "music" && !v.prompt?.trim() && !v.text?.trim()) {
+    ctx.addIssue({ code: "custom", path: ["prompt"], message: "audio: kind music requires prompt or text (lyrics)" });
+  }
 });
 
 export const ServiceWithSchema = BaseWithSchema.extend({
@@ -751,6 +959,12 @@ export const WorktreeWithSchema = z.object({
   output: OutputMappingSchema.optional(),
 });
 
+/** A hitl route target: a node id, or `{ to, description }`. */
+export const HitlRouteSchema = z.union([
+  z.string(),
+  z.object({ to: z.string(), description: z.string().optional() }),
+]);
+
 // hitl node — human-in-the-loop gate (approve, question, choice, form, review)
 export const HitlWithSchema = BaseWithSchema.extend({
   mode: z
@@ -776,10 +990,30 @@ export const HitlWithSchema = BaseWithSchema.extend({
       after: z.string().optional(),
     })
     .optional(),
-  /** `mode: review` — artifact paths or demo-manifest refs shown to the human. */
+  /**
+   * `approve` / `choice` / `review` — files shown to the human. Each entry is a template that
+   * may render to an Artifact, an array of Artifacts, a media node's whole output
+   * (`{ artifact, artifacts }`), a workspace-relative path, demo-manifest ref, or an array of those.
+   */
   artifacts: z.array(z.string()).optional(),
+  /**
+   * Let the human pick from `artifacts`: `one` or `many` (default `none`). The answer carries
+   * `selected` (a path, `{ path }`, or an array); only presented artifacts are accepted, and the
+   * node outputs the matching Artifact record(s) as `selected`.
+   */
+  select: z.enum(["none", "one", "many"]).optional(),
   /** `mode: review` — extra decision labels beyond approve / request-changes. */
-  decision: z.array(z.string()).optional(),  /**
+  decision: z.array(z.string()).optional(),
+  /**
+   * Route on the human's answer instead of following the node's outgoing edges. Keys are
+   * the outcomes — `approved` / `rejected` for `approve`, each entry of `choices` for
+   * `choice`, each decision for `review` — and each value is the node to go to next.
+   * `default` catches any outcome without its own route (needed when `choices` are
+   * templated). Not available for `question` / `form`. The answer is still written to
+   * `output`, so later nodes can read it.
+   */
+  routes: z.record(HitlRouteSchema).optional(),
+  /**
    * Re-prompt budget for answers that fail validation (schema / decision / choice).
    * The interrupt is re-issued with `validationError` until this many answers were
    * rejected; then the run fails but the interrupt stays pending. Default 3.
@@ -841,6 +1075,12 @@ export const WorkshopWithSchema = BaseWithSchema.extend({
   limits: WorkshopLimitsSchema.optional(),
   /** Headless / no-mic fallback: form | text | json. Default form. */
   fallback: z.union([z.literal("form"), z.literal("text"), z.literal("json")]).optional().default("form"),
+  /**
+   * Accept an unfinished output when the session ends early (`endedReason` of
+   * human_ended, timeout or skipped). The node then writes `complete: false`, so
+   * later nodes can route on it. Property types are still checked. Default false.
+   */
+  allowPartial: z.boolean().optional(),
 });
 
 // wait node — duration / until / signal / webhook (inbound HTTP resume)
@@ -915,6 +1155,55 @@ export const WebhookWithSchema = BaseWithSchema.extend({
 });
 
 // ---------------------------------------------------------------------------
+// Placement (`runsOn`) — see docs/adr/0020-node-placement.md
+// ---------------------------------------------------------------------------
+
+/** `namespace:value`, e.g. `os:windows`, `app:cc5`, `plugin:@acme/cc5-nodes`, `flowgraph:0.42`. */
+export const PLACEMENT_LABEL_PATTERN = /^[a-z][a-zA-Z0-9-]*:[A-Za-z0-9@][A-Za-z0-9._@\/+-]*$/;
+
+export const PlacementLabelSchema = z
+  .string()
+  .regex(
+    PLACEMENT_LABEL_PATTERN,
+    "Invalid placement label: use namespace:value, e.g. os:windows or app:cc5",
+  );
+
+export const RunsOnObjectSchema = z
+  .object({
+    labels: z.array(PlacementLabelSchema).min(1).describe("All of these labels must match"),
+    target: z.string().min(1).optional().describe("Pin to one named target from the topology"),
+    fallback: z
+      .enum(["error", "local"])
+      .optional()
+      .describe("`local` runs the node here when no worker matches (default: error)"),
+    wait: DurationSchema.optional().describe("Queue for a matching worker for up to this long"),
+  })
+  .strict();
+
+export const RunsOnSchema = z.union([z.array(PlacementLabelSchema).min(1), RunsOnObjectSchema]);
+
+/** `runsOn` as written: a label list, or the object form. */
+export type RunsOn = z.input<typeof RunsOnSchema>;
+
+export interface NormalizedRunsOn {
+  labels: string[];
+  target?: string;
+  fallback: "error" | "local";
+  wait?: string;
+}
+
+/** Canonical form of `runsOn`: object shape, labels deduped in order, `fallback` defaulted. */
+export function normalizeRunsOn(value: RunsOn): NormalizedRunsOn {
+  if (Array.isArray(value)) return { labels: [...new Set(value)], fallback: "error" };
+  return {
+    labels: [...new Set(value.labels)],
+    ...(value.target !== undefined ? { target: value.target } : {}),
+    fallback: value.fallback ?? "error",
+    ...(value.wait !== undefined ? { wait: value.wait } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Node spec (generic — `with` is typed per-type after resolution)
 // ---------------------------------------------------------------------------
 
@@ -971,6 +1260,9 @@ export const NodeSpecSchema = z.object({
   with: z.record(z.unknown()).optional(),
   retry: RetrySchema.optional(),
   timeout: DurationSchema.optional(),
+  runsOn: RunsOnSchema.optional().describe(
+    "Run this node on a machine that has all these labels (ADR-0020). Not allowed on hitl, workshop or wait.",
+  ),
   when: z.string().optional().describe("Guard expression — skip node if false"),
   on: z
     .object({
@@ -984,7 +1276,7 @@ export const NodeSpecSchema = z.object({
         .optional(),
     })
     .optional(),
-});
+}).strict();
 
 // NodeSpec is declared after GraphSpec (see below) so `spec?: GraphSpec` can
 // close the recursive type without a forward reference.
@@ -1115,12 +1407,33 @@ export const DeepAgentsProviderConfigSchema = z.object({
   options: z.record(z.unknown()).optional(),
 });
 
+/**
+ * Dedicated media-generation backend (Tripo, Meshy, Grok Imagine, ...).
+ *
+ * LLM vendors that also generate media (`langchain` with vendor `openai` or
+ * `xai`) do NOT need one of these: a `media` node can name the existing
+ * `langchain` entry and reuses its credentials. Use `kind: media` for
+ * backends that have no LLM side, or to pin different credentials/models.
+ *
+ * `vendor` is a free string so third-party packages can register their own
+ * (via `imports[].providers` / the media vendor registry).
+ */
+export const MediaProviderConfigSchema = z.object({
+  kind: z.literal("media"),
+  vendor: z.string().min(1),
+  model: z.string().optional(),
+  baseUrl: z.string().optional(),
+  apiKeyEnv: z.string().optional(),
+  options: z.record(z.unknown()).optional(),
+});
+
 export const ProviderConfigSchema = z.discriminatedUnion("kind", [
   LangChainProviderConfigSchema,
   ClaudeProviderConfigSchema,
   CursorProviderConfigSchema,
   CliProviderConfigSchema,
   DeepAgentsProviderConfigSchema,
+  MediaProviderConfigSchema,
 ]);
 
 export const ProvidersSchema = z.record(ProviderConfigSchema);
@@ -1435,7 +1748,7 @@ export const GraphSpecSchema = z.object({
   nodes: z.array(NodeSpecSchema),
   edges: z.array(EdgeSpecSchema),
   runtime: RuntimeSchema.optional(),
-});
+}).strict();
 
 export type GraphSpec = Omit<z.infer<typeof GraphSpecSchema>, "nodes"> & {
   nodes: NodeSpec[];
@@ -1453,6 +1766,14 @@ export type ClaudeProviderConfig = z.infer<typeof ClaudeProviderConfigSchema>;
 export type CursorProviderConfig = z.infer<typeof CursorProviderConfigSchema>;
 export type CliProviderConfig = z.infer<typeof CliProviderConfigSchema>;
 export type DeepAgentsProviderConfig = z.infer<typeof DeepAgentsProviderConfigSchema>;
+export type MediaProviderConfig = z.infer<typeof MediaProviderConfigSchema>;
+export type Artifact = z.infer<typeof ArtifactSchema>;
+export type DemoStatus = z.infer<typeof DemoStatusSchema>;
+export type DemoStep = z.infer<typeof DemoStepSchema>;
+export type ImageWith = z.infer<typeof ImageWithSchema>;
+export type VideoWith = z.infer<typeof VideoWithSchema>;
+export type Model3dWith = z.infer<typeof Model3dWithSchema>;
+export type AudioWith = z.infer<typeof AudioWithSchema>;
 export type CliVendor = z.infer<typeof CliVendorSchema>;
 export type LangChainVendor = z.infer<typeof LangChainVendorSchema>;
 

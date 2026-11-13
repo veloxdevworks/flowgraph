@@ -497,3 +497,40 @@ describe("validateSpec node config", () => {
     ).toBe(true);
   });
 });
+
+describe("loadGraph unknown keys", () => {
+  async function loadYaml(body: string) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-unknown-"));
+    const file = path.join(dir, "g.graph.yaml");
+    await fs.writeFile(file, body);
+    try {
+      return await loadGraph(file);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+  const head = "apiVersion: flowgraph/v1\nkind: Graph\nmetadata: { name: g }\n";
+
+  it("reports UNKNOWN_FIELD with a did-you-mean for a misspelled node key", async () => {
+    const r = await loadYaml(
+      `${head}nodes:\n  - { id: character, type: shell, runOn: [os:windows], with: { command: echo } }\nedges:\n  - { from: START, to: character }\n  - { from: character, to: END }\n`,
+    );
+    expect(r.spec).toBeNull();
+    expect(r.diagnostics).toEqual([
+      {
+        severity: "error",
+        code: "UNKNOWN_FIELD",
+        path: "nodes.character.runOn",
+        message:
+          'Unknown field "runOn" on node "character". Did you mean "runsOn"? If this graph was written for a newer flowgraph, upgrade flowgraph.',
+      },
+    ]);
+  });
+
+  it("reports UNKNOWN_FIELD on the graph root", async () => {
+    const r = await loadYaml(`${head}futureField: 1\nnodes: []\nedges: []\n`);
+    expect(r.spec).toBeNull();
+    expect(r.diagnostics[0]).toMatchObject({ code: "UNKNOWN_FIELD", path: "futureField" });
+    expect(r.diagnostics[0]!.message).toContain("on the graph");
+  });
+});

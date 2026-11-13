@@ -130,11 +130,18 @@ Each interrupt carries a **kind** so operators know how to answer:
 |---|---|---|
 | `approval` | `hitl` approve mode, tool gates, `permission: ask` | `{ approved: true \| false }` |
 | `question` | `hitl` question mode, `ask_human` | `{ answer: "..." }` |
-| `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }` |
+| `choice` | `hitl` choice mode, `ask_human` with choices | `{ choice: "..." }`, the choice string, or its 1-based index. A number (bare or as `choice`) is always an index; a string matches a choice first, then an index |
 | `form` | `hitl` form mode | schema-validated object |
 | `review` | `hitl` review mode | `{ decision, feedback? }` |
-| `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` |
+| `workshop` | `workshop` node | `{ output, transcript, coverage, endedReason }` (the node writes these plus `complete`) |
 | `custom` | advanced / hook payloads | arbitrary JSON |
+
+A falsy resume value (`false`, `null`, `0`, `""`) is applied as given, from `compiled.resume()`, the CLI's `--resume`, the server's resume endpoints, a webhook POST or `resolveInterrupt`: an approval records `approved: false`, and a choice re-prompts as invalid. With several interrupts pending, it answers each of them, the same as any other single value. A missing answer is not a denial: `compiled.resume()` with no `resume` value (or `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` and runs nothing, and the server answers a resume request without a `resume` key with 400 `RESUME_REQUIRED`.
+
+Two limits apply to falsy answers:
+
+- `resumeFrom()` keys a falsy answer by the interrupts pending at the latest point in the thread, not at the requested checkpoint. Resuming from a checkpoint whose interrupt was already answered replays the stored answer, whatever value you pass (truthy or falsy).
+- A falsy webhook body answers only that webhook's own interrupt. A truthy body is sent as one value and answers every pending interrupt.
 
 ```yaml
 - id: approve-release
@@ -233,6 +240,57 @@ The same flow is available via the programmatic API: `compiled.getState(threadId
 ## 7. Abortion & cancellation
 
 `runGraph({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written (so the run is resumable), and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this.
+
+A node `timeout` is not a cancel. The attempt fails with `Node timed out`, and the run fails unless a retry succeeds or `on.error` handles it, but for most node types the timed-out work keeps running in the background, and `ctx.signal` stays the run's own, so aborting it always means the run was cancelled. That keeps a timed-out `image` or `video` job alive for a retry to re-attach to, and a `service` able to finish a graceful stop.
+
+A node type that can stop cleanly declares `capabilities.stopsOnTimeout`; today that is only `demo`. Its `ctx.signal` is per attempt and also aborts on timeout, with the timeout error as `signal.reason` (`isTimeoutError(reason)` tells it from a cancelled run). The engine waits up to 20 seconds for the attempt to stop before it retries or reports the failure, so the two don't overlap. Nothing retries once the run itself is cancelled.
+
+## 6a. Node placement
+
+A node with [`runsOn`](./02-graph-spec.md#runson-placement) can run on another machine. The machine that starts the run stays the **coordinator** for its whole life; a placed node is sent to a **worker** (any `flowgraph-server` with matching labels), which runs it and returns the result. Design and rationale: [ADR-0020](./adr/0020-node-placement.md).
+
+**Resolution (at compile time, before any node runs).** For each placed top-level node:
+
+1. If this host's labels satisfy `labels` (and `target` is unset or `local`), it runs in-process, exactly as without `runsOn`.
+2. Otherwise the first topology target whose live labels match **and** whose worker preflight passes is chosen.
+3. Otherwise `fallback: local` runs it in-process.
+4. Otherwise `compileGraph` throws `PlacementUnsatisfiedError` (`PLACEMENT_UNSATISFIED`), naming the node, the labels it needed and what each candidate reported.
+
+Without a `topology` and `transport` in `CompileOptions.placement`, only the local host is considered. `flowgraph run --targets <file>` supplies both ([09 — CLI](./09-cli.md#2-flowgraph-run--shipped)). A graph with no `runsOn` does none of this.
+
+**What runs remotely.** A `subgraph` runs as its child graph (`uses:` children are inlined as `spec:`), seeded from `stateMap.in` and merged back through `stateMap.out` and the parent's reducers, exactly as in-process. Any other node runs as a one-node graph: it receives its resolved `input`, and its `outputs.<id>` result is written back through the node's own `output` (auto-save, `to`, `map`). Templates in such a node's `with` can read its `input` but not other parent state; group the node with what it needs in a subgraph if it must see more. `map` and `router` nodes cannot be placed directly; place a subgraph that contains them.
+
+**Child thread id and reconnect.** The child run's thread id is `{parentThreadId}/{nodeId}/{attempt}` (attempt is the 1-based retry attempt). An id over 234 characters fails the node with `PLACEMENT_THREAD_ID_TOO_LONG` before anything is sent. The `{ target, childThreadId }` pair is recorded with `ctx.once` before dispatch; a node that runs again finds the record and **attaches** to the child instead of dispatching again, and a dispatch the worker answers with "already exists" also attaches. The same child id is never dispatched twice. Each retry is a new attempt and so a new child id.
+
+**Events.** The child's events are forwarded into the parent stream nested under the placed node (`scope.parentSpanId` is the node id, as for in-process subgraphs). The child's own `run.*` and interrupt events are not forwarded, and for a non-subgraph node neither are the wrapper node's start/end events, which the parent already emits. Every forwarded event, and the placed node's own `node.start` / `node.end`, carries `scope.placement = { target, childThreadId }`.
+
+**Outcomes.**
+
+| Child ends | Node fails with | Notes |
+|---|---|---|
+| `completed` | n/a | Final state is merged as above |
+| `error` | `REMOTE_NODE_FAILED` | Message names the target and includes the child's error. Normal `retry` applies |
+| transport failure (unreachable, stream lost past its reconnects) | `REMOTE_NODE_FAILED` | The next attempt matches that node again and may pick another target |
+| `cancelled`, not by this run | `REMOTE_NODE_CANCELLED` | |
+| `interrupted` (a gate inside the child) | `PLACEMENT_GATE_UNSUPPORTED` | The paused child is cancelled. Not retried |
+
+**Artifacts.** State holds `Artifact` records ([05](./05-state-and-data.md)), never bytes, so the files move separately, addressed by `sha256` (ADR-0020 section 10). Only artifacts that cross the boundary move; files a node writes and does not return stay on the worker.
+
+- **Stage in (coordinator, before dispatch).** Every `Artifact` record anywhere in the child's input (the seeded child input of a subgraph; the node's resolved input for a wrapped node) is resolved in the coordinator workspace, hashed if it has no `sha256` (streamed), and checked with `HEAD /worker/artifacts/:sha256`. Missing blobs are streamed up with `PUT`; blobs the worker already has are not sent again. The dispatched input carries a **staged reference** instead of the record: `{ ...record, path: "fg-staged:<sha256>/<basename>", staged: true, sha256 }`. Nothing is sent to the worker until every file is resolved, so a missing file fails the node first. A reconnect to a recorded dispatch stages nothing.
+- **Materialization (worker, when the run starts).** The server copies each referenced blob to `<workspace>/.flowgraph/artifacts/<childThreadId>/staged/<sha256>/<basename>` and hands the nodes an ordinary record with that workspace-relative `path`. A sha the worker lacks refuses the start (422 `ARTIFACT_NOT_STAGED`), which surfaces as `REMOTE_NODE_FAILED`.
+- **Stage out (coordinator, after `completed`).** `Artifact` records in what flows back into the parent (the values `stateMap.out` selects, the merge-back for a subgraph without it, `output.to` / `output.map` results, or `outputs.<nodeId>` for a wrapped node) are downloaded with `GET /worker/runs/:childThreadId/artifacts/:sha256` into `<workspace>/.flowgraph/artifacts/<parentThreadId>/<nodeId>/<basename>`, the sha-256 verified while streaming (written to a temp file, renamed on a match). A file of that name that already holds the same content is reused without a download; different content gets `name-1.ext`, `name-2.ext`. A record that was staged in and comes back unchanged keeps its original coordinator path. The record's `path` is rewritten (workspace-relative, with `/`), and so are the legacy absolute `path` and `extra[].path` of a `demo`-style output that lists the record under `artifacts`.
+- **Not staged.** `meta.thumbnail` (a path on the other machine) is dropped on both crossings. Bare path strings and `{ path }` values that are not `Artifact` records are passed as-is. Artifacts in the child's state that do not flow back are never fetched.
+
+| Code | When |
+|---|---|
+| `ARTIFACT_MISSING` | A record in the input names a file that does not exist in the coordinator workspace, is not a regular file, or resolves outside the workspace (records are graph data, so they cannot be used to upload arbitrary host files). Raised before dispatch; not retried. |
+| `ARTIFACT_STAGE_IN_FAILED` | An upload or `HEAD` failed, or the worker refused the bytes (hash mismatch, size limit). The next attempt matches the node again. |
+| `ARTIFACT_STAGE_OUT_FAILED` | A download failed, the bytes did not hash to the record's `sha256`, or the record has no `sha256`. The child has already run, so a node `retry` runs it again. |
+| `ARTIFACT_NOT_STAGED` | (worker, HTTP 422) A staged reference names a sha the worker does not hold. |
+
+**Abort and timeout.** Aborting the run, or a node `timeout`, cancels the child on the worker if its outcome is not yet known and stops attaching. Placed nodes declare `stopsOnTimeout` so the engine waits for that stop before retrying.
+
+**Phase 1 limits.** Gates inside a placed subgraph are not forwarded (`flowgraph validate` warns `PLACEMENT_GATE_PHASE2`; at run time the node fails as above). `runsOn.wait` is rejected at compile time (it arrives in phase 2). Artifact staging is by `sha256` over HTTP only: uploads are not resumable and there is no shared store (`ArtifactStore`, `uri` references), so a coordinator with a short-lived workspace is not supported yet. Only `Artifact` records are staged; a bare path string that crosses the boundary is passed as-is. The parent node holds one long step while the child runs; the coordinator must stay up. Re-matching after a transport failure does not honor `fallback: local`.
 
 ## 8. Secrets & redaction
 

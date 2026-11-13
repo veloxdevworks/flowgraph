@@ -2,17 +2,41 @@
  * Offline graph lint helpers used by validateSpec.
  */
 
+import { findMergeableRouters, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
 import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
+import { templateRootRefs } from "../node-policy.js";
 import { childChannelRefsInMapping, stateMapOutEntries } from "../nodes/subgraph-merge.js";
 import { isOutputNone, OUTPUTS_CHANNEL } from "./apply-output.js";
 import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
 import { RESERVED_STATE_CHANNELS } from "./state-annotation.js";
 import { memoryLintDiagnostics } from "../memory/validate.js";
 import { contextLintDiagnostics } from "../context/validate.js";
+import {
+  HITL_DEFAULT_ROUTE,
+  hitlOutcomes,
+  hitlRouteTargets,
+  normalizeHitlRoutes,
+} from "../nodes/hitl-routes.js";
+
+/** Targets declared by a node's own `with.routes` (router or hitl); edges don't have to repeat them. */
+export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
+  const node = spec.nodes.find((n) => n.id === id);
+  if (!node) return [];
+  const w = (node.with ?? {}) as Record<string, unknown>;
+  if (node.type === "hitl") return hitlRouteTargets(w);
+  if (node.type !== "router") return [];
+  const routes = w["routes"];
+  if (!routes || typeof routes !== "object" || Array.isArray(routes)) return [];
+  return Object.values(routes as Record<string, unknown>).flatMap((r) =>
+    r && typeof r === "object" && typeof (r as { to?: unknown }).to === "string"
+      ? [(r as { to: string }).to]
+      : [],
+  );
+}
 
 function outgoingTargets(spec: GraphSpec, from: string): string[] {
-  const targets: string[] = [];
+  const targets: string[] = declaredRouteTargets(spec, from);
   for (const edge of spec.edges) {
     if (edge.from !== from) continue;
     if ("to" in edge) {
@@ -28,6 +52,9 @@ function outgoingTargets(spec: GraphSpec, from: string): string[] {
 
 function incomingSources(spec: GraphSpec, to: string): string[] {
   const sources: string[] = [];
+  for (const node of spec.nodes) {
+    if (declaredRouteTargets(spec, node.id).includes(to)) sources.push(node.id);
+  }
   for (const edge of spec.edges) {
     if ("to" in edge) {
       const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
@@ -365,7 +392,11 @@ export function nodeChannelNameCollisionDiagnostics(spec: GraphSpec): Diagnostic
 
 export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
-  const routerIds = new Set(spec.nodes.filter((n) => n.type === "router").map((n) => n.id));
+  const routerIds = new Set(
+    spec.nodes
+      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id).length > 0))
+      .map((n) => n.id),
+  );
 
   for (const [i, edge] of spec.edges.entries()) {
     if (routerIds.has(edge.from)) continue;
@@ -525,9 +556,397 @@ export function subgraphOutputMappingDiagnostics(spec: GraphSpec): Diagnostic[] 
   return diagnostics;
 }
 
+/**
+ * `hitl` `with.routes`: only the modes with a closed set of answers can route, every
+ * answer needs a route (or a `default`), and a route key that is not an answer is a typo.
+ */
+export function hitlRouteDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const nodeIds = new Set(["END", ...spec.nodes.map((n) => n.id)]);
+  for (const node of spec.nodes) {
+    if (node.type !== "hitl") continue;
+    const w = (node.with ?? {}) as Record<string, unknown>;
+    if (w["routes"] == null) continue;
+    const path = `nodes.${node.id}.with.routes`;
+    const routes = normalizeHitlRoutes(w["routes"]);
+    const keys = Object.keys(routes);
+    const mode = typeof w["mode"] === "string" ? w["mode"] : "approve";
+
+    const known = hitlOutcomes(w);
+    if (!known) {
+      diagnostics.push({
+        severity: "error",
+        code: "HITL_ROUTES_MODE",
+        message:
+          `hitl node "${node.id}" has routes but mode "${mode}" has no fixed set of answers to route on — ` +
+          `use approve, choice or review, or follow the node with a router.`,
+        path,
+      });
+      continue;
+    }
+
+    for (const [key, route] of Object.entries(routes)) {
+      if (!nodeIds.has(route.to)) {
+        diagnostics.push({
+          severity: "error",
+          code: "HITL_ROUTE_UNKNOWN_TARGET",
+          message: `hitl node "${node.id}" route "${key}" goes to unknown node "${route.to}"`,
+          path: `${path}.${key}`,
+        });
+      }
+    }
+
+    const hasDefault = HITL_DEFAULT_ROUTE in routes;
+    if (!known.dynamic) {
+      for (const outcome of known.outcomes) {
+        if (!(outcome in routes) && !hasDefault) {
+          diagnostics.push({
+            severity: "error",
+            code: "HITL_ROUTE_MISSING",
+            message:
+              `hitl node "${node.id}" has no route for "${outcome}" — ` +
+              `add it (or a "default" route), otherwise that answer fails the run`,
+            path,
+          });
+        }
+      }
+      for (const key of keys) {
+        if (key !== HITL_DEFAULT_ROUTE && !known.outcomes.includes(key)) {
+          diagnostics.push({
+            severity: "warning",
+            code: "HITL_ROUTE_UNKNOWN_OUTCOME",
+            message:
+              `hitl node "${node.id}" route "${key}" never matches — answers are: ${known.outcomes.join(", ")}`,
+            path: `${path}.${key}`,
+          });
+        }
+      }
+    } else if (!hasDefault) {
+      diagnostics.push({
+        severity: "warning",
+        code: "HITL_ROUTES_NO_DEFAULT",
+        message:
+          `hitl node "${node.id}" has templated choices, so its answers are only known at run time — ` +
+          `add a "default" route for answers without their own`,
+        path,
+      });
+    }
+
+    const targets = new Set(Object.values(routes).map((r) => r.to));
+    for (const [i, edge] of spec.edges.entries()) {
+      if (edge.from !== node.id) continue;
+      const to = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : edge.branch.map((b) => b.to);
+      if (to.some((t) => !targets.has(t))) {
+        diagnostics.push({
+          severity: "warning",
+          code: "HITL_ROUTES_EDGE_IGNORED",
+          message:
+            `hitl node "${node.id}" routes on its answer, so edges leaving it that aren't route targets are ignored`,
+          path: `edges[${i}]`,
+        });
+      }
+    }
+  }
+  return diagnostics;
+}
+
+/** `hitl` `with.select` one/many picks from `with.artifacts`, so it needs them. */
+export function hitlSelectDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const node of spec.nodes) {
+    if (node.type !== "hitl") continue;
+    const w = (node.with ?? {}) as Record<string, unknown>;
+    if (w["select"] !== "one" && w["select"] !== "many") continue;
+    const artifacts = w["artifacts"];
+    if (!Array.isArray(artifacts) || artifacts.length === 0) {
+      diagnostics.push({
+        severity: "warning",
+        code: "HITL_SELECT_NO_ARTIFACTS",
+        message:
+          `hitl node "${node.id}" sets select "${String(w["select"])}" but has no with.artifacts — ` +
+          `there is nothing to pick from, so no selection can be made`,
+        path: `nodes.${node.id}.with.artifacts`,
+      });
+    }
+  }
+  return diagnostics;
+}
+
+/**
+ * A router straight after a human gate that only repeats the gate's answer can be folded into
+ * the gate's `with.routes` — one node instead of two, no expressions. A recommendation
+ * (`info`), not a problem, so it never fails `--strict`.
+ */
+export function hitlRouterMergeDiagnostics(spec: GraphSpec): Diagnostic[] {
+  return findMergeableRouters(spec as unknown as MergeSpec).map(({ routerId, hitlId }) => ({
+    severity: "info" as const,
+    code: "HITL_ROUTER_MERGEABLE",
+    message:
+      `Router "${routerId}" only repeats the answer of hitl "${hitlId}" — ` +
+      `move its routes onto the gate (with.routes) and remove the router. ` +
+      `The desktop Builder does this with "Merge into HITL".`,
+    path: `nodes.${routerId}`,
+  }));
+}
+
+/**
+ * A `demo` node that proves something can't be an agent tool (ADR-0019 §9): a tool call writes
+ * no `state.outputs`, and an agent choosing its own assertions would make `passed` meaningless.
+ */
+export function provesObjective(node: { type?: unknown; with?: unknown } | undefined): boolean {
+  if (node?.type !== "demo") return false;
+  const w = (node.with ?? {}) as Record<string, unknown>;
+  return w["objective"] != null || w["steps"] != null;
+}
+
+export function demoToolExposureDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const check = (node: NodeSpec, path: string): void => {
+    const w = (node.with ?? {}) as { tools?: unknown; node?: NodeSpec };
+    if (Array.isArray(w.tools)) {
+      for (const tool of w.tools as Array<{ node?: unknown }>) {
+        const target = spec.nodes.find((n) => n.id === tool?.node);
+        if (!provesObjective(target)) continue;
+        diagnostics.push({
+          severity: "error",
+          code: "DEMO_OBJECTIVE_AS_TOOL",
+          message: `Node "${node.id ?? "map item"}" exposes demo node "${target!.id}" as a tool, but a demo node with an objective or steps can't be an agent tool`,
+          path: `${path}.with.tools`,
+        });
+      }
+    }
+    if (w.node) check(w.node, `${path}.with.node`);
+  };
+  for (const node of spec.nodes) check(node, `nodes.${node.id}`);
+  return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// Placement (`runsOn`) — ADR-0020
+// ---------------------------------------------------------------------------
+
+const GATE_NODE_TYPES = new Set(["hitl", "workshop", "wait"]);
+
+/** Child nodes carried inside a node: the inline subgraph spec and a `map` inner node. */
+function childNodesOf(node: NodeSpec): NodeSpec[] {
+  const out: NodeSpec[] = [];
+  if (node.spec) out.push(...(node.spec.nodes ?? []));
+  const inner = (node.with as { node?: NodeSpec } | undefined)?.node;
+  if (node.type === "map" && inner && typeof inner === "object") out.push(inner);
+  return out;
+}
+
+/** Node types that cannot be wrapped in a one-node child graph: `map` fans out, `router` returns a goto. */
+export const UNPLACEABLE_TYPES = new Set(["map", "router"]);
+
+export function unplaceableMessage(id: string, type: string): string {
+  return (
+    `Node "${id}" (type ${type}) cannot set runsOn: ${type} nodes cannot run remotely. ` +
+    `Wrap it in a subgraph and place the subgraph.`
+  );
+}
+
+/** Scopes a worker running a wrapped node does not have: it sees only the node's `input`. */
+const COORDINATOR_ONLY_SCOPES = new Set(["state", "config", "issues"]);
+
+function withTemplates(value: unknown, at: string, out: Array<{ at: string; text: string }>, depth = 0): void {
+  if (depth > 32) return;
+  if (typeof value === "string") out.push({ at, text: value });
+  else if (Array.isArray(value)) value.forEach((v, i) => withTemplates(v, `${at}[${i}]`, out, depth + 1));
+  else if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) withTemplates(v, `${at}.${k}`, out, depth + 1);
+  }
+}
+
+/**
+ * A placed non-subgraph node runs as a one-node graph that receives only its resolved `input`
+ * (ADR-0020 §2). Templates in its `with` that read coordinator state would render empty there, and
+ * an `input` key named like the node collides with its node id as a channel.
+ * `with.output` and the node's `when` / `input` are evaluated on the coordinator, so they may read state.
+ */
+function wrappedNodeDiagnostics(node: NodeSpec, path: string): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  const found: Array<{ at: string; text: string }> = [];
+  for (const [k, v] of Object.entries((node.with ?? {}) as Record<string, unknown>)) {
+    if (k === "output") continue;
+    withTemplates(v, `with.${k}`, found);
+  }
+  for (const { at, text } of found) {
+    for (const ref of templateRootRefs(text, COORDINATOR_ONLY_SCOPES)) {
+      out.push({
+        severity: "error",
+        code: "PLACEMENT_STATE_REFERENCE",
+        message:
+          `Placed node "${node.id}" reads "${ref}" in ${at}, but on the worker it only sees its own input, so this would render empty. ` +
+          `Pass the value through the node's input (input: { x: "{{ ${ref} }}" } and read {{ input.x }}), ` +
+          `or place a subgraph with stateMap.in instead.`,
+        path: `${path}.${at}`,
+      });
+    }
+  }
+  const input = (node as { input?: unknown }).input;
+  if (input && typeof input === "object" && !Array.isArray(input) && Object.prototype.hasOwnProperty.call(input, node.id)) {
+    out.push({
+      severity: "error",
+      code: "PLACEMENT_INPUT_ID_COLLISION",
+      message:
+        `Placed node "${node.id}" has an input key named "${node.id}". Its input becomes channels of the child graph, ` +
+        `and a channel cannot share a name with a node id. Rename the input key.`,
+      path: `${path}.input.${node.id}`,
+    });
+  }
+  return out;
+}
+
+/** Describes a human gate in `node` itself or in the inline children below it, else undefined. */
+function findGate(node: NodeSpec): string | undefined {
+  const w = (node.with ?? {}) as Record<string, unknown>;
+  if (node.type === "hitl" || node.type === "workshop") return `a ${node.type} node ("${node.id}")`;
+  if (node.type === "wait" && (w["until"] != null || w["signal"] != null || w["webhook"] != null)) {
+    return `a wait node ("${node.id}") that waits on until/signal/webhook`;
+  }
+  if (node.type === "agent" && Array.isArray(w["tools"]) && JSON.stringify(w["tools"]).includes('"ask_human"')) {
+    return `an agent ("${node.id}") with the ask_human tool`;
+  }
+  for (const child of childNodesOf(node)) {
+    const found = findGate(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** True when `graph` (or any inline child below it) has a node with `runsOn`. */
+export function graphHasPlacement(graph: GraphSpec): boolean {
+  const walk = (nodes: NodeSpec[]): boolean =>
+    nodes.some((n) => n.runsOn !== undefined || walk(childNodesOf(n)));
+  return walk(graph.nodes ?? []);
+}
+
+export function placementNestedMessage(id: string): string {
+  return (
+    `Node "${id}" sets runsOn, but its subgraph also contains a node with runsOn. ` +
+    `Nested placement is not supported: place the whole subgraph, or place its inner nodes, not both.`
+  );
+}
+
+export function placementNotTopLevelMessage(id: string): string {
+  return (
+    `Node "${id}" sets runsOn inside a subgraph. Only top-level nodes are placed, so this runsOn would be ignored ` +
+    `and the node run on the coordinator. Place the subgraph node instead, or move the node to the top level.`
+  );
+}
+
+/**
+ * `runsOn` rules that need only the spec (inline children included):
+ * - not allowed on hitl / workshop / wait (PLACEMENT_NOT_ALLOWED)
+ * - a placed subgraph may not contain `runsOn` (PLACEMENT_NESTED)
+ * - `runsOn` below the top level of an unplaced graph is rejected (PLACEMENT_NOT_TOP_LEVEL)
+ * File-referenced (`uses:`) children are checked by `loadGraph`, which can read them.
+ */
+export function placementDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const warnedGate = new Set<string>();
+  const check = (node: NodeSpec, path: string, depth: number, placedAncestor: boolean) => {
+    if (node.runsOn !== undefined && depth > 0 && !placedAncestor) {
+      // Only top-level nodes are resolved; below that, runsOn would be ignored and the node run locally.
+      diagnostics.push({
+        severity: "error",
+        code: "PLACEMENT_NOT_TOP_LEVEL",
+        message: placementNotTopLevelMessage(node.id),
+        path: `${path}.runsOn`,
+      });
+    }
+    if (node.runsOn !== undefined) {
+      if (GATE_NODE_TYPES.has(node.type)) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLACEMENT_NOT_ALLOWED",
+          message:
+            `Node "${node.id}" (type ${node.type}) cannot set runsOn. ` +
+            `Gates run on the coordinator; a gate inside a placed subgraph is forwarded to the coordinator's operator.`,
+          path: `${path}.runsOn`,
+        });
+      }
+      if (node.type === "subgraph" && node.spec && graphHasPlacement(node.spec)) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLACEMENT_NESTED",
+          message: placementNestedMessage(node.id),
+          path: `${path}.runsOn`,
+        });
+      }
+      if (UNPLACEABLE_TYPES.has(node.type)) {
+        diagnostics.push({
+          severity: "error",
+          code: "PLACEMENT_NOT_SUPPORTED",
+          message: unplaceableMessage(node.id, node.type),
+          path: `${path}.runsOn`,
+        });
+      }
+      if (node.type !== "subgraph" && !GATE_NODE_TYPES.has(node.type) && !UNPLACEABLE_TYPES.has(node.type)) {
+        diagnostics.push(...wrappedNodeDiagnostics(node, path));
+      }
+      const gate = !GATE_NODE_TYPES.has(node.type) ? findGate(node) : undefined;
+      if (gate && !warnedGate.has(node.id)) {
+        warnedGate.add(node.id);
+        diagnostics.push({
+          severity: "warning",
+          code: "PLACEMENT_GATE_PHASE2",
+          message:
+            `Placed node "${node.id}" contains ${gate}. Gates inside placed subgraphs are forwarded in phase 2 (ADR-0020); ` +
+            `until then the run fails with PLACEMENT_GATE_UNSUPPORTED if the gate is reached on the worker. ` +
+            `Move the gate out of the placed subgraph, onto the coordinator.`,
+          path: `${path}.runsOn`,
+        });
+      }
+    }
+    const placed = placedAncestor || node.runsOn !== undefined;
+    if (node.spec) for (const child of node.spec.nodes ?? []) check(child, `${path}.spec.nodes.${child.id}`, depth + 1, placed);
+    const inner = (node.with as { node?: NodeSpec } | undefined)?.node;
+    if (node.type === "map" && inner && typeof inner === "object") check(inner, `${path}.with.node`, depth + 1, placed);
+  };
+  for (const node of spec.nodes ?? []) check(node, `nodes.${node.id}`, 0, false);
+  return diagnostics;
+}
+
+/**
+ * Warn when a static edge joins two nodes placed on the same labels and target:
+ * each runs as its own hop through the coordinator.
+ */
+export function placementAdjacentHopDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const byId = new Map(spec.nodes.map((n) => [n.id, n]));
+  const key = (n: NodeSpec) => {
+    const p = normalizeRunsOn(n.runsOn!);
+    return JSON.stringify([[...p.labels].sort(), p.target ?? null]);
+  };
+  for (const [i, edge] of spec.edges.entries()) {
+    if (!("to" in edge)) continue;
+    const from = byId.get(edge.from);
+    if (!from || from.runsOn === undefined) continue;
+    for (const toId of Array.isArray(edge.to) ? edge.to : [edge.to]) {
+      const to = byId.get(toId);
+      if (!to || to.runsOn === undefined || key(from) !== key(to)) continue;
+      diagnostics.push({
+        severity: "warning",
+        code: "PLACEMENT_ADJACENT_HOPS",
+        message:
+          `Nodes "${from.id}" and "${to.id}" are adjacent and share the same runsOn, so each makes a round trip through the coordinator. ` +
+          `Group them in a subgraph and place the subgraph to run both in one hop.`,
+        path: `edges[${i}]`,
+      });
+    }
+  }
+  return diagnostics;
+}
+
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   return [
+    ...hitlRouteDiagnostics(spec),
+    ...hitlSelectDiagnostics(spec),
+    ...hitlRouterMergeDiagnostics(spec),
     ...reachabilityDiagnostics(spec),
+    ...demoToolExposureDiagnostics(spec),
     ...channelReducerDiagnostics(spec),
     ...undeclaredOutputChannelDiagnostics(spec),
     ...nodeChannelNameCollisionDiagnostics(spec),
@@ -535,6 +954,8 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...unconditionalFanOutDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
     ...subgraphOutputMappingDiagnostics(spec),
+    ...placementDiagnostics(spec),
+    ...placementAdjacentHopDiagnostics(spec),
     ...memoryLintDiagnostics(spec),
     ...contextLintDiagnostics(spec),
   ];
