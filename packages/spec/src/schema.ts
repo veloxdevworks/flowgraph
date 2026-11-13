@@ -1081,6 +1081,16 @@ export const WorkshopWithSchema = BaseWithSchema.extend({
    * later nodes can route on it. Property types are still checked. Default false.
    */
   allowPartial: z.boolean().optional(),
+  /**
+   * A session that ends `completed` must have covered every agenda item (`coverage[id]`
+   * truthy). Early ends (`allowPartial`) are exempt. Default false.
+   */
+  requireCoverage: z.boolean().optional(),
+  /**
+   * Keep the transcript in the node result (`keep`, default) or drop it (`omit`) so long
+   * sessions do not bloat checkpointed state.
+   */
+  transcript: z.union([z.literal("keep"), z.literal("omit")]).optional(),
 });
 
 // wait node — duration / until / signal / webhook (inbound HTTP resume)

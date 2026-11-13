@@ -1,0 +1,78 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: workshop-intake
+  description: >
+    A facilitated intake session that must cover its whole agenda, may end early
+    with a partial draft, and routes on whether the deliverable is complete.
+    No LLM is needed to run it headless.
+
+state:
+  channels:
+    topic:
+      type: string
+      default: "SSO login for the admin console"
+    brief:
+      type: object
+    outcome:
+      type: string
+
+nodes:
+  - id: intake
+    type: workshop
+    with:
+      message: "Intake workshop: {{ state.topic }}"
+      agenda:
+        - { id: problem, title: "Problem", description: "What is broken or missing, and for whom?" }
+        - { id: acceptance, title: "Acceptance", description: "How will we know it is done?" }
+        - { id: risks, title: "Risks", description: "What could go wrong or block this?" }
+      schema:
+        type: object
+        properties:
+          title: { type: string }
+          acceptance: { type: array, items: { type: string } }
+          risks: { type: array }
+        required: [title]
+      context: "{{ state.topic }}"
+      facilitator: >
+        Work through every agenda item in order. Do not invent requirements;
+        ask until the human has answered each item, then finish.
+      fallback: text
+      # Every agenda item must be covered before a session may finish ...
+      requireCoverage: true
+      # ... unless the human ends it, it times out, or it is skipped.
+      allowPartial: true
+      # Keep the (large) transcript out of state and node.output events.
+      transcript: omit
+      output: { to: brief }
+
+  - id: route
+    type: router
+    with:
+      mode: rules
+      routes:
+        done:
+          when: "{{ state.brief.complete }}"
+          to: END
+        needs-follow-up:
+          default: true
+          to: follow-up
+
+  - id: follow-up
+    type: hitl
+    with:
+      mode: approve
+      message: "Intake ended early ({{ state.brief.endedReason }}). Schedule a follow-up?"
+      output: { to: outcome }
+
+edges:
+  - { from: START, to: intake }
+  - { from: intake, to: route }
+  - { from: follow-up, to: END }
+
+runtime:
+  checkpoint:
+    enabled: true
+    backend: sqlite
+    path: ".flowgraph/workshop-intake.db"

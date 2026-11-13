@@ -327,3 +327,110 @@ describe("workshop node", () => {
     expect(r2.interrupts?.[0]?.exhausted).toBeUndefined();
   });
 });
+
+describe("workshop requireCoverage and transcript omit", () => {
+  const schema = { type: "object", properties: { title: { type: "string" } }, required: ["title"] };
+  const agenda = [{ id: "scope", title: "scope" }, { id: "risks", title: "risks" }];
+
+  it("rejects a completed resume with uncovered agenda items", () => {
+    expect(() =>
+      mapWorkshopResume(
+        { output: { title: "a" }, coverage: { scope: true } },
+        { schema, nodeId: "w", agenda, requireCoverage: true },
+      ),
+    ).toThrow(/agenda item\(s\) not covered: risks/);
+  });
+
+  it("accepts when covered, and ignores coverage when the option is off", () => {
+    const covered = mapWorkshopResume(
+      { output: { title: "a" }, coverage: { scope: true, risks: true } },
+      { schema, nodeId: "w", agenda, requireCoverage: true },
+    );
+    expect(covered.complete).toBe(true);
+    expect(() => mapWorkshopResume({ output: { title: "a" } }, { schema, nodeId: "w", agenda })).not.toThrow();
+  });
+
+  it("accepts a partial early end with allowPartial despite uncovered items", () => {
+    const r = mapWorkshopResume(
+      { output: { title: "a" }, endedReason: "timeout" },
+      { schema, nodeId: "w", agenda, requireCoverage: true, allowPartial: true },
+    );
+    expect(r.complete).toBe(false);
+  });
+
+  it("still errors on non-object coverage", () => {
+    expect(() =>
+      mapWorkshopResume({ output: { title: "a" }, coverage: "yes" }, { schema, nodeId: "w", agenda, requireCoverage: true }),
+    ).toThrow(/"coverage" must be an object/);
+  });
+
+  it("advertises requireCoverage in the contract only when set", async () => {
+    const on = await compileGraph(workshopGraph({ requireCoverage: true }), {});
+    const d = (await on.run({ threadId: "rc-on", onInterrupt: "fail" })).interrupts?.[0]?.payload as {
+      data: WorkshopContract;
+    };
+    expect(d.data.requireCoverage).toBe(true);
+    const off = await compileGraph(workshopGraph(), {});
+    const o = (await off.run({ threadId: "rc-off", onInterrupt: "fail" })).interrupts?.[0]?.payload as {
+      data: WorkshopContract;
+    };
+    expect(o.data.requireCoverage).toBeUndefined();
+  });
+
+  it("end to end: re-prompts on uncovered items, then accepts; transcript omitted from state and event", async () => {
+    const compiled = await compileGraph(
+      workshopGraph({ requireCoverage: true, allowPartial: true, transcript: "omit" }),
+      {},
+    );
+    await compiled.run({ threadId: "e2e-1", onInterrupt: "fail" });
+    const transcript = [{ role: "user", text: "hello" }];
+    const r2 = await compiled.resume({
+      threadId: "e2e-1",
+      resume: { output: { title: "SSO" }, transcript, coverage: { scope: true }, endedReason: "completed" },
+      onInterrupt: "fail",
+    });
+    expect(r2.status).toBe("interrupted");
+    expect(r2.interrupts?.[0]?.validationError).toMatch(/agenda item\(s\) not covered: risks/);
+    const events: { type: string }[] = [];
+    const r3 = await compiled.resume({
+      threadId: "e2e-1",
+      resume: { output: { title: "SSO" }, transcript, coverage: { scope: true, risks: true }, endedReason: "completed" },
+      onInterrupt: "fail",
+      sinks: [(e) => void events.push(e)],
+    });
+    expect(r3.status).toBe("completed");
+    expect(r3.state["brief"]).toEqual({
+      output: { title: "SSO" },
+      coverage: { scope: true, risks: true },
+      endedReason: "completed",
+      complete: true,
+    });
+    const outs = events.filter((e) => e.type === "node.output");
+    expect(outs.length).toBeGreaterThan(0);
+    expect(JSON.stringify(outs)).not.toContain("hello");
+    expect(JSON.stringify(outs)).toContain("SSO");
+  });
+
+  it("end to end: a partial early end is accepted and marked incomplete; default keeps the transcript", async () => {
+    const omit = await compileGraph(workshopGraph({ requireCoverage: true, allowPartial: true, transcript: "omit" }), {});
+    await omit.run({ threadId: "e2e-2", onInterrupt: "fail" });
+    const r = await omit.resume({
+      threadId: "e2e-2",
+      resume: { output: {}, transcript: [{ role: "user", text: "x" }], endedReason: "human_ended" },
+      onInterrupt: "fail",
+    });
+    expect(r.status).toBe("completed");
+    const brief = r.state["brief"] as Record<string, unknown>;
+    expect(brief["complete"]).toBe(false);
+    expect(brief).not.toHaveProperty("transcript");
+
+    const keep = await compileGraph(workshopGraph(), {});
+    await keep.run({ threadId: "e2e-3", onInterrupt: "fail" });
+    const k = await keep.resume({
+      threadId: "e2e-3",
+      resume: { output: { title: "a" }, transcript: [{ role: "user", text: "x" }] },
+      onInterrupt: "fail",
+    });
+    expect((k.state["brief"] as { transcript: unknown[] }).transcript).toHaveLength(1);
+  });
+});

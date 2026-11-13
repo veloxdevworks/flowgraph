@@ -1,0 +1,5 @@
+{
+  "output": { "title": "SSO login for the admin console" },
+  "coverage": { "problem": true },
+  "endedReason": "completed"
+}

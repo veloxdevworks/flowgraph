@@ -5,6 +5,7 @@ import type { CompileOptions, InterruptInfo, MemoryIdentity } from "@flowgraph/c
 import { resolveMemoryIdentity } from "./memory-identity.js";
 import { printInfo } from "./ui.js";
 import { lazyOptionalImport } from "./optional-deps.js";
+import { createReadlineIO, runWorkshopInteractive } from "./workshop-interactive.js";
 
 const loadCheckpointSqlite = lazyOptionalImport<typeof import("@flowgraph/checkpoint-sqlite")>(
   "@flowgraph/checkpoint-sqlite",
@@ -300,6 +301,15 @@ export async function promptResolver(interrupts: InterruptInfo[]): Promise<unkno
 
     const answers: Record<string, unknown> = {};
     for (const it of interrupts) {
+      if (it.kind === "workshop" && stdin.isTTY && stdout.isTTY) {
+        const io = createReadlineIO(rl);
+        try {
+          answers[it.id] = await runWorkshopInteractive(it, { io });
+        } finally {
+          io.dispose();
+        }
+        continue;
+      }
       if (it.payload && typeof it.payload === "object") {
         const data = (it.payload as { data?: unknown }).data;
         if (data !== undefined) printInfo(`  context: ${JSON.stringify(data)}`);
