@@ -22,6 +22,8 @@ export const SERVICES_CHANNEL = "__services";
 export const WORKTREES_CHANNEL = "__worktrees";
 /** Accumulated run issues (capped; full history is on disk). */
 export const ISSUES_CHANNEL = "__issues";
+/** Run-level external correlation pairs, durable across interrupts and restarts. */
+export const CORRELATION_CHANNEL = "__correlation";
 
 export const RESERVED_STATE_CHANNELS = [
   ONCE_CHANNEL,
@@ -31,6 +33,7 @@ export const RESERVED_STATE_CHANNELS = [
   SERVICES_CHANNEL,
   WORKTREES_CHANNEL,
   ISSUES_CHANNEL,
+  CORRELATION_CHANNEL,
 ] as const;
 
 type ChannelDef = NonNullable<GraphSpec["state"]>["channels"][string];
@@ -130,6 +133,10 @@ export function buildStateAnnotation(
 
   // Reserved idempotency channel: merge of completed once-keys → results
   fields[ONCE_CHANNEL] = Annotation<Record<string, unknown>>(mergeRecords);
+  fields[CORRELATION_CHANNEL] = Annotation<Record<string, string>>({
+    reducer: (_cur, incoming) => incoming,
+    default: () => ({}),
+  });
   // Unused, kept on purpose: threads checkpointed by earlier releases carry
   // values (and pending writes) for this channel, and keeping it declared
   // means those checkpoints restore into the same channel set. Nothing reads

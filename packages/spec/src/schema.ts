@@ -1103,7 +1103,11 @@ export const WaitWithSchema = BaseWithSchema.extend({
   webhook: z
     .union([
       z.literal(true),
-      z.object({ schema: z.record(z.unknown()).optional() }),
+      z.object({
+        schema: z.record(z.unknown()).optional(),
+        /** Additional opaque correlation pairs for this gate; values support templates. */
+        correlation: z.record(z.string()).optional(),
+      }),
     ])
     .optional(),
 });
@@ -1582,6 +1586,8 @@ export const RuntimeSchema = z.object({
     .optional(),
   /** Scoped durable memory (see RuntimeMemorySchema). Mutually exclusive with `store`. */
   memory: RuntimeMemorySchema.optional(),
+  /** Opaque run correlation pairs, rendered once at start against the initial state/input. */
+  correlation: z.record(z.string()).optional(),
   /** Embedded HTTP ingress for `wait` nodes with `webhook: true`. */
   webhookServer: z
     .object({
@@ -1594,6 +1600,12 @@ export const RuntimeSchema = z.object({
        * must send `Authorization: Bearer <token>` or `X-Flowgraph-Token: <token>`.
        */
       token: z.string().optional(),
+      /** Stable authenticated correlation endpoint; receipt files survive process restarts. */
+      ingress: z.object({
+        id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/),
+        signingSecretEnv: z.string().min(1),
+        journalPath: z.string().min(1),
+      }).optional(),
     })
     .optional(),
   /**

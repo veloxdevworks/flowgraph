@@ -222,6 +222,32 @@ restart against a durable checkpointer, `compiled.getState(threadId)` restores
 that thread's pending webhook route. See [PLAT-278](./spikes/PLAT-278-webhook-resume.md)
 for the verified restart procedure and current delivery/validation limitations.
 
+`flowgraph resume <graph> --thread <id> --listen` restores pending webhook routes
+and waits without submitting a manual answer. It cannot be combined with
+`--resume`, `--from`, or `--list`. A thread with no pending webhook gate exits 3.
+
+Signed correlation ingress is configured through
+`runtime.webhookServer.ingress: { id, signingSecretEnv, journalPath }`.
+`compiled.run({ correlation: { external: "opaque-id" } })` declares opaque keys
+without adding user state channels. Graph defaults in `runtime.correlation`
+render once at start from initial input/state, and API pairs override them.
+Gate-level `with.webhook.correlation` can refine the keys from current node state.
+Run declarations are checkpointed in engine bookkeeping and omitted from public
+state. Correlation updates after start are not implemented.
+
+The stable `/webhook-events/<id>` endpoint verifies an HMAC signature and routes
+by key/value pairs, with optional node/interrupt selectors. It fails closed on
+ambiguity and fsyncs an event receipt before invoking a resume. Completed receipts
+are replayed without executing a gate, including after process restart. Manual
+API invocations and deadline timers acquire the same durable thread lock. Every
+process acting on that thread must share the same ingress id and journal directory.
+The directory must support atomic local-filesystem operations; this is not a
+Postgres/distributed ingress implementation. Hosts restore known waiting threads
+with `getState`; compilation alone does not discover them. A crash-left unresolved
+claim requires operator reconciliation. See the
+[signed webhook example](../examples/correlated-webhooks/README.md) for the complete
+wire protocol, rejection statuses, and at-most-once durability boundary.
+
 ```json
 {
   "threadId": "release-42",

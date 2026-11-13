@@ -9,13 +9,14 @@
 
 import { z } from "zod";
 import { WaitWithSchema } from "@flowgraph/spec";
-import { evalGuard } from "@flowgraph/expr";
+import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { parseDuration, sleep } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import { assertInboundWebhookAllowed, nodePolicyOf } from "../node-policy.js";
 import { parseWebhookPayload } from "../runtime/webhook-payload.js";
+import { webhookCorrelation } from "../runtime/webhook-correlation.js";
 
 const configSchema = WaitWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -57,6 +58,9 @@ export const waitNode = defineNode<Config>({
             kind: "custom",
             data: {
               mode: "webhook",
+              ...(typeof config.webhook === "object" && config.webhook.correlation
+                ? { correlation: webhookCorrelation(renderDeep(config.webhook.correlation, scope)) }
+                : {}),
               ...(schema ? { schema } : {}),
               ...(config.timeout
                 ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) }

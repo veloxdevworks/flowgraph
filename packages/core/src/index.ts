@@ -150,10 +150,12 @@ export {
   waitForWebhookResume,
   buildWebhookUrl,
   getWebhookRoute,
+  validateWebhookServerConfig,
   DEFAULT_WEBHOOK_HOST,
   DEFAULT_WEBHOOK_PORT,
 } from "./runtime/webhook-server.js";
 export type {
+  WebhookIngressConfig,
   WebhookServerConfig,
   WebhookServerInfo,
   WebhookRoute,
