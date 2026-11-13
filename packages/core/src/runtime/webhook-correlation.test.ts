@@ -487,10 +487,12 @@ describe("signed correlation webhook ingress", () => {
         resume: { approved: true },
       });
       expect((manual.error as { code?: string })?.code).toBe("WEBHOOK_THREAD_BUSY");
-      const rejected = compiled.stream({
-        threadId: "stream-owner",
-        correlation: { external: "one" },
-      });
+      const rejected = compiled
+        .stream({
+          threadId: "stream-owner",
+          correlation: { external: "one" },
+        })
+        [Symbol.asyncIterator]();
       const rejectedFirst = rejected.next();
       const deadline = new Promise<never>((_resolve, reject) => {
         setTimeout(() => reject(new Error("Competing stream did not settle")), 2000).unref();

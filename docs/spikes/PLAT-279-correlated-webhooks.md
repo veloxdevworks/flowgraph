@@ -59,25 +59,27 @@ for receipt-only recovery when no webhook interrupt remains to create a listener
 
 ## Regression validation
 
-| Check                                                        | Local result                                                        |
-| ------------------------------------------------------------ | ------------------------------------------------------------------- |
-| Root build, concurrency 2, read-only cache                   | 16 tasks passed.                                                    |
-| Root typecheck, concurrency 2, read-only cache               | 30 tasks passed.                                                    |
-| Focused core webhook, journal, wait, hook, and output suites | 107 tests passed, including fresh-runtime future-deadline recovery. |
-| Complete CLI suite                                           | 87 passed, 1 skipped.                                               |
-| Complete specification suite                                 | 76 passed.                                                          |
-| Parent server resume-map regression suite                    | 4 passed.                                                           |
+| Check                                                        | Local result                                                                                        |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| Root build, concurrency 2, read-only cache                   | 16 tasks passed.                                                                                    |
+| Root typecheck, concurrency 2, read-only cache               | 30 tasks passed.                                                                                    |
+| Focused core webhook, journal, wait, hook, and output suites | 108 tests passed, including fresh-runtime future-deadline recovery and standalone stream admission. |
+| Complete CLI suite                                           | 87 passed, 1 skipped.                                                                               |
+| Complete specification suite                                 | 76 passed.                                                                                          |
+| Parent server resume-map regression suite                    | 4 passed.                                                                                           |
 
 The full local core run exercised 1,219 tests: 1,211 passed, 5 skipped, and 3
 failed. Two empty-output/veto compatibility regressions exposed by that run were
 fixed and their affected suites passed on rerun. The remaining failure is the
 previously documented macOS worktree case at `src/worktree.test.ts:129`
 (`honors runtime.worktrees.root`); this change does not alter worktree handling.
+The final private stream-lifecycle follow-up was rebuilt and typechecked in core,
+and the built end-to-end harness and 108 focused regressions passed again.
 CI is enabled for stacked PR bases so the PR receives the full Node 22/Linux
 build, typecheck, test, and Postgres integration checks.
 
 Additional focused cases cover changed body bytes after signing, cross-ingress
-path replay with a shared signing key, safe rejection logs, error-message privacy
+path replay with a shared signing key, safe rejection logs, held-owner/rejected-stream isolation, error-message privacy
 in HTTP receipts, shared-thread API exclusion, early timers, slow receipt writes,
 future-deadline recovery, overdue parallel siblings, and cross-process exclusive
 journal claims. Receipt files do not contain callback payloads or signing keys.
