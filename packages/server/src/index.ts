@@ -1,5 +1,5 @@
 export { RunService } from "./run-service.js";
-export { ServerRequestError, TooManyRunsError } from "./errors.js";
+export { GraphStoreError, ServerRequestError, TooManyRunsError } from "./errors.js";
 export { SessionRegistry } from "./session-registry.js";
 export {
   parseGraphYaml,
