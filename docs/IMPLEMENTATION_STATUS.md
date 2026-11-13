@@ -18,6 +18,7 @@ Last reviewed: PLAT-281 committed state and selected transition progress events.
 | Events + console/jsonl sinks | **Shipped** (`state.update` reports post-reducer superstep changes; `edge.taken` reports selected transitions; nested events forward with `parentSpanId`) |
 | Hooks (YAML subset + guardrails) | **Shipped** (partial defaults) |
 | HITL + in-memory checkpointing | **Shipped** |
+| Signed correlation webhooks | **Shipped** | Opaque run/gate keys, HMAC ingress, durable local-filesystem delivery receipts, and CLI listener recovery. Unknown crash outcomes fail closed for operator reconciliation; no distributed database ingress. |
 | Providers: LangChain (in core), Claude, Cursor | **Shipped** |
 | MCP hub (stdio, HTTP, OAuth) | **Shipped** (`@flowgraph/mcp` optional peer of CLI) |
 | Local FS tools + governance | **Shipped** (`@flowgraph/tools-fs` optional peer of CLI) |

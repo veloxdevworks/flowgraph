@@ -33,7 +33,7 @@ export {
   isInputValidationError,
   InputValidationError,
 } from "./inputs.js";
-export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError } from "./compiler.js";
+export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError, assertResumeValue } from "./compiler.js";
 export {
   NODE_POLICY,
   NodePolicyError,
@@ -150,10 +150,12 @@ export {
   waitForWebhookResume,
   buildWebhookUrl,
   getWebhookRoute,
+  validateWebhookServerConfig,
   DEFAULT_WEBHOOK_HOST,
   DEFAULT_WEBHOOK_PORT,
 } from "./runtime/webhook-server.js";
 export type {
+  WebhookIngressConfig,
   WebhookServerConfig,
   WebhookServerInfo,
   WebhookRoute,

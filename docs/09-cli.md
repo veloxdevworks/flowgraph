@@ -188,6 +188,7 @@ flowgraph skills resolve skills/slugify --cwd examples/quickstart
 flowgraph resume ./graph.yaml --thread release-42 --resume '{"approved":true}'
 flowgraph resume ./graph.yaml --thread release-42 --list
 flowgraph resume ./graph.yaml --thread release-42 --list --json
+flowgraph resume ./graph.yaml --thread release-42 --listen --on-interrupt webhook
 ```
 
 | Flag | Description |
@@ -195,6 +196,7 @@ flowgraph resume ./graph.yaml --thread release-42 --list --json
 | `--thread <id>` | **Required.** Thread to resume. |
 | `--resume <json>` | Value passed to the interrupt handler (default: `{"approved":true}`). |
 | `--list` | List pending interrupts and exit (no resume). |
+| `--listen` | Restore pending webhook listeners and wait without sending a resume value. Incompatible with `--resume`, `--from`, and `--list`; exits 3 if no webhook gate is pending. |
 | `--stream` / `--json` | Same as `run`. |
 | `--on-interrupt <policy>` | Policy if the run interrupts again. |
 | `--no-mcp-oauth` | CI-safe MCP behavior. |

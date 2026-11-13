@@ -1,0 +1,89 @@
+{
+  "node": "v25.2.1",
+  "platform": "darwin/arm64",
+  "findings": [
+    {
+      "scenario": "authentication and validation rejection leave the original wait usable",
+      "unauthorized": 401,
+      "expired": 401,
+      "invalid": 422,
+      "effects": 0
+    },
+    {
+      "scenario": "SQLite and receipts survive SIGKILL before callback, after partial reply, and after completion",
+      "first": {
+        "http": 200,
+        "body": {
+          "status": "interrupted"
+        }
+      },
+      "duplicate": {
+        "http": 200,
+        "body": {
+          "status": "interrupted",
+          "duplicate": true
+        }
+      },
+      "conflict": 409,
+      "second": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "completedEffects": [
+        "first",
+        "second"
+      ],
+      "replayWithoutPendingRoutes": true
+    },
+    {
+      "scenario": "ambiguous external ids fail closed and a more precise callback selects one run",
+      "ambiguous": 409,
+      "selected": "interrupted",
+      "untouchedRun": true
+    },
+    {
+      "scenario": "twelve overlapping deliveries across two Node processes apply one effect",
+      "responses": [
+        200,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409
+      ],
+      "firstEffects": 1,
+      "staleGate": 404,
+      "finalEffects": [
+        "first",
+        "second"
+      ]
+    },
+    {
+      "scenario": "crash after a durable claim fails closed instead of invoking the effect again",
+      "sameId": "delivery_in_doubt",
+      "newId": "not_waiting",
+      "sameIdHttp": 409,
+      "newIdHttp": 404,
+      "gateStillWaiting": false,
+      "effects": 1
+    },
+    {
+      "scenario": "real CLI declares correlation from input and restores a signed wait using resume --listen",
+      "firstStatus": "interrupted",
+      "finalStatus": "completed",
+      "completionPrinted": true,
+      "restoredWithoutSubmittingAnAnswer": true,
+      "oldDeliveryReplayedFromReceipt": true,
+      "jsonlStdoutContainsOnlyEvents": true,
+      "listenerRetainedAfterCompletion": true
+    }
+  ]
+}

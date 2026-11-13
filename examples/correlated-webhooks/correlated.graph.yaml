@@ -1,0 +1,51 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: correlated-webhooks
+  description: Two external gates with signed, retry-safe correlation callbacks.
+inputs:
+  - key: externalId
+    type: string
+    required: true
+state:
+  channels:
+    externalId: { type: string }
+    first: { type: object }
+    second: { type: object }
+nodes:
+  - id: first-gate
+    type: wait
+    with:
+      webhook:
+        schema:
+          required: [answer]
+          properties:
+            answer: { type: string }
+      output: { to: first }
+  - id: second-gate
+    type: wait
+    with:
+      webhook:
+        schema:
+          required: [answer]
+          properties:
+            answer: { type: string }
+      output: { to: second }
+edges:
+  - { from: START, to: first-gate }
+  - { from: first-gate, to: second-gate }
+  - { from: second-gate, to: END }
+runtime:
+  correlation:
+    external: "{{ input.externalId }}"
+  checkpoint:
+    enabled: true
+    backend: sqlite
+    path: .flowgraph/correlated-webhooks.db
+  webhookServer:
+    host: 127.0.0.1
+    port: 8878
+    ingress:
+      id: example
+      signingSecretEnv: FLOWGRAPH_WEBHOOK_SECRET
+      journalPath: .flowgraph/webhook-deliveries

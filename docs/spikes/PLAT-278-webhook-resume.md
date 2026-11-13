@@ -36,9 +36,9 @@ upstream falsy-resume fix. The current harness asserts successful HTTP resume fo
 historical. The refreshed follow-up evidence was captured on this rebased engine.
 
 This is a claim on one in-memory registration, not durable event-id deduplication
-across retries, later gates, process restarts, or hosts. Independent parallel gates
-and always-on hosting remain follow-on work. Retry-safe schema rejection is covered
-by the next section.
+across retries, later gates, process restarts, or hosts. Retry-safe schema rejection
+and independent parallel gates are covered by the follow-ups below. Always-on
+hosting remains separate work.
 
 ## Follow-up: retry-safe HTTP payload validation
 
@@ -69,14 +69,57 @@ workers reported 1,151 passed, five skipped, and the same existing
 `worktree.test.ts:129` failure. All HTTP validation, overlap, wait, and HITL tests
 passed. Syntax, formatting, and whitespace checks also passed.
 
+## Follow-up: independent parallel webhook gates
+
+Each registration now belongs to a thread, node, and durable interrupt id.
+Generated callback URLs include all three. A callback submits an interrupt-id-keyed
+resume map, so only the selected gate receives its body. Waiting sibling routes
+retain their identity, schema, token, and waiter. A webhook callback also leaves
+parallel human approval gates untouched. Concurrent callbacks for different gates
+in one thread are serialized before invoking the runtime, preserving both answers.
+An overdue HTTP callback likewise targets only its own gate's timeout result and
+does not time out a human sibling.
+
+The registry retains a claimed registration during its resume so an observer
+cannot recreate it from a checkpoint being updated. LangGraph may keep an old
+interrupt write after its task has completed in a partial superstep; state loading
+filters those completed tasks using the checkpoint's channel/result writes.
+Resume-only writes do not mark a task completed, preserving re-prompt behavior.
+After a restart, only unanswered gates are restored, including when one answer
+was saved before the process stopped.
+
+Legacy node-only callback URLs remain supported for an unambiguous registration.
+They return HTTP 409 if several interrupts share that node id. Exact generated
+URLs return HTTP 404 after their interrupt is consumed. The CLI prints every URL
+and waits through partial replies. Thread-wide cancellation clears every gate;
+route helper selectors can identify a particular node and interrupt.
+
+Regressions cover both answer orders, simultaneous callbacks, separate payloads,
+equally named gates in parallel subgraphs, mixed human/webhook gates, validation,
+duplicate requests, and abort. The process harness tests SQLite recovery before
+any reply and after a partial reply, verifies answered routes do not reappear, and
+exercises both single-gate and parallel-gate CLI runs. Captured evidence:
+[parallel verification JSON](./PLAT-278-webhook-resume-parallel.json).
+
+The serialization and one-shot claims are process-local. Durable event-id dedupe,
+cross-host ownership, and always-on hosting remain follow-on work.
+
+Validation for this follow-up: root build passed (16 tasks), root typecheck passed
+(30 tasks), and all end-to-end harness cases passed. The final core run with two
+workers reported 1,158 passed, five skipped, and the same existing
+`worktree.test.ts:129` failure. The CLI suite reported 86 passed and one skipped.
+An unrelated demo screenshot test timed out during an earlier concurrent run;
+its isolated rerun (8 tests) and the final core run passed. Focused callback,
+deadline, wait, and HITL regressions passed (58 tests).
+
 ## Decision
 
-The embedded HTTP path works for a single webhook gate per thread, including a
-delayed callback and recovery from a killed process with SQLite checkpoints.
+The embedded HTTP path supports independently answered parallel gates, including
+delayed callbacks and recovery from a killed process with SQLite checkpoints.
 Several independent waiting threads can share a listener. This is enough to
 continue designing the follow-on work, but production external-event ingress is
 blocked on the remaining failures below. The original spike changed no engine
-behavior; the follow-up above fixes URL decoding and overlapping deliveries.
+behavior; the follow-ups above harden callbacks and isolate parallel resumes.
 
 Use `type: wait` with `with.webhook: true` for HTTP ingress. Setting
 `onInterrupt: webhook` on a normal `hitl` gate only leaves an interrupt pending;
@@ -191,7 +234,6 @@ spike; the aggregate suite is not green.
 | [PLAT-284](https://veloxdevworks.atlassian.net/browse/PLAT-284) — example/adapter                | **Proceed as a trusted local demonstration. Block a production recipe** until PLAT-279's delivery and ingress guarantees are verified.                                                                                                                                                                                     |
 
 The follow-ups above resolve the malformed-path crash, overlapping-delivery race,
-and retry-safe HTTP rejection for the current schema checks. Keep the single-gate
-limitation explicit until routes and resumes are scoped to an individual
-interrupt. Durable event deduplication and production hosting remain follow-on
-work; broader JSON Schema support is outside the validator's declared subset.
+retry-safe HTTP rejection, and isolation of parallel gates. Durable event
+deduplication and production hosting remain follow-on work; broader JSON Schema
+support is outside the validator's declared subset.

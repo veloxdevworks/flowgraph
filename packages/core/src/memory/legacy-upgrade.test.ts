@@ -561,10 +561,18 @@ async function installOlder(store: Backing, sources: MemoryOpSource[], indexOf: 
   await store.replaceWrites(rows);
 }
 
+
+function keyedResume(interrupts: ReadonlyArray<{ id?: string }> | undefined, value: unknown): unknown {
+  const ids = (interrupts ?? []).map((it) => it.id).filter((id): id is string => typeof id === "string" && id.length > 0);
+  return ids.length > 1 ? Object.fromEntries(ids.map((id) => [id, value])) : value;
+}
+
 async function finish(compile: () => ReturnType<typeof compileGraph>, threadId: string) {
-  let res = await (await compile()).resume({ threadId, resume: true, onInterrupt: "fail" });
+  const first = await compile();
+  const pending = (await first.getState(threadId))?.interrupts;
+  let res = await first.resume({ threadId, resume: keyedResume(pending, true), onInterrupt: "fail" });
   for (let i = 0; i < 5 && res.status === "interrupted"; i++) {
-    res = await (await compile()).resume({ threadId, resume: true, onInterrupt: "fail" });
+    res = await (await compile()).resume({ threadId, resume: keyedResume(res.interrupts, true), onInterrupt: "fail" });
   }
   return res;
 }
@@ -712,9 +720,10 @@ describe("older tool-call and subgraph numbering", () => {
           () => 0,
         );
         observed.length = 0;
-        let res = await (await compile("bump2")).resume({ threadId, resume: true, onInterrupt: "fail" });
+        let compiled = await compile("bump2");
+        let res = await compiled.resume({ threadId, resume: keyedResume((await compiled.getState(threadId))?.interrupts, true), onInterrupt: "fail" });
         for (let i = 0; i < 5 && res.status === "interrupted"; i++) {
-          res = await (await compile("bump2")).resume({ threadId, resume: true, onInterrupt: "fail" });
+          res = await (await compile("bump2")).resume({ threadId, resume: keyedResume(res.interrupts, true), onInterrupt: "fail" });
         }
         // The resumed graph keeps the first write. The new child id is not the
         // node that was interrupted, so that write is not applied again.
