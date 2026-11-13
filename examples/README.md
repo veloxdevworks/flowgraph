@@ -10,6 +10,7 @@ Runnable vertical slices demonstrating flowgraph features. Each example includes
 | [triage-issue](./triage-issue/) | `function` + `router` + `skill` (north-star) | None | [README](./triage-issue/README.md) |
 | [release-notes](./release-notes/) | HITL interrupt + durable resume | `register.ts` | [README](./release-notes/README.md) |
 | [hitl](./hitl/) | `hitl` node + interactive/CI resume | Scripted provider in test | [README](./hitl/README.md) |
+| [webhook-resume](./webhook-resume/) | Inbound HTTP interrupt/resume + restart verification | No provider; SQLite plugin | [README](./webhook-resume/README.md) |
 | [review-loop](./review-loop/) | Branching + revise loop until approved | `register.ts` | [README](./review-loop/README.md) |
 | [software-factory](./software-factory/) | SDLC: prototype vs production, HITL, quality gates, mock Jira/chat | `register.ts` | [README](./software-factory/README.md) |
 | [self-healing](./self-healing/) | Memory: incident subjects, agent recall budget, `similarSubjects` ("what fixed this last time") | Scripted provider + sqlite in test | [README](./self-healing/README.md) |

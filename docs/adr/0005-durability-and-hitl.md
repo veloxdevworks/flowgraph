@@ -17,7 +17,7 @@ Target use cases include long-running "software factories" and multi-step approv
 - Requires idempotency support (`ctx.once`, `sideEffecting` flags) because resumed nodes re-run from their start.
 - Larger v1 surface, but these concerns are very hard to retrofit, so paying early is correct.
 - Postgres checkpointer and durable LangGraph `Store` backends deferred to a later phase; in-memory `ctx.store` is available now.
-- `webhook` (outbound emit) and `wait` with `webhook: true` (inbound HTTP ingress wrapping `resume()`) are implemented. The ingress is an in-process `node:http` listener (default `127.0.0.1:8878`, no auth in v1). Pending route registrations are lost on process restart.
+- `webhook` (outbound emit) and `wait` with `webhook: true` (inbound HTTP ingress wrapping `resume()`) are implemented. The ingress is an in-process `node:http` listener (default `127.0.0.1:8878`, optional per-graph shared-secret token). Pending route registrations are lost on process restart and can be restored by loading a durable thread through `getState`. [PLAT-278 verification](../spikes/PLAT-278-webhook-resume.md) records delivery, validation, and parallel-gate gaps that still require hardening.
 
 ## Alternatives considered
 

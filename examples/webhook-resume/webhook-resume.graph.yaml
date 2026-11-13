@@ -1,0 +1,32 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: webhook-resume
+  description: Pause for an external event, then continue to completion without an LLM.
+state:
+  channels:
+    received: { type: object }
+nodes:
+  - id: await-event
+    type: wait
+    with:
+      webhook: true
+      output: { to: received }
+  - id: finish
+    type: wait
+    with:
+      duration: 1ms
+edges:
+  - { from: START, to: await-event }
+  - { from: await-event, to: finish }
+  - { from: finish, to: END }
+runtime:
+  checkpoint:
+    enabled: true
+    backend: sqlite
+    path: .flowgraph/webhook-resume.db
+  webhookServer:
+    host: 127.0.0.1
+    port: 8878
+  hitl:
+    onInterrupt: webhook

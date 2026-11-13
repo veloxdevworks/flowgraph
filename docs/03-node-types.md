@@ -854,7 +854,9 @@ Inbound webhook example:
     output: { to: approval }
 ```
 
-When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTTP server and attaches a generated URL on the interrupt payload as `data.webhookUrl` (e.g. `http://127.0.0.1:8878/webhooks/<threadId>/<nodeId>`). `POST` JSON to that URL to resume; `GET` returns `{ waiting: true }`. Configure host/port via `runtime.webhookServer` (default `127.0.0.1:8878`; on `EADDRINUSE` falls back to an ephemeral port). **No auth in v1** — local / trusted-network only. Routes are in-memory and one-shot; a process restart loses pending registrations until the node is hit again.
+When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTTP server and attaches a generated URL on the interrupt payload as `data.webhookUrl` (e.g. `http://127.0.0.1:8878/webhooks/<threadId>/<nodeId>`). `POST` a JSON object to that URL to resume; `GET` returns `{ waiting: true }`. Configure host/port via `runtime.webhookServer` (default `127.0.0.1:8878`; on `EADDRINUSE` falls back to an ephemeral port). Optional per-graph `runtime.webhookServer.token` guards GET/POST via `Authorization: Bearer <token>` or `x-flowgraph-token`. Routes are in memory: after restart, compile with the same durable checkpointer and call `compiled.getState(threadId)` to restore a pending thread's route and discover its current URL. Compilation alone does not restore listeners.
+
+Current ingress supports one webhook gate per thread. Schema checks enforce only `required` key presence, and a rejected schema answer is not recoverable by simply posting a corrected answer. Malformed percent-encoded paths return HTTP 400. Each route registration is claimed once after a valid JSON body is read; overlapping POSTs for that registration get one resume and HTTP 404 for the others. Requests whose route was cancelled or replaced while their body was being read also get HTTP 404. This claim is process-local; durable event deduplication still requires additional ingress support. Restrict this ingress to trusted local use pending hardening. See the [verified behavior and follow-on decisions](./spikes/PLAT-278-webhook-resume.md) and [runnable example](../examples/webhook-resume/README.md).
 
 ### Modes
 
@@ -863,7 +865,7 @@ When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTT
 | `duration` | In-process sleep for the given duration | No — same as any in-flight node |
 | `until` | Interrupt if the guard is false; re-evaluate on resume | Yes (checkpointed interrupt) |
 | `signal` | Interrupt until resumed with a payload for the named signal | Yes (checkpointed interrupt) |
-| `webhook` | Interrupt until inbound HTTP POST resumes (schema-validated) | Interrupt yes; listening URL requires the owning process |
+| `webhook` | Interrupt until inbound HTTP POST resumes (required schema keys checked) | Interrupt yes; listening URL requires a live process and route rehydration |
 
 ### Observability
 

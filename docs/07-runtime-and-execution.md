@@ -215,6 +215,13 @@ External systems complete HITL without a terminal prompt:
 
 The same flow is available via the programmatic API: `compiled.getState(threadId)` → read `interrupts` → `compiled.resume({ threadId, resume })`.
 
+For `wait` nodes with `with.webhook: true`, the CLI instead keeps the process
+listening for an inbound POST, including under `--on-interrupt fail`. A normal
+`hitl` node with `onInterrupt: webhook` does not create an HTTP route. After a
+restart against a durable checkpointer, `compiled.getState(threadId)` restores
+that thread's pending webhook route. See [PLAT-278](./spikes/PLAT-278-webhook-resume.md)
+for the verified restart procedure and current delivery/validation limitations.
+
 ```json
 {
   "threadId": "release-42",
