@@ -7,13 +7,14 @@ import { START, END, StateGraph, Command, Send, type BaseCheckpointSaver, type B
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
+import { randomUUID, createHash } from "node:crypto";
 import type { GraphSpec, NodeSpec, OutputMapping } from "@flowgraph/spec";
 import { applyOutput } from "./runtime/apply-output.js";
 import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
-import { createEventBus, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
+import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { createEnvSecretProvider } from "./secrets.js";
 import {
   createLogger,
@@ -23,7 +24,7 @@ import {
   type RunMeta,
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
-import { buildStateAnnotation, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import { buildStateAnnotation, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, CORRELATION_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
 import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 import {
   checkpointPrunedError,
@@ -65,10 +66,15 @@ import {
   ensureWebhookServer,
   registerWebhookRoute,
   unregisterWebhookRoute,
+  settleWebhookInterrupt,
   buildWebhookUrl,
   getWebhookRoute,
+  validateWebhookServerConfig,
   type WebhookServerConfig,
 } from "./runtime/webhook-server.js";
+import { webhookCorrelation } from "./runtime/webhook-correlation.js";
+import { webhookBaseUrl } from "./runtime/webhook-ingress.js";
+import { FileWebhookDeliveryJournal } from "./runtime/webhook-delivery-journal.js";
 import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
 import { cleanupWorktrees } from "./nodes/worktree.js";
 import { registerProvider, type ProviderAdapter } from "./providers/index.js";
@@ -231,6 +237,8 @@ function describeExhausted(it: InterruptInfo): string {
 
 export interface RunOptions {
   input?: Record<string, unknown>;
+  /** Opaque external identifiers; merged over runtime.correlation and checkpointed at start. */
+  correlation?: Record<string, string>;
   threadId?: string;
   signal?: AbortSignal;
   /**
@@ -319,8 +327,20 @@ type ExecuteMode = "start" | "resume" | "continue";
 interface InvokeOverrides {
   /** Stop after one superstep (LangGraph invoke-time `interruptAfter: "*"`). */
   singleStep?: boolean;
+  /** Internal stream lifecycle: called only after admission, before execution events. */
+  onExecutionStart?: () => void;
   /** An HTTP callback targets one interrupt; leave sibling route registrations intact. */
   preserveWebhookRoutes?: boolean;
+  /** Recheck a route against the latest checkpoint after acquiring its delivery lock. */
+  expectedWebhookInterruptId?: string;
+  /** Private: the signed HTTP ingress already owns the durable thread lock. */
+  webhookDeliveryLocked?: boolean;
+  /** Expire only the currently due interrupt ids, rechecked after acquiring the lock. */
+  expireWaitsOnly?: boolean;
+  /** A competing invocation will refresh its deadlines when it releases the lock. */
+  backgroundWaitTimeout?: boolean;
+  /** Internal notification that a fresh expired interrupt was actually resumed. */
+  onWaitTimeoutApplied?: () => void;
 }
 
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
@@ -375,6 +395,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   const waitTimers: WaitTimerMap = new Map();
   const clock = () => (opts.now ?? Date.now)();
   const scheduleTimeout = opts.scheduleTimeout ?? ((fn: () => void, delayMs: number) => setTimeout(fn, delayMs));
+  const waitTimerGenerations = new Map<string, number>();
+
+  const clearThreadWaitTimer = (threadId: string) => {
+    waitTimerGenerations.set(threadId, (waitTimerGenerations.get(threadId) ?? 0) + 1);
+    clearWaitTimeoutTimer(waitTimers, threadId);
+  };
 
   const getCheckpointState = async (config: LangGraphRunnableConfig) => {
     const snap = await compiledLg.getState(config);
@@ -390,7 +416,57 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     return { ...snap, tasks: snap.tasks.map((task) => completed.has(task.id) ? { ...task, interrupts: [] } : task) };
   };
 
-  const executeInvoke = async (
+  const notifyWaitTimeout = (result: RunResult) => withEventThread(result.threadId ?? `thread-${runId}`, () => {
+    try { opts.onWaitTimeout?.(result); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      events.emit("run.error", { message: `onWaitTimeout callback failed: ${message}`, error: message, threadId: result.threadId });
+    }
+  });
+
+  const fireWaitTimeout = async (threadId: string): Promise<void> => withEventThread(threadId, async () => {
+    let applied = false;
+    try {
+      const result = await executeInvoke(null, { threadId, resume: undefined, onInterrupt: "fail" }, "resume", {
+        expireWaitsOnly: true, preserveWebhookRoutes: true, backgroundWaitTimeout: true,
+        onWaitTimeoutApplied: () => { applied = true; },
+      });
+      if ((result.error as { code?: unknown } | undefined)?.code === "WEBHOOK_THREAD_BUSY") return;
+      if (!applied && result.status === "interrupted") await refreshThreadWaitTimer(threadId);
+      if (applied || result.status === "error") notifyWaitTimeout(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      events.emit("run.error", { message: `wait timeout resume failed: ${message}`, error: message, threadId });
+      notifyWaitTimeout({ status: "error", state: {}, runId, threadId,
+        error: error instanceof Error ? error : new Error(message), durationMs: 0 });
+    }
+  });
+
+  const scheduleThreadWaitTimer = (threadId: string, interrupts: InterruptInfo[]) => {
+    clearThreadWaitTimer(threadId);
+    scheduleWaitTimeoutTimer(waitTimers, threadId, interrupts, () => {
+      if (!interrupts.some(interrupt => interrupt.deadlineAt !== undefined && Date.parse(interrupt.deadlineAt) <= clock())) {
+        // Injected schedulers and system clocks can fire early. Re-arm
+        // synchronously before consulting the checkpoint under the lock.
+        scheduleThreadWaitTimer(threadId, interrupts);
+        return;
+      }
+      void fireWaitTimeout(threadId);
+    }, clock, scheduleTimeout);
+  };
+
+  const refreshThreadWaitTimer = async (threadId: string): Promise<void> => {
+    if (!checkpointer) return;
+    const generation = (waitTimerGenerations.get(threadId) ?? 0) + 1;
+    waitTimerGenerations.set(threadId, generation);
+    const snap = await getCheckpointState({ configurable: { thread_id: threadId } });
+    // A newer invocation or refresh owns scheduling if the checkpoint read yielded.
+    if (waitTimerGenerations.get(threadId) !== generation) return;
+    const interrupts = snap.tasks.flatMap(task => task.interrupts.map(toInterruptInfo));
+    scheduleThreadWaitTimer(threadId, interrupts);
+  };
+
+  const invoke = async (
     payload: Record<string, unknown> | Command | null,
     runOpts: RunOptions | ResumeOptions | ContinueOptions,
     mode: ExecuteMode,
@@ -409,7 +485,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         resolveCheckpointRetention(graphRetention, opts.checkpointRetention),
       );
     }
-    clearWaitTimeoutTimer(waitTimers, threadId);
+    clearThreadWaitTimer(threadId);
     const startedAt = new Date().toISOString();
     const runMeta: RunMeta = { runId, graph: graphSpec.metadata.name, startedAt, threadId };
 
@@ -459,6 +535,11 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           if ((r.error as { code?: unknown } | undefined)?.code === THREAD_WAIT_NOT_RECORDED) Object.assign(r.error!, { parkError: err });
         }
       }
+      for (const interruptId of timedOutInterruptIds) {
+        settleWebhookInterrupt(threadId, interruptId, {
+          status: r.status, ...(r.error ? { error: r.error.message } : {}),
+        });
+      }
       return r;
     };
 
@@ -475,6 +556,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     let priorStatus: { status: "active" | "paused" | "finished"; updatedAt: number } | undefined;
     let activeMark: string | undefined;
     let markedAt: number | undefined;
+    const timedOutInterruptIds = new Set<string>();
     // While this run waits in-process for an answer it writes nothing, so its
     // row would look abandoned to a sweep on another host. Store it as paused
     // for the wait and set it back to active under the same mark afterwards.
@@ -536,6 +618,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     if (mode !== "start" && checkpointer) {
       const snap = await getCheckpointState(cfg);
       pendingResumeInterrupts = (snap.tasks ?? []).flatMap((task) => task.interrupts ?? []);
+      if (overrides.expectedWebhookInterruptId && !(snap.tasks ?? []).some(task =>
+        task.interrupts.some(interrupt => interrupt.id === overrides.expectedWebhookInterruptId))) {
+        const error = Object.assign(new Error("Webhook interrupt is no longer waiting"), { code: "WEBHOOK_INTERRUPT_NOT_WAITING" });
+        return finish({ status: "error", state: stripReserved(snap.values), runId, threadId,
+          error, durationMs: Date.now() - startMs }, false);
+      }
       // `threadId` lets interrupts saved by earlier releases (keyed
       // `<threadId>:<nodeId>`) resume without re-running approved tools.
       const pending = pendingInterrupts(snap);
@@ -544,14 +632,36 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         executeInvoke,
         nodePolicy: opts.nodePolicy,
         rehydrateWebhooks: mode !== "resume",
+        afterDelivery: refreshThreadWaitTimer,
         ...(runOpts.signal ? { signal: runOpts.signal } : {}),
         ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
       });
       const expired = timeoutResumeCommand(snap, clock());
+      if (overrides.expireWaitsOnly && !expired) {
+        const interrupts = snap.tasks.flatMap(task => task.interrupts.map(toInterruptInfo));
+        return finish({
+          status: interrupts.length ? "interrupted" : snap.next.length ? "paused" : "completed",
+          state: stripReserved(snap.values), runId, threadId, durationMs: Date.now() - startMs,
+          ...(interrupts.length ? { interrupts } : {}),
+        }, false);
+      }
       if (expired) {
-        // Keep the caller's answers for gates that are not overdue; only the
-        // overdue interrupt(s) are replaced with the timeout command.
-        payload = mergeTimeoutResume(payload, expired);
+        if (overrides.expireWaitsOnly) {
+          payload = expired;
+        } else if (overrides.expectedWebhookInterruptId && payload instanceof Command) {
+          // A callback answers only its selected gate; siblings expire on their own timer.
+          const overdue = expired.resume as Record<string, unknown>;
+          const targeted = payload.resume as Record<string, unknown>;
+          payload = new Command({ resume: Object.fromEntries(Object.entries(targeted)
+            .map(([id, answer]) => [id, overdue[id] ?? answer])) });
+        } else {
+          payload = mergeTimeoutResume(payload, expired);
+        }
+        const answers = (payload as Command).resume as Record<string, unknown>;
+        for (const id of Object.keys(expired.resume as Record<string, unknown>)) {
+          if (Object.hasOwn(answers, id)) timedOutInterruptIds.add(id);
+        }
+        if (timedOutInterruptIds.size > 0) overrides.onWaitTimeoutApplied?.();
         mode = "resume";
       }
     }
@@ -567,6 +677,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
     const startEvent =
       mode === "resume" ? "interrupt.resumed" : mode === "continue" ? "run.continued" : "run.start";
+    overrides.onExecutionStart?.();
     events.emit(startEvent, {
       graphName: graphSpec.metadata.name,
     });
@@ -601,6 +712,15 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         if (r.payload.input) current = r.payload.input;
         // A run:before hook's replacement input is run input too.
         assertNoReservedInput(current, `graph "${graphSpec.metadata.name}" run (after run:before hooks)`);
+      }
+      if (mode === "start" && current != null && !(current instanceof Command) &&
+        (graphSpec.runtime?.correlation !== undefined || (runOpts as RunOptions).correlation !== undefined)) {
+        const declared = webhookCorrelation(renderDeep(graphSpec.runtime?.correlation, {
+          state: current, input: current, config: baseCtx.config, run: runMeta,
+        }));
+        current = { ...current, [CORRELATION_CHANNEL]: webhookCorrelation({
+          ...declared, ...webhookCorrelation((runOpts as RunOptions).correlation),
+        }) };
       }
 
       // Bind this thread's memory scope (subject rendered from input/run at start;
@@ -731,6 +851,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         await attachWebhookUrls(interrupts, {
           threadId,
           graphSpec,
+          correlation: webhookCorrelation(result[CORRELATION_CHANNEL]),
+          afterDelivery: refreshThreadWaitTimer,
           executeInvoke,
           nodePolicy: opts.nodePolicy,
           ...(runOpts.signal ? { signal: runOpts.signal } : {}),
@@ -740,50 +862,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         events.emit("interrupt.raised", { interrupts });
 
         if (policy === "fail" || policy === "webhook") {
-          const onWaitDeadline = () => {
-            const at = clock();
-            const overdue = interrupts.filter((it) => it.deadlineAt !== undefined && Date.parse(it.deadlineAt) <= at);
-            if (overdue.length === 0) {
-              // An early fire (clock skew, a short delay) should re-arm, not drop the timer.
-              scheduleWaitTimeoutTimer(waitTimers, threadId, interrupts, onWaitDeadline, clock, scheduleTimeout);
-              return;
-            }
-            executeInvoke(
-              new Command({ resume: Object.fromEntries(overdue.map((it) => [it.id, { timedOut: true }])) }),
-              { threadId, resume: { timedOut: true }, onInterrupt: "fail" },
-              "resume",
-              { preserveWebhookRoutes: true },
-            ).then(
-              (timedOutResult) => {
-                for (const it of overdue) unregisterWebhookRoute(threadId, undefined, it.id);
-                try {
-                  opts.onWaitTimeout?.(timedOutResult);
-                } catch (cbErr) {
-                  const m = cbErr instanceof Error ? cbErr.message : String(cbErr);
-                  events.emit("run.error", { message: `onWaitTimeout callback failed: ${m}`, error: m, threadId });
-                }
-              },
-              (err: unknown) => {
-                // executeInvoke normally returns status "error"; this catches anything that escaped it
-                // so a background timer can never become an unhandled rejection.
-                const m = err instanceof Error ? err.message : String(err);
-                events.emit("run.error", { message: `wait timeout resume failed: ${m}`, error: m, threadId });
-                try {
-                  opts.onWaitTimeout?.({
-                    status: "error",
-                    state: {},
-                    runId,
-                    threadId,
-                    error: err instanceof Error ? err : new Error(m),
-                    durationMs: 0,
-                  });
-                } catch {
-                  /* already reported */
-                }
-              },
-            );
-          };
-          scheduleWaitTimeoutTimer(waitTimers, threadId, interrupts, onWaitDeadline, clock, scheduleTimeout);
+          // Signed invocations still hold the durable thread lock here. Their
+          // caller refreshes deadlines after recording the outcome and unlocking.
+          if (!deliveryJournal) scheduleThreadWaitTimer(threadId, interrupts);
           const clean = stripReserved(result);
           return finish({
             status: "interrupted",
@@ -861,6 +942,55 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       for (const u of unsubs) u();
     }
   };
+
+  // All execution surfaces for a signed graph share the delivery journal lock,
+  // including manual resumes and deadline timers. A process-local HTTP queue
+  // alone cannot protect against an API caller or a second runtime instance.
+  const ingress = graphSpec.runtime?.webhookServer?.ingress;
+  const deliveryJournal = ingress ? new FileWebhookDeliveryJournal(ingress.journalPath, ingress.id) : undefined;
+  const executeInvoke = async (
+    payload: Record<string, unknown> | Command | null,
+    runOpts: RunOptions | ResumeOptions | ContinueOptions,
+    mode: ExecuteMode,
+    overrides: InvokeOverrides = {},
+  ): Promise<RunResult> => withEventThread(runOpts.threadId ?? `thread-${runId}`, async () => {
+    if (!deliveryJournal || overrides.webhookDeliveryLocked) return invoke(payload, runOpts, mode, overrides);
+    const threadId = runOpts.threadId ?? `thread-${runId}`;
+    const reject = (code: string, message: string): RunResult => {
+      const error = Object.assign(new Error(message), { code });
+      if (!(code === "WEBHOOK_THREAD_BUSY" && overrides.backgroundWaitTimeout)) {
+        // Admission failed before execution. A terminal event here would
+        // incorrectly terminate observers of the invocation holding the thread.
+        events.emit("log", { level: "warn", msg: message, code, threadId });
+      }
+      return { status: "error", state: {}, runId, threadId, error, durationMs: 0 };
+    };
+    const eventId = `internal-${randomUUID()}`;
+    let claim;
+    try {
+      claim = await deliveryJournal.claim(eventId, createHash("sha256").update(`${mode}:${eventId}`).digest("hex"), { threadId });
+    } catch {
+      return reject("WEBHOOK_DELIVERY_STORE_UNAVAILABLE", "Cannot safely coordinate this run with webhook deliveries");
+    }
+    if (claim.kind !== "claimed") return reject("WEBHOOK_THREAD_BUSY", "A webhook delivery or another invocation holds this thread; inspect an unresolved claim before retrying");
+    let result: RunResult;
+    try {
+      result = await invoke(payload, runOpts, mode, overrides);
+    } catch (error) {
+      await deliveryJournal.complete(claim.claim, { http: 500, body: { status: "error" } });
+      throw error;
+    }
+    try {
+      await deliveryJournal.complete(claim.claim, { http: result.status === "error" ? 422 : 200, body: { status: result.status } });
+    } catch {
+      return reject("WEBHOOK_DELIVERY_STORE_UNAVAILABLE", "Run outcome could not be durably recorded; inspect the thread before retrying");
+    }
+    if (result.status === "interrupted") {
+      try { await refreshThreadWaitTimer(threadId); }
+      catch { events.emit("run.error", { error: "Wait deadline refresh failed", message: "Wait deadline refresh failed; inspect the thread", threadId }); }
+    }
+    return result;
+  });
 
   const toSnapshot = (
     snap: { values: Record<string, unknown>; next: readonly string[]; config?: { configurable?: { checkpoint_id?: string } }; createdAt?: string; tasks?: ReadonlyArray<{ name?: string; interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }> },
@@ -960,14 +1090,18 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return toSnapshot(snap as any, threadId);
       }
-      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, nodePolicy: opts.nodePolicy, rehydrateWebhooks: true });
+      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, nodePolicy: opts.nodePolicy,
+        rehydrateWebhooks: true, afterDelivery: refreshThreadWaitTimer });
       const expired = timeoutResumeCommand(snap, clock());
       if (expired) {
-        await executeInvoke(expired, { threadId, resume: { timedOut: true }, onInterrupt: "fail" }, "resume", { preserveWebhookRoutes: true });
-        for (const id of Object.keys(expired.resume as Record<string, unknown>)) {
-          unregisterWebhookRoute(threadId, undefined, id);
-        }
+        await executeInvoke(null, { threadId, resume: undefined, onInterrupt: "fail" }, "resume", {
+          expireWaitsOnly: true, preserveWebhookRoutes: true, backgroundWaitTimeout: true,
+        });
         snap = await getCheckpointState({ configurable: { thread_id: threadId } });
+      } else if (deliveryJournal) {
+        // A restarted host has no in-memory timers. Rehydrating a signed wait
+        // also re-arms its future deadline without submitting an answer.
+        await refreshThreadWaitTimer(threadId);
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return toSnapshot(snap as any, threadId);
@@ -993,9 +1127,43 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       return continueRun(opts, { singleStep: true });
     },
     stream: async function* (runOpts: RunOptions = {}) {
-      const streamP = events.stream();
-      executeInvoke(runOpts.input ?? {}, runOpts, "start").catch(() => {});
-      yield* streamP;
+      const threadId = runOpts.threadId ?? `thread-${runId}`;
+      const queue: FlowgraphEvent[] = [];
+      const lifecycle: { started: boolean; outcome?: RunResult; failure?: Error } = { started: false };
+      let wake: (() => void) | undefined;
+      const notify = () => { wake?.(); wake = undefined; };
+      const unsubscribe = events.subscribe((event) => {
+        if (!lifecycle.started || event.threadId !== threadId) return;
+        queue.push(event);
+        notify();
+      });
+      // A coordinating host may reject this invocation before it runs. Ignore
+      // another owner's events until our own execution starts, and handle a
+      // rejected invocation locally without terminating the owner's stream.
+      void executeInvoke(runOpts.input ?? {}, runOpts, "start", {
+        onExecutionStart: () => { lifecycle.started = true; },
+      }).then((result) => {
+        lifecycle.outcome = result;
+        notify();
+      }, (error: unknown) => {
+        lifecycle.failure = error instanceof Error ? error : new Error(String(error));
+        notify();
+      });
+      try {
+        for (;;) {
+          while (queue.length > 0) {
+            const event = queue.shift()!;
+            yield event;
+            if (["run.end", "run.error", "run.aborted", "run.paused"].includes(event.type)) return;
+          }
+          if (lifecycle.failure) throw lifecycle.failure;
+          if (lifecycle.outcome?.status === "error") throw lifecycle.outcome.error ?? new Error("Run failed before execution");
+          if (lifecycle.outcome && lifecycle.outcome.status !== "interrupted") return;
+          await new Promise<void>((resolve) => { wake = resolve; });
+        }
+      } finally {
+        unsubscribe();
+      }
     },
   };
 }
@@ -1052,6 +1220,14 @@ async function assembleCompiledLangGraph(
 
   assertGraphToolsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
   assertGraphRuntimeAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
+  if (spec.runtime?.webhookServer) {
+    const config = spec.runtime.webhookServer;
+    const resolved = config.ingress ? {
+      ...config, ingress: { ...config.ingress, journalPath: path.resolve(graphDir, config.ingress.journalPath) },
+    } : config;
+    validateWebhookServerConfig(resolved);
+    spec = { ...spec, runtime: { ...spec.runtime, webhookServer: resolved } };
+  }
   {
     // Every node, map inner and inline subgraph (and its declared channels) at any depth.
     const channels = [...Object.keys(spec.state?.channels ?? {})];
@@ -1529,6 +1705,7 @@ function scheduleWaitTimeoutTimer(
   if (deadline === undefined) return;
   const delay = Math.max(0, deadline - now());
   const timer = schedule(() => {
+    if (waitTimeoutTimers.get(threadId) !== timer) return;
     waitTimeoutTimers.delete(threadId);
     onFire();
   }, delay);
@@ -2034,6 +2211,8 @@ async function attachWebhookUrls(
     signal?: AbortSignal;
     sinks?: EventSink[];
     nodePolicy?: NodePolicy | undefined;
+    correlation?: Record<string, string>;
+    afterDelivery?: (threadId: string) => Promise<void>;
   },
 ): Promise<void> {
   // Never listen on a host port for a graph whose policy refuses inbound webhooks.
@@ -2047,10 +2226,17 @@ async function attachWebhookUrls(
 
   for (const interrupt of webhookInterrupts) {
     const nodeId = webhookNodeIdFromInterrupt(interrupt) ?? "unknown";
-    const payload = interrupt.payload as { data?: { schema?: Record<string, unknown> } } | undefined;
+    const payload = interrupt.payload as { data?: { schema?: Record<string, unknown>; correlation?: unknown } } | undefined;
     const schema = payload?.data?.schema;
     const existing = getWebhookRoute(opts.threadId, nodeId, interrupt.id);
-    const url = existing?.url ?? buildWebhookUrl(info.host, info.port, opts.threadId, nodeId, interrupt.id);
+    if (existing && (existing.listenerKey !== `${info.host}:${info.port}` || existing.ingressId !== serverCfg?.ingress?.id)) {
+      throw new Error("Webhook thread is already bound to another listener/ingress; close its existing listeners before reconfiguring it");
+    }
+    const url = existing?.url ?? (serverCfg?.ingress
+      ? `${webhookBaseUrl(info.host, info.port)}/webhook-events/${serverCfg.ingress.id}`
+      : buildWebhookUrl(info.host, info.port, opts.threadId, nodeId, interrupt.id));
+    const correlation = webhookCorrelation({ ...opts.correlation, ...webhookCorrelation(payload?.data?.correlation) }, Boolean(serverCfg?.ingress));
+    if (serverCfg?.ingress && payload?.data) payload.data.correlation = correlation;
     setWebhookUrlOnInterrupt(interrupt, url);
     if (existing) continue;
 
@@ -2068,6 +2254,10 @@ async function attachWebhookUrls(
       nodeId,
       interruptId: interrupt.id,
       url,
+      listenerKey: `${info.host}:${info.port}`,
+      ...(serverCfg?.ingress ? { ingressId: serverCfg.ingress.id } : {}),
+      ...(serverCfg?.ingress && opts.afterDelivery ? { afterDelivery: () => opts.afterDelivery!(opts.threadId) } : {}),
+      correlation,
       ...(schema ? { schema } : {}),
       ...(serverCfg?.token ? { token: serverCfg.token } : {}),
       resume: async (body) => {
@@ -2081,11 +2271,14 @@ async function attachWebhookUrls(
             ...(opts.sinks ? { sinks: opts.sinks } : {}),
           },
           "resume",
-          { preserveWebhookRoutes: true },
+          { preserveWebhookRoutes: true, expectedWebhookInterruptId: interrupt.id,
+            ...(serverCfg?.ingress ? { webhookDeliveryLocked: true } : {}) },
         );
         return {
           status: result.status,
           ...(result.error ? { error: result.error.message } : {}),
+          ...((result.error as { code?: unknown } | undefined)?.code === "WEBHOOK_INTERRUPT_NOT_WAITING"
+            ? { code: "WEBHOOK_INTERRUPT_NOT_WAITING" } : {}),
         };
       },
     });
@@ -2402,6 +2595,7 @@ export async function hydrateDurableRuntime(
     sinks?: EventSink[];
     rehydrateWebhooks?: boolean;
     nodePolicy?: NodePolicy | undefined;
+    afterDelivery?: (threadId: string) => Promise<void>;
   },
 ): Promise<void> {
   if (!snap) return;
@@ -2413,6 +2607,8 @@ export async function hydrateDurableRuntime(
     await attachWebhookUrls(interrupts, {
       threadId,
       graphSpec,
+      correlation: webhookCorrelation(snap.values?.[CORRELATION_CHANNEL]),
+      ...(opts.afterDelivery ? { afterDelivery: opts.afterDelivery } : {}),
       executeInvoke: opts.executeInvoke,
       nodePolicy: opts.nodePolicy,
       ...(opts.signal ? { signal: opts.signal } : {}),

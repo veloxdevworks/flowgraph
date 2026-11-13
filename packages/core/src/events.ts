@@ -1,3 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const eventThread = new AsyncLocalStorage<string>();
+
+/** @internal Keep event attribution local to an invocation, including concurrent threads. */
+export function withEventThread<T>(threadId: string, run: () => T): T {
+  return eventThread.run(threadId, run);
+}
+
 /**
  * The event bus and event types for flowgraph.
  * Events are read-only observations; they never block execution.
@@ -98,7 +107,8 @@ export function createEventBus(opts: EventBusOptions): EventBus {
       data,
       seq: _seq++,
     };
-    if (opts.threadId !== undefined) event.threadId = opts.threadId;
+    const threadId = opts.threadId ?? eventThread.getStore();
+    if (threadId !== undefined) event.threadId = threadId;
 
     buffer.push(event);
 
@@ -149,7 +159,9 @@ export function createEventBus(opts: EventBusOptions): EventBus {
         if (queue.length > 0) {
           yield queue.shift()!;
         } else {
-          await new Promise<void>((r) => { resolve = r; });
+          await new Promise<void>((r) => {
+            resolve = r;
+          });
         }
         // End signal: a run.end or run.error event closes the stream
         const last = buffer[buffer.length - 1];

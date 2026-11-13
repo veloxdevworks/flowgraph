@@ -11,16 +11,28 @@ import * as http from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { parseWebhookPayload } from "./webhook-payload.js";
+import {
+  clearWebhookIngresses,
+  handleWebhookIngress,
+  registerWebhookIngress,
+  validateWebhookServerConfig,
+  webhookBaseUrl,
+  type WebhookIngressConfig,
+} from "./webhook-ingress.js";
+import type { WebhookDeliveryResponse } from "./webhook-delivery-journal.js";
+export { validateWebhookServerConfig } from "./webhook-ingress.js";
+export type { WebhookIngressConfig } from "./webhook-ingress.js";
 
 export const DEFAULT_WEBHOOK_HOST = "127.0.0.1";
 export const DEFAULT_WEBHOOK_PORT = 8878;
 const MAX_BODY_BYTES = 1_048_576; // 1 MiB
 
 export interface WebhookServerConfig {
-  host?: string;
-  port?: number;
+  host?: string | undefined;
+  port?: number | undefined;
   /** Shared secret; required on POST when set. */
-  token?: string;
+  token?: string | undefined;
+  ingress?: WebhookIngressConfig | undefined;
 }
 
 export interface WebhookServerInfo {
@@ -28,7 +40,9 @@ export interface WebhookServerInfo {
   port: number;
 }
 
-export type WebhookResumeFn = (body: unknown) => Promise<{ status: string; error?: string }>;
+export type WebhookResumeFn = (
+  body: unknown,
+) => Promise<{ status: string; error?: string; code?: string }>;
 
 export interface WebhookRoute {
   threadId: string;
@@ -42,6 +56,12 @@ export interface WebhookRoute {
   token?: string;
   /** Required keys and primitive property types, checked before claiming the route. */
   schema?: Record<string, unknown>;
+  /** Opaque external keys, scoped to the configured listener and ingress. */
+  correlation?: Record<string, string>;
+  ingressId?: string;
+  listenerKey?: string;
+  /** Refresh deadline timers only after the delivery receipt releases its lock. */
+  afterDelivery?: () => Promise<void>;
 }
 
 interface PendingRoute extends WebhookRoute {
@@ -88,7 +108,7 @@ function removeRoute(route: PendingRoute): void {
 async function resumeRoute(
   route: PendingRoute,
   body: unknown,
-): Promise<{ status: string; error?: string }> {
+): Promise<{ status: string; error?: string; code?: string }> {
   // Concurrent replies to different gates still write the same checkpoint.
   const previous = resumeTails.get(route.threadId) ?? Promise.resolve();
   const result = previous.then(() =>
@@ -117,7 +137,7 @@ export function buildWebhookUrl(
   nodeId: string,
   interruptId?: string,
 ): string {
-  const base = `http://${host}:${port}/webhooks/${encodeURIComponent(threadId)}/${encodeURIComponent(nodeId)}`;
+  const base = `${webhookBaseUrl(host, port)}/webhooks/${encodeURIComponent(threadId)}/${encodeURIComponent(nodeId)}`;
   return interruptId === undefined ? base : `${base}/${encodeURIComponent(interruptId)}`;
 }
 
@@ -162,7 +182,60 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(payload);
 }
 
-async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function dispatchCorrelatedRoute(
+  route: PendingRoute,
+  body: unknown,
+): Promise<WebhookDeliveryResponse> {
+  if (currentRoute(route) !== route || route.claimed) {
+    return {
+      http: 409,
+      body: { error: "not_waiting", message: "Gate was already answered, cancelled, or replaced" },
+    };
+  }
+  route.claimed = true;
+  try {
+    const result = await resumeRoute(route, body);
+    route.settle(result);
+    if (result.code === "WEBHOOK_INTERRUPT_NOT_WAITING") {
+      return {
+        http: 409,
+        body: { error: "not_waiting", message: "This gate was already answered or cancelled" },
+      };
+    }
+    return result.status === "error"
+      ? {
+          http: 422,
+          body: {
+            error: "resume_failed",
+            status: result.status,
+            message: "Webhook resume failed; inspect the thread",
+          },
+        }
+      : { http: 200, body: { status: result.status } };
+  } catch (err) {
+    route.settle({ status: "error", error: err instanceof Error ? err.message : "Resume failed" });
+    throw err;
+  } finally {
+    removeRoute(route);
+  }
+}
+
+async function handleRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  listenerKey: string,
+): Promise<void> {
+  if (
+    await handleWebhookIngress(
+      req,
+      res,
+      listenerKey,
+      () => [...routes.values()].flatMap((thread) => [...thread.values()]),
+      readBody,
+      dispatchCorrelatedRoute,
+    )
+  )
+    return;
   let parsed: ReturnType<typeof parseWebhookPath>;
   try {
     parsed = parseWebhookPath(req.url);
@@ -181,7 +254,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
-  const matches = matchingRoutes(parsed.threadId, parsed.nodeId, parsed.interruptId);
+  const matches = matchingRoutes(parsed.threadId, parsed.nodeId, parsed.interruptId).filter(
+    (route) => route.listenerKey === undefined || route.listenerKey === listenerKey,
+  );
   if (matches.length > 1) {
     sendJson(res, 409, {
       error: "ambiguous_interrupt",
@@ -194,6 +269,15 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     sendJson(res, 404, {
       error: "not_waiting",
       message: `No run waiting on thread "${parsed.threadId}" node "${parsed.nodeId}"`,
+    });
+    return;
+  }
+
+  // Signed integrations cannot be bypassed via the legacy raw-payload endpoint.
+  if (route.ingressId) {
+    sendJson(res, 410, {
+      error: "signed_ingress_required",
+      message: "Use the configured signed correlation endpoint",
     });
     return;
   }
@@ -302,8 +386,11 @@ function webhookAuthorized(req: http.IncomingMessage, token: string): boolean {
 
 function listenOnce(host: string, port: number): Promise<{ server: http.Server; port: number }> {
   return new Promise((resolve, reject) => {
+    let listenerKey = serverKey(host, port);
     const server = http.createServer((req, res) => {
-      void handleRequest(req, res).catch(() => {
+      // Keep-alive requests can arrive while close() drains an active socket,
+      // after server.address() has already become null.
+      void handleRequest(req, res, listenerKey).catch(() => {
         if (res.headersSent || res.destroyed) {
           res.destroy();
           return;
@@ -315,6 +402,7 @@ function listenOnce(host: string, port: number): Promise<{ server: http.Server; 
     server.listen(port, host, () => {
       server.off("error", reject);
       const addr = server.address() as AddressInfo;
+      listenerKey = serverKey(host, addr.port);
       resolve({ server, port: addr.port });
     });
   });
@@ -328,17 +416,22 @@ export async function ensureWebhookServer(
   config: WebhookServerConfig = {},
 ): Promise<WebhookServerInfo> {
   const host = config.host ?? DEFAULT_WEBHOOK_HOST;
+  validateWebhookServerConfig(config);
   const preferredPort = config.port ?? DEFAULT_WEBHOOK_PORT;
   const preferredKey = serverKey(host, preferredPort);
 
   const existing = servers.get(preferredKey);
   if (existing) {
+    if (config.ingress)
+      registerWebhookIngress(serverKey(existing.host, existing.port), config.ingress, config.token);
     return { host: existing.host, port: existing.port };
   }
 
   // Also reuse any already-bound server for this host that fell back from the same preferred port.
   for (const entry of servers.values()) {
     if (entry.host === host && preferredPort !== 0 && entry.key === preferredKey) {
+      if (config.ingress)
+        registerWebhookIngress(serverKey(entry.host, entry.port), config.ingress, config.token);
       return { host: entry.host, port: entry.port };
     }
   }
@@ -348,14 +441,17 @@ export async function ensureWebhookServer(
     const key = serverKey(host, preferredPort);
     const entry: ServerEntry = { server, host, port, key };
     servers.set(key, entry);
+    if (config.ingress) registerWebhookIngress(serverKey(host, port), config.ingress, config.token);
     if (port !== preferredPort) {
       // ephemeral listen with preferredPort===0
       servers.set(serverKey(host, port), entry);
+      if (config.ingress)
+        registerWebhookIngress(serverKey(host, port), config.ingress, config.token);
     }
     return { host, port };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "EADDRINUSE" && preferredPort !== 0) {
+    if (code === "EADDRINUSE" && preferredPort !== 0 && !config.ingress) {
       console.warn(
         `[flowgraph] webhook server port ${preferredPort} in use; falling back to an ephemeral port`,
       );
@@ -401,6 +497,18 @@ export function unregisterWebhookRoute(
   }
 }
 
+/** @internal Settle an automatically expired gate without cancelling its siblings. */
+export function settleWebhookInterrupt(
+  threadId: string,
+  interruptId: string,
+  result: { status: string; error?: string },
+): void {
+  for (const pending of matchingRoutes(threadId, undefined, interruptId)) {
+    removeRoute(pending);
+    pending.settle(result);
+  }
+}
+
 /** Return one unambiguous registration, including a claimed one being resumed. */
 export function getWebhookRoute(
   threadId: string,
@@ -430,6 +538,7 @@ export async function closeWebhookServers(): Promise<void> {
       }),
   );
   servers.clear();
+  clearWebhookIngresses();
   await Promise.all(closing);
 }
 

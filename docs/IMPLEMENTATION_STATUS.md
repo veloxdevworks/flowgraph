@@ -18,6 +18,7 @@ Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint 
 | Events + console/jsonl sinks | **Shipped** (nested subgraph events forward with `parentSpanId`) |
 | Hooks (YAML subset + guardrails) | **Shipped** (partial defaults) |
 | HITL + in-memory checkpointing | **Shipped** |
+| Signed correlation webhooks | **Shipped** | Opaque run/gate keys, HMAC ingress, durable local-filesystem delivery receipts, and CLI listener recovery. Unknown crash outcomes fail closed for operator reconciliation; no distributed database ingress. |
 | Providers: LangChain (in core), Claude, Cursor | **Shipped** |
 | MCP hub (stdio, HTTP, OAuth) | **Shipped** (`@flowgraph/mcp` optional peer of CLI) |
 | Local FS tools + governance | **Shipped** (`@flowgraph/tools-fs` optional peer of CLI) |

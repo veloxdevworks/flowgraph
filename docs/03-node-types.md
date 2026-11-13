@@ -860,7 +860,19 @@ When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTT
 
 Parallel gates have independent routes and resume values, including equally named gates inside different subgraphs. Answering one leaves its siblings and any human gates pending; the response is HTTP 200 with `status: interrupted` until the remaining gates finish. Callbacks within one thread are serialized in-process to preserve checkpoint progress. State inspection and restart recovery do not recreate answered gates. Legacy `/webhooks/<threadId>/<nodeId>` URLs still work for a single matching registration; ambiguous node-only URLs return HTTP 409/`ambiguous_interrupt`. Prefer the exact generated URLs. The CLI prints all pending callback URLs and keeps listening after a partial answer.
 
-Malformed percent-encoded paths return HTTP 400. Each route registration is claimed once after the JSON body passes validation; overlapping POSTs for that registration get one resume and HTTP 404 for the others. Requests whose route was cancelled or replaced while their body was being read also get HTTP 404. This claim and serialization are process-local; durable event deduplication and coordination between hosts still require additional ingress support. Restrict this ingress to trusted local use pending hardening. See the [verified behavior and follow-on decisions](./spikes/PLAT-278-webhook-resume.md) and [runnable examples](../examples/webhook-resume/README.md).
+Malformed percent-encoded paths return HTTP 400. Each legacy route registration is claimed once after the JSON body passes validation; overlapping POSTs for that registration get one resume and HTTP 404 for the others. Requests whose route was cancelled or replaced while their body was being read also get HTTP 404. These legacy claims are process-local. Non-loopback listeners require a token or signed ingress configuration. See the [verified legacy behavior](./spikes/PLAT-278-webhook-resume.md) and [runnable examples](../examples/webhook-resume/README.md).
+
+For authenticated correlation routing and durable deduplication, configure
+`runtime.webhookServer.ingress: { id, signingSecretEnv, journalPath }` and declare
+opaque keys with `runtime.correlation`, `compiled.run({ correlation })`, or
+`with.webhook.correlation`. The generated URL becomes `/webhook-events/<id>`.
+Signed POSTs carry `{ correlation, payload, nodeId?, interruptId? }` and a stable
+delivery id. Ambiguous matches return 409; rejected payloads remain retryable;
+completed deliveries replay their original receipt across process restarts.
+This mode disables legacy raw callback URLs for its gates. It coordinates all
+execution surfaces through a durable local-filesystem journal; claims with an
+unknown crash outcome fail closed rather than invoking again. See the
+[complete signature, recovery, and durability contract](../examples/correlated-webhooks/README.md).
 
 ### Modes
 

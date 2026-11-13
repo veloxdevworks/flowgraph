@@ -75,20 +75,30 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
  * HTTP listener resumes (or the user hits Ctrl-C). Returns the post-resume
  * status when available.
  */
-async function awaitWebhookIfNeeded(result: RunResult): Promise<RunResult> {
+async function awaitWebhookIfNeeded(result: RunResult, json?: boolean): Promise<RunResult> {
   if (result.status !== "interrupted") return result;
   const webhookUrl = webhookUrlFromInterrupts(result.interrupts);
   if (!webhookUrl || !result.threadId) return result;
+  const progress = (message: string, print = printInfo) => {
+    if (json) console.error(message);
+    else print(message);
+  };
+  if (json) {
+    const urls = new Set((result.interrupts ?? [])
+      .map(interrupt => webhookUrlFromInterrupts([interrupt]))
+      .filter((url): url is string => url !== undefined));
+    for (const url of urls) progress(`POST ${url}`);
+  }
 
   let done: { status: string; error?: string };
   for (;;) {
     const waiter = waitForWebhookResume(result.threadId);
     if (!waiter) return result;
 
-    printInfo("Listening for webhook… (Ctrl-C to exit)");
+    progress("Listening for webhook… (Ctrl-C to exit)");
     done = await new Promise<{ status: string; error?: string }>((resolve) => {
       const onSig = () => {
-        printWarning("Interrupted by user.");
+        progress("Interrupted by user.", printWarning);
         resolve({ status: "cancelled" });
       };
       process.once("SIGINT", onSig);
@@ -103,7 +113,7 @@ async function awaitWebhookIfNeeded(result: RunResult): Promise<RunResult> {
   }
 
   if (done.status === "completed") {
-    printSuccess("Webhook received — run completed.");
+    progress("Webhook received — run completed.", printSuccess);
     return { ...result, status: "completed" };
   }
   if (done.status === "cancelled") {
@@ -395,7 +405,7 @@ program
           maybeFailOnIssues(result, opts.failOnIssues);
         } else if (result.status === "interrupted") {
           reportInterrupts(result.interrupts, result.threadId);
-          result = await awaitWebhookIfNeeded(result);
+          result = await awaitWebhookIfNeeded(result, opts.json);
           if (result.status === "completed") {
             printSuccess("Completed after webhook resume.");
             printInfo(`Run ID: ${result.runId}`);
@@ -414,7 +424,7 @@ program
           process.exit(1);
         }
       } else if (result.status === "interrupted") {
-        result = await awaitWebhookIfNeeded(result);
+        result = await awaitWebhookIfNeeded(result, opts.json);
         if (result.status === "error") process.exit(1);
         if (result.status !== "completed") process.exit(3);
       } else if (result.status === "error" || result.status === "aborted") {
@@ -433,6 +443,7 @@ program
   .description("Resume an interrupted run on a given thread")
   .requiredOption("--thread <id>", "Thread ID to resume")
   .option("--list", "List pending interrupts for the thread and exit")
+  .option("--listen", "Restore webhook listeners and wait without submitting a resume value")
   .option("--resume <json>", "Resume value passed to the interrupt (JSON). When several interrupts are pending, a map keyed by interrupt id")
   .option("--from <checkpointId>", "Resume from a historical checkpoint id")
   .option("--stream", "Stream events to stdout")
@@ -446,6 +457,7 @@ program
     opts: {
       thread: string;
       list?: boolean;
+      listen?: boolean;
       resume?: string;
       from?: string;
       stream?: boolean;
@@ -456,6 +468,10 @@ program
       cwd?: string;
     },
   ) => {
+    if (opts.listen && (opts.resume !== undefined || opts.from !== undefined || opts.list)) {
+      printError("--listen cannot be combined with --resume, --from, or --list.");
+      process.exit(2);
+    }
     const cwd = opts.cwd ?? process.cwd();
     loadDotenvFromCwd(cwd);
     const { spec, diagnostics: loadDiags } = await loadGraph(graphPath, { cwd });
@@ -562,7 +578,14 @@ program
     if (policy === "prompt") resumeOpts.resolveInterrupt = promptResolver;
     let result;
     try {
-      result = await withCtrlC(opts.json, (signal) =>
+      if (opts.listen && !webhookUrlFromInterrupts(snap.interrupts)) {
+        printError("No pending webhook wait to listen for on this thread.");
+        process.exit(3);
+      }
+      result = opts.listen ? {
+        status: "interrupted" as const, state: snap.values, runId: compiled.runId,
+        threadId: opts.thread, interrupts: snap.interrupts, durationMs: 0,
+      } : await withCtrlC(opts.json, (signal) =>
         opts.from
           ? compiled.resumeFrom({ ...resumeOpts, signal, checkpointId: opts.from })
           : compiled.resume({ ...resumeOpts, signal }),
@@ -575,7 +598,7 @@ program
           maybeFailOnIssues(result, opts.failOnIssues);
         } else if (result.status === "interrupted") {
           reportInterrupts(result.interrupts, result.threadId);
-          result = await awaitWebhookIfNeeded(result);
+          result = await awaitWebhookIfNeeded(result, opts.json);
           if (result.status === "completed") {
             printSuccess("Completed after webhook resume.");
             printIssues(result);
@@ -593,7 +616,7 @@ program
           process.exit(1);
         }
       } else if (result.status === "interrupted") {
-        result = await awaitWebhookIfNeeded(result);
+        result = await awaitWebhookIfNeeded(result, opts.json);
         if (result.status === "error") process.exit(1);
         if (result.status !== "completed") process.exit(3);
       } else if (result.status !== "completed") {
