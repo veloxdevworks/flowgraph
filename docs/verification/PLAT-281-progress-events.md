@@ -24,7 +24,7 @@ servers close at the end.
 
 | Surface | Verified behavior |
 | --- | --- |
-| Built programmatic API / `CompiledGraph.stream` | Two parallel nodes append to one channel. Exactly one state update carries the combined post-reducer result; all four selected edges appear, events carry the correct thread, and the stream delivers `run.end` and closes. |
+| Built programmatic API / `CompiledGraph.stream` | Two parallel nodes append to one channel. Exactly one state update carries the combined post-reducer result; all four selected edges appear, events carry the correct thread, and the stream delivers `run.end` and closes. A second stream reuses the same graph/thread, pauses its consumer until execution ends, then receives only its own queued progress and terminal event without replaying the first invocation. |
 | Real CLI JSONL | The zero-key quickstart runs in a child process. Its two public state changes and all three graph transitions appear on stdout; initial input is not re-emitted, and the process exits 0 naturally. |
 | Durable CLI resume | One CLI process runs to a signal interrupt and exits 3 with SQLite checkpoints. A different CLI process resumes it and exits 0. The completed predecessor's state and START edge are not replayed; only the resumed gate's change and outgoing END transition appear. |
 | Authenticated HTTP + SSE | POST a graph through REST, observe its initial progress through SSE, resume the signal gate through REST, and observe its final progress and terminal event on the same SSE connection. |
@@ -80,3 +80,24 @@ pnpm --filter @flowgraph/server exec vitest run \
 The final rebuilt HTTP/SSE/journal end-to-end harness also passed after the last
 source corrections. The focused retry resolves the affected suite failures;
 the contended broad run is not represented as green.
+
+## Stream lifecycle follow-up
+
+The initial implementation exposed existing event-stream bugs: a reader could
+hang after replaying an already-completed buffer, completion during a slow
+consumer's buffered replay could be missed, and a second `compiled.stream()`
+could replay the prior invocation. Focused regressions reproduced all three
+before the fix. The stream lifecycle now subscribes before replay, checks the
+terminal event actually delivered, and starts each compiled stream from its own
+execution admission with only new events for that thread. Pre-execution failure
+throws locally and unsubscribes rather than broadcasting a terminal event into
+another owner's stream.
+
+The follow-up passed **23 focused tests** (18 progress + 5 stream lifecycle), a
+fresh core build including declarations, core typecheck, and the rebuilt
+end-to-end harness captured above. These checks include trailing post-terminal
+diagnostics, slow consumers, repeated calls, thread filtering, and local input
+rejection. No additional broad local suite was run after this focused repair;
+the earlier full-suite results above retain their stated scope. The earlier
+head's Node 22/Linux CI passed build, typecheck, and full tests with Postgres;
+the updated PR head runs its own CI.
