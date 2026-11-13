@@ -321,6 +321,17 @@ describe("parallel HITL interrupts", () => {
     expect((r2.state["gateB"] as { answer: string }).answer).toBe("false");
   });
 
+  it("refuses an unkeyed truthy resume when several interrupts are pending", async () => {
+    const compiled = await compileGraph(parallelHitlSpec(), {});
+    const r1 = await compiled.run({ threadId: "hitl-par-unkeyed", onInterrupt: "fail" });
+    expect(r1.interrupts).toHaveLength(2);
+    await expect(
+      compiled.resume({ threadId: "hitl-par-unkeyed", resume: { approved: true }, onInterrupt: "fail" }),
+    ).rejects.toMatchObject({ code: "RESUME_MAP_REQUIRED" });
+    const snap = await compiled.getState("hitl-par-unkeyed");
+    expect(snap?.interrupts).toHaveLength(2);
+  });
+
   it("partial map resume re-raises the remaining interrupt", async () => {
     const compiled = await compileGraph(parallelHitlSpec(), {});
     const r1 = await compiled.run({ threadId: "hitl-partial", onInterrupt: "fail" });

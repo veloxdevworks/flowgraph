@@ -3,6 +3,12 @@ import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@flowgraph/spec";
 
+
+function keyedResume(interrupts: ReadonlyArray<{ id?: string }> | undefined, value: unknown): unknown {
+  const ids = (interrupts ?? []).map((it) => it.id).filter((id): id is string => typeof id === "string" && id.length > 0);
+  return ids.length > 1 ? Object.fromEntries(ids.map((id) => [id, value])) : value;
+}
+
 beforeAll(() => {
   registerFunction("echo-item", (input) => {
     const n = (input as { n?: number }).n ?? 0;
@@ -94,14 +100,14 @@ describe("checkpointed map + HITL", () => {
 
     const resumed = await compiled.resume({
       threadId,
-      resume: { approved: true },
+      resume: keyedResume(first.interrupts, { approved: true }),
       onInterrupt: "fail",
     });
     // First resume may still have the sibling item pending.
     if (resumed.status === "interrupted") {
       const second = await compiled.resume({
         threadId,
-        resume: { approved: true },
+        resume: keyedResume(resumed.interrupts, { approved: true }),
         onInterrupt: "fail",
       });
       expect(second.status).toBe("completed");
@@ -173,7 +179,7 @@ describe("checkpointed map + HITL", () => {
     while (result.status === "interrupted" && guards++ < 6) {
       result = await compiled.resume({
         threadId,
-        resume: { approved: true },
+        resume: keyedResume(result.interrupts, { approved: true }),
         onInterrupt: "fail",
       });
     }

@@ -84,7 +84,7 @@ await compiled.resume({
 });
 ```
 
-`resume: false` (or `null`, `0`, `""`) denies the approval and records `approved: false`. Leaving `resume` out (or passing `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` instead, and the interrupt stays pending.
+`resume: false` (or `null`, `0`, `""`) denies the approval and records `approved: false`. Leaving `resume` out (or passing `undefined`) while an interrupt is pending rejects with `error.code` `RESUME_VALUE_REQUIRED` instead, and the interrupt stays pending. When several interrupts are pending, pass a map keyed by interrupt id; a truthy unkeyed value is refused with `error.code` `RESUME_MAP_REQUIRED` and leaves every gate pending.
 
 See [release-notes](../examples/release-notes/register.ts) for `ctx.interrupt()` and `ctx.once()` patterns.
 

@@ -61,7 +61,10 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
     printInfo(`  • ${it.reason ?? it.id}`);
   }
   if (threadId) {
-    printInfo(`Resume with: flowgraph resume <graph> --thread ${threadId} --resume '{"approved":true}'`);
+    const example = (interrupts ?? []).length > 1
+      ? `'{"<interrupt-id>":{"approved":true}}'`
+      : `'{"approved":true}'`;
+    printInfo(`Resume with: flowgraph resume <graph> --thread ${threadId} --resume ${example}`);
   } else {
     printInfo("Tip: pass --thread <id> so the run is resumable.");
   }
@@ -430,7 +433,7 @@ program
   .description("Resume an interrupted run on a given thread")
   .requiredOption("--thread <id>", "Thread ID to resume")
   .option("--list", "List pending interrupts for the thread and exit")
-  .option("--resume <json>", "Resume value passed to the interrupt (JSON)")
+  .option("--resume <json>", "Resume value passed to the interrupt (JSON). When several interrupts are pending, a map keyed by interrupt id")
   .option("--from <checkpointId>", "Resume from a historical checkpoint id")
   .option("--stream", "Stream events to stdout")
   .option("--json", "Emit events as JSONL on stdout")

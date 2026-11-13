@@ -103,6 +103,12 @@ const hitl = (id: string): Node => ({ id, type: "hitl", with: { mode: "approve",
 const mark = (id: string): Node => ({ id, type: "function", with: { fn: "fg_nested_mark" } });
 const map = (id: string, inner: Node, over = "{{ state.items }}"): Node => ({ id, type: "map", with: { over, node: inner } });
 
+
+function keyedResume(interrupts: ReadonlyArray<{ id?: string }> | undefined, value: unknown): unknown {
+  const ids = (interrupts ?? []).map((it) => it.id).filter((id): id is string => typeof id === "string" && id.length > 0);
+  return ids.length > 1 ? Object.fromEntries(ids.map((id) => [id, value])) : value;
+}
+
 /** Approve every interrupt until the run ends, compiling afresh for each resume. */
 async function approveAll(spec: GraphSpec, providers: unknown[], input: Record<string, unknown> = {}) {
   const saver = new MemorySaver();
@@ -116,7 +122,7 @@ async function approveAll(spec: GraphSpec, providers: unknown[], input: Record<s
   let resumes = 0;
   for (; resumes < 12 && res.status === "interrupted"; resumes++) {
     note(res);
-    res = await (await compile()).resume({ threadId, resume: true, onInterrupt: "fail" });
+    res = await (await compile()).resume({ threadId, resume: keyedResume(res.interrupts, true), onInterrupt: "fail" });
   }
   return { status: res.status, shown, resumes, res };
 }

@@ -266,22 +266,18 @@ describe("webhook HTTP ingress", () => {
   });
 
   it("does not broadcast an overdue callback's timeout to a human sibling", async () => {
+    let now = Date.now();
     const spec = parallelWebhookGraph(true);
     spec.nodes[0]!.with = { ...spec.nodes[0]!.with, timeout: "1h" };
-    const compiled = await compileGraph(spec, {});
+    const compiled = await compileGraph(spec, { now: () => now });
     const first = await compiled.run({ threadId: "overdue-callback", onInterrupt: "fail" });
     const webhook = first.interrupts!.find((gate) => interruptNode(gate) === "await-approval")!;
     const human = first.interrupts!.find((gate) => gate.kind === "approval")!;
-    const now = Date.now();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 7_200_000);
-    try {
-      expect(await postJson(callbackUrl(webhook), { answer: "late" })).toEqual({
-        status: 200,
-        json: { status: "interrupted" },
-      });
-    } finally {
-      clock.mockRestore();
-    }
+    now += 7_200_000;
+    expect(await postJson(callbackUrl(webhook), { answer: "late" })).toEqual({
+      status: 200,
+      json: { status: "interrupted" },
+    });
     const snapshot = await compiled.getState("overdue-callback");
     expect(snapshot?.interrupts.map((gate) => gate.id)).toEqual([human.id]);
     expect(snapshot?.values["approval"]).toEqual({ timedOut: true });
@@ -295,6 +291,86 @@ describe("webhook HTTP ingress", () => {
         })
       ).status,
     ).toBe("completed");
+  });
+
+  it("does not broadcast a timer timeout to a later webhook sibling", async () => {
+    let now = Date.now();
+    const queued: Array<() => void> = [];
+    const spec = parallelWebhookGraph();
+    spec.nodes[0]!.with = { ...spec.nodes[0]!.with, timeout: "1h" };
+    let sawTimeout!: (result: { status: string }) => void;
+    const firstTimeout = new Promise<{ status: string }>((resolve) => {
+      sawTimeout = resolve;
+    });
+    const compiled = await compileGraph(spec, {
+      now: () => now,
+      scheduleTimeout: (fn, delayMs) => {
+        if (delayMs >= 30 * 60 * 1000) queued.push(fn);
+        else return setTimeout(fn, delayMs);
+        return { unref() {} };
+      },
+      onWaitTimeout: (result) => sawTimeout(result),
+    });
+    const first = await compiled.run({ threadId: "timer-sibling", onInterrupt: "fail" });
+    const early = first.interrupts!.find((gate) => interruptNode(gate) === "await-approval")!;
+    const later = first.interrupts!.find((gate) => interruptNode(gate) === "second-gate")!;
+    expect(queued).toHaveLength(1);
+    now += 60 * 60 * 1000 + 1_000;
+    queued.shift()!();
+    expect((await firstTimeout).status).toBe("interrupted");
+    const mid = await compiled.getState("timer-sibling");
+    expect(mid?.interrupts.map((gate) => gate.id)).toEqual([later.id]);
+    expect(mid?.values["approval"]).toEqual({ timedOut: true });
+    expect(mid?.values["second"]).toBeNull();
+    expect((await fetch(callbackUrl(early))).status).toBe(404);
+    expect((await fetch(callbackUrl(later))).status).toBe(200);
+    expect(await postJson(callbackUrl(later), { answer: "ok" })).toEqual({
+      status: 200,
+      json: { status: "completed" },
+    });
+  });
+
+  it("times out only the overdue gate when getState runs after a deadline", async () => {
+    let now = Date.now();
+    const spec = parallelWebhookGraph();
+    spec.nodes[0]!.with = { ...spec.nodes[0]!.with, timeout: "1h" };
+    const compiled = await compileGraph(spec, { now: () => now });
+    const first = await compiled.run({ threadId: "getstate-sibling", onInterrupt: "fail" });
+    const early = first.interrupts!.find((gate) => interruptNode(gate) === "await-approval")!;
+    const later = first.interrupts!.find((gate) => interruptNode(gate) === "second-gate")!;
+    now += 7_200_000;
+    const snapshot = await compiled.getState("getstate-sibling");
+    expect(snapshot?.interrupts.map((gate) => gate.id)).toEqual([later.id]);
+    expect(snapshot?.values["approval"]).toEqual({ timedOut: true });
+    expect(snapshot?.values["second"]).toBeNull();
+    expect((await fetch(callbackUrl(early))).status).toBe(404);
+    expect((await fetch(callbackUrl(later))).status).toBe(200);
+    expect(await postJson(callbackUrl(later), { answer: "ok" })).toEqual({
+      status: 200,
+      json: { status: "completed" },
+    });
+  });
+
+  it("keeps the webhook URL listening after a human gate is resumed first", async () => {
+    const compiled = await compileGraph(parallelWebhookGraph(true), {});
+    const first = await compiled.run({ threadId: "human-first", onInterrupt: "fail" });
+    const webhook = first.interrupts!.find((gate) => interruptNode(gate) === "await-approval")!;
+    const human = first.interrupts!.find((gate) => gate.kind === "approval")!;
+    expect((await fetch(callbackUrl(webhook))).status).toBe(200);
+    expect(
+      (
+        await compiled.resume({
+          threadId: "human-first",
+          resume: { [human.id]: { approved: false } },
+          onInterrupt: "fail",
+        })
+      ).status,
+    ).toBe("interrupted");
+    expect((await fetch(callbackUrl(webhook))).status).toBe(200);
+    expect(await postJson(callbackUrl(webhook), { answer: "external" })).toEqual({
+      status: 200,
+      json: { status: "completed" },
+    });
   });
 
   it("cancels all pending routes when a parallel run is aborted", async () => {

@@ -101,6 +101,12 @@ function mapSpec(warm: number): GraphSpec {
   } as unknown as GraphSpec;
 }
 
+
+function keyedResume(interrupts: ReadonlyArray<{ id?: string }> | undefined, value: unknown): unknown {
+  const ids = (interrupts ?? []).map((it) => it.id).filter((id): id is string => typeof id === "string" && id.length > 0);
+  return ids.length > 1 ? Object.fromEntries(ids.map((id) => [id, value])) : value;
+}
+
 async function drive(
   checkpointer: ReturnType<typeof createSqliteCheckpointer>,
   spec: GraphSpec,
@@ -113,7 +119,7 @@ async function drive(
   let resumes = 0;
   while (result.status === "interrupted" && resumes < 8) {
     resumes += 1;
-    result = await compiled.resume({ threadId, resume: { approved: true }, onInterrupt: "fail" });
+    result = await compiled.resume({ threadId, resume: keyedResume(result.interrupts, { approved: true }), onInterrupt: "fail" });
   }
   return {
     status: result.status,
