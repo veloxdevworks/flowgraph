@@ -43,14 +43,14 @@ The [captured JSON](./PLAT-279-correlated-webhooks.json) records six passing
 scenarios using built packages, real signed HTTP requests, actual Node child
 processes, SQLite checkpoints, and SIGKILL:
 
-| Scenario | Observed result |
-| --- | --- |
-| Bad signature, expired timestamp, and invalid payload | 401 / 401 / 422; no effects; original wait remains usable. |
-| Restart before callback, after partial reply, and after completion | Correlation and checkpoints restore; duplicate receipts replay; each downstream effect occurs once. |
-| Two runs sharing an external id | Broad match returns 409; an additional opaque key selects only the intended run. |
-| Twelve overlapping deliveries across two processes | One first-gate effect; stale old-gate attempts fail; the distinct second event completes once. |
-| SIGKILL while an effect is in flight | Same id returns 409 `delivery_in_doubt`; a new event naming the already-consumed gate returns 404 `not_waiting`; effect count stays one. |
-| Real CLI run, kill, then `resume --listen --json` | Restores without submitting an answer, replays the old receipt, completes the second gate, and keeps stdout valid JSONL. |
+| Scenario                                                           | Observed result                                                                                                                          |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Bad signature, expired timestamp, and invalid payload              | 401 / 401 / 422; no effects; original wait remains usable.                                                                               |
+| Restart before callback, after partial reply, and after completion | Correlation and checkpoints restore; duplicate receipts replay; each downstream effect occurs once.                                      |
+| Two runs sharing an external id                                    | Broad match returns 409; an additional opaque key selects only the intended run.                                                         |
+| Twelve overlapping deliveries across two processes                 | One first-gate effect; stale old-gate attempts fail; the distinct second event completes once.                                           |
+| SIGKILL while an effect is in flight                               | Same id returns 409 `delivery_in_doubt`; a new event naming the already-consumed gate returns 404 `not_waiting`; effect count stays one. |
+| Real CLI run, kill, then `resume --listen --json`                  | Restores without submitting an answer, replays the old receipt, completes the second gate, and keeps stdout valid JSONL.                 |
 
 When a crash leaves a still-pending matching gate, another event on the locked
 thread instead returns 409 `thread_busy`; this boundary is covered by the
@@ -59,13 +59,14 @@ for receipt-only recovery when no webhook interrupt remains to create a listener
 
 ## Regression validation
 
-| Check | Local result |
-| --- | --- |
-| Root build, concurrency 2, read-only cache | 16 tasks passed. |
-| Root typecheck, concurrency 2, read-only cache | 30 tasks passed. |
-| Focused core webhook, journal, wait, hook, and output suites | 106 tests passed; the subsequently added future-deadline correlation suite also passed all 30 tests. |
-| Complete CLI suite | 87 passed, 1 skipped. |
-| Complete specification suite | 76 passed. |
+| Check                                                        | Local result                                                        |
+| ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| Root build, concurrency 2, read-only cache                   | 16 tasks passed.                                                    |
+| Root typecheck, concurrency 2, read-only cache               | 30 tasks passed.                                                    |
+| Focused core webhook, journal, wait, hook, and output suites | 107 tests passed, including fresh-runtime future-deadline recovery. |
+| Complete CLI suite                                           | 87 passed, 1 skipped.                                               |
+| Complete specification suite                                 | 76 passed.                                                          |
+| Parent server resume-map regression suite                    | 4 passed.                                                           |
 
 The full local core run exercised 1,219 tests: 1,211 passed, 5 skipped, and 3
 failed. Two empty-output/veto compatibility regressions exposed by that run were

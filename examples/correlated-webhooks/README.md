@@ -67,7 +67,11 @@ pending. A plain `resume` retains its normal manual-answer behavior.
 The request body is UTF-8 JSON:
 
 ```json
-{"correlation":{"external":"external-123"},"nodeId":"first-gate","payload":{"answer":"yes"}}
+{
+  "correlation": { "external": "external-123" },
+  "nodeId": "first-gate",
+  "payload": { "answer": "yes" }
+}
 ```
 
 Every supplied correlation pair must match. `nodeId` and `interruptId` are

@@ -31,10 +31,7 @@
           "status": "completed"
         }
       },
-      "completedEffects": [
-        "first",
-        "second"
-      ],
+      "completedEffects": ["first", "second"],
       "replayWithoutPendingRoutes": true
     },
     {
@@ -45,26 +42,10 @@
     },
     {
       "scenario": "twelve overlapping deliveries across two Node processes apply one effect",
-      "responses": [
-        200,
-        409,
-        409,
-        409,
-        409,
-        409,
-        409,
-        409,
-        409,
-        409,
-        409,
-        409
-      ],
+      "responses": [200, 409, 409, 409, 409, 409, 409, 409, 409, 409, 409, 409],
       "firstEffects": 1,
       "staleGate": 404,
-      "finalEffects": [
-        "first",
-        "second"
-      ]
+      "finalEffects": ["first", "second"]
     },
     {
       "scenario": "crash after a durable claim fails closed instead of invoking the effect again",

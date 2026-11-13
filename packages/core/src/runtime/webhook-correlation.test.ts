@@ -423,6 +423,103 @@ describe("signed correlation webhook ingress", () => {
     expect(effect).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the owning stream open and promptly rejects a competing stream without replaying its frames", async () => {
+    let parked!: () => void;
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      parked = resolve;
+    });
+    const active = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const complete = FileWebhookDeliveryJournal.prototype.complete;
+    vi.spyOn(FileWebhookDeliveryJournal.prototype, "complete").mockImplementation(async function (
+      this: FileWebhookDeliveryJournal,
+      claim,
+      response,
+    ) {
+      await complete.call(this, claim, response);
+      if (claim.receipt.eventId.startsWith("internal-") && response.body.status === "interrupted")
+        parked();
+    });
+    const effect = vi.fn(async () => {
+      entered();
+      await blocked;
+      return {};
+    });
+    registerFunction("correlation-stream-held-effect", effect);
+    const spec = graph();
+    spec.nodes.push({
+      id: "effect",
+      type: "function",
+      with: { fn: "correlation-stream-held-effect" },
+    });
+    spec.edges = [
+      { from: "START", to: "gate" },
+      { from: "gate", to: "effect" },
+      { from: "effect", to: "END" },
+    ];
+    const compiled = await compileGraph(spec);
+    const frames: Array<{ type: string; threadId?: string | undefined; data: unknown }> = [];
+    let ownerFinished = false;
+    const owner = (async () => {
+      for await (const event of compiled.stream({
+        threadId: "stream-owner",
+        correlation: { external: "one" },
+        onInterrupt: "webhook",
+      }))
+        frames.push(event);
+      ownerFinished = true;
+    })();
+    await waiting;
+    const snapshot = await compiled.getState("stream-owner");
+    const endpoint = (snapshot!.interrupts[0]!.payload as { data: { webhookUrl: string } }).data
+      .webhookUrl;
+    const callback = signed(endpoint, envelope());
+    await active;
+    try {
+      const manual = await compiled.resume({
+        threadId: "stream-owner",
+        resume: { approved: true },
+      });
+      expect((manual.error as { code?: string })?.code).toBe("WEBHOOK_THREAD_BUSY");
+      const rejected = compiled.stream({
+        threadId: "stream-owner",
+        correlation: { external: "one" },
+      });
+      const rejectedFirst = rejected.next();
+      const deadline = new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("Competing stream did not settle")), 2000).unref();
+      });
+      await expect(Promise.race([rejectedFirst, deadline])).rejects.toMatchObject({
+        code: "WEBHOOK_THREAD_BUSY",
+      });
+      expect(await rejected.next()).toEqual({ done: true, value: undefined });
+      expect(ownerFinished).toBe(false);
+      expect(frames.some((event) => event.type === "run.error")).toBe(false);
+      expect(
+        frames
+          .filter(
+            (event) =>
+              event.type === "log" &&
+              (event.data as { code?: string }).code === "WEBHOOK_THREAD_BUSY",
+          )
+          .map((event) => event.threadId),
+      ).toEqual(["stream-owner", "stream-owner"]);
+    } finally {
+      release();
+    }
+    expect(await callback).toMatchObject({ http: 200, body: { status: "completed" } });
+    await vi.waitFor(() => expect(ownerFinished).toBe(true), { timeout: 1500 });
+    await owner;
+    expect(frames.filter((event) => event.type === "run.end")).toHaveLength(1);
+    expect(effect).toHaveBeenCalledTimes(1);
+  });
+
   it("schedules an already-due deadline after the initial durable receipt unlocks", async () => {
     const complete = FileWebhookDeliveryJournal.prototype.complete;
     vi.spyOn(FileWebhookDeliveryJournal.prototype, "complete").mockImplementation(async function (
