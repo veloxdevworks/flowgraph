@@ -18,6 +18,57 @@ describe("applyFacilitatorTool", () => {
   });
 });
 
+describe("applyFacilitatorTool finish", () => {
+  const schema = {
+    type: "object",
+    properties: { title: { type: "string" }, risks: { type: "array" } },
+    required: ["title"],
+  };
+  const finish = (reason?: string) => ({
+    name: "finish",
+    callId: "f",
+    args: reason ? { reason } : {},
+  });
+  const fresh = () => ({ draft: {} as Record<string, unknown>, coverage: {} as Record<string, boolean | string> }) as {
+    draft: Record<string, unknown>;
+    coverage: Record<string, boolean | string>;
+    endedReason?: string;
+  };
+
+  it("keeps the session open and names what is missing", () => {
+    const state = fresh();
+    const r = applyFacilitatorTool(state, finish(), { schema });
+    expect(r.ok).toBe(false);
+    expect(r.finish).toBeUndefined();
+    expect(JSON.stringify(r.result)).toContain("title");
+    expect(state.endedReason).toBeUndefined();
+  });
+
+  it("does not let the model skip the check by naming another reason", () => {
+    for (const reason of ["human_ended", "timeout", "skipped"]) {
+      expect(applyFacilitatorTool(fresh(), finish(reason), { schema }).finish).toBeUndefined();
+    }
+  });
+
+  it("finishes once the draft satisfies the schema", () => {
+    const state = fresh();
+    applyFacilitatorTool(state, { name: "update_draft", callId: "1", args: { patch: { title: "SSO" } } }, { schema });
+    expect(applyFacilitatorTool(state, finish(), { schema }).finish).toBe(true);
+    expect(state.endedReason).toBe("completed");
+  });
+
+  it("refuses a draft with a wrong type", () => {
+    const state = fresh();
+    state.draft = { title: "SSO", risks: "none" };
+    expect(applyFacilitatorTool(state, finish(), { schema }).finish).toBeUndefined();
+  });
+
+  it("ends early with allowPartial, but not as completed", () => {
+    expect(applyFacilitatorTool(fresh(), finish("human_ended"), { schema, allowPartial: true }).finish).toBe(true);
+    expect(applyFacilitatorTool(fresh(), finish("completed"), { schema, allowPartial: true }).finish).toBeUndefined();
+  });
+});
+
 describe("voiceProvider", () => {
   it("defaults to xai and maps openai", () => {
     expect(voiceProvider().id).toBe("xai");

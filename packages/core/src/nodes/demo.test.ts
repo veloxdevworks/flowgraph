@@ -109,7 +109,8 @@ describe("demo node", () => {
     expect(out.response.body).toEqual({ hello: "world" });
     expect(out.request.headers.Authorization).toBe("***");
     expect(fs.existsSync(out.path)).toBe(true);
-    expect(out.path.startsWith(demoArtifactDir(workspace, "capture"))).toBe(true);
+    expect(out.path.startsWith(demoArtifactDir(workspace, "demo-http", "capture"))).toBe(true);
+    expect(out.path).toContain(path.join(".flowgraph", "artifacts", "demo-http", "capture"));
 
     const transcript = JSON.parse(fs.readFileSync(out.path, "utf8")) as {
       request: { headers: Record<string, string> };
@@ -128,6 +129,7 @@ describe("demo node", () => {
       label: "api-check",
     });
     expect(manifest[0]?.path).toBe(out.path);
+    expect(manifest[0]).toMatchObject({ status: "inconclusive" });
   });
 
   it("file mode copies an existing artifact into the demo dir", async () => {
@@ -290,5 +292,69 @@ describe("demo node", () => {
       nodeId: "file-tool",
       label: "from-tool",
     });
+  });
+});
+
+describe("demo results across a loop-back", () => {
+  /** demo (file) -> router -> shell that deletes the source -> back to demo. */
+  function loopGraph(source: string): GraphSpec {
+    return {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "demo-loop" },
+      state: { channels: {} },
+      nodes: [
+        { id: "capture", type: "demo", with: { file: { path: source } } },
+        {
+          id: "decide",
+          type: "router",
+          with: {
+            mode: "rules",
+            routes: {
+              again: { when: "{{ state.outputs.capture.ok }}", to: "remove" },
+              done: { default: true, to: "END" },
+            },
+          },
+        },
+        { id: "remove", type: "shell", with: { command: "rm", args: ["-f", source] } },
+      ],
+      edges: [
+        { from: "START", to: "capture" },
+        { from: "capture", to: "decide" },
+        { from: "decide", branch: [{ to: "remove" }, { to: "END" }] },
+        { from: "remove", to: "capture" },
+      ],
+      runtime: { checkpoint: { enabled: false, backend: "memory" } },
+    } as unknown as GraphSpec;
+  }
+
+  it("does not carry the first run's file into a later capture that failed", async () => {
+    const workspace = mkWorkspace();
+    const source = path.join(workspace, "evidence.txt");
+    fs.writeFileSync(source, "first", "utf8");
+
+    const compiled = await compileGraph(loopGraph(source), { cwd: workspace });
+    const result = await compiled.run({ threadId: "loop" });
+    expect(result.status).toBe("completed");
+
+    const manifest = readDemoManifest(workspace, "loop");
+    expect(manifest.map((e) => e.status)).toEqual(["inconclusive", "not_captured"]);
+    const firstFile = manifest[0]!.path!;
+    expect(fs.existsSync(firstFile)).toBe(true);
+
+    const out = (result.state["outputs"] as Record<string, Record<string, unknown>>)["capture"]!;
+    expect(out).toMatchObject({
+      ok: false,
+      status: "not_captured",
+      reason: expect.stringMatching(/source not found/),
+      path: null,
+      mimeType: null,
+      sizeBytes: null,
+      extra: null,
+      artifacts: [],
+    });
+    // Nothing in the final result may point at the file the first run captured.
+    expect(JSON.stringify(out)).not.toContain(firstFile);
+    expect(JSON.stringify(out)).not.toContain(path.basename(firstFile));
   });
 });

@@ -42,7 +42,7 @@ The server identifies callers in one of three modes. None of this applies to the
 | `token` | `FLOWGRAPH_AUTH_TOKEN` | Single-user mode: anyone with the shared token is the same principal. With durable runs or memory (`DATABASE_URL` or a durable `FLOWGRAPH_MEMORY_BACKEND`) the server only starts when you also set `FLOWGRAPH_AUTH_MODE=token`. |
 | `none` | `FLOWGRAPH_AUTH_DISABLED=1` | No auth, local/dev only. With durable runs or memory the server refuses to start unless `FLOWGRAPH_INSECURE_DEV=1`. |
 
-`FLOWGRAPH_OIDC_ISSUER` cannot be combined with `FLOWGRAPH_AUTH_TOKEN` or `FLOWGRAPH_AUTH_DISABLED`; `FLOWGRAPH_AUTH_MODE` (`oidc` \| `token` \| `none`) must match the variables that are set. AgentCore `/ping` is always open. `/invocations` skips bearer auth in `token` and `none` mode (AgentCore checks SigV4 at the edge), but in `oidc` mode it needs `Authorization: Bearer <jwt>` exactly like REST: no token, a malformed or forged one is a 401, and a valid one acts as that caller, so another caller's thread is a 403 `THREAD_NOT_OWNED`. Over the connect channel, `oidc` mode needs the user's JWT in each command's `params.accessToken` ([trust model](#control-plane-connect-adr-0014)).
+`FLOWGRAPH_OIDC_ISSUER` cannot be combined with `FLOWGRAPH_AUTH_TOKEN` or `FLOWGRAPH_AUTH_DISABLED`; `FLOWGRAPH_AUTH_MODE` (`oidc` \| `token` \| `none`) must match the variables that are set. AgentCore `/ping` is always open. `/invocations` skips bearer auth in `token` and `none` mode only when `FLOWGRAPH_AGENTCORE=1` (the server runs as an AgentCore Runtime, which checks SigV4 at the edge); anywhere else, such as behind the ECS ALB, it takes the same bearer token as REST. In `oidc` mode it always needs `Authorization: Bearer <jwt>` exactly like REST: no token, a malformed or forged one is a 401, and a valid one acts as that caller, so another caller's thread is a 403 `THREAD_NOT_OWNED`. Over the connect channel, `oidc` mode needs the user's JWT in each command's `params.accessToken` ([trust model](#control-plane-connect-adr-0014)).
 
 ### OIDC
 
@@ -65,7 +65,7 @@ The server reads `<issuer>/.well-known/openid-configuration` once, checks that i
 In `oidc` mode each caller is a principal `org/subject`:
 
 - **Runs.** A thread belongs to the principal that started it. Another principal gets 403 `THREAD_NOT_OWNED` on every read, control and event call for it (thread ids are global, so a 403 tells the caller the id is in use); `GET /runs` lists only your own threads. Live events for an unknown thread are a 404, so start a run before subscribing to it.
-  The owner is stored next to the checkpoints (`fg_thread_owners`): in Postgres when `DATABASE_URL` is set, so every replica sharing the database agrees, else in the sqlite memory file with `FLOWGRAPH_MEMORY_BACKEND=sqlite`, else in process memory alongside the in-memory checkpoints. Losing a replica's graph store does not hand a thread to someone else. On startup a multi-user server copies the owners recorded in its graph store's meta files into this store (once per thread; existing owners are never changed), so threads started before an upgrade stay with their owners on every replica; start each replica that has its own graph store once after upgrading. A thread id with saved checkpoints but no recorded owner anywhere is refused for everyone; use a new id. When the owner cannot be looked up (the database is down) the call is a 503 `THREAD_OWNER_UNAVAILABLE`, never a guess.
+  The owner is stored next to the checkpoints (`fg_thread_owners`): in Postgres when `DATABASE_URL` is set, so every replica sharing the database agrees, else in the sqlite memory file with `FLOWGRAPH_MEMORY_BACKEND=sqlite` (which then holds the checkpoints too), else in process memory alongside the in-memory checkpoints. Losing a replica's graph store does not hand a thread to someone else. On startup a multi-user server copies the owners recorded in its graph store's meta files into this store (once per thread; existing owners are never changed), so threads started before an upgrade stay with their owners on every replica; start each replica that has its own graph store once after upgrading. A thread id with saved checkpoints but no recorded owner anywhere is refused for everyone; use a new id. When the owner cannot be looked up (the database is down) the call is a 503 `THREAD_OWNER_UNAVAILABLE`, never a guess.
 - **Memory.** Runs write memory as `{ org, project, user: subject }` of the caller, and only the same principal can resume a thread bound to memory (`MEMORY_SCOPE_MISMATCH`).
 - **Graph names.** The first principal to upload a graph `metadata.name` in an org owns it; anyone else gets 409 `GRAPH_NAME_TAKEN`. Names are kept in Postgres (`fg_graph_names`) when `DATABASE_URL` is set, or in the sqlite memory file with `FLOWGRAPH_MEMORY_BACKEND=sqlite`; otherwise they are per process and the server logs a warning. Run replicas with `DATABASE_URL`. Names are lower-case kebab-case, so case or Unicode look-alikes of a taken name are refused when the graph is parsed.
 
@@ -187,8 +187,10 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 | Env | Default | Purpose |
 |---|---|---|
 | `FLOWGRAPH_MAX_BODY_BYTES` | `2000000` | JSON body cap for `POST /runs` and control endpoints (`0` = unlimited) |
+| `FLOWGRAPH_ARTIFACT_MAX_BYTES` | `4294967296` (4 GiB) | Largest artifact `PUT /worker/artifacts/:sha256` accepts (`0` = unlimited). Over the limit: 413 `ARTIFACT_TOO_LARGE`. |
 | `FLOWGRAPH_ERROR_ID_KEY` | _(unset)_ | Key (at least 16 characters) for the error ids that replace system error text in run events, issues and state. Unset: random per process, so ids change on restart; set the same key on every replica to keep ids stable across them. Never logged or returned |
 | `FLOWGRAPH_MAX_CONCURRENT_RUNS` | `16` | In-flight `running`/`started` threads per process (`0` = unlimited) |
+| `FLOWGRAPH_AGENTCORE` | off | Set to `1` when the container runs as a Bedrock AgentCore Runtime (`deploy/agentcore/register.sh` sets it). `/invocations` then trusts the AgentCore edge (SigV4) in `token` / `none` mode. Never set it behind a load balancer: anyone who reaches the port could run graphs as the trusted principal. |
 | `FLOWGRAPH_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. `GET /ping` access logs are `debug`. |
 | `FLOWGRAPH_GIT_SHA` | _(unset)_ | Optional build identity included on `/` and `/healthz`. |
 | `FLOWGRAPH_SHUTDOWN_TIMEOUT_MS` | `10000` | On SIGTERM / SIGINT the server stops accepting connections and new runs (503 `SERVER_CLOSING`), waits this long for runs in flight, aborts what is still running and gives it 2 s to settle, waits for pending graph-store meta writes (status updates whose request did not wait for them), then closes database pools and exits. `RunService.close()` does the same for embedders and refuses control calls (cancel, pause) with 503 `SERVER_CLOSING`, waiting for any already under way; once it resolves nothing more is written to the graph store, unless a run was still going after the 2 s abort grace (logged as `shutdown.unsettled`): such a run can still write when it finishes |
@@ -200,8 +202,8 @@ Graphs that declare `runtime.memory` need a durable memory backend; on the defau
 
 | Env | Default | Purpose |
 |---|---|---|
-| `FLOWGRAPH_MEMORY_BACKEND` | `memory` | `memory` (process-local; `runtime.memory` graphs fail to compile) \| `postgres` (the `DATABASE_URL` database, same pool as checkpoints; behind PgBouncer use session mode, not transaction mode) \| `sqlite` (local file; install `@flowgraph/checkpoint-sqlite`) |
-| `FLOWGRAPH_MEMORY_SQLITE_PATH` | `<FLOWGRAPH_GRAPH_STORE>/memory.db` | sqlite memory file. Per replica: with several replicas use `postgres`, or memory splits between them |
+| `FLOWGRAPH_MEMORY_BACKEND` | `memory` | `memory` (process-local; `runtime.memory` graphs fail to compile) \| `postgres` (the `DATABASE_URL` database, same pool as checkpoints; behind PgBouncer use session mode, not transaction mode) \| `sqlite` (local file; install `@flowgraph/checkpoint-sqlite`). Without `DATABASE_URL`, `sqlite` also keeps the run checkpoints in that file, so a run waiting on a human answer can be resumed after a restart on the same graph store; with `DATABASE_URL`, checkpoints stay in Postgres |
+| `FLOWGRAPH_MEMORY_SQLITE_PATH` | `<FLOWGRAPH_GRAPH_STORE>/memory.db` | sqlite file for memory, thread owners, graph names and (without `DATABASE_URL`) checkpoints. Per replica: with several replicas use `postgres`, or memory splits between them |
 | `FLOWGRAPH_ORG` | _(required for `postgres` / `sqlite` outside `oidc` mode)_ | The org every run on this server writes memory as. With a durable backend, no `FLOWGRAPH_ORG` and no OIDC the server refuses to start. In `oidc` mode memory is written as the caller instead, and this is only the fallback org for tokens without an org claim |
 | `FLOWGRAPH_PROJECT` / `FLOWGRAPH_USER` | `local` / _(unset)_ | Project and user of that one identity (`FLOWGRAPH_USER` is ignored in `oidc` mode) |
 | `FLOWGRAPH_SETUP_LOCK_TIMEOUT_MS` | `60000` | How long Postgres schema setup waits for another replica's setup lock before failing with `FLOWGRAPH_SETUP_LOCK_TIMEOUT` |
@@ -226,6 +228,59 @@ Event dump without SSE:
 ```bash
 curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8080/runs/t1/journal
 ```
+
+## Node placement (worker side, ADR-0020)
+
+A server can act as a worker for graphs whose nodes declare `runsOn`. A coordinator asks which labels it has, preflights the piece it wants to send, then dispatches (a later slice). Both routes use the same auth as `POST /runs`.
+
+`GET /worker/labels` returns `{ labels: string[]; checks: Record<string, { ok, checkedAt, error? }>; flowgraphVersion: string }`. `labels` are the built-in labels (`os:`, `arch:`, `gpu:`, `flowgraph:`, `nodeType:`) plus your custom labels whose check passes. A failing label is absent from `labels` and appears in `checks` with the reason. `plugin:` labels are not populated yet: the server keeps no record of loaded node packages.
+
+`POST /worker/preflight` takes `{ yaml: string, input?: object }` (or `{ spec: object, input?: object }`, which the server serializes) and returns `{ ok: boolean; diagnostics: Diagnostic[]; importsStripped?: true }`. It parses the graph like `POST /runs` (same size limit, upload policy for untrusted callers, `imports` stripping) and reports schema and validation diagnostics (including `UNKNOWN_FIELD` and `UNKNOWN_NODE_TYPE`), run-input problems (`INPUT_INVALID`), missing `requires` binaries, skill and agent refs, and provider credentials or vendor packages. It does not start a run and writes no thread, owner, graph file or checkpoint. It cannot tell whether a license is valid or an app will launch; model those as custom labels with a `check`.
+
+**Dispatch.** A coordinator runs a placed piece with the existing run routes; there are no dispatch-specific routes. `createHttpTransport()` in `@flowgraph/core` uses them like this:
+
+- `dispatch`: `POST /runs` with `{ threadId, yaml, input?, label? }` (the spec is sent as JSON, which is valid YAML). A thread id that is running or has a stored run answers 409 `THREAD_EXISTS` with `{ threadId, status, active }`; the coordinator then attaches instead of re-sending.
+- `attach`: `GET /runs/:id/events?afterSeq=N`, a Server-Sent Events stream. `afterSeq=-1` replays everything from the start (including seq 0, the first event a fresh process emits); `afterSeq=N` replays events with a greater seq and then streams live. The stream stays open after the run ends; the client stops at the terminal event (`run.end`, `run.error`, `run.aborted`, `run.paused`, or an `interrupt.raised` whose data has `interrupts`). It reconnects with the last seq it saw and drops duplicates. Final state comes from `run.end`'s `data.state`, or `GET /runs/:id/state` (`state.values`, reserved channels stripped) for runs that stopped some other way.
+- `cancel`: `POST /runs/:id/cancel`. `resume`: `POST /runs/:id/resume` with `{ resume }`.
+
+Child thread ids look like `{parentThreadId}/{nodeId}/{attempt}`. The slashes are percent-encoded in paths (`/runs/parent%2Fnode%2F1/events`), which the route matcher decodes. The graph store maps characters outside `[A-Za-z0-9._-]` to `_` in file names, so `a/b` and `a_b` collide; the second start answers 409 `THREAD_ID_CONFLICT`. A reverse proxy in front of a worker must pass `%2F` through unchanged.
+
+**Artifacts.** State holds `Artifact` records, never bytes, so files cross machines separately, addressed by `sha256` (ADR-0020 §10). Same auth as the other worker routes.
+
+| Route | Purpose |
+|---|---|
+| `HEAD /worker/artifacts/:sha256` | 200 when the worker's content store holds the blob, else 404. |
+| `PUT /worker/artifacts/:sha256` | Raw body streamed to a temp file in the content store, hash-verified, then renamed into place. 200 `{ sha256, sizeBytes, existed }`. 400 `ARTIFACT_HASH_MISMATCH` when the bytes do not hash to `:sha256` (nothing is kept); 413 `ARTIFACT_TOO_LARGE` over `FLOWGRAPH_ARTIFACT_MAX_BYTES` (checked against `Content-Length` and again while streaming); 400 `ARTIFACT_SHA_INVALID` unless `:sha256` is 64 lowercase hex characters. |
+| `GET /worker/runs/:threadId/artifacts/:sha256` | Streams the file of an `Artifact` record with that `sha256` in the thread's final state. Needs the same ownership as the other run routes (403 `THREAD_NOT_OWNED`). The record's `path` is resolved inside the run workspace only (`..`, absolute paths elsewhere and symlinks that leave it are refused). 404 `ARTIFACT_NOT_FOUND` otherwise. |
+
+The **content store** is `<graph store dir>/.flowgraph/artifact-store/<sha256>`. On a multi-user (OIDC) server each principal gets its own directory, `artifact-store/p-<hash of principal id>/<sha256>`, so callers cannot probe or reference each other's blobs. Blobs are never evicted by the server; delete the directory to reclaim space. Uploads are not resumable.
+
+**Staged references.** When `POST /runs` input holds an `Artifact` record with `staged: true` and `path: "fg-staged:<sha256>/<basename>"`, the server copies the blob from the content store to `<workspace>/.flowgraph/artifacts/<childThreadId with unsafe characters as _>/staged/<sha256>/<basename>` before the run starts and rewrites the record: `path` becomes that workspace-relative path, `staged` is dropped, and `meta.thumbnail` (a path on the other machine) is removed. A `demo`-style output's legacy absolute `path` / `extra[].path` become absolute paths in this workspace. A sha the store lacks, or a malformed reference, refuses the start with 422 `ARTIFACT_NOT_STAGED`; no run or thread is left behind. The copy is a real copy (reflinked where the filesystem supports it), so a node that edits its input cannot damage the store.
+
+| Variable | Meaning |
+|---|---|
+| `FLOWGRAPH_WORKER_LABELS` | Comma-separated custom labels, trusted as declared, e.g. `site:studio,app:blender` |
+| `FLOWGRAPH_WORKER_LABELS_FILE` | YAML or JSON file of labels with optional checks |
+
+```yaml
+# worker-labels.yaml (a top-level `labels:` key is also accepted)
+app:cc5:
+  check: ["powershell", "-NoProfile", "-c", "Test-Path 'C:/Program Files/CC5'"]   # argv, no shell; exit 0 = label holds
+  every: 10m                                                                       # default 10m
+site:studio: {}                                                                    # no check
+```
+
+Labels in the `os:`, `arch:`, `gpu:`, `flowgraph:`, `nodeType:` and `plugin:` namespaces are detected, not declared; using one, or a malformed label, stops the server at startup with a message naming the setting. Checks run at startup and then on each label's `every` (10s timeout each); timers do not keep the process alive and stop on shutdown.
+
+### Existing threads
+
+`POST /runs` with a thread id that is running or has a stored run (any status except `error`) answers `409`:
+
+```json
+{ "error": "Thread \"t1\" already exists (status: interrupted)", "code": "THREAD_EXISTS", "threadId": "t1", "status": "interrupted", "active": false }
+```
+
+`active` is true while the run is executing in this server. Only a caller allowed to see the thread gets this; another user's thread still answers `403 THREAD_NOT_OWNED`.
 
 ## Listing and reattach
 

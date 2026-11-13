@@ -15,11 +15,27 @@ export {
   ChannelTypeSchema,
   ReducerSchema,
   NodeSpecSchema,
+  RunsOnSchema,
+  RunsOnObjectSchema,
+  PlacementLabelSchema,
+  PLACEMENT_LABEL_PATTERN,
+  normalizeRunsOn,
   EdgeSpecSchema,
   GraphSpecSchema,
   RouterWithSchema,
   HttpWithSchema,
   DemoWithSchema,
+  DemoStatusSchema,
+  DemoStepSchema,
+  ArtifactSchema,
+  ArtifactRoleSchema,
+  ImageWithSchema,
+  VideoWithSchema,
+  Model3dWithSchema,
+  AudioWithSchema,
+  AudioKindSchema,
+  Model3dFormatSchema,
+  MediaProviderConfigSchema,
   FunctionWithSchema,
   MemoryWithSchema,
   MemoryScopeSchema,
@@ -50,6 +66,7 @@ export {
   MapWithSchema,
   WorktreeWithSchema,
   HitlWithSchema,
+  HitlRouteSchema,
   WorkshopWithSchema,
   WorkshopAgendaItemSchema,
   WorkshopVoiceSchema,
@@ -89,6 +106,8 @@ export {
 } from "./schema.js";
 
 export type {
+  RunsOn,
+  NormalizedRunsOn,
   GraphSpec,
   NodeSpec,
   EdgeSpec,
@@ -112,11 +131,19 @@ export type {
   CursorProviderConfig,
   CliProviderConfig,
   DeepAgentsProviderConfig,
+  MediaProviderConfig,
+  Artifact,
+  DemoStatus,
+  DemoStep,
+  ImageWith,
+  VideoWith,
+  Model3dWith,
+  AudioWith,
   CliVendor,
   LangChainVendor,
 } from "./schema.js";
 
-export { generateJsonSchema } from "./json-schema.js";
+export { generateJsonSchema, zodToConfigJsonSchema } from "./json-schema.js";
 
 export type {
   WorkshopAgendaItem,
@@ -126,4 +153,28 @@ export type {
   WorkshopContract,
   WorkshopTranscriptTurn,
   WorkshopResume,
+  WorkshopResult,
 } from "./workshop-contract.js";
+export { validateJsonSchema, type ValidateJsonSchemaOptions } from "./validate-json-schema.js";
+export {
+  checkWorkshopOutput,
+  WORKSHOP_PARTIAL_END_REASONS,
+  type WorkshopOutputCheck,
+} from "./workshop-output.js";
+
+export {
+  analyzeRouterMerge,
+  findMergeableRouters,
+  mergeRouterIntoHitl,
+  answerFromCondition,
+} from "./hitl-merge.js";
+export type {
+  HitlRouteValue,
+  MergeEdge,
+  MergeNode,
+  MergeSpec,
+  RouterMergePlan,
+  RouterMergeRefusal,
+} from "./hitl-merge.js";
+
+export { diagnosticsFromZodIssues, editDistance, suggestKey } from "./zod-diagnostics.js";

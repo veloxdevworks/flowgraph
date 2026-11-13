@@ -32,6 +32,7 @@ describe("appendDemoManifestEntry / readDemoManifest", () => {
     const workspace = mkWorkspace();
     appendDemoManifestEntry(workspace, "tid-1", {
       ok: true,
+      status: "inconclusive",
       kind: "http",
       nodeId: "capture",
       capturedAt: "2026-01-01T00:00:00.000Z",
@@ -42,6 +43,7 @@ describe("appendDemoManifestEntry / readDemoManifest", () => {
     });
     appendDemoManifestEntry(workspace, "tid-1", {
       ok: false,
+      status: "not_captured",
       kind: "file",
       nodeId: "attach",
       capturedAt: "2026-01-01T00:00:01.000Z",
@@ -54,6 +56,30 @@ describe("appendDemoManifestEntry / readDemoManifest", () => {
     expect(entries[0]?.label).toBe("health");
     expect(entries[1]?.ok).toBe(false);
     expect(entries[1]?.reason).toBe("not found");
+  });
+
+  it("derives a status for entries written before statuses existed", () => {
+    const workspace = mkWorkspace();
+    const file = demoManifestPath(workspace, "tid-3");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      [
+        '{"ok":true,"kind":"screenshot","nodeId":"a","capturedAt":"t","path":"/x.png"}',
+        '{"ok":false,"kind":"http","nodeId":"b","capturedAt":"t","path":"/x.json","reason":"HTTP 500"}',
+        '{"ok":false,"kind":"file","nodeId":"c","capturedAt":"t","reason":"source not found"}',
+        '{"ok":true,"status":"passed","kind":"http","nodeId":"d","capturedAt":"t"}',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    expect(readDemoManifest(workspace, "tid-3").map((e) => e.status)).toEqual([
+      "inconclusive",
+      "failed",
+      "not_captured",
+      "passed",
+    ]);
   });
 
   it("skips malformed lines and returns [] when missing", () => {

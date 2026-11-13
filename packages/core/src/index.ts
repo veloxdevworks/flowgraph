@@ -14,14 +14,26 @@ export {
   ensureDeclaredOutputChannels,
   undeclaredOutputChannelDiagnostics,
   unconditionalFanOutDiagnostics,
+  hitlRouteDiagnostics,
+  hitlSelectDiagnostics,
+  hitlRouterMergeDiagnostics,
 } from "./runtime/validate-graph.js";
+export {
+  hitlOutcomes,
+  hitlOutcomeKey,
+  hitlRouteTargets,
+  normalizeHitlRoutes,
+  resolveHitlRoute,
+  HITL_DEFAULT_ROUTE,
+} from "./nodes/hitl-routes.js";
+export type { HitlRoute, HitlOutcomes } from "./nodes/hitl-routes.js";
 export { applyOutput, isOutputNone, OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
 export {
   resolveAndValidateInput,
   isInputValidationError,
   InputValidationError,
 } from "./inputs.js";
-export { compileGraph, ResumeAttemptsExhaustedError } from "./compiler.js";
+export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError } from "./compiler.js";
 export {
   NODE_POLICY,
   NodePolicyError,
@@ -72,7 +84,6 @@ export {
   CHECKPOINT_PRUNED,
   THREAD_MOVED_ON,
   THREAD_WAIT_NOT_RECORDED,
-  threadWaitError,
   type ThreadWaitErrorCode,
   DEFAULT_ACTIVE_TTL_MS,
   DEFAULT_CHECKPOINT_RETENTION,
@@ -169,8 +180,8 @@ export type {
 export { findFreePorts } from "./runtime/port.js";
 export type { FindFreePortsOptions } from "./runtime/port.js";
 
-export { registry, defineNode } from "./registry.js";
-export type { NodeFactory, CompiledNode, NodeResult, NodeContract, NodeCapabilities, ReducerFn } from "./registry.js";
+export { registry, defineNode, describeNodeTypes } from "./registry.js";
+export type { NodeFactory, CompiledNode, NodeResult, NodeContract, NodeCapabilities, ReducerFn, NodeUiMeta, NodeTypeDescriptor } from "./registry.js";
 export { registerFunction } from "./nodes/function.js";
 export { registerFunction as registerFn } from "./nodes/function.js";
 export { runScriptSandboxed } from "./nodes/script.js";
@@ -368,3 +379,38 @@ export type {
   SummarizeRequest,
 } from "./context/index.js";
 export { isNonRetryable } from "./runtime/retry.js";
+
+// ── Generative media (image / video / model3d) — ADR-0017 ──────────────────
+export {
+  registerMediaVendor,
+  registerMediaProvider,
+  getMediaVendor,
+  listMediaVendors,
+  deriveMediaProviders,
+  mediaProviderFor,
+  mediaProvidersFor,
+  GRAPH_MEDIA_PROVIDERS,
+} from "./media/registry.js";
+export { runMediaJob } from "./media/run-job.js";
+export { createFileJournal, fingerprintRequest } from "./media/journal.js";
+export { createOutputWriter, describeArtifactFile, artifactDir, extensionForMime, mimeForExtension, probeImageSize } from "./media/artifacts.js";
+export { resolveMediaInputs } from "./media/inputs.js";
+export { imageNode, videoNode, model3dNode, audioNode } from "./nodes/media.js";
+export type {
+  MediaModality,
+  MediaInput,
+  MediaRequest,
+  MediaOutput,
+  MediaCallContext,
+  MediaProvider,
+  MediaVendor,
+  MediaVendorOptions,
+  JobHandle,
+  JobStatus,
+  JobState,
+} from "./media/types.js";
+
+// Node placement (ADR-0020)
+export * from "./placement/index.js";
+export { CORE_VERSION } from "./version.js";
+export { CORE_BUILTIN_NODE_TYPES } from "./nodes/index.js";

@@ -23,6 +23,7 @@
   "dependencies": {
     "@flowgraph/core": "workspace:*",
     "@flowgraph/expr": "workspace:*",
+    "@flowgraph/media": "workspace:*",
     "@flowgraph/skills": "workspace:*",
     "@flowgraph/spec": "workspace:*",
     "commander": "^15.0.0",

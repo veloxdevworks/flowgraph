@@ -41,6 +41,77 @@ function workshopGraph(extra: Record<string, unknown> = {}): GraphSpec {
   } as unknown as GraphSpec;
 }
 
+/** The routing documented for `allowPartial`; each branch stops at a gate that names it. */
+function routedOnCompleteGraph(): GraphSpec {
+  const gate = (id: string) => ({ id, type: "hitl", with: { mode: "approve", message: id } });
+  const spec = workshopGraph({ allowPartial: true }) as unknown as {
+    nodes: unknown[];
+    edges: unknown[];
+  };
+  spec.nodes.push(gate("post"), gate("follow-up"));
+  spec.edges = [
+    { from: "START", to: "feature-workshop" },
+    {
+      from: "feature-workshop",
+      branch: [{ when: "{{ state.brief.complete }}", to: "post" }, { default: true, to: "follow-up" }],
+    },
+    { from: "post", to: "END" },
+    { from: "follow-up", to: "END" },
+  ];
+  return spec as unknown as GraphSpec;
+}
+
+describe("workshop allowPartial", () => {
+  it("advertises allowPartial in the contract only when set", async () => {
+    const on = await compileGraph(workshopGraph({ allowPartial: true }), {});
+    const onData = (await on.run({ threadId: "ap-on", onInterrupt: "fail" })).interrupts?.[0]?.payload as {
+      data: WorkshopContract;
+    };
+    expect(onData.data.allowPartial).toBe(true);
+    const off = await compileGraph(workshopGraph(), {});
+    const offData = (await off.run({ threadId: "ap-off", onInterrupt: "fail" })).interrupts?.[0]?.payload as {
+      data: WorkshopContract;
+    };
+    expect(offData.data.allowPartial).toBeUndefined();
+  });
+
+  it("routes an unfinished session on complete", async () => {
+    const compiled = await compileGraph(routedOnCompleteGraph(), {});
+    await compiled.run({ threadId: "ap-1", onInterrupt: "fail" });
+    const r = await compiled.resume({
+      threadId: "ap-1",
+      resume: { output: {}, transcript: [{ role: "user", text: "out of time" }], endedReason: "timeout" },
+      onInterrupt: "fail",
+    });
+    expect(r.interrupts?.[0]?.reason).toBe("follow-up");
+    expect((r.state["brief"] as { complete: boolean }).complete).toBe(false);
+  });
+
+  it("routes a finished session on complete, even when it ended early", async () => {
+    const compiled = await compileGraph(routedOnCompleteGraph(), {});
+    await compiled.run({ threadId: "ap-2", onInterrupt: "fail" });
+    const r = await compiled.resume({
+      threadId: "ap-2",
+      resume: { output: { title: "SSO" }, endedReason: "human_ended" },
+      onInterrupt: "fail",
+    });
+    expect(r.interrupts?.[0]?.reason).toBe("post");
+    expect((r.state["brief"] as { complete: boolean }).complete).toBe(true);
+  });
+
+  it("re-prompts an unfinished session when the node does not allow it", async () => {
+    const compiled = await compileGraph(workshopGraph(), {});
+    await compiled.run({ threadId: "ap-3", onInterrupt: "fail" });
+    const r = await compiled.resume({
+      threadId: "ap-3",
+      resume: { output: {}, endedReason: "timeout" },
+      onInterrupt: "fail",
+    });
+    expect(r.status).toBe("interrupted");
+    expect(r.interrupts?.[0]?.validationError).toMatch(/missing required field/);
+  });
+});
+
 describe("normalizeAgenda", () => {
   it("slugs string items and preserves object ids", () => {
     expect(normalizeAgenda(["Scope", { id: "risks", title: "Risks", description: "what could go wrong" }])).toEqual([
@@ -114,6 +185,45 @@ describe("mapWorkshopResume", () => {
     expect(() => mapWorkshopResume({ output: {} }, { schema, nodeId: "w" })).toThrow(
       /missing required field/,
     );
+  });
+
+  it("marks a whole output complete", () => {
+    const r = mapWorkshopResume({ output: { title: "SSO" } }, { schema, nodeId: "w" });
+    expect(r.complete).toBe(true);
+  });
+
+  it("rejects an unfinished output that ended early unless the node allows it", () => {
+    for (const endedReason of ["human_ended", "timeout", "skipped"]) {
+      expect(() => mapWorkshopResume({ output: {}, endedReason }, { schema, nodeId: "w" })).toThrow(
+        /missing required field/,
+      );
+    }
+  });
+
+  it("accepts an unfinished output that ended early with allowPartial, marked incomplete", () => {
+    const r = mapWorkshopResume(
+      { output: {}, endedReason: "timeout" },
+      { schema, nodeId: "w", allowPartial: true },
+    );
+    expect(r.complete).toBe(false);
+    expect(r.endedReason).toBe("timeout");
+  });
+
+  it("does not let allowPartial excuse a session reported as completed", () => {
+    for (const resume of [{ output: {}, endedReason: "completed" }, { output: {}, endedReason: "form" }, { output: {} }]) {
+      expect(() => mapWorkshopResume(resume, { schema, nodeId: "w", allowPartial: true })).toThrow(
+        /missing required field/,
+      );
+    }
+  });
+
+  it("still checks property types on a partial output", () => {
+    expect(() =>
+      mapWorkshopResume(
+        { output: { title: 7 }, endedReason: "human_ended" },
+        { schema, nodeId: "w", allowPartial: true },
+      ),
+    ).toThrow(/field "title" expected type string/);
   });
 });
 

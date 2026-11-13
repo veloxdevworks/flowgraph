@@ -365,7 +365,7 @@ function defaultProviderName(ctx: NodeRunContext): string | undefined {
   return all.length === 1 ? all[0] : all.includes("mock") ? "mock" : undefined;
 }
 
-function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number; costUSD?: number }): void {
+export function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number; costUSD?: number }): void {
   const budget = ctx.budget;
   if (!budget) return;
   budget.usedTokens += usage.totalTokens ?? 0;

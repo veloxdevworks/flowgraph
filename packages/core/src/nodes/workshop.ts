@@ -6,15 +6,15 @@
  * (voice, text, or form) and resumes with a validated structured output.
  */
 
+import { resolveGateArtifacts } from "./hitl-artifacts.js";
 import * as path from "node:path";
 import { z } from "zod";
-import { WorkshopWithSchema } from "@flowgraph/spec";
+import { checkWorkshopOutput, WorkshopWithSchema } from "@flowgraph/spec";
 import { renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import type { WorkshopAgendaItem, WorkshopContract, WorkshopResume } from "@flowgraph/spec";
+import type { WorkshopAgendaItem, WorkshopContract, WorkshopResult } from "@flowgraph/spec";
 import { applyOutput } from "./output.js";
-import { validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
 import { assertHostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
@@ -22,7 +22,7 @@ import { interruptUntilValid } from "../runtime/resume-validation.js";
 const configSchema = WorkshopWithSchema;
 type Config = z.infer<typeof configSchema>;
 
-export type { WorkshopAgendaItem, WorkshopContract, WorkshopResume } from "@flowgraph/spec";
+export type { WorkshopAgendaItem, WorkshopContract, WorkshopResume, WorkshopResult } from "@flowgraph/spec";
 
 /** Max git patch bytes embedded in the (checkpointed) interrupt payload. */
 export const WORKSHOP_MAX_PATCH_BYTES = 256 * 1024;
@@ -72,13 +72,20 @@ export const workshopNode = defineNode<Config>({
           fallback,
         };
         if (schema) data.schema = schema;
+        if (config.allowPartial) data.allowPartial = true;
         if (context !== undefined) data.context = context;
         if (facilitator) data.facilitator = facilitator;
         if (voice) data.voice = voice as WorkshopContract["voice"];
         if (limits) data.limits = limits as WorkshopContract["limits"];
 
         if (config.artifacts) {
-          data.artifactRefs = (renderDeep(config.artifacts, scope) as unknown[]).map(String);
+          // Same flattening as the hitl gate: a rendered Artifact/media output must not become "[object Object]".
+          data.artifactRefs = (
+            await resolveGateArtifacts(
+              config.artifacts.map((a) => renderDeep(a, scope)),
+              ctx.workspace,
+            )
+          ).artifactRefs;
         }
 
         if (config.diff) {
@@ -88,7 +95,12 @@ export const workshopNode = defineNode<Config>({
         const result = interruptUntilValid(
           ctx,
           { reason: message, kind: "workshop", data: data as Record<string, unknown> },
-          (resume) => mapWorkshopResume(resume, { schema, nodeId: String(nodeSpec["id"]) }),
+          (resume) =>
+            mapWorkshopResume(resume, {
+              schema,
+              nodeId: String(nodeSpec["id"]),
+              allowPartial: config.allowPartial,
+            }),
           { maxAttempts: config.maxResumeAttempts },
         );
 
@@ -176,8 +188,12 @@ const RESUME_META = ["output", "transcript", "coverage", "endedReason"] as const
 
 export function mapWorkshopResume(
   resume: unknown,
-  opts: { schema?: Record<string, unknown> | undefined; nodeId: string },
-): WorkshopResume {
+  opts: {
+    schema?: Record<string, unknown> | undefined;
+    nodeId: string;
+    allowPartial?: boolean | undefined;
+  },
+): WorkshopResult {
   const where = `workshop node "${opts.nodeId}" resume`;
   if (!isRecord(resume)) {
     throw new Error(
@@ -211,7 +227,6 @@ export function mapWorkshopResume(
   } else {
     output = rec;
   }
-  validateJsonSchema(output, opts.schema, `workshop node "${opts.nodeId}" output`);
 
   if ("transcript" in rec && !Array.isArray(rec["transcript"])) {
     throw new Error(`${where}: "transcript" must be an array.`);
@@ -229,12 +244,21 @@ export function mapWorkshopResume(
       ? rec["endedReason"]
       : "completed";
 
+  const check = checkWorkshopOutput(output, {
+    schema: opts.schema,
+    endedReason,
+    allowPartial: opts.allowPartial,
+    label: `workshop node "${opts.nodeId}" output`,
+  });
+  if (check.error) throw new Error(check.error);
+
   // transcript/coverage entries are passed through as sent (shape not validated).
   return {
     output,
-    transcript: transcript as WorkshopResume["transcript"],
-    coverage: coverage as WorkshopResume["coverage"],
+    transcript: transcript as WorkshopResult["transcript"],
+    coverage: coverage as WorkshopResult["coverage"],
     endedReason,
+    complete: check.complete,
   };
 }
 

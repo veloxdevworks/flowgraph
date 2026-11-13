@@ -502,6 +502,59 @@ export function templateRefs(text: string): TemplateRefs {
 }
 
 /**
+ * Paths (such as `state.topic.name`) that the `{{ }}` blocks of `text` read from the given root
+ * scope objects. Uses the same template scanner and expression parser as the checks above.
+ * An unparseable block yields nothing: the config schema reports it.
+ */
+export function templateRootRefs(text: string, roots: ReadonlySet<string>): string[] {
+  if (!text.includes("{{")) return [];
+  const out: string[] = [];
+  const chain = (e: Expr): { root: string; path: string } | undefined => {
+    if (e.kind === "Ident") return { root: e.name, path: e.name };
+    if (e.kind === "Member") {
+      const o = chain(e.object);
+      return o && { root: o.root, path: `${o.path}.${e.property}` };
+    }
+    if (e.kind === "Index") {
+      const o = chain(e.object);
+      const k = e.index.kind === "String" || e.index.kind === "Number" ? JSON.stringify(e.index.value) : "…";
+      return o && { root: o.root, path: `${o.path}[${k}]` };
+    }
+    return undefined;
+  };
+  const walk = (e: Expr): void => {
+    const c = chain(e);
+    if (c) {
+      if (roots.has(c.root)) out.push(c.path);
+      // computed indexes can read further
+      for (let cur: Expr = e; cur.kind === "Member" || cur.kind === "Index"; cur = cur.object) {
+        if (cur.kind === "Index") walk(cur.index);
+      }
+      return;
+    }
+    switch (e.kind) {
+      case "Call": e.args.forEach(walk); break;
+      case "Unary": walk(e.operand); break;
+      case "Binary": case "Nullish": walk(e.left); walk(e.right); break;
+      case "Ternary": walk(e.condition); walk(e.consequent); walk(e.alternate); break;
+      case "Pipe": walk(e.left); e.args.forEach(walk); break;
+      case "Array": e.elements.forEach(walk); break;
+      case "Object": e.entries.forEach((en) => walk(en.value)); break;
+      case "Member": case "Index": walk(e.object); if (e.kind === "Index") walk(e.index); break;
+      default: break;
+    }
+  };
+  for (const span of scanTemplate(text).spans) {
+    try {
+      walk(parseExpr(span.expr));
+    } catch {
+      /* reported by the config schema */
+    }
+  }
+  return out;
+}
+
+/**
  * Template expressions in a node's `with` block (prompts, messages, URLs,
  * conditions, at any depth) that name a `__` channel, as `with.<path>`
  * paths. Only `{{ }}` expressions are checked, so text such as

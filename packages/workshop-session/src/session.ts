@@ -143,7 +143,7 @@ export class WorkshopSession {
     const seed = seedTranscript ? `\nPrior transcript (continue this meeting):\n${seedTranscript}\n` : "";
     return [
       this.contract.facilitator ?? "You facilitate a workshop. Cover the agenda. Do not invent requirements.",
-      "Call update_draft as facts land. Call cover_agenda_item when a topic is done. Call finish when the schema is satisfied or the human ends the session.",
+      "Call update_draft as facts land. Call cover_agenda_item when a topic is done. Call finish when the schema is satisfied or the human ends the session. If finish returns an error, the session is still open: ask the human for what is missing.",
       `Agenda:\n${agenda || "(none)"}`,
       `Output JSON Schema:\n${schema}`,
       context ? `Primed context:\n${context}` : "",

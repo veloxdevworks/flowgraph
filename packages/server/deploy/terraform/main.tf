@@ -318,6 +318,9 @@ resource "aws_ecs_task_definition" "server" {
     environment = [
       { name = "FLOWGRAPH_HOST", value = "0.0.0.0" },
       { name = "FLOWGRAPH_PORT", value = "8080" },
+      # One shared token on a durable (DATABASE_URL) server must be chosen explicitly,
+      # or the server refuses to start (see README "Durable servers need an explicit auth mode").
+      { name = "FLOWGRAPH_AUTH_MODE", value = "token" },
       { name = "FLOWGRAPH_AUTH_TOKEN", value = var.auth_token },
       { name = "FLOWGRAPH_MAX_BODY_BYTES", value = tostring(var.max_body_bytes) },
       { name = "FLOWGRAPH_MAX_CONCURRENT_RUNS", value = tostring(var.max_concurrent_runs) },

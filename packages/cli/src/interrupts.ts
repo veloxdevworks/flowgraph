@@ -107,6 +107,19 @@ export function formatInterruptPrompt(it: InterruptInfo): string {
   return `Previous answer rejected${budget}: ${it.validationError}\n${body}`;
 }
 
+/** `\nArtifacts: ...` for gates that present files, plus a `selected` hint when the gate lets the human pick. */
+function artifactBlock(data: Record<string, unknown> | undefined): string {
+  const refs = Array.isArray(data?.["artifactRefs"]) ? (data["artifactRefs"] as unknown[]).map(String) : [];
+  return refs.length ? `\nArtifacts: ${refs.join(", ")}` : "";
+}
+
+function selectHint(data: Record<string, unknown> | undefined, key: string): string {
+  const select = data?.["select"];
+  if (select !== "one" && select !== "many") return "";
+  const shape = select === "many" ? '["path", ...]' : '"path"';
+  return `\nSelect ${select === "many" ? "one or more" : "one"} of the artifacts: answer with JSON { "${key}": ..., "selected": ${shape} }`;
+}
+
 function formatInterruptBody(it: InterruptInfo): string {
   const kind = it.kind ?? "approval";
   const reason = it.reason ?? it.id;
@@ -118,7 +131,7 @@ function formatInterruptBody(it: InterruptInfo): string {
 
   if (kind === "choice" && it.choices?.length) {
     const lines = it.choices.map((c, i) => `  ${i + 1}. ${c}`).join("\n");
-    return `${reason}\n${lines}\nEnter choice (number or text): `;
+    return `${reason}${artifactBlock(data)}\n${lines}${selectHint(data, "choice")}\nEnter choice (number or text): `;
   }
 
   if (kind === "form") {
@@ -129,13 +142,11 @@ function formatInterruptBody(it: InterruptInfo): string {
 
   if (kind === "review") {
     const stat = typeof data?.["diffStat"] === "string" ? `\n${data["diffStat"]}` : "";
-    const artifacts = Array.isArray(data?.["artifactRefs"])
-      ? `\nArtifacts: ${(data["artifactRefs"] as string[]).join(", ")}`
-      : "";
+    const artifacts = artifactBlock(data);
     const decisions = Array.isArray(data?.["decision"])
       ? (data["decision"] as string[]).join(", ")
       : "approve, request-changes";
-    return `${reason}${stat}${artifacts}\nDecision (${decisions}) or JSON { "decision", "feedback" }: `;
+    return `${reason}${stat}${artifacts}${selectHint(data, "decision")}\nDecision (${decisions}) or JSON { "decision", "feedback" }: `;
   }
 
   if (kind === "workshop") {
@@ -151,6 +162,10 @@ function formatInterruptBody(it: InterruptInfo): string {
     const hint = schema ? `\nJSON Schema: ${JSON.stringify(schema)}` : "";
     const agendaBlock = agenda ? `\nAgenda:\n${agenda}` : "";
     return `${reason}${agendaBlock}${hint}\nPaste JSON { "output", "transcript?", "coverage?", "endedReason?" } or the output object: `;
+  }
+
+  if (kind === "approval" && Array.isArray(data?.["artifactRefs"])) {
+    return `${reason}${artifactBlock(data)}${selectHint(data, "approved")}\nApprove? (yes/no, or JSON resume value): `;
   }
 
   const tool = typeof data?.["tool"] === "string" ? data["tool"] : undefined;

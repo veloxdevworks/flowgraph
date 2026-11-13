@@ -58,30 +58,28 @@ export async function handleAgentCore(
             ...(body.env ? { env: body.env } : {}),
           }, principal);
           if (body.stream !== false) {
-            await streamEventsUntilTerminal(
-              res,
-              service.registry,
-              result.threadId,
-              body.afterSeq,
-            );
+            await streamEventsUntilTerminal(res, service.registry, result.threadId, {
+              runId: result.runId,
+            });
             return true;
           }
           sendJson(res, 200, result);
           return true;
         }
         case "resume": {
+          if (!("resume" in body)) {
+            sendJson(res, 400, { error: "resume is required (use false or null to deny)", code: "RESUME_REQUIRED" });
+            return true;
+          }
           const result = await service.resumeRun({
             threadId: body.threadId ?? "",
             resume: body.resume,
             ...(body.yaml ? { yaml: body.yaml } : {}),
           }, principal);
           if (body.stream !== false) {
-            await streamEventsUntilTerminal(
-              res,
-              service.registry,
-              result.threadId,
-              body.afterSeq,
-            );
+            await streamEventsUntilTerminal(res, service.registry, result.threadId, {
+              runId: result.runId,
+            });
             return true;
           }
           sendJson(res, 200, result);
@@ -115,12 +113,9 @@ export async function handleAgentCore(
         }
         case "events": {
           await service.authorizeEvents(body.threadId ?? "", principal);
-          await streamEventsUntilTerminal(
-            res,
-            service.registry,
-            body.threadId ?? "",
-            body.afterSeq,
-          );
+          await streamEventsUntilTerminal(res, service.registry, body.threadId ?? "", {
+            afterSeq: body.afterSeq,
+          });
           return true;
         }
         default:
@@ -132,8 +127,8 @@ export async function handleAgentCore(
     } catch (err) {
       const refusal = refusalOf(err);
       if (refusal) {
-        const { status, ...rest } = refusal;
-        sendJson(res, status, { error: (err as Error).message, ...rest });
+        const { status, extra, ...rest } = refusal;
+        sendJson(res, status, { error: (err as Error).message, ...rest, ...extra });
         return true;
       }
       if (err instanceof ClientSecretsRejectedError) {

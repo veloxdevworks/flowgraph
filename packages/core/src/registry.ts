@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import { zodToConfigJsonSchema } from "@flowgraph/spec";
 import type { ContextConfigInput } from "./context/types.js";
 import type { NodeRunContext } from "./context.js";
 
@@ -17,6 +18,12 @@ export type NodeCapabilities = {
   streaming?: boolean;
   interruptible?: boolean;
   routing?: boolean;
+  /**
+   * The node stops its work when `ctx.signal` aborts for a node `timeout`, and undoes nothing a
+   * retry needs. Without this, `ctx.signal` is the run's own and aborting it means the run was
+   * cancelled, so a node may treat it as permission to cancel paid work or kill what it started.
+   */
+  stopsOnTimeout?: boolean;
 };
 
 export type NodeResult =
@@ -32,6 +39,11 @@ export interface CompiledNode {
 
 export interface BuildContext {
   graphName: string;
+  /**
+   * Set when this node was placed on a remote worker (ADR-0020). Only `subgraph` reads it:
+   * it replaces the in-process child run with a dispatch, keeping its state seeding and merge.
+   */
+  remote?: import("./placement/remote.js").RemoteNodeExecutor;
   /** `runtime.worktrees.root` (raw; resolved against the run workspace). */
   worktreeRoot?: string;
   resolveSkill?: (uses: string) => Promise<unknown>;
@@ -56,11 +68,28 @@ export interface BuildContext {
   };
 }
 
+/**
+ * Display metadata a node type carries so UIs can list it and render a form
+ * without bespoke code (ADR-0017). All fields optional.
+ */
+export interface NodeUiMeta {
+  label?: string;
+  description?: string;
+  /** Palette group, e.g. "media". */
+  category?: string;
+  /** Lucide icon name, e.g. "image", "box". */
+  icon?: string;
+  /** CSS color for the node accent. */
+  color?: string;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface NodeFactory<Config = any> {
   type: string;
   configSchema: z.ZodType<Config>;
   capabilities: NodeCapabilities;
+  /** Display metadata for palettes and generic inspectors. */
+  ui?: NodeUiMeta;
   build(ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode;
 }
 
@@ -106,4 +135,40 @@ export const registry = new Registry();
 /** Helper for defining a node factory with proper typing */
 export function defineNode<Config>(factory: NodeFactory<Config>): NodeFactory<Config> {
   return factory;
+}
+
+/** What a UI needs to list a node type and render an inspector for it. */
+export interface NodeTypeDescriptor {
+  type: string;
+  label: string;
+  description?: string;
+  category: string;
+  icon?: string;
+  color?: string;
+  capabilities: NodeCapabilities;
+  /** JSON Schema of the node's `with` block. */
+  configSchema?: Record<string, unknown>;
+}
+
+/** Every registered node type (built-in and plugin) as UI descriptors. */
+export function describeNodeTypes(): NodeTypeDescriptor[] {
+  return registry.types().map((type) => {
+    const f = registry.get(type)!;
+    let configSchema: Record<string, unknown> | undefined;
+    try {
+      configSchema = zodToConfigJsonSchema(f.configSchema);
+    } catch {
+      configSchema = undefined; // a schema that cannot be described still lists
+    }
+    return {
+      type,
+      label: f.ui?.label ?? type,
+      ...(f.ui?.description ? { description: f.ui.description } : {}),
+      category: f.ui?.category ?? "custom",
+      ...(f.ui?.icon ? { icon: f.ui.icon } : {}),
+      ...(f.ui?.color ? { color: f.ui.color } : {}),
+      capabilities: f.capabilities,
+      ...(configSchema ? { configSchema } : {}),
+    };
+  });
 }

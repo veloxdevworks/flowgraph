@@ -257,8 +257,10 @@ async function main() {
       `expected interrupt.raised, got ${interrupted.map((e) => e.type)}`,
     );
 
+    // Not "interrupt.raised": the gate runs again on resume and emits a node-level
+    // interrupt.raised before it takes the answer, then the run ends.
     const resumeSse = collectSse(threadId, {
-      untilTypes: new Set(["run.end", "run.error", "interrupt.raised"]),
+      untilTypes: new Set(["run.end", "run.error"]),
       timeoutMs: 15_000,
     });
     await sleep(100);
@@ -278,9 +280,10 @@ async function main() {
   // 7) AgentCore /invocations start (stream until terminal)
   {
     const threadId = `ac-${Date.now()}`;
+    // Outside AgentCore (FLOWGRAPH_AGENTCORE unset) /invocations takes the REST token.
     const res = await fetch(`${BASE}/invocations`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream", Authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({
         action: "start",
         threadId,
