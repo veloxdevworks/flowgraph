@@ -1,0 +1,6 @@
+{
+  "output": { "title": "SSO login for the admin console" },
+  "transcript": [{ "role": "user", "text": "I have to drop off." }],
+  "coverage": { "problem": true },
+  "endedReason": "human_ended"
+}

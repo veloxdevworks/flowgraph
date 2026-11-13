@@ -51,7 +51,7 @@ describe.skipIf(!DB)("postgres external resume with a falsy answer", () => {
       expect((await compiled.run({ threadId, onInterrupt: "fail" })).status).toBe("interrupted");
       const r = await compiled.resume({ threadId, resume: answer, onInterrupt: "fail" });
       expect(r.status).toBe("completed");
-      expect(r.state["answer"]).toEqual({ approved: false });
+      expect(r.state["answer"]).toEqual({ approved: false, round: 1 });
     }
   });
 
@@ -67,7 +67,7 @@ describe.skipIf(!DB)("postgres external resume with a falsy answer", () => {
       expect(r1.interrupts?.[0]?.validationError).toContain("Invalid choice");
       const r2 = await compiled.resume({ threadId, resume: 2, onInterrupt: "fail" });
       expect(r2.status).toBe("completed");
-      expect(r2.state["answer"]).toEqual({ choice: "b" });
+      expect(r2.state["answer"]).toEqual({ choice: "b", round: 1 });
     }
   });
 });

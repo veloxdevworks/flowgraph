@@ -26,6 +26,7 @@
     "@flowgraph/media": "workspace:*",
     "@flowgraph/skills": "workspace:*",
     "@flowgraph/spec": "workspace:*",
+    "@flowgraph/workshop-session": "workspace:*",
     "commander": "^15.0.0",
     "picocolors": "^1.1.1",
     "yaml": "^2.9.0"

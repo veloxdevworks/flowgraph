@@ -376,6 +376,9 @@ importers:
       '@flowgraph/spec':
         specifier: workspace:*
         version: link:../spec
+      '@flowgraph/workshop-session':
+        specifier: workspace:*
+        version: link:../workshop-session
       commander:
         specifier: ^15.0.0
         version: 15.0.0

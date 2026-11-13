@@ -1,0 +1,13 @@
+{
+  "output": {
+    "title": "SSO login for the admin console",
+    "acceptance": ["Admins can sign in with the company IdP", "Password login is disabled"],
+    "risks": ["IdP outage locks admins out"]
+  },
+  "transcript": [
+    { "role": "assistant", "text": "What problem are we solving?" },
+    { "role": "user", "text": "Admins share passwords." }
+  ],
+  "coverage": { "problem": true, "acceptance": true, "risks": true },
+  "endedReason": "completed"
+}

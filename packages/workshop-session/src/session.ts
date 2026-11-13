@@ -1,4 +1,5 @@
-import { FACILITATOR_TOOLS, type FacilitatorTool, type FacilitatorToolCall } from "./tools.js";
+import { FACILITATOR_TOOLS, type FacilitatorToolCall, type FacilitatorToolDef } from "./tools.js";
+import type { WorkshopController } from "./controller.js";
 import { voiceProvider } from "./providers.js";
 import {
   WORKSHOP_SESSION_MAX_MS,
@@ -20,6 +21,8 @@ export type WorkshopSessionEvents = {
    * closes right after; resume with `endedReason: "timeout"` and the current draft.
    */
   onTimeLimit?: () => void;
+  /** With a controller: the facilitator's `finish` was accepted; the socket closes right after. */
+  onFinished?: (endedReason: string) => void;
   onOpen?: () => void;
   onClose?: () => void;
 };
@@ -41,6 +44,17 @@ export class WorkshopSession {
     private readonly contract: WorkshopContract,
     private readonly events: WorkshopSessionEvents = {},
     private readonly connect: typeof browserWebSocket = browserWebSocket,
+    private readonly options: {
+      /**
+       * Shared session state. When set: its tools and instructions are used, tool calls are
+       * applied to it, transcripts are recorded on it, and the socket closes on an accepted
+       * `finish`. `events.onToolCall` is then only called for tools the controller does not
+       * serve (e.g. `read_artifact`) and, as a notification, for the others.
+       */
+      controller?: WorkshopController;
+      /** With a controller: also advertise `read_artifact` (answer it in `onToolCall`). */
+      readArtifact?: boolean;
+    } = {},
   ) {}
 
   get provider() {
@@ -54,11 +68,18 @@ export class WorkshopSession {
       seedTranscript?: string;
       vad?: boolean;
       /** Tools advertised to the model. Default FACILITATOR_TOOLS (no read_artifact). */
-      tools?: readonly FacilitatorTool[];
+      tools?: readonly FacilitatorToolDef[];
     } = {},
   ): Promise<void> {
     const voice = opts.voice ?? this.contract.voice?.voice ?? this.provider.defaultVoice;
-    const instructions = opts.instructions ?? this.buildInstructions(opts.seedTranscript);
+    const ctl = this.options.controller;
+    const instructions =
+      opts.instructions ??
+      (ctl
+        ? ctl.instructions(opts.seedTranscript ? { seedTranscript: opts.seedTranscript } : {})
+        : this.buildInstructions(opts.seedTranscript));
+    const tools =
+      opts.tools ?? (ctl ? ctl.tools({ readArtifact: this.options.readArtifact === true }) : FACILITATOR_TOOLS);
     const vad = opts.vad !== false;
     this.ws = this.connect(this.token.url, this.token.token, this.token.provider);
     this.ws.binaryType = "arraybuffer";
@@ -71,7 +92,7 @@ export class WorkshopSession {
           instructions,
           turn_detection: vad ? { type: "server_vad", silence_duration_ms: 600 } : null,
           input_audio_transcription: { model: "whisper-1" },
-          tools: opts.tools ?? FACILITATOR_TOOLS,
+          tools,
         },
       });
     });
@@ -115,6 +136,7 @@ export class WorkshopSession {
 
   /** Session wall-clock budget in ms (`limits.maxMinutes`, else WORKSHOP_SESSION_MAX_MS). */
   get timeLimitMs(): number {
+    if (this.options.controller) return this.options.controller.limits.timeLimitMs;
     const minutes = this.contract.limits?.maxMinutes;
     return typeof minutes === "number" && minutes > 0 ? minutes * 60_000 : WORKSHOP_SESSION_MAX_MS;
   }
@@ -158,9 +180,22 @@ export class WorkshopSession {
     this.limitTimer = setTimeout(() => {
       this.limitTimer = null;
       if (this.closed) return;
+      const ctl = this.options.controller;
+      if (ctl && !ctl.ended) {
+        try {
+          ctl.end("timeout"); // accepted only when the contract allows a partial end
+        } catch {
+          // the host decides what to do with an unfinished draft
+        }
+      }
       this.events.onTimeLimit?.();
       this.close();
     }, this.timeLimitMs);
+  }
+
+  private recordTranscript(turn: WorkshopTranscriptTurn): void {
+    this.options.controller?.addTurn(turn);
+    this.events.onTranscript?.(turn);
   }
 
   private send(payload: unknown): void {
@@ -195,9 +230,7 @@ export class WorkshopSession {
       type === "response.output_audio_transcript.done"
     ) {
       const transcript = String(event["transcript"] ?? event["text"] ?? "");
-      if (transcript) {
-        this.events.onTranscript?.({ role: "assistant", text: transcript, at: new Date().toISOString() });
-      }
+      if (transcript) this.recordTranscript({ role: "assistant", text: transcript, at: new Date().toISOString() });
       return;
     }
     if (type === "session.expired") {
@@ -210,9 +243,7 @@ export class WorkshopSession {
     }
     if (type === "conversation.item.input_audio_transcription.completed") {
       const transcript = String(event["transcript"] ?? "");
-      if (transcript) {
-        this.events.onTranscript?.({ role: "user", text: transcript, at: new Date().toISOString() });
-      }
+      if (transcript) this.recordTranscript({ role: "user", text: transcript, at: new Date().toISOString() });
       return;
     }
     if (type === "response.function_call_arguments.done") {
@@ -224,7 +255,18 @@ export class WorkshopSession {
       } catch {
         args = {};
       }
-      const result = await this.events.onToolCall?.({ name, callId, args });
+      const call = { name, callId, args };
+      const ctl = this.options.controller;
+      let result: unknown;
+      let ended: string | undefined;
+      if (ctl && ctl.handles(name)) {
+        const applied = ctl.apply(call);
+        result = applied.result;
+        if (applied.ended) ended = ctl.state.endedReason;
+        await this.events.onToolCall?.(call); // notification only
+      } else {
+        result = await this.events.onToolCall?.(call);
+      }
       this.send({
         type: "conversation.item.create",
         item: {
@@ -233,6 +275,11 @@ export class WorkshopSession {
           output: JSON.stringify(result ?? { ok: true }),
         },
       });
+      if (ended !== undefined) {
+        this.events.onFinished?.(ended);
+        this.close();
+        return;
+      }
       this.send({ type: "response.create" });
       return;
     }

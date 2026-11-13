@@ -33,3 +33,15 @@ export {
   printWarning,
   formatDuration,
 } from "./ui.js";
+export {
+  runWorkshopInteractive,
+  resolveWorkshopModel,
+  createReadlineIO,
+  formatWorkshopPanel,
+  WorkshopAbortError,
+  WORKSHOP_MODEL_ENV,
+  type WorkshopIO,
+  type WorkshopInteractiveOptions,
+  type WorkshopModelConfig,
+  type WorkshopModelResolution,
+} from "./workshop-interactive.js";
