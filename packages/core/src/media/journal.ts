@@ -35,8 +35,21 @@ export interface Journal {
   remove(): Promise<void>;
 }
 
-/** Stable identity of a request: same request, same job. */
-export function fingerprintRequest(provider: string, req: MediaRequest, jobIndex: number): string {
+/**
+ * Stable identity of a request: same request, same job.
+ *
+ * `variant` is a cache-buster that is part of the identity but deliberately not
+ * part of `MediaRequest` (vendors never see it). It joins the canonical JSON
+ * only when it has a value, so a request without one hashes exactly as it did
+ * before `variant` existed and in-flight journal entries still match.
+ */
+export function fingerprintRequest(
+  provider: string,
+  req: MediaRequest,
+  jobIndex: number,
+  variant?: string | number | null,
+): string {
+  const hasVariant = variant != null && variant !== "";
   const canonical = JSON.stringify({
     provider,
     jobIndex,
@@ -61,6 +74,7 @@ export function fingerprintRequest(provider: string, req: MediaRequest, jobIndex
     format: req.format ?? null,
     texture: req.texture ?? null,
     params: sortKeys(req.params),
+    ...(hasVariant ? { variant: String(variant) } : {}),
   });
   return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
 }

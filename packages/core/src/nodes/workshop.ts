@@ -6,6 +6,7 @@
  * (voice, text, or form) and resumes with a validated structured output.
  */
 
+import { resolveGateArtifacts } from "./hitl-artifacts.js";
 import * as path from "node:path";
 import { z } from "zod";
 import { checkWorkshopOutput, WorkshopWithSchema } from "@flowgraph/spec";
@@ -79,7 +80,13 @@ export const workshopNode = defineNode<Config>({
         if (limits) data.limits = limits as WorkshopContract["limits"];
 
         if (config.artifacts) {
-          data.artifactRefs = (renderDeep(config.artifacts, scope) as unknown[]).map(String);
+          // Same flattening as the hitl gate: a rendered Artifact/media output must not become "[object Object]".
+          data.artifactRefs = (
+            await resolveGateArtifacts(
+              config.artifacts.map((a) => renderDeep(a, scope)),
+              ctx.workspace,
+            )
+          ).artifactRefs;
         }
 
         if (config.diff) {

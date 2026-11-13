@@ -15,6 +15,7 @@ export {
   undeclaredOutputChannelDiagnostics,
   unconditionalFanOutDiagnostics,
   hitlRouteDiagnostics,
+  hitlSelectDiagnostics,
   hitlRouterMergeDiagnostics,
 } from "./runtime/validate-graph.js";
 export {
@@ -32,7 +33,7 @@ export {
   isInputValidationError,
   InputValidationError,
 } from "./inputs.js";
-export { compileGraph, ResumeAttemptsExhaustedError } from "./compiler.js";
+export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError } from "./compiler.js";
 export {
   NODE_POLICY,
   NodePolicyError,
@@ -393,7 +394,7 @@ export {
 } from "./media/registry.js";
 export { runMediaJob } from "./media/run-job.js";
 export { createFileJournal, fingerprintRequest } from "./media/journal.js";
-export { createOutputWriter, artifactDir, extensionForMime, mimeForExtension, probeImageSize } from "./media/artifacts.js";
+export { createOutputWriter, describeArtifactFile, artifactDir, extensionForMime, mimeForExtension, probeImageSize } from "./media/artifacts.js";
 export { resolveMediaInputs } from "./media/inputs.js";
 export { imageNode, videoNode, model3dNode, audioNode } from "./nodes/media.js";
 export type {
@@ -409,3 +410,8 @@ export type {
   JobStatus,
   JobState,
 } from "./media/types.js";
+
+// Node placement (ADR-0020)
+export * from "./placement/index.js";
+export { CORE_VERSION } from "./version.js";
+export { CORE_BUILTIN_NODE_TYPES } from "./nodes/index.js";

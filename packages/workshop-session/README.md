@@ -1,6 +1,6 @@
 # @flowgraph/workshop-session
 
-Client session layer for the flowgraph `workshop` node (ADR-0016, ADR-0018). Depends only on
+Client session layer for the flowgraph `workshop` node (ADR-0016, ADR-0021). Depends only on
 `@flowgraph/spec`; no SDKs (adapters use `fetch`). The root entry is environment-neutral; browser
 code lives in `@flowgraph/workshop-session/browser`.
 

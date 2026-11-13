@@ -14,6 +14,7 @@
  * nested run scope.
  */
 
+import * as path from "node:path";
 import { z } from "zod";
 import { SubgraphWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
@@ -44,11 +45,17 @@ type NodeCtx = NodeRunContext & {
   _lgConfig?: import("@langchain/langgraph").LangGraphRunnableConfig;
 };
 
-interface EmbeddedChild {
+interface ChildSpecInfo {
+  spec: GraphSpec;
+  /** Directory `uses:` refs inside the child resolve against. */
+  cwd: string;
   /** Child channels after output targets are declared, used to seed matching inputs. */
   channels: string[];
   /** Reducer/type of each child channel, including auto-declared targets. */
   channelDefs: Record<string, ChannelMergeDef>;
+}
+
+interface EmbeddedChild extends Omit<ChildSpecInfo, "spec" | "cwd"> {
   invoke(
     input: Record<string, unknown>,
     lgConfig: import("@langchain/langgraph").LangGraphRunnableConfig,
@@ -70,11 +77,13 @@ export const subgraphNode = defineNode<Config>({
   configSchema: configSchema as any,
   capabilities: { interruptible: true },
 
-  build(_buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
+  build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const uses = String(nodeSpec["uses"] ?? "");
     const inlineSpec = isInlineGraphSpec(nodeSpec["spec"]) ? nodeSpec["spec"] : undefined;
     const parentNodeId = String(nodeSpec["id"] ?? (uses || "subgraph"));
+    const remote = buildCtx.remote;
     let childPromise: Promise<EmbeddedChild> | undefined;
+    let remoteChildPromise: Promise<ChildSpecInfo> | undefined;
 
     return {
       contract: {},
@@ -88,8 +97,21 @@ export const subgraphNode = defineNode<Config>({
           throw new Error(`subgraph "${label}": missing LangGraph runtime config (internal error).`);
         }
 
-        childPromise ??= loadChild(uses, inlineSpec, parentNodeId, ctx.events, ctx);
-        const child = await childPromise;
+        // Placed on a worker (ADR-0020): the child is not compiled here. Only its spec and channel
+        // definitions are needed; seeding and merge-back below are the in-process ones.
+        let child: Pick<ChildSpecInfo, "channels" | "channelDefs">;
+        let embedded: EmbeddedChild | undefined;
+        let remoteSpec: GraphSpec | undefined;
+        if (remote) {
+          remoteChildPromise ??= loadRemoteChild(uses, inlineSpec, parentNodeId, ctx);
+          const info = await remoteChildPromise;
+          child = info;
+          remoteSpec = info.spec;
+        } else {
+          childPromise ??= loadChild(uses, inlineSpec, parentNodeId, ctx.events, ctx);
+          embedded = await childPromise;
+          child = embedded;
+        }
 
         const nodeInput = nodeCtx._input ?? {};
         const parentChannels = (ctx.config.channels ?? {}) as Record<string, ChannelMergeDef>;
@@ -105,21 +127,30 @@ export const subgraphNode = defineNode<Config>({
 
         // The child starts from its own engine channels (none of the parent's,
         // none from `input`), and its run scope sits under this node.
-        const childState = await child.invoke(withoutReservedKeys(childInput), childRunConfig(lgConfig, ctx.nodeId));
+        // Placed: `remote.execute` stages the artifacts in `childInput` to the worker, and what flows
+        // back into the parent is staged out below (ADR-0020 section 10).
+        const childState = remote
+          ? await remote.execute({ ctx, spec: remoteSpec!, input: withoutReservedKeys(childInput) })
+          : await embedded!.invoke(withoutReservedKeys(childInput), childRunConfig(lgConfig, ctx.nodeId));
         const clean = stripSubgraphState(childState);
+        // Only what flows back into the parent is fetched from the worker (artifact records in it).
+        const flowBack = async (update: Record<string, unknown>): Promise<Record<string, unknown>> =>
+          remote ? remote.stageOut(ctx, update) : update;
 
         // Explicit parent ← child mapping. The parent's reducer sees a delta
         // only when this parent channel is the one that seeded the child value.
         if (config.stateMap?.out) {
           return {
-            update: projectExplicitOutput({
-              out: config.stateMap.out,
-              childState: clean,
-              seeds,
-              parentChannels,
-              childChannelDefs: child.channelDefs,
-              resolve: (ref) => resolveRef(ref, clean, {}, ctx),
-            }),
+            update: await flowBack(
+              projectExplicitOutput({
+                out: config.stateMap.out,
+                childState: clean,
+                seeds,
+                parentChannels,
+                childChannelDefs: child.channelDefs,
+                resolve: (ref) => resolveRef(ref, clean, {}, ctx),
+              }),
+            ),
           };
         }
 
@@ -135,10 +166,12 @@ export const subgraphNode = defineNode<Config>({
           (config.output.to != null || config.output.map != null)
         ) {
           return {
-            update: applyOutput(config.output, clean, {
-              nodeId: parentNodeId,
-              scope: { result: clean, ...clean },
-            }),
+            update: await flowBack(
+              applyOutput(config.output, clean, {
+                nodeId: parentNodeId,
+                scope: { result: clean, ...clean },
+              }),
+            ),
           };
         }
 
@@ -146,28 +179,29 @@ export const subgraphNode = defineNode<Config>({
         // channels stay on the update so `map` can unwrap them; the parent graph
         // drops any key it did not declare.
         return {
-          update: projectMatchingOutput({
-            childState: clean,
-            seeds,
-            parentChannels,
-            childChannelDefs: child.channelDefs,
-          }),
+          update: await flowBack(
+            projectMatchingOutput({
+              childState: clean,
+              seeds,
+              parentChannels,
+              childChannelDefs: child.channelDefs,
+            }),
+          ),
         };
       },
     };
   },
 });
 
-async function loadChild(
+/** Load the child graph and its channel definitions without compiling it. */
+async function loadChildSpec(
   uses: string,
   inlineSpec: GraphSpec | undefined,
   parentNodeId: string,
-  parentEvents: EventBus,
   ctx: NodeRunContext,
-): Promise<EmbeddedChild> {
-  const { compileGraphForEmbedding } = await import("../compiler.js");
-
+): Promise<ChildSpecInfo> {
   let spec: GraphSpec;
+  let cwd = ctx.workspace;
   if (inlineSpec) {
     spec = inlineSpec;
   } else {
@@ -184,6 +218,7 @@ async function loadChild(
       );
     }
     spec = loaded.spec;
+    cwd = path.dirname(path.resolve(ctx.workspace, ref));
   }
 
   const declared = ensureDeclaredOutputChannels(spec);
@@ -194,7 +229,33 @@ async function loadChild(
       ...(def.reducer ? { reducer: def.reducer } : {}),
     };
   }
-  const channels = Object.keys(channelDefs);
+  return { spec, cwd, channels: Object.keys(channelDefs), channelDefs };
+}
+
+/** The child as a worker receives it: `uses:` children (and theirs) inlined as `spec:`. */
+async function loadRemoteChild(
+  uses: string,
+  inlineSpec: GraphSpec | undefined,
+  parentNodeId: string,
+  ctx: NodeRunContext,
+): Promise<ChildSpecInfo> {
+  const info = await loadChildSpec(uses, inlineSpec, parentNodeId, ctx);
+  const { bundleGraphForRemote } = await import("../runtime/bundle-graph.js");
+  // Blockers (shell, skills, imports) describe what a generic server cannot run; the worker chosen
+  // for this node was preflighted for exactly this spec, so they are not refused here.
+  const bundled = await bundleGraphForRemote(info.spec, { cwd: info.cwd });
+  return { ...info, spec: bundled.spec };
+}
+
+async function loadChild(
+  uses: string,
+  inlineSpec: GraphSpec | undefined,
+  parentNodeId: string,
+  parentEvents: EventBus,
+  ctx: NodeRunContext,
+): Promise<EmbeddedChild> {
+  const { compileGraphForEmbedding } = await import("../compiler.js");
+  const { spec, channels, channelDefs } = await loadChildSpec(uses, inlineSpec, parentNodeId, ctx);
 
   const forwardSink = (event: FlowgraphEvent) => {
     parentEvents.emit(event.type, event.data, {

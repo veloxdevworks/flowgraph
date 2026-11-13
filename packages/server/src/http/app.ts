@@ -50,7 +50,7 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
     // CORS for desktop / browser clients talking to ECS ALB
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, OPTIONS");
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
@@ -102,6 +102,11 @@ export function createHttpServer(service: RunService, config: ServerConfig): htt
               "GET /runs/:threadId/state",
               "GET /runs/:threadId/history",
               "GET /runs/:threadId/issues",
+              "GET /worker/labels",
+              "POST /worker/preflight",
+              "HEAD /worker/artifacts/:sha256",
+              "PUT /worker/artifacts/:sha256",
+              "GET /worker/runs/:threadId/artifacts/:sha256",
               "POST /voice/client-secrets",
             ],
             agentcore: ["GET /ping", "POST /invocations"],

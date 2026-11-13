@@ -648,6 +648,58 @@ For `approve`, `choice` and `review`, the human's answer *is* the routing decisi
     output: { to: intake }
 ```
 
+### Reviewing generated assets (`artifacts`, `select`, `round`)
+
+`approve`, `choice` and `review` can show the human files and let them pick. `with.artifacts` is a list of templates; each may render to an Artifact, an array of Artifacts, a media node's whole output (`{ artifact, artifacts }`), a workspace-relative path, a demo-manifest ref, or an array of those. The gate flattens them, normalises paths and de-duplicates by path, keeping order.
+
+The interrupt payload (`payload.data`) then carries:
+
+- `artifacts` — full `Artifact` records. A path string that is a file inside the run workspace (after symlink resolution) becomes a record (size, MIME type and role from the extension). A path that is missing or outside the workspace does not, and is never an error.
+- `artifactRefs` — the record paths plus any string that could not become a record (for example a demo-manifest ref). For older clients; never `[object Object]`.
+- `captureFailures` — only when a `demo` output in `with.artifacts` has `ok: false`: `{ reason, kind?, label?, path? }` for each. The same failures are appended to the gate's message, so every client shows them. A `demo` output's `extra` files are presented too.
+- `select` — `"one"` / `"many"` when `with.select` asks for a pick.
+
+Never file bytes: the payload is checkpointed.
+
+`with.select: none | one | many` (default `none`) lets the human choose from what was shown. The answer carries `selected` — a path, `{ path }`, or an array of those — and only artifacts **presented at this gate** are accepted; anything else is an invalid answer and re-prompts, so a client cannot inject an arbitrary path downstream. The node outputs `selected` as the matching `Artifact` (`one`) or `Artifact[]` (`many`); with `select: none` a client-sent `selected` is dropped. A selection is required on an approving answer (`approved: true` / review `approve`) and on every `choice` answer; a rejection may omit it, and then `selected` is `null` (`one`) or `[]` (`many`) so a previous round's pick does not linger in a merged `state.outputs` entry. With `select: one` and exactly one artifact shown, an approving answer without `selected` picks it.
+
+Every gate output also has `round`: `1` for the first accepted answer at this gate in a thread, `+1` each time it is answered again (for example when a route loops back to it). Rejected answers re-prompt and do not count. `round` is read back from the node's previous `state.outputs.<id>.round`, so it survives checkpoint and resume; `output: none` opts out of that storage, and `round` is then always `1`.
+
+A worked loop: generate two images, pick one, or regenerate with a new vendor job (see `variant` under [`image` / `video`…](#9d-image--video--model3d--audio--generative-media)).
+
+```yaml
+state:
+  channels:
+    check: { type: object }          # a channel cannot share a node's id, so the gate below is `review`
+
+nodes:
+  - id: concept
+    type: image
+    provider: art
+    with:
+      prompt: "a small lighthouse, painterly"
+      count: 2
+      variant: "{{ state.check.round }}"      # unset on the first pass: same fingerprint as no variant
+
+  - id: review
+    type: hitl
+    with:
+      mode: review
+      message: "Pick the concept to turn into 3D"
+      artifacts: ["{{ state.outputs.concept }}"]
+      select: one
+      decision: [approve, request-changes, regenerate]
+      routes: { approve: mesh, request-changes: concept, regenerate: concept }
+      output: { to: check }
+
+  - id: mesh
+    type: model3d
+    provider: art
+    with: { input: "{{ state.check.selected }}", format: glb }
+```
+
+A `select` of `one`/`many` without `artifacts` is flagged by lint as `HITL_SELECT_NO_ARTIFACTS` (a warning). In the CLI, answer with JSON, for example `{ "decision": "approve", "selected": "<path>" }`. The runnable version is `examples/media-mock/media-review.graph.yaml`.
+
 ### `ask_human` tool (agent nodes)
 
 Agents can ask clarifying questions mid-loop by opting into the built-in tool:
@@ -752,7 +804,7 @@ edges:
 
 **Dropping the transcript.** With `transcript: omit` the node writes `{ output, coverage, endedReason, complete }` without `transcript`, and the `node.output` event omits it too. Use it when the transcript is large or sensitive and nothing downstream reads it. The default (`keep`) is unchanged.
 
-**Client side.** The `WorkshopController` in `@flowgraph/workshop-session` is the client-side counterpart that runs the facilitated session and builds this resume value; see [ADR-0018](./adr/0018-workshop-controller-and-facilitators.md). For a headless run, see `examples/workshop-intake`.
+**Client side.** The `WorkshopController` in `@flowgraph/workshop-session` is the client-side counterpart that runs the facilitated session and builds this resume value; see [ADR-0021](./adr/0021-workshop-controller-and-facilitators.md). For a headless run, see `examples/workshop-intake`.
 
 **In the terminal.** `flowgraph run|resume --on-interrupt prompt` on an interactive terminal runs a real session for a `workshop` interrupt, built on `WorkshopController`. It first shows any `validationError`, then asks how to take part:
 
@@ -829,9 +881,9 @@ When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTT
 
 ## 9b. `demo` — best-effort artifact capture
 
-Capture a small artifact that demonstrates what a pipeline produced — an API request/response transcript, a web screenshot, a short page-load video, a mobile-simulator recording, or an attached file/document. Modes are **explicit** (no auto-detection of "is this a web app"). Interactive flows (login, click-through) still belong in a prior `shell`/`script` node (or Playwright MCP), with `demo` attaching the resulting file via `file` mode. Simulator screenshot/video capture **is** in-scope.
+Capture a small artifact that demonstrates what a pipeline produced — an API request/response transcript, a web screenshot, a short page-load video, a mobile-simulator recording, or an attached file/document. Modes are **explicit** (no auto-detection of "is this a web app"). To show that something works rather than that it loaded, use a [`steps` flow](#proving-an-objective-with-steps): it signs in, clicks through, and checks what the page shows. Native flows still belong in a prior `shell`/`script` node, with `demo` attaching the result via `file`. Simulator screenshot/video capture **is** in-scope.
 
-**Exactly one** of `http`, `screenshot`, `file`, `video`, or `simulator` must be set.
+**Exactly one** of `http`, `screenshot`, `file`, `video`, `simulator`, or `steps` must be set.
 
 ```yaml
 # API request/response transcript
@@ -879,7 +931,7 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
   with:
     simulator:
       platform: ios
-      device: "iPhone 15"
+      device: "iPhone 15"      # Android: adb serial of a running device, e.g. emulator-5554
       app: com.example.app
       capture: video
       duration: 15s
@@ -889,38 +941,150 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
 
 | Mode | What it does | Extra deps |
 |---|---|---|
-| `http` | Re-issues the request; writes a JSON transcript (redacted headers) under `.flowgraph/demo/<nodeId>/` | none |
-| `screenshot` | Headless Chromium via Playwright; PNG screenshot (+ tracked `.webm` extra when `video: true`) | optional peer `playwright` (+ `npx playwright install chromium`) |
-| `video` | Headless Chromium page recording; `.webm` is the primary artifact | optional peer `playwright` |
-| `simulator` | iOS (`xcrun simctl`) or Android (`adb`) screenshot / `recordVideo` / `screenrecord` | Xcode CLT or Android SDK platform-tools |
-| `file` | Copies an existing path into the demo artifact dir | none |
+| `http` | Re-issues the request; writes a JSON transcript (credentials masked, see below). `timeout` defaults to 30s | none |
+| `screenshot` | Headless Chromium via Playwright; PNG screenshot (+ tracked `.webm` extra when `video: true`) | optional peer `playwright` (+ `npx playwright install chromium ffmpeg`) |
+| `video` | Headless Chromium page recording; `.webm` is the primary artifact. It covers the page load and `waitFor`, then `duration` more | optional peer `playwright` |
+| `simulator` | iOS (`xcrun simctl`) or Android (`adb`) screenshot / `recordVideo` / `screenrecord`. An iOS `device` is booted if needed; an Android `device` is the serial of one already running. A failed launch or deep link fails the capture instead of recording whatever is on screen. After a launch or deep link the capture waits up to `settle` (default 30s) for the screen to change and hold still; if it never does, the capture still happens and raises a warning issue. A recording starts before the app opens and covers it opening, then runs `duration` more. On iOS a still screen gives a very short clip whatever `duration` says, because `simctl` only writes frames when the screen changes, and a clip under half of `duration` raises a warning issue. Android recordings stop at 180s | Xcode (not just the command-line tools) or Android SDK platform-tools |
+| `file` | Copies a file from the run workspace, or from a worktree this thread created, into the artifact folder. Anything else is refused, including through a symlink | none |
+| `steps` | Runs a scripted flow against `target.web` and checks assertions. See [below](#proving-an-objective-with-steps) | optional peer `playwright` |
 
-### Best effort vs `strict`
+### Status, best effort and `strict`
 
-By default, capture failures (Playwright missing, DNS error, source file not found, …) **do not fail the run**. The node returns `{ ok: false, kind, reason, capturedAt }` and logs a warning so the rest of the pipeline can continue. Set `with.strict: true` to throw on those same failures when the artifact is required.
+Every result has a `status` that says what it shows ([ADR-0019](./adr/0019-demo-objectives-and-evidence.md)). `ok` follows from it and nothing else: `true` for `passed` and `inconclusive`, `false` for `failed` and `not_captured`.
+
+| `status` | Meaning | `ok` | Files |
+|---|---|---|---|
+| `inconclusive` | The capture worked and recorded no failure. Nothing checked an objective, so it shows that something was captured, not that something worked. Every successful capture in the five shorthand modes is this, and so is a `steps` flow with no positive assertion | `true` | yes |
+| `failed` | The capture worked and recorded a failure: `http`, `screenshot` or `video` got an HTTP status outside `expect.status`, which by default means 400 or above, or a step or assertion in a `steps` flow did not hold | `false` | kept as evidence |
+| `not_captured` | Nothing was captured: Playwright or its browser missing, connection refused, DNS error, source file not found, app did not launch, empty output, … | `false` | none |
+| `passed` | A `steps` flow ran to the end, every assertion held, at least one positive assertion ran, and evidence exists. No other mode can produce it | `true` | yes |
+
+Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
+
+Use `expect` when a different status is the point, such as proving a 404 page:
+
+```yaml
+- id: prove-404
+  type: demo
+  with:
+    screenshot:
+      url: "http://localhost:{{ state.port }}/missing"
+      expect: { status: [404] }   # also on http and video
+```
+
+### Proving an objective with `steps`
+
+`objective` says what a capture is evidence for, and `steps` is the only mode that can show it holds:
+
+```yaml
+- id: prove-checkout
+  type: demo
+  with:
+    objective: "A signed-in user can complete checkout"
+    target:
+      web: { url: "{{ state.baseUrl }}/login", timeout: 2m, stepTimeout: 30s }
+    steps:
+      - fill: { selector: "#email", value: "{{ config.vars.testUser }}" }
+      - fill: { selector: "#password", value: "{{ secret.TEST_PASSWORD }}" }
+      - click: 'button:has-text("Sign in")'
+      - expect: { url: "**/account" }
+      - click: "text=Checkout"
+      - expect: { text: "Order confirmed" }
+      - screenshot: confirmation
+    expect: { noConsoleErrors: true }
+```
+
+| Step | Effect |
+|---|---|
+| `goto: <url>` | Navigate. `javascript:` addresses are refused |
+| `click: <selector>` | Click, waiting for the element. A selector matching several elements fails rather than guess: `text=Sign in` also matches a "Sign in" heading |
+| `fill: { selector, value }` | Fill an input |
+| `press: <key>` | Press a key on the focused element |
+| `wait: <selector or duration>` | Same rule as `waitFor` |
+| `screenshot: <name>` | Save a named screenshot |
+| `expect: { ... }` | Assert, with exactly one of the checks below |
+
+| Check | Positive? | Holds when |
+|---|---|---|
+| `text: <string>` | Yes | The text is visible on the page before the step times out; text hidden in the DOM does not count. It is a case-sensitive substring, so `Saved` holds on "Not Saved" too: choose text that only the good outcome shows, or use `visible` |
+| `visible: <selector>` | Yes | An element is visible |
+| `url: <glob>` | Yes | The page URL matches. A query string is part of the URL |
+| `hidden: <selector>` | No | No matching element is visible |
+| `with.expect.noConsoleErrors: true` | No | No `console.error` or uncaught page error during the flow, including the "Failed to load resource" the browser logs for any response of 400 or above |
+
+Negative checks can't produce `passed` alone, because they also hold on a blank page.
+
+Any page the flow reaches, by `goto`, a click or a redirect, fails the flow with a status of 400 or above, unless `target.web.expect.status` lists that status. For the first page, as in the other modes, `expect.status` is the full list of what counts as success. Requests for images, scripts and other resources don't count, though the browser logs their errors, which `noConsoleErrors` sees.
+
+**The harness chooses the evidence.** A flow is always recorded from the first navigation and always ends with a screenshot, on failure as well, where it shows the point of failure and no later steps run. It pauses for just under a second after each step that changes the page, so the recording can be followed; this counts toward the flow's time. If the recording or the final screenshot is lost, the status stands and a warning issue is raised.
+
+`target.web.timeout` bounds the whole flow (default 2m), and each step waits up to `stepTimeout` (default 30s). A node-level `timeout` is still the outer limit. A node-level `retry` re-runs the whole flow, side effects included.
+
+**What the status means here:**
+
+- Not reaching `target.web.url` at all, or losing the browser, is `not_captured`, and no files are kept. A later `goto` that can't connect is `failed`, because the target was reached.
+- A flow really clicks "Place order", so point flows at local or test environments.
+- `passed` means exactly what the assertions say. `text: "Order confirmed"` proves that text was visible, not that an order exists. The result lists the literal checks so a reviewer can judge whether they are enough.
+
+**Objectives.** `objective` is also allowed on the five shorthand modes, which suits "a human should look at this", but such a node can never be `passed`. With an `objective`, `strict` throws unless the status is `passed`, so `strict` on a shorthand capture with an `objective` always throws. A `failed` result with an `objective` raises `OBJECTIVE_FAILED` instead of `CAPTURE_FAILED`.
+
+**Agents.** A `demo` node with `objective` or `steps` can't be an agent tool, which is a compile error (`DEMO_OBJECTIVE_AS_TOOL`). A tool call writes no `state.outputs`, and an agent choosing its own assertions would make `passed` meaningless.
+
+### Cancelling a run
+
+Aborting the run stops a `demo` capture in every mode, and it is not treated as a failed capture: no `CAPTURE_FAILED` issue, no manifest entry, and `strict` has nothing to turn into an error. The run ends as `aborted`, and no half-written file or `.recording-` folder is left behind.
+
+| Mode | What an abort does |
+|---|---|
+| `screenshot`, `video`, `steps` | Closes the browser context, which rejects whatever Playwright call is in flight (loading the page, `waitFor`, `duration`), and closes the browser. An abort during browser launch closes the browser once it has started |
+| `simulator` | Kills the `simctl` or `adb` steps and the settle wait. Stops `simctl recordVideo`. On Android also stops `screenrecord` on the device and deletes its temp file there, because stopping the adb client alone leaves the file (and on some devices the recorder) behind |
+| `http` | Cancels the request, with the same effect as the other modes |
+| `file` | Checks before it copies |
+
+The engine reports the run as `aborted` the moment the signal fires, and the capture finishes cleaning up after that: usually within a few hundred milliseconds for a browser, and a few seconds for an Android device. A recorder that does not finish is killed after 15 seconds. A host that exits straight away still gets the cleanup that cannot wait: child processes are signalled, scratch files are removed, and the Android device cleanup runs as a separate process. A node-level `timeout` stops the capture the same way and leaves nothing behind, but it is not a cancel: the attempt fails with `Node timed out`, even without `strict`, and the run fails unless a retry succeeds or `on.error` handles it. It raises no `CAPTURE_FAILED` issue and writes no manifest entry. Use a mode's own `timeout` for a capture that should fail softly with `not_captured`.
+
+A gate that lists a failed capture in `with.artifacts` adds a "Capture problems" section to its message and sets `captureFailures` in its data, so the human sees why evidence is missing. See [Reviewing generated assets](#reviewing-generated-assets-artifacts-select-round).
+
+### What transcripts mask
+
+`http` transcripts, and the `request` / `response` in the result, mask sensitive headers, sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. This is best effort: a secret under an innocent name in a response body stays visible. `steps` results mask the same way: a `fill` value holding a secret is recorded as `[REDACTED]` whatever its length, and steps, assertions, console messages and Playwright's own errors all pass through the same masking, including percent-encoded forms of a secret, though a secret shorter than 6 characters is only masked in `fill`. A `label` or `objective` is masked in every mode, including in the file names a label produces. Screenshots and videos are not masked.
 
 ### Result shape
 
+Every field is written on every run, `null` when it does not apply (`artifacts` is `[]`). The `outputs` channel is deep-merged, so a field left out would keep the value from an earlier run: a capture that failed on a loop-back used to show the first run's `path`. A graph can rely on `path: null` meaning there is no file.
+
 ```ts
 {
-  ok: boolean;
-  kind: "http" | "screenshot" | "file" | "video" | "simulator";
-  path?: string;         // artifact file path when ok
-  mimeType?: string;
-  sizeBytes?: number;
-  reason?: string;       // when ok: false
+  ok: boolean;                       // derived from status
+  status: "passed" | "failed" | "inconclusive" | "not_captured";
+  kind: "http" | "screenshot" | "file" | "video" | "simulator" | "steps";
+  objective: string | null;          // the claim this capture is evidence for
+  path: string | null;               // absolute path of the main file; set with status "failed", as evidence
+  mimeType: string | null;
+  sizeBytes: number | null;
+  reason: string | null;             // why status is failed or not_captured
   capturedAt: string;
-  label?: string;
-  extra?: Array<{ path, mimeType, kind, sizeBytes? }>; // e.g. screenshot + video
-  // http mode also includes request/response summaries (headers redacted)
+  label: string | null;
+  extra: Array<{ path, mimeType, kind, sizeBytes? }> | null; // absolute paths, e.g. the screenshot's recording
+  pageStatus: number | null;         // screenshot and video: HTTP status of the page opened
+  request: { ... } | null;           // http mode, headers redacted
+  response: { ... } | null;
+  artifacts: Artifact[];             // workspace-relative records, main file first
+  steps: Array<{ index, action, detail, ok, ms, error? }> | null;  // steps mode; index 0 opens the page
+  assertions: Array<{ check, positive, held, observed? }> | null;  // steps mode; the literal checks
+  console: { errors: number; messages: string[] } | null;          // steps mode; first 20, masked
 }
 ```
+
+`artifacts` holds the same files as `path` and `extra`, as `Artifact` records (`path` relative to the workspace, `mimeType`, `sizeBytes`, `role`, `sha256`), which is what gates, previews and media nodes read. Prefer it in new graphs. `request` and `response` are nested objects and still merge across runs: a key in `response.headers` from an earlier run can remain. Read them with `output.to` when a graph loops.
+
+Files live under `<workspace>/.flowgraph/artifacts/<threadId|runId>/<nodeId>/`, where media nodes write theirs. Captures made before this layout are in `.flowgraph/demo/<nodeId>/` and are not moved.
 
 Artifacts are **files on disk** (paths in state), not inline binary data. See [05 — State & Data](./05-state-and-data.md).
 
 ### Artifact manifest (run-scoped tracking)
 
-Every `demo` capture (success or best-effort failure) appends one JSON line to:
+Every `demo` capture (success or best-effort failure) appends one JSON line, with `status` and `artifacts`, to:
 
 ```
 <workspace>/.flowgraph/demo/runs/<threadId|runId>/manifest.jsonl
@@ -977,7 +1141,7 @@ nodes:
         - node: http-transcript-tool
 ```
 
-The agent may call each tool zero or more times with different arguments. Each call runs the `demo` node with those args as `input`; files land under `.flowgraph/demo/<nodeId>/` and are tracked in the run manifest. Tool return values stay intra-agent (they do not overwrite `state.outputs.<nodeId>`).
+The agent may call each tool zero or more times with different arguments. Each call runs the `demo` node with those args as `input`; files land under `.flowgraph/artifacts/<thread>/<nodeId>/` and are tracked in the run manifest. Tool return values stay intra-agent (they do not overwrite `state.outputs.<nodeId>`).
 
 ### Compose for anything harder
 
@@ -1065,6 +1229,7 @@ nodes:
 | `mode` (`text`/`image`/`multiview`), `format` (`glb` default, `gltf`, `fbx`, `obj`, `usdz`, `stl`, `3mf`), `texture` | model3d | `mode` defaults from the number of inputs. |
 | `kind` (`speech` / `sfx` / `music`), `text`, `voice`, `language`, `duration`, `instrumental`, `format` (`mp3`, `wav`, `ogg`, `flac`, `opus`) | audio | `kind` is required. `speech` needs `text` (the script) and usually a `voice`; `sfx` needs a `prompt` and optionally a `duration`; `music` needs a `prompt` and/or `text` (lyrics), and `instrumental: true` drops vocals. `input` can be reference audio where the vendor supports it. |
 | `seed`, `negativePrompt` | all | Passed when the vendor supports them. |
+| `variant` | all | String or number (templated). Part of the job fingerprint, **never sent to the vendor**. Looping back to a media node with an unchanged request re-attaches to the finished job (no new call); change `variant`, for example `"{{ state.check.round }}"`, to force a new one. Unset, null or empty (such as before the first answer) keeps the fingerprint identical to a node without `variant`, so in-flight journal entries still match after an upgrade. |
 | `params` | all | Vendor passthrough options. |
 | `timeout` | all | Whole-job limit (defaults: image 5m, audio 10m, video/model3d 15m). On timeout the job is left running and a retry re-attaches. |
 

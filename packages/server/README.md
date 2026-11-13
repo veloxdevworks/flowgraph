@@ -175,6 +175,7 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 | Env | Default | Purpose |
 |---|---|---|
 | `FLOWGRAPH_MAX_BODY_BYTES` | `2000000` | JSON body cap for `POST /runs` and control endpoints (`0` = unlimited) |
+| `FLOWGRAPH_ARTIFACT_MAX_BYTES` | `4294967296` (4 GiB) | Largest artifact `PUT /worker/artifacts/:sha256` accepts (`0` = unlimited). Over the limit: 413 `ARTIFACT_TOO_LARGE`. |
 | `FLOWGRAPH_MAX_CONCURRENT_RUNS` | `16` | In-flight `running`/`started` threads per process (`0` = unlimited) |
 | `FLOWGRAPH_AGENTCORE` | off | Set to `1` when the container runs as a Bedrock AgentCore Runtime (`deploy/agentcore/register.sh` sets it). `/invocations` then trusts the AgentCore edge (SigV4) in `token` / `none` mode. Never set it behind a load balancer: anyone who reaches the port could run graphs as the trusted principal. |
 | `FLOWGRAPH_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. `GET /ping` access logs are `debug`. |
@@ -214,6 +215,59 @@ Event dump without SSE:
 ```bash
 curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8080/runs/t1/journal
 ```
+
+## Node placement (worker side, ADR-0020)
+
+A server can act as a worker for graphs whose nodes declare `runsOn`. A coordinator asks which labels it has, preflights the piece it wants to send, then dispatches (a later slice). Both routes use the same auth as `POST /runs`.
+
+`GET /worker/labels` returns `{ labels: string[]; checks: Record<string, { ok, checkedAt, error? }>; flowgraphVersion: string }`. `labels` are the built-in labels (`os:`, `arch:`, `gpu:`, `flowgraph:`, `nodeType:`) plus your custom labels whose check passes. A failing label is absent from `labels` and appears in `checks` with the reason. `plugin:` labels are not populated yet: the server keeps no record of loaded node packages.
+
+`POST /worker/preflight` takes `{ yaml: string, input?: object }` (or `{ spec: object, input?: object }`, which the server serializes) and returns `{ ok: boolean; diagnostics: Diagnostic[]; importsStripped?: true }`. It parses the graph like `POST /runs` (same size limit, upload policy for untrusted callers, `imports` stripping) and reports schema and validation diagnostics (including `UNKNOWN_FIELD` and `UNKNOWN_NODE_TYPE`), run-input problems (`INPUT_INVALID`), missing `requires` binaries, skill and agent refs, and provider credentials or vendor packages. It does not start a run and writes no thread, owner, graph file or checkpoint. It cannot tell whether a license is valid or an app will launch; model those as custom labels with a `check`.
+
+**Dispatch.** A coordinator runs a placed piece with the existing run routes; there are no dispatch-specific routes. `createHttpTransport()` in `@flowgraph/core` uses them like this:
+
+- `dispatch`: `POST /runs` with `{ threadId, yaml, input?, label? }` (the spec is sent as JSON, which is valid YAML). A thread id that is running or has a stored run answers 409 `THREAD_EXISTS` with `{ threadId, status, active }`; the coordinator then attaches instead of re-sending.
+- `attach`: `GET /runs/:id/events?afterSeq=N`, a Server-Sent Events stream. `afterSeq=-1` replays everything from the start (including seq 0, the first event a fresh process emits); `afterSeq=N` replays events with a greater seq and then streams live. The stream stays open after the run ends; the client stops at the terminal event (`run.end`, `run.error`, `run.aborted`, `run.paused`, or an `interrupt.raised` whose data has `interrupts`). It reconnects with the last seq it saw and drops duplicates. Final state comes from `run.end`'s `data.state`, or `GET /runs/:id/state` (`state.values`, reserved channels stripped) for runs that stopped some other way.
+- `cancel`: `POST /runs/:id/cancel`. `resume`: `POST /runs/:id/resume` with `{ resume }`.
+
+Child thread ids look like `{parentThreadId}/{nodeId}/{attempt}`. The slashes are percent-encoded in paths (`/runs/parent%2Fnode%2F1/events`), which the route matcher decodes. The graph store maps characters outside `[A-Za-z0-9._-]` to `_` in file names, so `a/b` and `a_b` collide; the second start answers 409 `THREAD_ID_CONFLICT`. A reverse proxy in front of a worker must pass `%2F` through unchanged.
+
+**Artifacts.** State holds `Artifact` records, never bytes, so files cross machines separately, addressed by `sha256` (ADR-0020 §10). Same auth as the other worker routes.
+
+| Route | Purpose |
+|---|---|
+| `HEAD /worker/artifacts/:sha256` | 200 when the worker's content store holds the blob, else 404. |
+| `PUT /worker/artifacts/:sha256` | Raw body streamed to a temp file in the content store, hash-verified, then renamed into place. 200 `{ sha256, sizeBytes, existed }`. 400 `ARTIFACT_HASH_MISMATCH` when the bytes do not hash to `:sha256` (nothing is kept); 413 `ARTIFACT_TOO_LARGE` over `FLOWGRAPH_ARTIFACT_MAX_BYTES` (checked against `Content-Length` and again while streaming); 400 `ARTIFACT_SHA_INVALID` unless `:sha256` is 64 lowercase hex characters. |
+| `GET /worker/runs/:threadId/artifacts/:sha256` | Streams the file of an `Artifact` record with that `sha256` in the thread's final state. Needs the same ownership as the other run routes (403 `THREAD_NOT_OWNED`). The record's `path` is resolved inside the run workspace only (`..`, absolute paths elsewhere and symlinks that leave it are refused). 404 `ARTIFACT_NOT_FOUND` otherwise. |
+
+The **content store** is `<graph store dir>/.flowgraph/artifact-store/<sha256>`. On a multi-user (OIDC) server each principal gets its own directory, `artifact-store/p-<hash of principal id>/<sha256>`, so callers cannot probe or reference each other's blobs. Blobs are never evicted by the server; delete the directory to reclaim space. Uploads are not resumable.
+
+**Staged references.** When `POST /runs` input holds an `Artifact` record with `staged: true` and `path: "fg-staged:<sha256>/<basename>"`, the server copies the blob from the content store to `<workspace>/.flowgraph/artifacts/<childThreadId with unsafe characters as _>/staged/<sha256>/<basename>` before the run starts and rewrites the record: `path` becomes that workspace-relative path, `staged` is dropped, and `meta.thumbnail` (a path on the other machine) is removed. A `demo`-style output's legacy absolute `path` / `extra[].path` become absolute paths in this workspace. A sha the store lacks, or a malformed reference, refuses the start with 422 `ARTIFACT_NOT_STAGED`; no run or thread is left behind. The copy is a real copy (reflinked where the filesystem supports it), so a node that edits its input cannot damage the store.
+
+| Variable | Meaning |
+|---|---|
+| `FLOWGRAPH_WORKER_LABELS` | Comma-separated custom labels, trusted as declared, e.g. `site:studio,app:blender` |
+| `FLOWGRAPH_WORKER_LABELS_FILE` | YAML or JSON file of labels with optional checks |
+
+```yaml
+# worker-labels.yaml (a top-level `labels:` key is also accepted)
+app:cc5:
+  check: ["powershell", "-NoProfile", "-c", "Test-Path 'C:/Program Files/CC5'"]   # argv, no shell; exit 0 = label holds
+  every: 10m                                                                       # default 10m
+site:studio: {}                                                                    # no check
+```
+
+Labels in the `os:`, `arch:`, `gpu:`, `flowgraph:`, `nodeType:` and `plugin:` namespaces are detected, not declared; using one, or a malformed label, stops the server at startup with a message naming the setting. Checks run at startup and then on each label's `every` (10s timeout each); timers do not keep the process alive and stop on shutdown.
+
+### Existing threads
+
+`POST /runs` with a thread id that is running or has a stored run (any status except `error`) answers `409`:
+
+```json
+{ "error": "Thread \"t1\" already exists (status: interrupted)", "code": "THREAD_EXISTS", "threadId": "t1", "status": "interrupted", "active": false }
+```
+
+`active` is true while the run is executing in this server. Only a caller allowed to see the thread gets this; another user's thread still answers `403 THREAD_NOT_OWNED`.
 
 ## Listing and reattach
 

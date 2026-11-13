@@ -1,4 +1,4 @@
-# ADR-0018 — Workshop controller, text facilitator, and dictation
+# ADR-0021 — Workshop controller, text facilitator, and dictation
 
 - **Status:** Accepted
 - **Date:** 2026-11-05

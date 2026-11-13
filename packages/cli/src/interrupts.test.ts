@@ -188,3 +188,46 @@ describe("re-prompt after a rejected answer", () => {
     expect(out.interrupts[0]).toMatchObject({ validationError: "bad", attempt: 3, maxAttempts: 3, exhausted: true });
   });
 });
+
+describe("gate artifacts and selection", () => {
+  const data = { artifactRefs: ["a/one.png", "a/two.png"], select: "one" };
+
+  it("lists artifact paths and the selected hint for review, approval and choice gates", () => {
+    const review = formatInterruptPrompt(
+      info({ id: "1", reason: "Pick", kind: "review", payload: { data: { ...data, decision: ["approve"] } } }),
+    );
+    expect(review).toContain("Artifacts: a/one.png, a/two.png");
+    expect(review).toContain('"selected"');
+    expect(review).toContain('"decision"');
+
+    const approval = formatInterruptPrompt(info({ id: "1", reason: "Ok?", kind: "approval", payload: { data } }));
+    expect(approval).toContain("Artifacts: a/one.png, a/two.png");
+    expect(approval).toContain('"approved"');
+
+    const choice = formatInterruptPrompt(
+      info({ id: "1", reason: "Which", kind: "choice", choices: ["x", "y"], payload: { data } }),
+    );
+    expect(choice).toContain("Artifacts: a/one.png, a/two.png");
+    expect(choice).toContain('"choice"');
+  });
+
+  it("shows no selection hint without select", () => {
+    const p = formatInterruptPrompt(
+      info({ id: "1", kind: "review", payload: { data: { artifactRefs: ["a.png"] } } }),
+    );
+    expect(p).toContain("Artifacts: a.png");
+    expect(p).not.toContain('"selected"');
+  });
+
+  it("passes JSON answers with selected through untouched in every closed-answer mode", () => {
+    expect(
+      parseInterruptAnswer(info({ id: "1", kind: "approval" }), '{"approved":true,"selected":"a/one.png"}'),
+    ).toEqual({ approved: true, selected: "a/one.png" });
+    expect(
+      parseInterruptAnswer(info({ id: "1", kind: "choice", choices: ["x", "y"] }), '{"choice":"x","selected":["a.png"]}'),
+    ).toEqual({ choice: "x", selected: ["a.png"] });
+    expect(
+      parseInterruptAnswer(info({ id: "1", kind: "review" }), '{"decision":"approve","selected":{"path":"a.png"}}'),
+    ).toEqual({ decision: "approve", selected: { path: "a.png" } });
+  });
+});

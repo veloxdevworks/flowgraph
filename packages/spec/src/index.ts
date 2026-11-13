@@ -15,11 +15,18 @@ export {
   ChannelTypeSchema,
   ReducerSchema,
   NodeSpecSchema,
+  RunsOnSchema,
+  RunsOnObjectSchema,
+  PlacementLabelSchema,
+  PLACEMENT_LABEL_PATTERN,
+  normalizeRunsOn,
   EdgeSpecSchema,
   GraphSpecSchema,
   RouterWithSchema,
   HttpWithSchema,
   DemoWithSchema,
+  DemoStatusSchema,
+  DemoStepSchema,
   ArtifactSchema,
   ArtifactRoleSchema,
   ImageWithSchema,
@@ -99,6 +106,8 @@ export {
 } from "./schema.js";
 
 export type {
+  RunsOn,
+  NormalizedRunsOn,
   GraphSpec,
   NodeSpec,
   EdgeSpec,
@@ -124,6 +133,8 @@ export type {
   DeepAgentsProviderConfig,
   MediaProviderConfig,
   Artifact,
+  DemoStatus,
+  DemoStep,
   ImageWith,
   VideoWith,
   Model3dWith,
@@ -166,3 +177,5 @@ export type {
   RouterMergePlan,
   RouterMergeRefusal,
 } from "./hitl-merge.js";
+
+export { diagnosticsFromZodIssues, editDistance, suggestKey } from "./zod-diagnostics.js";

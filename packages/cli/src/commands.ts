@@ -2,14 +2,16 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildSkillsCommand } from "./skills-command.js";
+import { abortOnSignals } from "./run-signal.js";
 import { checkpointerOption, CLI_MEMORY_BACKENDS, promptResolver, serializePendingInterrupts } from "./interrupts.js";
 import { mcpHubForRun, closeMcpHub, loginMcpServer, mcpOAuthStatus, logoutMcpServer } from "./mcp.js";
 import { buildProviders } from "./providers.js";
 import { registerLocalTools } from "./local-tools.js";
 import { loadDotenvFromCwd } from "./env.js";
+import { loadTargetsFile, placementCompileOptions, placementLines } from "./placement.js";
 import { templateFor, listTemplates } from "./templates.js";
 import { migrateSpec } from "./migrate.js";
 import { printDiagnostics, printBanner, printSuccess, printError, printInfo, printWarning, formatDuration } from "./ui.js";
@@ -103,6 +105,20 @@ async function awaitWebhookIfNeeded(result: RunResult): Promise<RunResult> {
   }
   // Another interrupt after resume, etc.
   return { ...result, status: done.status as RunResult["status"] };
+}
+
+/** Run with Ctrl-C and SIGTERM cancelling it, for as long as it runs. */
+async function withCtrlC<T>(json: boolean | undefined, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const cancel = abortOnSignals(() => {
+    // Keeps stdout pure JSONL under --json.
+    const say = json ? (text: string) => console.error(text) : printWarning;
+    say("Stopping… (Ctrl-C again to exit now)");
+  });
+  try {
+    return await run(cancel.signal);
+  } finally {
+    cancel.dispose();
+  }
 }
 
 const program = new Command()
@@ -209,10 +225,12 @@ program
   .option("--on-interrupt <policy>", "HITL policy: prompt|fail|approve|webhook", "fail")
   .option("--no-mcp-oauth", "Do not prompt for MCP OAuth on connect; fail if tokens are missing")
   .option("--fail-on-issues", "Exit 1 when the run recorded any issues")
+  .option("--targets <file>", "Topology file (YAML/JSON) naming the workers that `runsOn` nodes may be placed on")
   .option("--cwd <dir>", "Working directory")
   .action(async (
     graphPath: string,
     opts: {
+      targets?: string;
       input?: string[];
       thread?: string;
       stream?: boolean;
@@ -308,14 +326,45 @@ program
     const providers = await buildProviders(spec, cwd);
     const localTools = await registerLocalTools(spec, cwd);
     for (const w of localTools.warnings) printWarning(w);
-    const compiled = await compileGraph(spec, {
-      cwd,
-      graphPath,
-      sinks,
-      providers,
-      ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
-      ...mcpOpt,
-    });
+    let placement: Awaited<ReturnType<typeof placementCompileOptions>> | undefined;
+    if (opts.targets) {
+      const targets = await loadTargetsFile(opts.targets, cwd);
+      if (!targets.topology) {
+        printError(`Invalid --targets file ${opts.targets}:`);
+        printDiagnostics(targets.diagnostics, opts.targets);
+        await closeMcpHub(mcpOpt.mcp);
+        process.exit(2);
+      }
+      placement = await placementCompileOptions(spec, targets.topology, {
+        graphDir,
+        subgraphAliases: imported.subgraphAliases,
+        loadGraph,
+      });
+    }
+    let compiled;
+    try {
+      compiled = await compileGraph(spec, {
+        cwd,
+        graphPath,
+        sinks,
+        providers,
+        ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
+        ...mcpOpt,
+        ...(placement ? { placement } : {}),
+      });
+    } catch (err) {
+      if (err instanceof PlacementUnsatisfiedError) {
+        printError(err.message);
+        await closeMcpHub(mcpOpt.mcp);
+        process.exit(2);
+      }
+      throw err;
+    }
+    // Where each placed node will run, before anything starts (stderr under --json keeps stdout JSONL).
+    for (const line of placementLines(compiled.placements)) {
+      if (opts.json) console.error(line);
+      else printInfo(line);
+    }
 
     if (!opts.json && !opts.stream) {
       printBanner(`Running ${spec.metadata.name}`);
@@ -327,7 +376,7 @@ program
     if (policy === "prompt") runOpts.resolveInterrupt = promptResolver;
     let result;
     try {
-      result = await compiled.run(runOpts);
+      result = await withCtrlC(opts.json, (signal) => compiled.run({ ...runOpts, signal }));
 
       if (!opts.json) {
         if (result.status === "completed") {
@@ -504,9 +553,11 @@ program
     if (policy === "prompt") resumeOpts.resolveInterrupt = promptResolver;
     let result;
     try {
-      result = opts.from
-        ? await compiled.resumeFrom({ ...resumeOpts, checkpointId: opts.from })
-        : await compiled.resume(resumeOpts);
+      result = await withCtrlC(opts.json, (signal) =>
+        opts.from
+          ? compiled.resumeFrom({ ...resumeOpts, signal, checkpointId: opts.from })
+          : compiled.resume({ ...resumeOpts, signal }),
+      );
 
       if (!opts.json) {
         if (result.status === "completed") {

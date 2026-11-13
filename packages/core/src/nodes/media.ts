@@ -65,6 +65,7 @@ type Config = Record<string, unknown> & {
   aspectRatio?: string;
   quality?: string;
   seed?: number;
+  variant?: string | number;
   duration?: number;
   resolution?: string;
   mode?: "text" | "image" | "multiview";
@@ -204,6 +205,15 @@ function buildMediaNode(spec: ModalitySpec) {
             params: (renderDeep((config.params ?? {}) as never, scope) as Record<string, unknown>) ?? {},
           };
 
+          // Cache-buster for the job fingerprint only; never part of the vendor request.
+          const renderedVariant = config.variant == null ? undefined : renderDeep(config.variant as never, scope);
+          const variant =
+            renderedVariant == null || renderedVariant === ""
+              ? undefined
+              : typeof renderedVariant === "string" || typeof renderedVariant === "number"
+                ? renderedVariant
+                : JSON.stringify(renderedVariant);
+
           const total = config.count ?? 1;
           const perJob = Math.max(1, provider.maxPerJob?.[modality] ?? 1);
           const counts = splitCounts(total, perJob);
@@ -212,7 +222,7 @@ function buildMediaNode(spec: ModalitySpec) {
           const results = await Promise.all(
             counts.map(async (count, jobIndex) => {
               const req: MediaRequest = { ...base, count };
-              const fingerprint = fingerprintRequest(provider.name, req, jobIndex);
+              const fingerprint = fingerprintRequest(provider.name, req, jobIndex, variant);
               const mctx: MediaCallContext = {
                 secrets: ctx.secrets,
                 signal: ctx.signal,

@@ -18,6 +18,12 @@ export type NodeCapabilities = {
   streaming?: boolean;
   interruptible?: boolean;
   routing?: boolean;
+  /**
+   * The node stops its work when `ctx.signal` aborts for a node `timeout`, and undoes nothing a
+   * retry needs. Without this, `ctx.signal` is the run's own and aborting it means the run was
+   * cancelled, so a node may treat it as permission to cancel paid work or kill what it started.
+   */
+  stopsOnTimeout?: boolean;
 };
 
 export type NodeResult =
@@ -33,6 +39,11 @@ export interface CompiledNode {
 
 export interface BuildContext {
   graphName: string;
+  /**
+   * Set when this node was placed on a remote worker (ADR-0020). Only `subgraph` reads it:
+   * it replaces the in-process child run with a dispatch, keeping its state seeding and merge.
+   */
+  remote?: import("./placement/remote.js").RemoteNodeExecutor;
   /** `runtime.worktrees.root` (raw; resolved against the run workspace). */
   worktreeRoot?: string;
   resolveSkill?: (uses: string) => Promise<unknown>;

@@ -27,6 +27,43 @@ export function redactHeaders(
   return out;
 }
 
+/** Field and query-parameter names whose values are masked in saved transcripts. */
+const SENSITIVE_NAME =
+  /pass(word|wd|phrase)?$|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|^auth$|authorization|credential|cookie|session|signature|^sig$|^code$/i;
+
+/** Mask credentials in a URL (user info, sensitive query parameters), keeping the rest readable. */
+export function redactUrlSecrets(url: string): string {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return url;
+  }
+  if (u.username) u.username = "***";
+  if (u.password) u.password = "***";
+  for (const name of [...u.searchParams.keys()]) {
+    if (SENSITIVE_NAME.test(name)) u.searchParams.set(name, "***");
+  }
+  return u.toString();
+}
+
+/**
+ * Mask string values stored under sensitive field names, at any depth.
+ * Best effort: a secret under an innocent name stays visible.
+ */
+export function redactSensitiveFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSensitiveFields);
+  if (value != null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, v]) => [
+        key,
+        typeof v === "string" && SENSITIVE_NAME.test(key) ? "***" : redactSensitiveFields(v),
+      ]),
+    );
+  }
+  return value;
+}
+
 export type PerformHttpRequestOptions = {
   method?: string;
   url: string;

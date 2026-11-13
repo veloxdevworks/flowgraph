@@ -1,7 +1,7 @@
 # workshop-intake
 
 A `workshop` node run **headless**, with no LLM and no network. It shows the
-engine options from ADR-0018:
+engine options from ADR-0021:
 
 - `requireCoverage: true`: a session reported as `completed` is rejected (and
   re-prompted with a `validationError`) while an agenda item is uncovered.
@@ -80,4 +80,4 @@ has `brief: { output, coverage, endedReason, complete }` and no `transcript`.
 
 Delete `.flowgraph/` to start over. A real client (voice or text) builds the
 same `{ output, transcript, coverage, endedReason }` value itself; see
-`docs/adr/0018-workshop-controller-and-facilitators.md`.
+`docs/adr/0021-workshop-controller-and-facilitators.md`.

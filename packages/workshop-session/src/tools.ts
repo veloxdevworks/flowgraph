@@ -163,7 +163,7 @@ export const CONTROLLER_TOOL_NAMES = [
 ] as const;
 
 /**
- * Schema-aware facilitator tools for a contract (ADR-0018 section 5):
+ * Schema-aware facilitator tools for a contract (ADR-0021 section 5):
  * `set_field`, `update_draft`, `append_to_list`, `cover_agenda_item` (ids limited to the
  * agenda), `finish`, `add_risk` (only when the schema has a `risks` array) and, opt-in,
  * `read_artifact`.
