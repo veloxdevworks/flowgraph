@@ -107,7 +107,16 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const parsed = parseWebhookPath(req.url);
+  let parsed: ReturnType<typeof parseWebhookPath>;
+  try {
+    parsed = parseWebhookPath(req.url);
+  } catch {
+    sendJson(res, 400, {
+      error: "invalid_path",
+      message: "Webhook path contains invalid percent-encoding",
+    });
+    return;
+  }
   if (!parsed) {
     sendJson(res, 404, { error: "not_found", message: "Expected /webhooks/:threadId/:nodeId" });
     return;
@@ -155,8 +164,16 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
-  // One-shot: drop from the map before resume so concurrent POSTs get 404,
-  // but settle the waiter only after resume completes.
+  // Body reading yields: another POST, cancellation, or a new registration may
+  // have consumed/replaced this route. Claim only the registration we authorized,
+  // with no await between the identity check and deletion.
+  if (routes.get(parsed.threadId) !== route) {
+    sendJson(res, 404, {
+      error: "not_waiting",
+      message: "Webhook route was already consumed, cancelled, or replaced",
+    });
+    return;
+  }
   routes.delete(parsed.threadId);
 
   try {
@@ -198,13 +215,16 @@ function webhookAuthorized(req: http.IncomingMessage, token: string): boolean {
   return false;
 }
 
-function listenOnce(
-  host: string,
-  port: number,
-): Promise<{ server: http.Server; port: number }> {
+function listenOnce(host: string, port: number): Promise<{ server: http.Server; port: number }> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
-      void handleRequest(req, res);
+      void handleRequest(req, res).catch(() => {
+        if (res.headersSent || res.destroyed) {
+          res.destroy();
+          return;
+        }
+        sendJson(res, 500, { error: "internal_error", message: "Webhook request failed" });
+      });
     });
     server.once("error", reject);
     server.listen(port, host, () => {
@@ -265,7 +285,9 @@ export async function ensureWebhookServer(
   }
 }
 
-export function registerWebhookRoute(route: WebhookRoute): Promise<{ status: string; error?: string }> {
+export function registerWebhookRoute(
+  route: WebhookRoute,
+): Promise<{ status: string; error?: string }> {
   const prev = routes.get(route.threadId);
   if (prev) prev.settle({ status: "cancelled" });
 

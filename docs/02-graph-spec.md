@@ -336,6 +336,7 @@ runtime:
   webhookServer:                  # embedded HTTP ingress for wait.webhook
     host: "127.0.0.1"             # default
     port: 8878                    # default; 0 = ephemeral; EADDRINUSE → ephemeral fallback
+    # token: ${FLOWGRAPH_WEBHOOK_TOKEN} # optional shared secret for GET/POST
   services:
     terminateOnEnd: true          # stop non-keepAlive `service` processes on completed/error (default)
   hitl:

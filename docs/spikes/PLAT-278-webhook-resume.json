@@ -1,0 +1,321 @@
+{
+  "node": "v25.2.1",
+  "platform": "darwin/arm64",
+  "findings": [
+    {
+      "scenario": "delayed POST, auth, wrong route, invalid JSON, sequential duplicate",
+      "post": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "duplicate": {
+        "http": 404,
+        "body": {
+          "error": "not_waiting",
+          "message": "No run waiting on thread \"delayed\" node \"await-event\""
+        }
+      },
+      "finishes": 1,
+      "dwellMs": 1000
+    },
+    {
+      "scenario": "eight concurrent waiting threads",
+      "http": [200, 200, 200, 200, 200, 200, 200, 200],
+      "finishes": 9
+    },
+    {
+      "scenario": "missing required field and retry",
+      "missing": {
+        "http": 422,
+        "body": {
+          "error": "resume_failed",
+          "status": "error",
+          "message": "wait node \"await-event\": resume payload missing required field(s): value"
+        }
+      },
+      "retry": {
+        "http": 404,
+        "body": {
+          "error": "not_waiting",
+          "message": "No run waiting on thread \"missing-field\" node \"await-event\""
+        }
+      },
+      "nextAfterLoad": ["await-event"],
+      "retryAfterLoad": {
+        "http": 422,
+        "body": {
+          "error": "resume_failed",
+          "status": "error",
+          "message": "wait node \"await-event\": resume payload missing required field(s): value"
+        }
+      }
+    },
+    {
+      "scenario": "schema property type",
+      "wrongType": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "received": {
+        "value": "not-a-number"
+      }
+    },
+    {
+      "scenario": "JSON scalar false",
+      "result": {
+        "http": 422,
+        "body": {
+          "error": "resume_failed",
+          "status": "error",
+          "message": "Received empty Command input"
+        }
+      },
+      "snapshot": {
+        "values": {
+          "received": null,
+          "outputs": {}
+        },
+        "next": ["await-event"],
+        "checkpointId": "1f1df9d8-736e-6fa0-8000-fb0d7a14cc24",
+        "createdAt": "2026-11-13T20:05:09.658Z",
+        "interrupts": [
+          {
+            "id": "000d73fe5e39f3f23b858fb070bb5aea",
+            "payload": {
+              "reason": "Waiting for webhook callback on node \"await-event\"",
+              "kind": "custom",
+              "data": {
+                "mode": "webhook",
+                "__nodeId": "await-event",
+                "webhookUrl": "http://127.0.0.1:55883/webhooks/scalar/await-event"
+              }
+            },
+            "kind": "custom",
+            "reason": "Waiting for webhook callback on node \"await-event\""
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "JSON scalar 0",
+      "result": {
+        "http": 422,
+        "body": {
+          "error": "resume_failed",
+          "status": "error",
+          "message": "Received empty Command input"
+        }
+      },
+      "snapshot": {
+        "values": {
+          "received": null,
+          "outputs": {}
+        },
+        "next": ["await-event"],
+        "checkpointId": "1f1df9d8-82fc-6e90-8000-2e0917222b5d",
+        "createdAt": "2026-11-13T20:05:11.289Z",
+        "interrupts": [
+          {
+            "id": "5d2ab947b1faa7ef4155dd6bf3df63c1",
+            "payload": {
+              "reason": "Waiting for webhook callback on node \"await-event\"",
+              "kind": "custom",
+              "data": {
+                "mode": "webhook",
+                "__nodeId": "await-event",
+                "webhookUrl": "http://127.0.0.1:55887/webhooks/scalar/await-event"
+              }
+            },
+            "kind": "custom",
+            "reason": "Waiting for webhook callback on node \"await-event\""
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "JSON scalar \"\"",
+      "result": {
+        "http": 422,
+        "body": {
+          "error": "resume_failed",
+          "status": "error",
+          "message": "Received empty Command input"
+        }
+      },
+      "snapshot": {
+        "values": {
+          "received": null,
+          "outputs": {}
+        },
+        "next": ["await-event"],
+        "checkpointId": "1f1df9d8-95b0-6820-8000-a792bf740a59",
+        "createdAt": "2026-11-13T20:05:13.250Z",
+        "interrupts": [
+          {
+            "id": "b081bafc9a8191826eb7e92e8282fda2",
+            "payload": {
+              "reason": "Waiting for webhook callback on node \"await-event\"",
+              "kind": "custom",
+              "data": {
+                "mode": "webhook",
+                "__nodeId": "await-event",
+                "webhookUrl": "http://127.0.0.1:55890/webhooks/scalar/await-event"
+              }
+            },
+            "kind": "custom",
+            "reason": "Waiting for webhook callback on node \"await-event\""
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "JSON scalar null",
+      "result": {
+        "http": 422,
+        "body": {
+          "error": "resume_failed",
+          "status": "error",
+          "message": "Received empty Command input"
+        }
+      },
+      "snapshot": {
+        "values": {
+          "received": null,
+          "outputs": {}
+        },
+        "next": ["await-event"],
+        "checkpointId": "1f1df9d8-9e8c-6930-8000-7a7c00085821",
+        "createdAt": "2026-11-13T20:05:14.179Z",
+        "interrupts": [
+          {
+            "id": "7d582166e72ff7f9536ee6a8c35cecf8",
+            "payload": {
+              "reason": "Waiting for webhook callback on node \"await-event\"",
+              "kind": "custom",
+              "data": {
+                "mode": "webhook",
+                "__nodeId": "await-event",
+                "webhookUrl": "http://127.0.0.1:55893/webhooks/scalar/await-event"
+              }
+            },
+            "kind": "custom",
+            "reason": "Waiting for webhook callback on node \"await-event\""
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "overlapping duplicate POSTs",
+      "first": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "second": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "finishes": 2
+    },
+    {
+      "scenario": "SIGKILL + SQLite + new process + getState",
+      "routeBeforeLoad": null,
+      "sameUrl": true,
+      "recovered": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "finishes": 1
+    },
+    {
+      "scenario": "completed checkpoint reopened in third process",
+      "next": [],
+      "received": {
+        "value": "survived-restart"
+      },
+      "route": null
+    },
+    {
+      "scenario": "two sequential webhook waits",
+      "firstStatus": "interrupted",
+      "secondStatus": "completed"
+    },
+    {
+      "scenario": "two parallel webhook waits in one thread",
+      "interrupts": 2,
+      "registered": "http://127.0.0.1:55921/webhooks/two-gates/await-second",
+      "gatePosts": [
+        {
+          "http": 404,
+          "body": {
+            "error": "not_waiting",
+            "message": "No run waiting on thread \"two-gates\" node \"await-event\""
+          }
+        },
+        {
+          "http": 200,
+          "body": {
+            "status": "completed"
+          }
+        }
+      ],
+      "state": {
+        "values": {
+          "received": {
+            "value": 1
+          },
+          "second": {
+            "value": 1
+          },
+          "outputs": {
+            "await-event": {
+              "value": 1
+            },
+            "await-second": {
+              "value": 1
+            }
+          }
+        },
+        "next": [],
+        "checkpointId": "1f1df9d9-26c0-6bd0-8001-2d55e8b23b0b",
+        "createdAt": "2026-11-13T20:05:28.461Z",
+        "interrupts": []
+      }
+    },
+    {
+      "scenario": "HITL with onInterrupt webhook",
+      "status": "interrupted",
+      "kind": "approval",
+      "hasWebhookUrl": false,
+      "route": null
+    },
+    {
+      "scenario": "CLI YAML run and real POST",
+      "cliPost": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "completionPrinted": true,
+      "aliveAfterCompletion": true
+    },
+    {
+      "scenario": "malformed percent-encoded route",
+      "pathResponse": {
+        "error": "TypeError: fetch failed"
+      },
+      "exit": [1, null],
+      "uriError": true
+    }
+  ]
+}

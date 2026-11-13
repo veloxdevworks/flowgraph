@@ -33,6 +33,7 @@ We are **not** building a new graph engine. LangGraph is the engine. flowgraph i
 | — | [Implementation status](./IMPLEMENTATION_STATUS.md) | Shipped vs planned feature matrix |
 | — | [ADRs](./adr/) | Architecture Decision Records capturing locked-in choices |
 | — | [Examples](../examples/README.md) | Runnable example index |
+| — | [Webhook resume spike](./spikes/PLAT-278-webhook-resume.md) | PLAT-278 end-to-end evidence and follow-on decisions |
 
 ---
 
