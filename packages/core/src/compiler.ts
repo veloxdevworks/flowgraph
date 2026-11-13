@@ -1906,6 +1906,8 @@ async function attachWebhookUrls(
 
   for (const interrupt of webhookInterrupts) {
     const nodeId = webhookNodeIdFromInterrupt(interrupt) ?? "unknown";
+    const payload = interrupt.payload as { data?: { schema?: Record<string, unknown> } } | undefined;
+    const schema = payload?.data?.schema;
     const url = buildWebhookUrl(info.host, info.port, opts.threadId, nodeId);
     setWebhookUrlOnInterrupt(interrupt, url);
 
@@ -1922,6 +1924,7 @@ async function attachWebhookUrls(
       threadId: opts.threadId,
       nodeId,
       url,
+      ...(schema ? { schema } : {}),
       ...(serverCfg?.token ? { token: serverCfg.token } : {}),
       resume: async (body) => {
         if (opts.signal) opts.signal.removeEventListener("abort", onAbort);

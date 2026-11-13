@@ -9,6 +9,7 @@ import {
   getWebhookRoute,
   registerWebhookRoute,
   unregisterWebhookRoute,
+  waitForWebhookResume,
   DEFAULT_WEBHOOK_PORT,
 } from "./webhook-server.js";
 
@@ -55,8 +56,8 @@ async function postJson(url: string, body: unknown): Promise<{ status: number; j
 
 // The automatic 100 Continue response confirms the server has received the
 // headers and entered the handler before we send the body, without sleeps.
-async function pendingPost(url: string, token?: string) {
-  const body = JSON.stringify({ approved: true });
+async function pendingPost(url: string, token?: string, payload: unknown = { approved: true }) {
+  const body = JSON.stringify(payload);
   let ready!: () => void;
   let failed!: (error: Error) => void;
   const headersReceived = new Promise<void>((resolve, reject) => {
@@ -127,7 +128,8 @@ describe("webhook HTTP ingress", () => {
     for (const [i, body] of [false, null, 0].entries()) {
       const threadId = `ingress-falsy-${i}`;
       const r1 = await compiled.run({ threadId, onInterrupt: "fail" });
-      const url = (r1.interrupts?.[0]?.payload as { data?: { webhookUrl?: string } })?.data?.webhookUrl;
+      const url = (r1.interrupts?.[0]?.payload as { data?: { webhookUrl?: string } })?.data
+        ?.webhookUrl;
       const post = await postJson(url!, body);
       expect(post.status).toBe(200);
       expect(post.json).toEqual({ status: "completed" });
@@ -167,33 +169,96 @@ describe("webhook HTTP ingress", () => {
     expect((await postJson(url2!, { approved: false })).status).toBe(200);
   });
 
-  it("returns 422 when schema validation fails on POST", async () => {
+  it("rejects invalid payloads without consuming the wait, then accepts a corrected callback", async () => {
     const compiled = await compileGraph(
-      webhookWaitGraph({
-        webhook: {
-          schema: {
-            type: "object",
-            required: ["approved"],
-            properties: { approved: { type: "boolean" } },
+      webhookWaitGraph(
+        {
+          webhook: {
+            schema: {
+              type: "object",
+              required: ["approved"],
+              properties: { approved: { type: "boolean" } },
+            },
           },
+          timeout: "1h",
         },
-      }),
+        { webhookServer: { port: 0, token: "validation-secret" } },
+      ),
       {},
     );
     const r1 = await compiled.run({ threadId: "ingress-422", onInterrupt: "fail" });
     const url = (r1.interrupts?.[0]?.payload as { data?: { webhookUrl?: string } })?.data
       ?.webhookUrl;
     expect(url).toBeTruthy();
+    const original = await compiled.getState("ingress-422");
+    const route = getWebhookRoute("ingress-422");
+    const waiter = waitForWebhookResume("ingress-422");
+    expect(waiter).not.toBeNull();
+    const events: string[] = [];
+    compiled.events.subscribe((e) => {
+      events.push(e.type);
+    });
 
-    const post = await postJson(url!, { status: "pending" });
-    expect(post.status).toBe(422);
-    expect((post.json as { message?: string }).message).toContain("approved");
+    for (const payload of [{ status: "pending" }, { approved: "yes" }, {}, { timedOut: true }]) {
+      const post = await fetch(url!, {
+        method: "POST",
+        headers: { Authorization: "Bearer validation-secret", "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect(post.status).toBe(422);
+      expect(await post.json()).toMatchObject({ error: "invalid_payload", status: "interrupted" });
+      expect(getWebhookRoute("ingress-422")).toBe(route);
+      expect(waitForWebhookResume("ingress-422")).toBe(waiter);
+      expect(await compiled.getState("ingress-422")).toEqual(original);
+      expect(
+        (await fetch(url!, { headers: { Authorization: "Bearer validation-secret" } })).status,
+      ).toBe(200);
+    }
+    expect(events).not.toContain("interrupt.resumed");
+    expect(events).not.toContain("run.error");
+    expect((await postJson(url!, { approved: true })).status).toBe(401);
+    const corrected = await fetch(url!, {
+      method: "POST",
+      headers: { Authorization: "Bearer validation-secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: false }),
+    });
+    expect(corrected.status).toBe(200);
+    expect(await corrected.json()).toEqual({ status: "completed" });
+    expect(await waiter).toEqual({ status: "completed" });
+    expect((await compiled.getState("ingress-422"))?.values["approval"]).toEqual({
+      approved: false,
+    });
+    expect(events.filter((e) => e === "interrupt.resumed")).toHaveLength(1);
+    expect(getWebhookRoute("ingress-422")).toBeUndefined();
+    expect((await postJson(url!, { approved: true })).status).toBe(404);
   });
 
   it("returns 404 for unknown thread", async () => {
     const info = await ensureWebhookServer({ port: 0 });
     const res = await fetch(`http://${info.host}:${info.port}/webhooks/no-such-thread/node`);
     expect(res.status).toBe(404);
+  });
+
+  it.each([
+    ["boolean", false],
+    ["integer", 0],
+    ["string", ""],
+    ["null", null],
+    ["array", ["item"]],
+  ])("validates a normalized %s payload consistently with the wait node", async (type, value) => {
+    const compiled = await compileGraph(
+      webhookWaitGraph({
+        webhook: {
+          schema: { required: ["value"], properties: { value: { type } } },
+        },
+      }),
+      {},
+    );
+    const result = await compiled.run({ threadId: "normalized", onInterrupt: "fail" });
+    const url = (result.interrupts?.[0]?.payload as { data: { webhookUrl: string } }).data
+      .webhookUrl;
+    expect(await postJson(url, value)).toEqual({ status: 200, json: { status: "completed" } });
+    expect((await compiled.getState("normalized"))?.values["approval"]).toEqual({ value });
   });
 
   it.each(["%", "%ZZ", "%E0%A4%A"])(
@@ -236,6 +301,36 @@ describe("webhook HTTP ingress", () => {
     } finally {
       first.close();
       second.close();
+    }
+  });
+
+  it("does not let an invalid overlapping POST consume the valid callback's route", async () => {
+    const compiled = await compileGraph(
+      webhookWaitGraph({
+        webhook: {
+          schema: { required: ["approved"], properties: { approved: { type: "boolean" } } },
+        },
+      }),
+      {},
+    );
+    const result = await compiled.run({ threadId: "validation-overlap", onInterrupt: "fail" });
+    const url = (result.interrupts?.[0]?.payload as { data: { webhookUrl: string } }).data
+      .webhookUrl;
+    const before = await compiled.getState("validation-overlap");
+    const invalid = await pendingPost(url, undefined, { approved: "wrong" });
+    const valid = await pendingPost(url);
+    try {
+      invalid.finish();
+      expect(await invalid.response).toBe(422);
+      expect(await compiled.getState("validation-overlap")).toEqual(before);
+      valid.finish();
+      expect(await valid.response).toBe(200);
+      expect((await compiled.getState("validation-overlap"))?.values["approval"]).toEqual({
+        approved: true,
+      });
+    } finally {
+      invalid.close();
+      valid.close();
     }
   });
 

@@ -15,6 +15,7 @@ import type { NodeRunContext } from "../context.js";
 import { parseDuration, sleep } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import { assertInboundWebhookAllowed, nodePolicyOf } from "../node-policy.js";
+import { parseWebhookPayload } from "../runtime/webhook-payload.js";
 
 const configSchema = WaitWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -57,7 +58,9 @@ export const waitNode = defineNode<Config>({
             data: {
               mode: "webhook",
               ...(schema ? { schema } : {}),
-              ...(config.timeout ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) } : {}),
+              ...(config.timeout
+                ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) }
+                : {}),
             },
           });
 
@@ -67,8 +70,7 @@ export const waitNode = defineNode<Config>({
             return { update: applyOutput(config.output, result, { nodeId, scope }) };
           }
 
-          const result = normalizePayload(payload);
-          validateSchema(result, schema, nodeId);
+          const result = parseWebhookPayload(payload, schema, nodeId);
           ctx.emit("node.output", { wait: { mode: "webhook", result } });
           return {
             update: applyOutput(config.output, result, { nodeId, scope }),
@@ -98,7 +100,9 @@ export const waitNode = defineNode<Config>({
               data: {
                 mode: "until",
                 until: config.until,
-                ...(config.timeout ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) } : {}),
+                ...(config.timeout
+                  ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) }
+                  : {}),
               },
             });
           }
@@ -112,7 +116,9 @@ export const waitNode = defineNode<Config>({
             data: {
               mode: "signal",
               signal: config.signal,
-              ...(config.timeout ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) } : {}),
+              ...(config.timeout
+                ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) }
+                : {}),
             },
           });
           if (isTimedOut(payload)) {
@@ -125,8 +131,7 @@ export const waitNode = defineNode<Config>({
             };
           }
           // Resume value (if any) is available; surface it as the node output
-          const result =
-            payload && typeof payload === "object" ? payload : { value: payload };
+          const result = payload && typeof payload === "object" ? payload : { value: payload };
           return {
             update: applyOutput(config.output, result, {
               nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
@@ -151,35 +156,4 @@ function isTimedOut(payload: unknown): boolean {
     return (payload as { timedOut?: unknown }).timedOut === true;
   }
   return false;
-}
-
-function normalizePayload(payload: unknown): Record<string, unknown> {
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    return payload as Record<string, unknown>;
-  }
-  return { value: payload };
-}
-
-/**
- * Lightweight schema check: validates `schema.required` keys only.
- * Full JSON-Schema validation may be added in a future pass.
- */
-function validateSchema(
-  payload: Record<string, unknown>,
-  schema: Record<string, unknown> | undefined,
-  nodeId: string,
-): void {
-  if (!schema) return;
-
-  const required = schema["required"];
-  if (!Array.isArray(required)) return;
-
-  const missing = (required as string[]).filter(
-    (key) => payload[key] === undefined,
-  );
-  if (missing.length > 0) {
-    throw new Error(
-      `wait node "${nodeId}": resume payload missing required field(s): ${missing.join(", ")}`,
-    );
-  }
 }

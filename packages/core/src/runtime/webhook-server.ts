@@ -10,6 +10,7 @@
 import * as http from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
+import { parseWebhookPayload } from "./webhook-payload.js";
 
 export const DEFAULT_WEBHOOK_HOST = "127.0.0.1";
 export const DEFAULT_WEBHOOK_PORT = 8878;
@@ -37,6 +38,8 @@ export interface WebhookRoute {
   url?: string;
   /** Shared secret required on GET/POST for this route (from the graph's `webhookServer.token`). */
   token?: string;
+  /** Required keys and primitive property types, checked before claiming the route. */
+  schema?: Record<string, unknown>;
 }
 
 interface PendingRoute extends WebhookRoute {
@@ -171,6 +174,19 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     sendJson(res, 404, {
       error: "not_waiting",
       message: "Webhook route was already consumed, cancelled, or replaced",
+    });
+    return;
+  }
+
+  // A rejected value must never reach LangGraph: it persists consumed resume
+  // values, so validating in the node alone makes later corrections replay it.
+  try {
+    parseWebhookPayload(body, route.schema, route.nodeId);
+  } catch (err) {
+    sendJson(res, 422, {
+      error: "invalid_payload",
+      status: "interrupted",
+      message: err instanceof Error ? err.message : String(err),
     });
     return;
   }

@@ -1,0 +1,287 @@
+{
+  "node": "v25.2.1",
+  "platform": "darwin/arm64",
+  "findings": [
+    {
+      "scenario": "delayed POST, auth, wrong route, invalid JSON, sequential duplicate",
+      "post": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "duplicate": {
+        "http": 404,
+        "body": {
+          "error": "not_waiting",
+          "message": "No run waiting on thread \"delayed\" node \"await-event\""
+        }
+      },
+      "finishes": 1,
+      "dwellMs": 1000
+    },
+    {
+      "scenario": "eight concurrent waiting threads",
+      "http": [200, 200, 200, 200, 200, 200, 200, 200],
+      "finishes": 9
+    },
+    {
+      "scenario": "missing required field and retry",
+      "missing": {
+        "http": 422,
+        "body": {
+          "error": "invalid_payload",
+          "status": "interrupted",
+          "message": "wait node \"await-event\": missing required field(s): value"
+        }
+      },
+      "wrongType": {
+        "http": 422,
+        "body": {
+          "error": "invalid_payload",
+          "status": "interrupted",
+          "message": "wait node \"await-event\": field \"value\" expected type number."
+        }
+      },
+      "checkpointUnchangedAfterRejection": true,
+      "retry": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "nextAfterLoad": ["await-event"]
+    },
+    {
+      "scenario": "rejected callbacks preserve the wait across SIGKILL and SQLite reload",
+      "checkpointUnchangedAfterRejection": true,
+      "sameUrl": true,
+      "correctedAfterRestart": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "finishes": 1
+    },
+    {
+      "scenario": "JSON scalar false",
+      "result": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "snapshot": {
+        "values": {
+          "received": {
+            "value": false
+          },
+          "outputs": {
+            "await-event": {
+              "value": false
+            }
+          }
+        },
+        "next": [],
+        "checkpointId": "1f1dfa44-9dbf-6ae0-8002-e80adac05999",
+        "createdAt": "2026-11-13T20:53:33.198Z",
+        "interrupts": []
+      }
+    },
+    {
+      "scenario": "JSON scalar 0",
+      "result": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "snapshot": {
+        "values": {
+          "received": {
+            "value": 0
+          },
+          "outputs": {
+            "await-event": {
+              "value": 0
+            }
+          }
+        },
+        "next": [],
+        "checkpointId": "1f1dfa44-a672-63e0-8002-741920d8bb2e",
+        "createdAt": "2026-11-13T20:53:34.111Z",
+        "interrupts": []
+      }
+    },
+    {
+      "scenario": "JSON scalar \"\"",
+      "result": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "snapshot": {
+        "values": {
+          "received": {
+            "value": ""
+          },
+          "outputs": {
+            "await-event": {
+              "value": ""
+            }
+          }
+        },
+        "next": [],
+        "checkpointId": "1f1dfa44-bb09-63d0-8002-d73b6907c844",
+        "createdAt": "2026-11-13T20:53:36.269Z",
+        "interrupts": []
+      }
+    },
+    {
+      "scenario": "JSON scalar null",
+      "result": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "snapshot": {
+        "values": {
+          "received": {
+            "value": null
+          },
+          "outputs": {
+            "await-event": {
+              "value": null
+            }
+          }
+        },
+        "next": [],
+        "checkpointId": "1f1dfa44-c4cf-6ae0-8002-28de08ed9fb6",
+        "createdAt": "2026-11-13T20:53:37.294Z",
+        "interrupts": []
+      }
+    },
+    {
+      "scenario": "overlapping duplicate POSTs",
+      "first": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "second": {
+        "http": 404,
+        "body": {
+          "error": "not_waiting",
+          "message": "Webhook route was already consumed, cancelled, or replaced"
+        }
+      },
+      "finishes": 1
+    },
+    {
+      "scenario": "SIGKILL + SQLite + new process + getState",
+      "routeBeforeLoad": null,
+      "sameUrl": true,
+      "recovered": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "finishes": 1
+    },
+    {
+      "scenario": "completed checkpoint reopened in third process",
+      "next": [],
+      "received": {
+        "value": "survived-restart"
+      },
+      "route": null
+    },
+    {
+      "scenario": "two sequential webhook waits",
+      "firstStatus": "interrupted",
+      "secondStatus": "completed"
+    },
+    {
+      "scenario": "two parallel webhook waits in one thread",
+      "interrupts": 2,
+      "registered": "http://127.0.0.1:61922/webhooks/two-gates/await-second",
+      "gatePosts": [
+        {
+          "http": 404,
+          "body": {
+            "error": "not_waiting",
+            "message": "No run waiting on thread \"two-gates\" node \"await-event\""
+          }
+        },
+        {
+          "http": 200,
+          "body": {
+            "status": "completed"
+          }
+        }
+      ],
+      "state": {
+        "values": {
+          "received": {
+            "value": 1
+          },
+          "second": {
+            "value": 1
+          },
+          "outputs": {
+            "await-event": {
+              "value": 1
+            },
+            "await-second": {
+              "value": 1
+            }
+          }
+        },
+        "next": [],
+        "checkpointId": "1f1dfa45-059f-67a0-8001-b79deb3eaad8",
+        "createdAt": "2026-11-13T20:53:44.090Z",
+        "interrupts": []
+      }
+    },
+    {
+      "scenario": "HITL with onInterrupt webhook",
+      "status": "interrupted",
+      "kind": "approval",
+      "hasWebhookUrl": false,
+      "route": null
+    },
+    {
+      "scenario": "CLI YAML run and real POST",
+      "cliPost": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "completionPrinted": true,
+      "aliveAfterCompletion": true
+    },
+    {
+      "scenario": "malformed percent-encoded route",
+      "pathResponse": {
+        "http": 400,
+        "body": {
+          "error": "invalid_path",
+          "message": "Webhook path contains invalid percent-encoding"
+        }
+      },
+      "afterInvalidPath": {
+        "http": 200,
+        "body": {
+          "status": "completed"
+        }
+      },
+      "alive": true
+    }
+  ]
+}

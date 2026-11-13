@@ -856,7 +856,9 @@ Inbound webhook example:
 
 When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTTP server and attaches a generated URL on the interrupt payload as `data.webhookUrl` (e.g. `http://127.0.0.1:8878/webhooks/<threadId>/<nodeId>`). `POST` a JSON object to that URL to resume; `GET` returns `{ waiting: true }`. Configure host/port via `runtime.webhookServer` (default `127.0.0.1:8878`; on `EADDRINUSE` falls back to an ephemeral port). Optional per-graph `runtime.webhookServer.token` guards GET/POST via `Authorization: Bearer <token>` or `x-flowgraph-token`. Routes are in memory: after restart, compile with the same durable checkpointer and call `compiled.getState(threadId)` to restore a pending thread's route and discover its current URL. Compilation alone does not restore listeners.
 
-Current ingress supports one webhook gate per thread. Schema checks enforce only `required` key presence, and a rejected schema answer is not recoverable by simply posting a corrected answer. Malformed percent-encoded paths return HTTP 400. Each route registration is claimed once after a valid JSON body is read; overlapping POSTs for that registration get one resume and HTTP 404 for the others. Requests whose route was cancelled or replaced while their body was being read also get HTTP 404. This claim is process-local; durable event deduplication still requires additional ingress support. Restrict this ingress to trusted local use pending hardening. See the [verified behavior and follow-on decisions](./spikes/PLAT-278-webhook-resume.md) and [runnable example](../examples/webhook-resume/README.md).
+`with.webhook.schema` checks required keys and the primitive types of top-level properties, using the same lightweight validator as HITL (not a full JSON Schema engine). HTTP callbacks are validated before the route is claimed or a resume value is saved. A rejected payload returns HTTP 422 with `error: "invalid_payload"` and `status: "interrupted"`; the route, pending waiter, checkpoint, and original deadline remain usable. POST a corrected value to the same URL to complete the wait. This also works after restoring the interrupted thread from a durable checkpoint. Scalars and arrays retain their existing `{ value: payload }` normalization before validation. Malformed JSON returns HTTP 400 without consuming the route. This preflight contract applies to the embedded HTTP ingress; direct API/CLI resumes still pass through the wait node's validation.
+
+Current ingress supports one webhook gate per thread. Malformed percent-encoded paths return HTTP 400. Each route registration is claimed once after the JSON body passes validation; overlapping POSTs for that registration get one resume and HTTP 404 for the others. Requests whose route was cancelled or replaced while their body was being read also get HTTP 404. This claim is process-local; durable event deduplication still requires additional ingress support. Restrict this ingress to trusted local use pending hardening. See the [verified behavior and follow-on decisions](./spikes/PLAT-278-webhook-resume.md) and [runnable example](../examples/webhook-resume/README.md).
 
 ### Modes
 
@@ -865,7 +867,7 @@ Current ingress supports one webhook gate per thread. Schema checks enforce only
 | `duration` | In-process sleep for the given duration | No — same as any in-flight node |
 | `until` | Interrupt if the guard is false; re-evaluate on resume | Yes (checkpointed interrupt) |
 | `signal` | Interrupt until resumed with a payload for the named signal | Yes (checkpointed interrupt) |
-| `webhook` | Interrupt until inbound HTTP POST resumes (required schema keys checked) | Interrupt yes; listening URL requires a live process and route rehydration |
+| `webhook` | Interrupt until inbound HTTP POST resumes (required keys and property types checked) | Interrupt yes; listening URL requires a live process and route rehydration |
 
 ### Observability
 
