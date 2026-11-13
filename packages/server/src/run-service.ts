@@ -36,11 +36,19 @@ import {
   loadPersistedGraph,
   readPersistedGraphYaml,
   readGraphMeta,
+  graphStoreClaim,
   updateGraphMeta,
   listPersistedGraphs,
   appendEventJournal,
   loadEventJournal,
+  type GraphStoreHooks,
 } from "./graph-source.js";
+import {
+  assertGraphStoreSweepConfig,
+  GRAPH_STORE_SWEEP_MAX_AGE_MS,
+  startGraphStoreSweeper,
+  type GraphStoreSweeper,
+} from "./graph-store-sweep.js";
 import { buildServerProviders } from "./providers.js";
 import { SessionRegistry } from "./session-registry.js";
 import { createMetrics, errorFields, log } from "./metrics.js";
@@ -89,6 +97,14 @@ const SHUTDOWN_ABORT_GRACE_MS = 2_000;
 /** Per pool or store, how long shutdown waits for it to close. */
 const SHUTDOWN_CLOSE_TIMEOUT_MS = 5_000;
 
+/** What a RunService takes besides its config; tests replace these. */
+export interface RunServiceOptions {
+  /** Clock for graph-store sweeps and listing, in ms since the epoch. Default `Date.now`. */
+  now?: () => number;
+  /** Graph-store test seams, passed to every graph upload. */
+  graphStoreHooks?: GraphStoreHooks;
+}
+
 export class RunService {
   readonly registry: SessionRegistry;
   readonly metrics = createMetrics();
@@ -115,6 +131,7 @@ export class RunService {
   private threadOwners: ThreadOwnerRegistry | undefined;
   private singleUser: Principal | undefined;
   private sweeper: MemorySweeper | undefined;
+  private graphStoreSweeper: GraphStoreSweeper | undefined;
   private closers: Array<() => Promise<void> | void> = [];
   private auth: Authenticator | undefined;
   /** Set by close(): new runs and graph reads are refused from then on. */
@@ -136,13 +153,25 @@ export class RunService {
    */
   private readonly pendingMetaWrites = new Map<Promise<void>, string>();
 
+  private get now(): () => number {
+    return this.options.now ?? Date.now;
+  }
+
+  private get graphStoreMaxAgeMs(): number {
+    return this.config.graphStoreSweep?.maxAgeMs ?? GRAPH_STORE_SWEEP_MAX_AGE_MS;
+  }
+
   /** Resolves callers to principals (OIDC, the legacy token, or none), built from config.auth. */
   get authenticator(): Authenticator {
     this.auth ??= createAuthenticator(this.config);
     return this.auth;
   }
 
-  constructor(readonly config: ServerConfig) {
+  constructor(
+    readonly config: ServerConfig,
+    private readonly options: RunServiceOptions = {},
+  ) {
+    assertGraphStoreSweepConfig(config.graphStoreSweep);
     this.workerLabels = new WorkerLabelManager({
       custom: config.workerLabels,
       checkTimeoutMs: config.workerLabelCheckTimeoutMs,
@@ -174,6 +203,13 @@ export class RunService {
   }
 
   async init(): Promise<void> {
+    // Clear what crashed writers left in the graph store now, then on a timer.
+    this.graphStoreSweeper ??= startGraphStoreSweeper(this.config.graphStoreDir, {
+      maxAgeMs: this.graphStoreMaxAgeMs,
+      intervalMs: this.config.graphStoreSweep?.intervalMs,
+      now: this.now,
+    });
+    await this.graphStoreSweeper.sweepNow();
     await this.getCheckpointer();
     await this.workerLabels.start();
     if (this.multiUser) {
@@ -205,6 +241,8 @@ export class RunService {
     this.workerLabels.stop();
     this.sweeper?.stop();
     this.sweeper = undefined;
+    // A sweep under way finishes first: nothing is removed from the store after close().
+    await this.graphStoreSweeper?.stop();
     const timeoutMs = this.config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
     if (!(await this.drain(timeoutMs))) {
       const running = this.registry.list().filter((s) => s.status === "running" || s.status === "started");
@@ -648,6 +686,7 @@ export class RunService {
         ...extras,
         owner: this.ownerOf(principal),
         yamlFormat: "raw",
+        ...(this.options.graphStoreHooks ? { hooks: this.options.graphStoreHooks } : {}),
       });
       return {
         spec: parsed.spec,
@@ -724,7 +763,14 @@ export class RunService {
     const meta = await this.checkThreadAccess(req.threadId, principal);
     // Past the access check the caller may see this thread (never another principal's), so tell
     // it the thread exists instead of starting over it: a coordinator reconnects rather than re-sends.
-    this.assertThreadFree(req.threadId, meta);
+    // A claim with no graph file, older than the sweep age, is listed as `error` and the owner
+    // may start it again (the create never finished). The file still says `running`.
+    let freeMeta = meta;
+    if (meta && meta.status !== "error") {
+      const claim = await graphStoreClaim(this.config.graphStoreDir, req.threadId, { maxAgeMs: this.graphStoreMaxAgeMs, now: this.now() });
+      if (claim === "old") freeMeta = { ...meta, status: "error" };
+    }
+    this.assertThreadFree(req.threadId, freeMeta);
     await this.claimThread(req.threadId, principal);
 
     const max = this.config.maxConcurrentRuns ?? 16;
@@ -1260,7 +1306,11 @@ export class RunService {
     const principal = this.principalFor(caller);
     // Multi-user servers list only the caller's threads.
     const mine = (owner: ThreadOwner | undefined) => !this.multiUser || owner?.id === principal.id;
-    const persisted = await listPersistedGraphs(this.config.graphStoreDir);
+    // A thread whose create stopped before its graph was stored lists as
+    // `error` once it is older than the sweep age, not as running forever.
+    const persisted = await listPersistedGraphs(this.config.graphStoreDir, {
+      orphans: { maxAgeMs: this.graphStoreMaxAgeMs, now: this.now() },
+    });
     const byId = new Map<string, RunListItem>();
     for (const meta of persisted) {
       if (!mine(meta.owner)) continue;
