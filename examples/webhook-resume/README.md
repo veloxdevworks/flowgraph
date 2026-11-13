@@ -32,6 +32,16 @@ signature verification. Read the findings before exposing ingress to other hosts
 
 ## Repeat the spike
 
+When a graph declares `with.webhook.schema`, callbacks with missing required keys
+or incorrect primitive property types return HTTP 422 with
+`{"error":"invalid_payload","status":"interrupted",...}`. They leave the checkpoint,
+route, pending waiter, and deadline in place. A corrected callback can be sent to
+the same URL, including after reopening the durable checkpoint in another process.
+The harness checks this rejection/retry sequence and confirms one completion.
+
+The schema checks cover required keys and top-level primitive property types;
+they do not implement the full JSON Schema specification.
+
 From the repository root:
 
 ```sh

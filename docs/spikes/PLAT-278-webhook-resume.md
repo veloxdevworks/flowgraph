@@ -36,9 +36,38 @@ upstream falsy-resume fix. The current harness asserts successful HTTP resume fo
 historical. The refreshed follow-up evidence was captured on this rebased engine.
 
 This is a claim on one in-memory registration, not durable event-id deduplication
-across retries, later gates, process restarts, or hosts. Schema rejection,
-independent parallel gates, and always-on hosting remain the follow-on work
-described below.
+across retries, later gates, process restarts, or hosts. Independent parallel gates
+and always-on hosting remain follow-on work. Retry-safe schema rejection is covered
+by the next section.
+
+## Follow-up: retry-safe HTTP payload validation
+
+HTTP ingress now checks the normalized payload against the schema recorded on the
+pending interrupt **before** claiming its route or invoking resume. Missing
+required keys and wrong primitive property types return HTTP 422/`invalid_payload`
+with `status: interrupted`. Invalid JSON still returns HTTP 400. A schema rejection
+does not settle the waiter, emit a run failure, or change the checkpoint or
+deadline. The same authenticated route accepts a corrected callback.
+
+HTTP and the wait node share the existing HITL schema checks: required keys and
+top-level primitive property types, not full JSON Schema validation. The node
+retains its guard for non-HTTP resume paths; the retry-safe preflight described
+here is specific to HTTP callbacks. Falsy and array bodies keep their existing
+`{ value: payload }` normalization.
+
+The regression test sends several rejected values, verifies the exact route,
+waiter, and snapshot remain unchanged, then sends a corrected callback and checks
+one completion. The process harness additionally rejects a callback, kills the
+process, restores the SQLite thread, rejects a wrong type on the restored route,
+then accepts the corrected callback. Evidence is recorded separately in
+[retry validation JSON](./PLAT-278-webhook-resume-retry-validation.json), preserving
+the original failure captures below.
+
+Validation for this follow-up: root build passed (16 tasks), root typecheck passed
+(30 tasks), and the process harness passed. The complete core suite with two
+workers reported 1,151 passed, five skipped, and the same existing
+`worktree.test.ts:129` failure. All HTTP validation, overlap, wait, and HITL tests
+passed. Syntax, formatting, and whitespace checks also passed.
 
 ## Decision
 
@@ -161,8 +190,8 @@ spike; the aggregate suite is not green.
 | [PLAT-283](https://veloxdevworks.atlassian.net/browse/PLAT-283) — notification sinks             | **Proceed.** Human approval is `kind: approval`; webhook wait is `kind: custom` plus mode `webhook`. Avoid a human-action notification for external waits.                                                                                                                                                                 |
 | [PLAT-284](https://veloxdevworks.atlassian.net/browse/PLAT-284) — example/adapter                | **Proceed as a trusted local demonstration. Block a production recipe** until PLAT-279's delivery and ingress guarantees are verified.                                                                                                                                                                                     |
 
-The follow-up above resolves the malformed-path crash and overlapping-delivery
-race. Keep the single-gate limitation explicit until routes and resumes are scoped
-to an individual interrupt. Full schema validation and recoverable rejected
-answers are also prerequisites for treating external input as a reliable
-integration.
+The follow-ups above resolve the malformed-path crash, overlapping-delivery race,
+and retry-safe HTTP rejection for the current schema checks. Keep the single-gate
+limitation explicit until routes and resumes are scoped to an individual
+interrupt. Durable event deduplication and production hosting remain follow-on
+work; broader JSON Schema support is outside the validator's declared subset.

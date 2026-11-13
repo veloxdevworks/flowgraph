@@ -217,23 +217,60 @@ if (process.argv[2] === "--worker") {
       schema: { type: "object", required: ["value"], properties: { value: { type: "number" } } },
     });
     const missingUrl = await start(strict, "missing-field");
+    const beforeRejection = await strict.rpc("state", "missing-field");
     const missing = await request(missingUrl, "{}");
-    const retry = await request(missingUrl, '{"value":42}');
-    const afterLoad = await strict.rpc("state", "missing-field");
-    const retryAfterLoad = await request(urlOf(afterLoad) ?? missingUrl, '{"value":42}');
     assert.equal(missing.http, 422);
+    assert.equal(missing.body.status, "interrupted");
+    assert.equal((await request(missingUrl, undefined, {}, "GET")).body.waiting, true);
+    assert.deepEqual(await strict.rpc("state", "missing-field"), beforeRejection);
+    const wrongType = await request(missingUrl, '{"value":"not-a-number"}');
+    assert.equal(wrongType.http, 422);
+    assert.equal((await strict.rpc("inspect", "missing-field")).finishes, 0);
+    const afterLoad = await strict.rpc("state", "missing-field");
+    assert.deepEqual(afterLoad, beforeRejection);
+    const retry = await request(missingUrl, '{"value":42}');
+    assert.deepEqual(retry, { http: 200, body: { status: "completed" } });
+    assert.equal((await strict.rpc("state", "missing-field")).values.received.value, 42);
+    assert.equal((await strict.rpc("inspect", "missing-field")).finishes, 1);
     record("missing required field and retry", {
       missing,
+      wrongType,
+      checkpointUnchangedAfterRejection: true,
       retry,
       nextAfterLoad: afterLoad.next,
-      retryAfterLoad,
-    });
-    const wrongType = await request(await start(strict, "wrong-type"), '{"value":"not-a-number"}');
-    record("schema property type", {
-      wrongType,
-      received: (await strict.rpc("state", "wrong-type")).values.received,
     });
     await strict.stop();
+
+    const retryConfig = {
+      db: path.join(temp, "retry-validation.db"),
+      token: "retry-local-token",
+      schema: { required: ["value"], properties: { value: { type: "number" } } },
+    };
+    const retryAuth = { Authorization: "Bearer retry-local-token" };
+    const rejected = await worker(retryConfig);
+    const retryUrl = await start(rejected, "retry-restart");
+    const beforeRestartRejection = await rejected.rpc("state", "retry-restart");
+    assert.equal((await request(retryUrl, "{}", retryAuth)).http, 422);
+    assert.deepEqual(await rejected.rpc("state", "retry-restart"), beforeRestartRejection);
+    await rejected.stop();
+    const restoredRetry = await worker({ ...retryConfig, port: Number(new URL(retryUrl).port) });
+    assert.equal((await restoredRetry.rpc("inspect", "retry-restart")).route, null);
+    const restoredWait = await restoredRetry.rpc("state", "retry-restart");
+    assert.equal(restoredWait.checkpointId, beforeRestartRejection.checkpointId);
+    assert.equal(urlOf(restoredWait), retryUrl);
+    assert.equal((await request(retryUrl, '{"value":"wrong"}', retryAuth)).http, 422);
+    assert.deepEqual(await restoredRetry.rpc("state", "retry-restart"), restoredWait);
+    const correctedAfterRestart = await request(retryUrl, '{"value":7}', retryAuth);
+    assert.deepEqual(correctedAfterRestart, { http: 200, body: { status: "completed" } });
+    assert.equal((await restoredRetry.rpc("inspect", "retry-restart")).finishes, 1);
+    assert.equal((await restoredRetry.rpc("state", "retry-restart")).values.received.value, 7);
+    record("rejected callbacks preserve the wait across SIGKILL and SQLite reload", {
+      checkpointUnchangedAfterRejection: true,
+      sameUrl: true,
+      correctedAfterRestart,
+      finishes: 1,
+    });
+    await restoredRetry.stop();
 
     for (const value of [false, 0, "", null]) {
       const scalar = await worker();
