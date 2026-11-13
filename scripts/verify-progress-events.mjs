@@ -108,10 +108,59 @@ try {
   assert.deepEqual(stateChanges(streamed)[0].data.update.items, ["seed", "left", "right"]);
   assert.equal(edges(streamed).length, 4);
   assert(streamed.every((event) => event.threadId === "programmatic-progress"));
+  // Reuse the same compiled graph/thread and hold the consumer after its
+  // first yield until execution has ended. No old buffer may be replayed,
+  // and progress queued during the pause must still precede terminal delivery.
+  let completionTimer;
+  let stopObserving;
+  const completedAgain = new Promise((resolve, reject) => {
+    completionTimer = setTimeout(
+      () => reject(new Error("Repeated API stream did not finish")),
+      10_000,
+    );
+    stopObserving = compiled.events.subscribe((event) => {
+      if (event.type === "run.end" && event.threadId === "programmatic-progress") resolve();
+    });
+  });
+  const repeated = [];
+  const repeatedIterator = compiled
+    .stream({ threadId: "programmatic-progress" })
+    [Symbol.asyncIterator]();
+  try {
+    const first = await repeatedIterator.next();
+    assert.equal(first.value.type, "run.start");
+    repeated.push(first.value);
+    await completedAgain;
+    for (;;) {
+      const next = await repeatedIterator.next();
+      if (next.done) break;
+      repeated.push(next.value);
+    }
+  } finally {
+    clearTimeout(completionTimer);
+    stopObserving();
+    await repeatedIterator.return?.();
+  }
+  assert.equal(stateChanges(repeated).length, 1);
+  assert.deepEqual(stateChanges(repeated)[0].data.update.items, [
+    "seed",
+    "left",
+    "right",
+    "left",
+    "right",
+  ]);
+  assert.equal(edges(repeated).length, 4);
+  assert.equal(repeated.at(-1).type, "run.end");
+  assert(repeated.every((event) => !streamed.some((previous) => previous.id === event.id)));
   findings.push({
     scenario: "built API stream, parallel reducers and terminal delivery",
     progress: progress(streamed),
     terminal: streamed.at(-1).type,
+    repeatedSlowConsumer: {
+      progress: progress(repeated),
+      terminal: repeated.at(-1).type,
+      replayedPriorInvocation: false,
+    },
   });
 
   const cliEvents = await cli([

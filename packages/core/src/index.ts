@@ -192,7 +192,7 @@ export type {
 } from "./nodes/script.js";
 
 export { createEventBus, consoleSink, jsonlSink } from "./events.js";
-export type { FlowgraphEvent, EventType, EventBus, EventSink, EventScope, StateUpdateData, EdgeTakenData } from "./events.js";
+export type { FlowgraphEvent, EventType, EventBus, EventSink, EventScope, EventStreamOptions, StateUpdateData, EdgeTakenData } from "./events.js";
 
 export {
   createEnvSecretProvider,

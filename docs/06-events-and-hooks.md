@@ -128,6 +128,23 @@ interface EdgeTakenData {
   change appear. These payloads contain graph structure and state channels only;
   no integration-specific field names are built into the event contract.
 
+### Stream lifecycle
+
+`compiled.stream()` subscribes before starting execution and delivers only new
+execution events for that call's thread. Reusing one compiled graph for a second
+stream does not replay an earlier invocation's progress. Slow consumers still
+receive every queued progress event before the terminal event. If admission or
+input validation rejects a new invocation before execution starts, that stream
+throws locally and unsubscribes; it neither consumes another owner's events nor
+broadcasts a terminal event to an existing stream.
+
+`compiled.events.stream()` replays its existing buffer by default, including when
+execution has already ended. Use `{ replay: false, threadId: "my-thread" }` for
+live-only delivery scoped to a thread. Iteration subscribes before yielding any
+buffered events, so completion during replay cannot leave a reader hanging.
+`run.end`, `run.error`, `run.aborted`, and `run.paused` end the stream after they
+are delivered; an interrupt alone leaves it open for later resume events.
+
 ### Nested subgraph events
 
 When a `subgraph` node embeds a child graph, the child's `node.*` / `skill.*` / `intelligent.*` / etc. events are **forwarded onto the parent run's EventBus** with:

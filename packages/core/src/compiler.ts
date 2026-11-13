@@ -316,6 +316,8 @@ type ExecuteMode = "start" | "resume" | "continue";
 interface InvokeOverrides {
   /** Stop after one superstep (LangGraph invoke-time `interruptAfter: "*"`). */
   singleStep?: boolean;
+  /** Internal stream lifecycle: called only after admission, before execution events. */
+  onExecutionStart?: () => void;
 }
 
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
@@ -541,6 +543,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
     const startEvent =
       mode === "resume" ? "interrupt.resumed" : mode === "continue" ? "run.continued" : "run.start";
+    overrides.onExecutionStart?.();
     events.emit(startEvent, {
       graphName: graphSpec.metadata.name,
     });
@@ -949,9 +952,43 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       return continueRun(opts, { singleStep: true });
     },
     stream: async function* (runOpts: RunOptions = {}) {
-      const streamP = events.stream();
-      executeInvoke(runOpts.input ?? {}, runOpts, "start").catch(() => {});
-      yield* streamP;
+      const threadId = runOpts.threadId ?? `thread-${runId}`;
+      const queue: FlowgraphEvent[] = [];
+      const lifecycle: { started: boolean; outcome?: RunResult; failure?: Error } = { started: false };
+      let wake: (() => void) | undefined;
+      const notify = () => { wake?.(); wake = undefined; };
+      const unsubscribe = events.subscribe((event) => {
+        if (!lifecycle.started || event.threadId !== threadId) return;
+        queue.push(event);
+        notify();
+      });
+      // A coordinating host may reject this invocation before it runs. Ignore
+      // another owner's events until our own execution starts, and handle a
+      // rejected invocation locally without terminating the owner's stream.
+      void executeInvoke(runOpts.input ?? {}, runOpts, "start", {
+        onExecutionStart: () => { lifecycle.started = true; },
+      }).then((result) => {
+        lifecycle.outcome = result;
+        notify();
+      }, (error: unknown) => {
+        lifecycle.failure = error instanceof Error ? error : new Error(String(error));
+        notify();
+      });
+      try {
+        for (;;) {
+          while (queue.length > 0) {
+            const event = queue.shift()!;
+            yield event;
+            if (["run.end", "run.error", "run.aborted", "run.paused"].includes(event.type)) return;
+          }
+          if (lifecycle.failure) throw lifecycle.failure;
+          if (lifecycle.outcome?.status === "error") throw lifecycle.outcome.error ?? new Error("Run failed before execution");
+          if (lifecycle.outcome && lifecycle.outcome.status !== "interrupted") return;
+          await new Promise<void>((resolve) => { wake = resolve; });
+        }
+      } finally {
+        unsubscribe();
+      }
     },
   };
 }
