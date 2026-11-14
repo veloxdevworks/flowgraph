@@ -62,6 +62,14 @@ function stripImports(graph: Record<string, unknown>, depth: number): boolean {
  * environment unless `expandEnv` is false (untrusted uploads, stored graphs).
  */
 export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}): ParseGraphYamlResult {
+  return parseGraphSource(raw, opts);
+}
+
+function parseGraphSource(
+  raw: string,
+  opts: { expandEnv?: boolean },
+  legacyStored = false,
+): ParseGraphYamlResult {
   const expanded = opts.expandEnv === false ? raw : expandEnvVars(raw);
   let parsed: unknown;
   try {
@@ -88,7 +96,19 @@ export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}):
     importsStripped = stripImports(parsed as Record<string, unknown>, 0);
   }
 
-  if(importsStripped)return {spec:null,yaml:raw,importsStripped:true,diagnostics:[{severity:"error",code:"UPLOAD_IMPORTS_BLOCKED",path:"imports",message:"Client graph uploads cannot load imports (including nested graphs). Register modules on the server and reference server-provided capabilities instead."}]};
+  if (importsStripped && !legacyStored) {
+    return {
+      spec: null,
+      yaml: raw,
+      importsStripped: true,
+      diagnostics: [{
+        severity: "error",
+        code: "UPLOAD_IMPORTS_BLOCKED",
+        path: "imports",
+        message: "Client graph uploads cannot load imports (including nested graphs). Register modules on the server and reference server-provided capabilities instead.",
+      }],
+    };
+  }
 
   const result = GraphSpecSchema.safeParse(parsed);
   if (!result.success) {
@@ -548,8 +568,13 @@ export async function loadPersistedGraph(
     const stored = await readPersistedGraphYaml(dir, threadId);
     if (!stored) return null;
     const raw = stored.meta?.yamlFormat === "raw";
-    const parsed = parseGraphYaml(stored.yaml, { expandEnv: raw && opts.expandEnv === true });
+    // Older uploads were accepted with imports removed at execution time.
+    // Preserve those threads without restoring any client code execution.
+    const parsed = parseGraphSource(stored.yaml, { expandEnv: raw && opts.expandEnv === true }, true);
     if (!parsed.spec) return null;
+    if (parsed.importsStripped) {
+      log("warn", "stripped legacy imports from stored graph", { threadId });
+    }
     return { yaml: raw ? stored.yaml : parsed.yaml, spec: parsed.spec, meta: stored.meta };
   } catch (err) {
     if (err instanceof ServerRequestError) throw err;

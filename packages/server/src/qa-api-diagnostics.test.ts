@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
@@ -135,4 +135,30 @@ it("returns a structured import refusal from the real upload endpoint", async ()
     ]),
   });
   expect(service.registry.get("blocked")).toBeUndefined();
+});
+
+it("resumes a paused pre-upgrade thread with stored imports safely removed", async () => {
+  const { service, config } = await boot();
+  const graph = {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: "legacy-resume" },
+    state: { channels: { approval: { type: "object" } } },
+    nodes: [{
+      id: "gate",
+      type: "hitl",
+      with: { mode: "approve", message: "Continue?", output: { to: "approval" } },
+    }],
+    edges: [{ from: "START", to: "gate" }, { from: "gate", to: "END" }],
+    runtime: { checkpoint: { backend: "memory" }, hitl: { onInterrupt: "fail" } },
+  };
+  await service.startRun({ threadId: "legacy", yaml: JSON.stringify(graph) });
+  await vi.waitFor(() => expect(service.registry.get("legacy")?.status).toBe("interrupted"));
+  // Older servers persisted the original upload, including ignored imports.
+  await writeFile(join(config.graphStoreDir, "legacy.graph.yaml"), JSON.stringify({
+    ...graph,
+    imports: [{ providers: "./never-execute.mjs" }],
+  }));
+  await service.resumeRun({ threadId: "legacy", resume: { approved: true } });
+  await vi.waitFor(() => expect(service.registry.get("legacy")?.status).toBe("completed"));
 });

@@ -677,8 +677,10 @@ export class RunService {
       const parsed = parseGraphYaml(yaml, { expandEnv: principal.trusted });
       if (!parsed.spec) {
         const msg = parsed.diagnostics.map((d) => d.message).join("; ");
-        const code=parsed.diagnostics.some(d=>d.code==="UPLOAD_IMPORTS_BLOCKED")?"UPLOAD_IMPORTS_BLOCKED":"INVALID_GRAPH";
-        throw new ServerRequestError(400,code,`Invalid graph YAML: ${msg}`,parsed.diagnostics);
+        const code = parsed.diagnostics.some((d) => d.code === "UPLOAD_IMPORTS_BLOCKED")
+          ? "UPLOAD_IMPORTS_BLOCKED"
+          : "INVALID_GRAPH";
+        throw new ServerRequestError(400, code, `Invalid graph YAML: ${msg}`, parsed.diagnostics);
       }
       if (!principal.trusted) assertUntrustedUploadAllowed(yaml, parsed.spec, this.uploadOptions);
       if (parsed.importsStripped) {
@@ -1417,13 +1419,16 @@ export class RunService {
     const meta = persisted?.meta;
     const status = live?.status ?? meta?.status ?? "completed";
     const failure = status === "error"
-      ? [...(await this.getJournal(threadId, caller))].reverse().find(event => event.type === "run.error")
+      ? [...(await this.getJournal(threadId, caller))].reverse().find((event) => event.type === "run.error")
       : undefined;
-    const failureData = failure?.data as {message?:unknown;error?:unknown;code?:unknown}|undefined;
+    const failureData = failure?.data as { message?: unknown; error?: unknown; code?: unknown } | undefined;
     const message = typeof failureData?.message === "string" ? failureData.message
       : typeof failureData?.error === "string" ? failureData.error : undefined;
     return {
-      ...(message?{error:{message,...(typeof failureData?.code==="string"?{code:failureData.code}:{})}}:{}),
+      ...(message ? { error: {
+        message,
+        ...(typeof failureData?.code === "string" ? { code: failureData.code } : {}),
+      } } : {}),
       threadId,
       graphName: live?.graphName || meta?.graphName || "graph",
       ...(live?.label || meta?.label ? { label: (live?.label || meta?.label) as string } : {}),

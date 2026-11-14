@@ -77,7 +77,7 @@ export interface RunListItem {
 }
 
 export interface RunDetail extends RunListItem {
-  error?: {message:string;code?:string};
+  error?: { message: string; code?: string };
   yaml: string;
   issues?: import("@flowgraph/core").RunIssue[];
 }

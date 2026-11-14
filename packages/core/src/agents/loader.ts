@@ -40,9 +40,20 @@ export async function loadAgentDef(
     return { agent: null, diagnostics };
   }
 
-  let parsed:ReturnType<typeof matter>;
-  try {parsed=matter(raw);}
-  catch(cause){return {agent:null,diagnostics:[{severity:"error",code:"AGENT_FRONT_MATTER_ERROR",file:resolvedPath,message:`${resolvedPath}: invalid agent front matter: ${cause instanceof Error?cause.message:String(cause)}`}]};}
+  let parsed: ReturnType<typeof matter>;
+  try {
+    parsed = matter(raw);
+  } catch (cause) {
+    return {
+      agent: null,
+      diagnostics: [{
+        severity: "error",
+        code: "AGENT_FRONT_MATTER_ERROR",
+        file: resolvedPath,
+        message: `${resolvedPath}: invalid agent front matter: ${cause instanceof Error ? cause.message : String(cause)}`,
+      }],
+    };
+  }
   const frontMatterResult = AgentFrontMatterSchema.safeParse(parsed.data);
 
   if (!frontMatterResult.success) {
