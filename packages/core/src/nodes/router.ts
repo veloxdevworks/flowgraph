@@ -41,6 +41,7 @@ export const routerNode = defineNode<Config>({
         // Find the first matching route
         let matchedTo: string | null = null;
         let matchedKey: string | null = null;
+        const matched: Array<{ key: string; to: string }> = [];
 
         for (const [key, route] of routes) {
           if (route.default) continue;
@@ -51,7 +52,8 @@ export const routerNode = defineNode<Config>({
               if (evalGuard(expr, scope)) {
                 matchedTo = route.to;
                 matchedKey = key;
-                break;
+                matched.push({ key, to: route.to });
+                if (config.match !== "allMatches") break;
               }
             } catch (err) {
               ctx.logger.warn(`router: error evaluating route "${key}" condition`, {
@@ -77,6 +79,13 @@ export const routerNode = defineNode<Config>({
             matchedTo = defaultRoute[1].to;
             matchedKey = defaultRoute[0];
           }
+        }
+
+        if (config.match === "allMatches" && matched.length > 0) {
+          const to = [...new Set(matched.map(r => r.to))];
+          const chosen = matched.map(r => r.key);
+          ctx.emit("router.decision", { routes: Object.keys(config.routes), chosen, to, mode: config.mode });
+          return { command: { goto: to, update: applyOutput(config.output, chosen, { nodeId: String(nodeSpec["id"]), scope }) } };
         }
 
         ctx.emit("router.decision", {

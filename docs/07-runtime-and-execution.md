@@ -335,6 +335,10 @@ runGraph()
 
 ## 10. Failure semantics
 
+After retries and `node:error` hooks, `on.error: fail` (the default) fails the run. `continue` and `ignore` record an issue, produce no node result, and follow normal successors while siblings finish. `route:<nodeId>` selects only the recovery path. A hook route is also exclusive. For maps, failed items have no collected value; admitted siblings finish before the map's recovery route runs. Inner item policies override the map's policy.
+
+`runtime.recursionLimit` bounds supersteps per invocation, including parallel bookkeeping. Its default is 1,000; choose a smaller positive value for a tighter guard. Resume/continue starts a new invocation and a new counter; this is not a lifetime thread budget. Limit errors use code `RECURSION_LIMIT` and name the graph, pending nodes, and the YAML setting. `retry.retryOn` matches exact error `code`/`status`/`statusCode` values or complete message tokens (`code 7` does not match `code 75`).
+
 | Failure | Default behavior | Configurable |
 |---|---|---|
 | Node throws after retries | `run.error`, non-zero exit, last checkpoint retained | `on.error: continue/route/fail` |

@@ -73,11 +73,10 @@ function shouldRetry(err: unknown, retryOn?: Array<number | string>): boolean {
   if (!retryOn || retryOn.length === 0) return true; // retry all by default
   const message = err instanceof Error ? err.message : String(err);
   for (const matcher of retryOn) {
-    if (typeof matcher === "number") {
-      if (message.includes(String(matcher))) return true;
-    } else if (message.includes(matcher)) {
-      return true;
-    }
+    const fields = err && typeof err === "object" ? err as { code?: unknown; status?: unknown; statusCode?: unknown } : {};
+    if ([fields.code, fields.status, fields.statusCode].some(value => value != null && String(value) === String(matcher))) return true;
+    const escaped = String(matcher).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (escaped && new RegExp(`(^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`, "u").test(message)) return true;
   }
   return false;
 }

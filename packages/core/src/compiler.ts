@@ -92,6 +92,7 @@ import { planPlacements, type CompilePlacementOptions, type PlacementPlan } from
 import type { PlacementInfo, RemoteNodeExecutor } from "./placement/remote.js";
 import { wrapperSpecForNode } from "./placement/remote.js";
 import { hitlRouteTargets } from "./nodes/hitl-routes.js";
+import { exclusiveRouting, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
 import {
@@ -836,7 +837,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         current = resumeCommand(resumeValue, interrupts, threadId);
       }
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
+      let error = err instanceof Error ? err : new Error(String(err));
+      if (error.name === "GraphRecursionError") {
+        let pending = spec.nodes.map(n => n.id).slice(0, 10);
+        try { pending = [...(await compiledLg.getState(cfg)).next]; } catch { /* no checkpointer */ }
+        error = Object.assign(new Error(`Graph "${graphSpec.metadata.name}" reached runtime.recursionLimit (${graphSpec.runtime?.recursionLimit ?? 1000}) in this invocation; pending/graph nodes: ${pending.join(", ")}. Add a terminating route or increase runtime.recursionLimit. The counter restarts on resume.`, { cause: error }), { code: "RECURSION_LIMIT", retryable: false });
+      }
       if (isAbortFailure(err, runOpts.signal)) {
         events.emit("run.aborted", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
         await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
@@ -1184,6 +1190,7 @@ async function assembleCompiledLangGraph(
           defaultRetry,
           defaultTimeout,
           executionLimit,
+          externalHooks: opts.hooks,
         },
         mapJoinById,
       );
@@ -1248,7 +1255,8 @@ async function assembleCompiledLangGraph(
 
     // Routers (and any routing-capable node) declare Command.goto destinations via
     // `ends` so LangGraph accepts goto without requiring a duplicate branch edge.
-    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id), ...nodeToolTargets(spec, nodeSpec.id)].map((target) => target === "END" ? END : target))];
+    const recovery = recoveryTargets(spec, nodeSpec, opts.hooks);
+    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id), ...nodeToolTargets(spec, nodeSpec.id), ...recovery].map(target => target === "END" ? END : target))];
     const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
 
     const executeNode = async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
@@ -1384,13 +1392,26 @@ async function assembleCompiledLangGraph(
             return update;
           }
         }
+        const policy = nodeSpec.on?.error;
+        if (policy === "continue" || policy === "ignore") {
+          events.emit("node.error", { nodeId: nodeSpec.id, error: String(err), swallowed: true, policy }, scope);
+          const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `node "${nodeSpec.id}" continued after an error: ${String(err)}`, impact: "The node produced no result; subsequent nodes and sibling branches continue." }, { nodeId: nodeSpec.id, nodeType: nodeSpec.type });
+          events.emit("run.issue", issue, scope);
+          return { [ISSUES_CHANNEL]: [issue] };
+        }
+        if (policy?.startsWith("route:")) {
+          const to = policy.slice(6);
+          events.emit("node.error", { nodeId: nodeSpec.id, error: String(err), routed: to }, scope);
+          return new Command({ goto: to === "END" ? END : to }) as unknown as Record<string, unknown>;
+        }
         events.emit("node.error", { nodeId: nodeSpec.id, error: String(err) }, scope);
         throw err;
       }
     };
+    const routedNode = exclusiveRouting(nodeSpec.id, recovery.length > 0, executeNode);
     graph.addNode(nodeSpec.id,
       (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) =>
-        executionLimit(() => executeNode(state, lgConfig), lgConfig, lgConfig?.signal ?? runSignalOf(lgConfig, baseCtx.signal)),
+        executionLimit(() => routedNode(state, lgConfig), lgConfig, lgConfig?.signal ?? runSignalOf(lgConfig, baseCtx.signal)),
       addNodeOpts as Parameters<typeof graph.addNode>[2]);
   }
 
@@ -1453,6 +1474,15 @@ async function assembleCompiledLangGraph(
   // declared from with.routes — skip their static/branch edges so a UI fan-out
   // (`to: [a, b]`) cannot race with the router's decision and run both branches.
   const routerIds = new Set(spec.nodes.filter(declaresRoutes).map((n) => n.id));
+  for (const node of spec.nodes) {
+    if (recoveryTargets(spec, node, opts.hooks).length === 0) continue;
+    routerIds.add(node.id);
+    graph.addConditionalEdges((mapJoinById.get(node.id) ?? node.id) as typeof START, (state: Record<string, unknown>) => {
+      const selected = (state[ROUTING_CHANNEL] as Record<string, string | string[] | null> | undefined)?.[node.id];
+      const targets = selected == null ? normalTargets(spec, node.id, state) : Array.isArray(selected) ? selected : [selected];
+      return targets.map(to => to === "END" ? END : to);
+    }, Object.fromEntries([...spec.nodes.map(n => n.id), END].map(id => [id, id])) as Record<string, typeof END>);
+  }
   for (const edge of spec.edges) {
     if (routerIds.has(edge.from)) continue;
     let from = edge.from === "START" ? START : edge.from;
@@ -1585,7 +1615,7 @@ function buildInvokeConfig(
   spec: GraphSpec,
   checkpointId?: string,
 ): Record<string, unknown> {
-  const recursionLimit = spec.runtime?.recursionLimit;
+  const recursionLimit = spec.runtime?.recursionLimit ?? 1000;
   return {
     configurable: {
       thread_id: threadId,
@@ -2467,7 +2497,7 @@ export async function hydrateDurableRuntime(
 function addCheckpointedMap(
   graph: StateGraph<unknown>,
   spec: GraphSpec,
-  nodeSpec: { id: string; type: string; with?: unknown; retry?: unknown; timeout?: unknown },
+  nodeSpec: NodeSpec,
   configUnknown: unknown,
   ctx: {
     runId: string;
@@ -2479,6 +2509,7 @@ function addCheckpointedMap(
     defaultRetry: unknown;
     defaultTimeout: unknown;
     executionLimit: ExecutionLimit;
+    externalHooks?: Hook[] | undefined;
   },
   mapJoinById: Map<string, string>,
 ): void {
@@ -2507,9 +2538,22 @@ function addCheckpointedMap(
 
   const mapLimit = createExecutionLimit(config.concurrency);
 
+  const recover = async (err: unknown, state: Record<string, unknown>, itemId = mapId) => {
+    if (isInterruptLike(err) || ctx.baseCtx.signal?.aborted) throw err;
+    const error = err instanceof Error ? err : new Error(String(err));
+    const hook = await ctx.hooks.run("node:error", { state, run: ctx.baseCtx.meta as RunMeta, payload: { nodeId: mapId, nodeType: "map", error } });
+    const innerPolicy = itemId === mapId ? undefined : (config.node as { on?: { error?: string } }).on?.error;
+    const policy = hook.control?.kind === "route" ? `route:${hook.control.to}` : hook.control?.kind === "veto" ? "continue" : innerPolicy ?? nodeSpec.on?.error;
+    ctx.events.emit("node.error", { nodeId: itemId, error: error.message, ...(policy && policy !== "fail" ? { swallowed: true, policy } : {}) }, { nodeId: itemId, nodeType: itemId === mapId ? "map" : innerType });
+    if (!policy || policy === "fail") throw err;
+    const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `map item/node "${itemId}" failed: ${error.message}`, impact: "Failed items have no collected value; admitted siblings finish before recovery." }, { nodeId: itemId, nodeType: innerType });
+    return { [ISSUES_CHANNEL]: [issue], ...(policy.startsWith("route:") ? { [ROUTING_CHANNEL]: { [mapId]: policy.slice(6) } } : {}) };
+  };
+
   graph.addNode(
     mapId,
     async (state: Record<string, unknown>) => {
+      try {
       const scope = { state, config: ctx.baseCtx.config ?? {}, run: ctx.baseCtx.meta ?? {} };
       const collection = renderDeep(config.over, scope);
       if (!Array.isArray(collection)) {
@@ -2522,10 +2566,10 @@ function addCheckpointedMap(
       if (collection.length === 0) {
         const update = collectMapResults(config, [], mapId, scope);
         ctx.events.emit("node.end", { nodeId: mapId, update }, { nodeId: mapId, nodeType: "map" });
-        return new Command({ goto: joinId, update: { ...update, ...reset } }) as unknown as Record<string, unknown>;
+        return new Command({ goto: joinId, update: { ...update, ...reset, [ROUTING_CHANNEL]: { [mapId]: null } } }) as unknown as Record<string, unknown>;
       }
       return new Command({
-        update: reset,
+        update: { ...reset, [ROUTING_CHANNEL]: { [mapId]: null } },
         goto: collection.map(
           (item, index) =>
             new Send(workerId, {
@@ -2534,6 +2578,10 @@ function addCheckpointedMap(
             }),
         ),
       }) as unknown as Record<string, unknown>;
+      } catch (err) {
+        const update = await recover(err, state);
+        return new Command({ goto: joinId, update: { [MAP_COLLECT_CHANNEL]: { [mapId]: [] }, [ROUTING_CHANNEL]: { [mapId]: null }, ...update } }) as unknown as Record<string, unknown>;
+      }
     },
     { ends: [workerId, joinId] } as Parameters<typeof graph.addNode>[2],
   );
@@ -2596,21 +2644,21 @@ function addCheckpointedMap(
       if (run.issueUpdates.length > 0) update[ISSUES_CHANNEL] = run.issueUpdates;
       return update;
     } catch (err) {
-      if (isInterruptLike(err)) throw err;
-      ctx.events.emit("node.error", { nodeId: itemId, error: String(err) }, itemScope);
-      throw err;
+      return recover(err, state, itemId);
     }
   });
 
-  graph.addNode(joinId, async (state: Record<string, unknown>) => {
+  graph.addNode(joinId, exclusiveRouting(mapId, recoveryTargets(spec, nodeSpec, ctx.externalHooks).length > 0, async (state: Record<string, unknown>) => {
     const bagRaw = (state[MAP_COLLECT_CHANNEL] as Record<string, unknown> | undefined)?.[mapId];
     const roundItems = (bagRaw as { items?: unknown } | undefined)?.items;
     const bag = (Array.isArray(bagRaw) ? bagRaw : Array.isArray(roundItems) ? roundItems : []) as Array<{ i: number; v: unknown }>;
     const scope = { state, config: ctx.baseCtx.config ?? {}, run: ctx.baseCtx.meta ?? {} };
     const update = collectMapResults(config, bag, mapId, scope);
     ctx.events.emit("node.end", { nodeId: mapId, update, joined: true }, { nodeId: mapId, nodeType: "map" });
+    const to = (state[ROUTING_CHANNEL] as Record<string, string> | undefined)?.[mapId];
+    if (to) return new Command({ goto: to, update }) as unknown as Record<string, unknown>;
     return update;
-  });
+  }));
 
   graph.addEdge(workerId as typeof START, joinId as typeof END);
 }

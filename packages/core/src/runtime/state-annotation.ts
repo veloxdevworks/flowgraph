@@ -8,6 +8,7 @@ import { Annotation, messagesStateReducer } from "@langchain/langgraph";
 import type { GraphSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
 import { ISSUES_CHANNEL_CAP, issueDedupeKey, type RunIssue } from "./run-issues.js";
+import { ROUTING_CHANNEL } from "./routing-policy.js";
 
 export const ONCE_CHANNEL = "__once";
 /** Declared so checkpoints written by older versions still load; the engine no longer reads or writes it. */
@@ -24,6 +25,7 @@ export const WORKTREES_CHANNEL = "__worktrees";
 export const ISSUES_CHANNEL = "__issues";
 
 export const RESERVED_STATE_CHANNELS = [
+  ROUTING_CHANNEL,
   ONCE_CHANNEL,
   REPLAY_CHANNEL,
   MAP_COLLECT_CHANNEL,
@@ -183,6 +185,10 @@ export function buildStateAnnotation(
       return out.length > ISSUES_CHANNEL_CAP ? out.slice(-ISSUES_CHANNEL_CAP) : out;
     },
     default: () => [],
+  });
+  fields[ROUTING_CHANNEL] = Annotation<Record<string, unknown>>({
+    reducer: (cur = {}, inc) => ({ ...cur, ...inc }),
+    default: () => ({}),
   });
   fields[MAP_COLLECT_CHANNEL] = Annotation<Record<string, unknown>>({
     reducer: reduceMapCollect,

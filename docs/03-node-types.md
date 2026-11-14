@@ -158,7 +158,7 @@ Model-based routing:
       default:   { default: true, to: fallback }
 ```
 
-- A router may target **multiple** routes (fan-out) by returning more than one match (configurable: `firstMatch` vs `allMatches`).
+- `with.match: firstMatch` (default) selects the first matching route. `with.match: allMatches` fans out to every matching destination, deduplicates destinations, and writes an array of chosen route keys as the router output. The default route is used only when no condition matches. Model routers select one route.
 - Model-based routers are constrained to emit one of the declared route keys (enforced via structured output), so routing is always valid.
 - Routers are `routing: true` capability; they return a `Command{ goto }` rather than a state update.
 - In the desktop builder, dragging from a router node adds a route (not a parallel edge), and the canvas draws dashed edges from `with.routes`.
