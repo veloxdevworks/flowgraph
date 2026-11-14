@@ -54,6 +54,8 @@ import {
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { sharedHistoryChannels } from "./context/shared.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
+import { graphFile } from "./runtime/graph-files.js";
+import { nodeRouteTargets, nodeToolTargets, topologyDiagnostics } from "./runtime/validate-graph.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
 
 /**
@@ -1005,15 +1007,18 @@ async function assembleCompiledLangGraph(
   opts: CompileOptions,
   plan?: PlacementPlan,
 ): Promise<AssembledGraph> {
+  const sourceFile = graphFile(spec);
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
   // does not silently drop node updates when authors omit state.channels entries.
   spec = ensureDeclaredOutputChannels(spec);
+  const invalidTopology = topologyDiagnostics(spec).filter((d) => d.severity === "error");
+  if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
 
   const cwd = opts.cwd ?? process.cwd();
   const graphDir =
     opts.graphPath != null
       ? path.dirname(path.resolve(cwd, opts.graphPath))
-      : cwd;
+      : sourceFile ? path.dirname(sourceFile) : cwd;
   const graphWorkspace = resolveGraphWorkspace(spec, graphDir);
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const events = createEventBus({ runId, graph: spec.metadata.name });
@@ -1082,6 +1087,7 @@ async function assembleCompiledLangGraph(
   const baseCtx: Partial<RunContext> = {
     config: {
       ...(opts.runConfig ?? {}),
+      graphDir,
       defaults: { ...(spec.config?.defaults ?? {}), ...(opts.runConfig?.defaults ?? {}) },
       vars: { ...(spec.config?.vars ?? {}), ...(opts.runConfig?.vars ?? {}) },
       skills: skillAliases,
@@ -1224,7 +1230,7 @@ async function assembleCompiledLangGraph(
 
     // Routers (and any routing-capable node) declare Command.goto destinations via
     // `ends` so LangGraph accepts goto without requiring a duplicate branch edge.
-    const routeEnds = collectRouteEnds(nodeSpec);
+    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id), ...nodeToolTargets(spec, nodeSpec.id)].map((target) => target === "END" ? END : target))];
     const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
 
     graph.addNode(nodeSpec.id, async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {

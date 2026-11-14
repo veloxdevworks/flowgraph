@@ -19,6 +19,7 @@ import {
   unknownSubgraphOutputDiagnostics,
 } from "./runtime/validate-graph.js";
 import { registry } from "./registry.js";
+import { setGraphFile, subgraphAliases } from "./runtime/graph-files.js";
 import "./nodes/index.js";
 
 export {
@@ -26,162 +27,100 @@ export {
   NODE_BODY_ENV_EXPANSION,
 } from "./runtime/env-expansion-lint.js";
 
+type LoadResult = { spec: GraphSpec | null; diagnostics: Diagnostic[] };
+const filePlacement = new WeakSet<GraphSpec>();
+
 export async function loadGraph(
   filePath: string,
   opts: { cwd?: string; seen?: Set<string> } = {},
-): Promise<{ spec: GraphSpec | null; diagnostics: Diagnostic[] }> {
-  const cwd = opts.cwd ?? process.cwd();
-  const resolved = path.resolve(cwd, filePath);
-  const seen = opts.seen ?? new Set<string>();
-  // A cycle (parent → child → parent) must not load the same file forever.
-  if (seen.has(resolved)) return { spec: null, diagnostics: [] };
-  seen.add(resolved);
-
-  let raw: string;
-  try {
-    raw = await fs.readFile(resolved, "utf-8");
-  } catch {
-    return {
-      spec: null,
-      diagnostics: [{ severity: "error", code: "FILE_NOT_FOUND", message: `Cannot read: ${resolved}` }],
-    };
-  }
-
-  // Scan raw YAML before expandEnvVars rewrites `${UPPER}` away.
-  const envCollisionDiags = envExpansionCollisionDiagnostics(raw);
-
-  const expanded = expandEnvVars(raw);
-
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(expanded);
-  } catch (err) {
-    return {
-      spec: null,
-      diagnostics: [
-        { severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` },
-        ...envCollisionDiags,
-      ],
-    };
-  }
-
-  // Backward-compat: rewrite deprecated node type aliases before schema validation.
-  parsed = normalizeNodeTypeAliases(parsed);
-
-  const result = GraphSpecSchema.safeParse(parsed);
-  if (!result.success) {
-    return {
-      spec: null,
-      diagnostics: [
-        ...diagnosticsFromZodIssues(result.error.issues, parsed),
-        ...envCollisionDiags,
-      ],
-    };
-  }
-
-  const diagnostics = [...envCollisionDiags];
-  diagnostics.push(...(await fileSubgraphOutputDiagnostics(result.data, path.dirname(resolved), seen)));
-  diagnostics.push(...(await fileSubgraphPlacementDiagnostics(result.data, path.dirname(resolved))));
-  return { spec: result.data, diagnostics };
+): Promise<LoadResult> {
+  return loadGraphFile(filePath, opts, new Map());
 }
 
-function subgraphAliases(spec: GraphSpec): Record<string, string> {
-  const aliases: Record<string, string> = {};
-  for (const imp of spec.imports ?? []) {
-    if ("subgraph" in imp && typeof imp.subgraph === "string") {
-      aliases[imp.as ?? imp.subgraph] = imp.subgraph;
+async function loadGraphFile(
+  filePath: string,
+  opts: { cwd?: string; seen?: Set<string> },
+  cache: Map<string, Promise<LoadResult>>,
+): Promise<LoadResult> {
+  const requested = path.resolve(opts.cwd ?? process.cwd(), filePath);
+  const resolved = await fs.realpath(requested).catch(() => requested);
+  const ancestors = new Set(opts.seen);
+  if (ancestors.has(resolved)) {
+    return { spec: null, diagnostics: [{ severity: "error", code: "SUBGRAPH_CYCLE", message: `Subgraph import cycle: ${[...ancestors, resolved].join(" → ")}` }] };
+  }
+  const cached = cache.get(resolved);
+  if (cached) return cached;
+  ancestors.add(resolved);
+  const pending = readGraph(resolved, ancestors, cache);
+  cache.set(resolved, pending);
+  return pending;
+}
+
+async function readGraph(resolved: string, seen: Set<string>, cache: Map<string, Promise<LoadResult>>): Promise<LoadResult> {
+  let raw: string;
+  try { raw = await fs.readFile(resolved, "utf-8"); }
+  catch { return { spec: null, diagnostics: [{ severity: "error", code: "FILE_NOT_FOUND", message: `Cannot read: ${resolved}` }] }; }
+  const envCollisionDiags = envExpansionCollisionDiagnostics(raw);
+  let parsed: unknown;
+  try { parsed = normalizeNodeTypeAliases(parseYaml(expandEnvVars(raw))); }
+  catch (err) {
+    return { spec: null, diagnostics: [{ severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` }, ...envCollisionDiags] };
+  }
+  const result = GraphSpecSchema.safeParse(parsed);
+  if (!result.success) return { spec: null, diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...envCollisionDiags] };
+  const spec = result.data;
+  setGraphFile(spec, resolved);
+  const dir = path.dirname(resolved);
+  const diagnostics = [...envCollisionDiags];
+  let fatal = false;
+
+  // Check declarations even when unused; this never imports or executes a module.
+  for (const [index, imp] of (spec.imports ?? []).entries()) {
+    const entry = Object.entries(imp).find(([key]) => key !== "as");
+    const ref = entry?.[1];
+    if (typeof ref !== "string" || !(path.isAbsolute(ref) || ref.startsWith("."))) continue;
+    try { await fs.access(path.resolve(dir, ref)); }
+    catch {
+      fatal = true;
+      diagnostics.push({ severity: "error", code: "IMPORT_NOT_FOUND", message: `Import "${ref}" in ${resolved} cannot be read`, path: `imports[${index}]` });
     }
   }
-  return aliases;
-}
 
-function isGraphFileRef(ref: string): boolean {
-  return (
-    ref.endsWith(".yaml") ||
-    ref.endsWith(".yml") ||
-    ref.startsWith(".") ||
-    ref.includes("/") ||
-    ref.includes("\\")
-  );
-}
-
-/**
- * `stateMap.out` values that name a channel the file child does not declare.
- * Inline children are checked in `validateSpec` (no filesystem).
- */
-async function fileSubgraphOutputDiagnostics(
-  spec: GraphSpec,
-  dir: string,
-  seen: Set<string>,
-): Promise<Diagnostic[]> {
-  const diagnostics: Diagnostic[] = [];
-  const aliases = subgraphAliases(spec);
-  for (const site of subgraphOutputSites(spec)) {
-    if (!site.out || !site.uses || site.inline) continue;
+  const sites = subgraphOutputSites(spec);
+  const usedFiles = new Set<string>();
+  for (const site of sites) {
+    if (!site.uses || site.inline) continue;
+    const aliases = subgraphAliases(site.graph);
     const ref = aliases[site.uses] ?? site.uses;
     if (!isGraphFileRef(ref)) continue;
     const childPath = path.resolve(dir, ref);
-    const child = await loadGraph(childPath, { cwd: path.dirname(childPath), seen });
-    if (!child.spec) continue;
-    diagnostics.push(...unknownSubgraphOutputDiagnostics(site, child.spec));
+    usedFiles.add(childPath);
+    const child = await loadGraphFile(childPath, { seen }, cache);
+    diagnostics.push(...child.diagnostics);
+    if (!child.spec) { fatal = true; continue; }
+    if (site.out) diagnostics.push(...unknownSubgraphOutputDiagnostics(site, child.spec));
+    if (graphHasPlacement(child.spec) || filePlacement.has(child.spec)) {
+      filePlacement.add(spec);
+      diagnostics.push(site.placed
+        ? { severity: "error", code: "PLACEMENT_NESTED", message: placementNestedMessage(site.id), path: `nodes.${site.id}.runsOn` }
+        : { severity: "error", code: "PLACEMENT_NOT_TOP_LEVEL", message: `Subgraph node "${site.id}" uses a graph that sets runsOn. Only top-level nodes are placed; set runsOn on "${site.id}" instead.`, path: `nodes.${site.id}.uses` });
+    }
   }
-  return diagnostics;
+  // Unused graph declarations can contain cycles too.
+  for (const imp of spec.imports ?? []) {
+    if (!("subgraph" in imp) || !isGraphFileRef(imp.subgraph)) continue;
+    const childPath = path.resolve(dir, imp.subgraph);
+    if (usedFiles.has(childPath)) continue;
+    const child = await loadGraphFile(childPath, { seen }, cache);
+    diagnostics.push(...child.diagnostics);
+    if (!child.spec) fatal = true;
+  }
+  const unique = [...new Map(diagnostics.map((d) => [`${d.code}:${d.path}:${d.message}`, d])).values()];
+  return { spec: fatal ? null : spec, diagnostics: unique };
 }
 
-/**
- * A placed `uses:` subgraph whose file child (or an inline/file descendant) sets `runsOn`.
- * Inline children are checked in `validateSpec`.
- */
-async function fileSubgraphPlacementDiagnostics(spec: GraphSpec, dir: string): Promise<Diagnostic[]> {
-  const diagnostics: Diagnostic[] = [];
-  for (const node of spec.nodes ?? []) {
-    if (node.type !== "subgraph" || node.spec) continue;
-    const child = await loadFileChild(spec, node.uses, dir);
-    if (!child) continue;
-    if (!(await fileGraphHasPlacement(child.spec, child.dir, new Set([child.path])))) continue;
-    // Placed parent: nested placement. Unplaced parent: only top-level nodes are placed, so the
-    // child's runsOn would be ignored and its nodes run on the coordinator.
-    diagnostics.push(
-      node.runsOn !== undefined
-        ? { severity: "error", code: "PLACEMENT_NESTED", message: placementNestedMessage(node.id), path: `nodes.${node.id}.runsOn` }
-        : {
-            severity: "error",
-            code: "PLACEMENT_NOT_TOP_LEVEL",
-            message:
-              `Subgraph node "${node.id}" uses a graph that sets runsOn. Only top-level nodes are placed, so that runsOn ` +
-              `would be ignored and its nodes run on the coordinator. Set runsOn on "${node.id}" instead.`,
-            path: `nodes.${node.id}.uses`,
-          },
-    );
-  }
-  return diagnostics;
-}
-
-async function loadFileChild(
-  parent: GraphSpec,
-  uses: string | undefined,
-  dir: string,
-): Promise<{ spec: GraphSpec; dir: string; path: string } | null> {
-  if (!uses) return null;
-  const ref = subgraphAliases(parent)[uses] ?? uses;
-  if (!isGraphFileRef(ref)) return null;
-  const childPath = path.resolve(dir, ref);
-  // Fresh `seen`: the shared set would hide a child that two nodes both reference.
-  const child = await loadGraph(childPath, { cwd: path.dirname(childPath), seen: new Set() });
-  return child.spec ? { spec: child.spec, dir: path.dirname(childPath), path: childPath } : null;
-}
-
-/** True when `spec`, or any file subgraph below it, sets `runsOn`. `visited` guards cycles. */
-async function fileGraphHasPlacement(spec: GraphSpec, dir: string, visited: Set<string>): Promise<boolean> {
-  if (graphHasPlacement(spec)) return true;
-  for (const node of spec.nodes ?? []) {
-    if (node.type !== "subgraph" || node.spec) continue;
-    const child = await loadFileChild(spec, node.uses, dir);
-    if (!child || visited.has(child.path)) continue;
-    visited.add(child.path);
-    if (await fileGraphHasPlacement(child.spec, child.dir, visited)) return true;
-  }
-  return false;
+function isGraphFileRef(ref: string): boolean {
+  return ref.endsWith(".yaml") || ref.endsWith(".yml") || ref.startsWith(".") || ref.includes("/") || ref.includes("\\");
 }
 
 function expandEnvVars(yaml: string): string {

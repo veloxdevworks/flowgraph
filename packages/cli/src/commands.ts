@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { graphEdges, loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildSkillsCommand } from "./skills-command.js";
 import { abortOnSignals } from "./run-signal.js";
@@ -173,7 +173,7 @@ program
   .option("--format <format>", "Output format: pretty|json", "pretty")
   .action(async (graphPath: string, opts: { preflight?: boolean; strict?: boolean; format?: string }) => {
     const cwd = path.dirname(path.resolve(process.cwd(), graphPath));
-    const { spec, diagnostics: loadDiags } = await loadGraph(graphPath, { cwd });
+    const { spec, diagnostics: loadDiags } = await loadGraph(path.resolve(process.cwd(), graphPath), { cwd });
     const allDiags = [...loadDiags];
 
     if (spec) {
@@ -897,21 +897,10 @@ async function parseInputFlags(
 
 function toMermaid(spec: import("@flowgraph/spec").GraphSpec): string {
   const lines = ["graph TD"];
-  for (const edge of spec.edges) {
+  for (const edge of graphEdges(spec)) {
     const from = edge.from === "START" ? "START([START])" : edge.from;
-    if ("to" in edge) {
-      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      for (const t of tos) {
-        const to = t === "END" ? "END([END])" : t;
-        lines.push(`  ${from} --> ${to}`);
-      }
-    } else if ("branch" in edge) {
-      for (const b of edge.branch) {
-        const to = b.to === "END" ? "END([END])" : b.to;
-        const label = b.when ? `|${b.when}|` : b.default ? "|default|" : "";
-        lines.push(`  ${from} --${label}--> ${to}`);
-      }
-    }
+    const to = edge.to === "END" ? "END([END])" : edge.to;
+    lines.push(`  ${from} -->${edge.label ? `|${edge.label}|` : ""} ${to}`);
   }
   return lines.join("\n");
 }
@@ -926,15 +915,8 @@ function toAscii(spec: import("@flowgraph/spec").GraphSpec): string {
   }
   lines.push("");
   lines.push(pc.dim("Edges:"));
-  for (const edge of spec.edges) {
-    if ("to" in edge) {
-      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      for (const t of tos) lines.push(`  ${edge.from} → ${t}`);
-    } else if ("branch" in edge) {
-      for (const b of edge.branch) {
-        lines.push(`  ${edge.from} → ${b.to}${b.when ? ` (when: ${b.when})` : b.default ? " (default)" : ""}`);
-      }
-    }
+  for (const edge of graphEdges(spec)) {
+    lines.push(`  ${edge.from} → ${edge.to}${edge.label ? ` (${edge.label})` : ""}`);
   }
   return lines.join("\n");
 }

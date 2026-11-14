@@ -41,6 +41,8 @@ export interface Logger {
 }
 
 export interface RunConfig {
+  /** Directory of the declaring graph file, independent of the execution workspace. */
+  graphDir?: string | undefined;
   vars?: Record<string, unknown> | undefined;
   defaults?: {
     provider?: string | undefined;

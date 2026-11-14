@@ -91,7 +91,9 @@ runtime:
   workspace: /
   worktrees: { root: /tmp }`,
     );
-    expect(codesOf(yaml).sort()).toEqual(
+    const reachable = yaml.replace("{ from: START, to: a }", "{ from: START, to: [a, b, c] }")
+      .replace("{ from: a, to: END }", "{ from: a, to: END }\n  - { from: b, to: END }\n  - { from: c, to: END }");
+    expect(codesOf(reachable).sort()).toEqual(
       [
         "UPLOAD_SUBGRAPH_FILE_BLOCKED nodes.a",
         "UPLOAD_HOST_PATH_BLOCKED nodes.b.workspace",

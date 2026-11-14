@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseGraphYaml } from "./graph-source.js";
+import { parse as parseYaml } from "yaml";
+import { GraphSpecSchema } from "@flowgraph/spec";
 import { checkUntrustedUpload, findEnvPlaceholder } from "./upload-policy.js";
 
 const TWO_MB = 2 * 1024 * 1024;
@@ -36,11 +37,12 @@ edges:
 
 function check(message: string): { ms: number; codes: string[] } {
   const yaml = graphWith(message);
-  const parsed = parseGraphYaml(yaml, { expandEnv: false });
-  expect(parsed.spec).not.toBeNull();
+  // Exercise the upload scanner even on malformed expression text that the
+  // independent static validator now rejects before a run can start.
+  const spec = GraphSpecSchema.parse(parseYaml(yaml));
   let codes: string[] = [];
   const ms = timed(() => {
-    codes = checkUntrustedUpload(yaml, parsed.spec!).map((v) => `${v.code} ${v.path}`);
+    codes = checkUntrustedUpload(yaml, spec).map((v) => `${v.code} ${v.path}`);
   });
   return { ms, codes };
 }

@@ -12,6 +12,7 @@ import { discoverSkillUses, discoverSubgraphFileUses } from "./discover-skills.j
 import { discoverAgentUses } from "./discover-agents.js";
 import { loadAgentDef } from "./agents/loader.js";
 import { loadGraph } from "./loader.js";
+import { subgraphAliases } from "./runtime/graph-files.js";
 import { checkBinOnPath } from "./runtime/which.js";
 import { playwrightProblem } from "./nodes/demo-playwright.js";
 import { iosToolchainReady } from "./nodes/demo-simulator.js";
@@ -42,10 +43,11 @@ export async function preflightGraphSkills(
   const visited = new Set<string>();
 
   const walk = async (graph: GraphSpec, cwd: string): Promise<void> => {
+    const graphAliases = { ...(graph === spec ? aliases : {}), ...Object.fromEntries((graph.imports ?? []).flatMap((imp) => "skill" in imp ? [[imp.as ?? imp.skill, imp.skill]] : [])) };
     for (const ref of discoverSkillUses(graph)) {
       let skillDir: string;
       try {
-        skillDir = await resolveSkillPath(ref, { cwd, aliases });
+        skillDir = await resolveSkillPath(ref, { cwd, aliases: graphAliases });
       } catch (err) {
         diagnostics.push({
           severity: "error",
@@ -64,9 +66,9 @@ export async function preflightGraphSkills(
       reportRows.push({ skill, result });
     }
 
-    const subgraphAliases = (graph.config as { subgraphs?: Record<string, string> } | undefined)?.subgraphs ?? {};
+    const childAliases = subgraphAliases(graph);
     for (const ref of discoverSubgraphFileUses(graph)) {
-      const file = subgraphAliases[ref] ?? ref;
+      const file = childAliases[ref] ?? ref;
       const resolved = path.resolve(cwd, file);
       if (visited.has(resolved)) continue;
       visited.add(resolved);
@@ -98,10 +100,11 @@ export async function preflightGraphAgents(
   const visited = new Set<string>();
 
   const walk = async (graph: GraphSpec, cwd: string): Promise<void> => {
+    const graphAliases = { ...(graph === spec ? aliases : {}), ...Object.fromEntries((graph.imports ?? []).flatMap((imp) => "agent" in imp ? [[imp.as ?? imp.agent, imp.agent]] : [])) };
     for (const ref of discoverAgentUses(graph)) {
       let agentDir: string;
       try {
-        agentDir = await resolveAgentPath(ref, { cwd, aliases });
+        agentDir = await resolveAgentPath(ref, { cwd, aliases: graphAliases });
       } catch (err) {
         diagnostics.push({
           severity: "error",
@@ -115,9 +118,9 @@ export async function preflightGraphAgents(
       diagnostics.push(...loadDiags);
     }
 
-    const subgraphAliases = (graph.config as { subgraphs?: Record<string, string> } | undefined)?.subgraphs ?? {};
+    const childAliases = subgraphAliases(graph);
     for (const ref of discoverSubgraphFileUses(graph)) {
-      const file = subgraphAliases[ref] ?? ref;
+      const file = childAliases[ref] ?? ref;
       const resolved = path.resolve(cwd, file);
       if (visited.has(resolved)) continue;
       visited.add(resolved);
@@ -166,9 +169,9 @@ export async function preflightGraphRequires(
     }, prefix);
     await Promise.all(jobs);
 
-    const subgraphAliases = (graph.config as { subgraphs?: Record<string, string> } | undefined)?.subgraphs ?? {};
+    const childAliases = subgraphAliases(graph);
     for (const ref of discoverSubgraphFileUses(graph)) {
-      const file = subgraphAliases[ref] ?? ref;
+      const file = childAliases[ref] ?? ref;
       const resolved = path.resolve(cwd, file);
       if (visited.has(resolved)) continue;
       visited.add(resolved);

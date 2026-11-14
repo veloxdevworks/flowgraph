@@ -465,3 +465,9 @@ The same diagnostics power editor squiggles via the JSON Schema + a future Langu
 - `apiVersion: flowgraph/v1` is the stable contract. Breaking changes ⇒ `flowgraph/v2` with a documented migration and an optional `flowgraph migrate` codemod.
 - Additive fields ship within `v1` and are reflected in the JSON Schema. Because the graph root and nodes reject unknown keys (§11), a graph that uses a new field requires an engine that knows it; older engines report `UNKNOWN_FIELD` rather than ignoring the field.
 - `@flowgraph/spec` is independently versioned; the `apiVersion` token is decoupled from the package's semver.
+
+## File resolution and static validation
+
+Relative graph references and each child graph's module imports resolve against the YAML file that declares them, independently of the working directory and `runtime.workspace`. Subgraph aliases declared in `imports` are honored by load, preflight, and execution. Import cycles (including symlink cycles) are rejected with `SUBGRAPH_CYCLE`; sharing a child between DAG branches is supported. Missing relative imports are reported even when their aliases are unused.
+
+Validation checks router and hook route targets, unreachable nodes, channel default types, and expression builtin names. Nodes referenced as agent tools or declared hook targets need no dummy inbound edges. Expression validation is bounded at 256 nesting levels and 2,048 tokens per expression and reports the field path; repeated invalid templates produce at most 50 expression diagnostics per graph. The CLI's ASCII and Mermaid topology includes declared router and HITL routes.
