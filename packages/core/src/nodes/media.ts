@@ -251,7 +251,7 @@ function buildMediaNode(spec: ModalitySpec) {
                 workspace: ctx.workspace,
                 timeout: config.timeout ?? spec.defaultTimeout,
                 ...(ctx.accounting ? { meter: (invoke: () => Promise<import("../media/run-job.js").MediaJobResult>, estimateUSD: number | undefined) => ctx.accounting!.call(ctx, invoke, { kind: "media", estimateUSD, usage: result => result.costKnown ? { costUSD: result.costUSD } : undefined }) } : {}),
-                emit: (phase, data) => ctx.emit("custom.media.job", { nodeId, modality, phase, ...data }),
+                emit: (phase, data) => ctx.emit("custom.media.job", { nodeId, modality, fingerprint, phase, ...data }),
               });
             }),
           );

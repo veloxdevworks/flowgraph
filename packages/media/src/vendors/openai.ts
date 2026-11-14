@@ -112,6 +112,20 @@ function supportsArbitrarySizes(model: string): boolean {
   return /^gpt-image-2(\.\d+)?(-|$)/.test(model);
 }
 
+/** Official image-generation size constraints, checked 2026-11-14. */
+function validateSize(size: string, model: string): void {
+  const normalized = normalizeSize(size);
+  if (normalized === "auto") return;
+  if (!supportsArbitrarySizes(model)) {
+    if (!["1024x1024", "1536x1024", "1024x1536"].includes(normalized)) throw new Error(`openai: size ${size} is unsupported by ${model}; use a standard image size or auto`);
+    return;
+  }
+  const [w, h] = normalized.split("x").map(Number) as [number, number];
+  if (w <= 0 || h <= 0 || w % 16 || h % 16 || Math.max(w, h) > 3840 || Math.max(w, h) / Math.min(w, h) > 3 || w * h < 655_360 || w * h > 8_294_400) {
+    throw new Error(`openai: size ${size} must have edges divisible by 16, maximum edge 3840, ratio within 1:3–3:1 and 655360–8294400 total pixels`);
+  }
+}
+
 interface Usage {
   input_tokens?: number;
   input_tokens_details?: { text_tokens?: number; image_tokens?: number };
@@ -215,8 +229,16 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
   const defaultParams =
     o["params"] && typeof o["params"] === "object" && !Array.isArray(o["params"]) ? (o["params"] as Record<string, unknown>) : {};
 
+  function validateRequest(req: MediaRequest): void {
+    const params = { ...defaultParams, ...req.params };
+    const model = String(params["model"] ?? req.model ?? opts.model ?? DEFAULT_MODEL);
+    const size = params["size"] ?? req.size;
+    if (size !== undefined) validateSize(String(size), model);
+  }
+
 
   async function start(req: MediaRequest, ctx: MediaCallContext): Promise<JobHandle> {
+    validateRequest(req);
     if (req.modality !== "image") throw new Error(`${VENDOR}: only the image modality is supported (got ${req.modality}).`);
     const prompt = req.prompt?.trim();
     if (!prompt) throw new Error(`${VENDOR}: an image prompt is required.`);
@@ -360,6 +382,7 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
     modalities: ["image"],
     models: { image: MODELS },
     maxPerJob: { image: MAX_PER_JOB },
+    validateRequest,
     start,
   };
 }

@@ -66,6 +66,8 @@ export type MediaOutput =
 // `ext` (no dot) names the file explicitly for formats with no standard MIME type (fbx, 3mf).
 
 export interface MediaCallContext {
+  /** Durable submission identity. Use as a vendor idempotency key only when supported. */
+  submissionId?: string;
   secrets: SecretProvider;
   signal?: AbortSignal | undefined;
   logger: Logger;
@@ -112,6 +114,8 @@ export interface JobStatus {
 }
 
 export interface MediaProvider {
+  /** Offline request checks, performed before a submission intent or paid call. */
+  validateRequest?(req: MediaRequest): void;
   /** Name graphs reference (`provider:` on the node). */
   name: string;
   /** Vendor id (`xai`, `openai`, `tripo`, ...). */

@@ -396,7 +396,7 @@ export {
   GRAPH_MEDIA_PROVIDERS,
 } from "./media/registry.js";
 export { runMediaJob } from "./media/run-job.js";
-export { createFileJournal, fingerprintRequest } from "./media/journal.js";
+export { createFileJournal, fingerprintRequest, resolveMediaSubmission } from "./media/journal.js";
 export { createOutputWriter, describeArtifactFile, artifactDir, extensionForMime, mimeForExtension, probeImageSize } from "./media/artifacts.js";
 export { resolveMediaInputs } from "./media/inputs.js";
 export { imageNode, videoNode, model3dNode, audioNode } from "./nodes/media.js";
