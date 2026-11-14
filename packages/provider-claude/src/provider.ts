@@ -283,7 +283,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Provi
                 message: "Already applied on replay; do not repeat this file change.",
               };
             }
-            ctx.replay?.set(idx, "applied");
+            await ctx.replay?.set(idx, "applied");
             return {
               behavior: "allow" as const,
               updatedInput: (gated ?? input) as Record<string, unknown>,
@@ -360,7 +360,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Provi
         ...(usage ? { usage } : {}),
         stopReason,
       };
-      ctx.replay?.set("provider:result", agentResult);
+      await ctx.replay?.set("provider:result", agentResult);
       return agentResult;
     },
   };

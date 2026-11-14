@@ -541,3 +541,56 @@ const messages = (result.state.messages as unknown[])
 CLI state patching and dynamic computed routing remain separate capability work.
 Use a new run with explicit inputs, or registered function/router logic, for those
 workflows today; historical resume is not a state-editing API.
+
+### Recovering completed agent and shell steps
+
+Built-in SQLite/PostgreSQL checkpointers persist model responses and finished
+agent tool results in `fg_run_replay` (`replay: 1` component schema). Writes finish
+before a tool/model step can advance. Thread, graph, checkpoint task, namespace
+and nested node path identify each record: a new loop round gets new records.
+Legacy private interrupt snapshots are seeded atomically before an upgraded
+continuation can advance, preserving completed steps if that continuation crashes.
+Memory savers retain replay for that saver instance; custom durable savers need
+`ReplayCheckpointStore`, including atomic initialization and `compareThreadReplay`. All workers
+sharing a thread must use this runtime. Durable SQL records survive checkpoint
+pruning and are removed when the thread's checkpoint data is deleted. Memory
+replay records last for the saver instance's lifetime.
+
+After a SIGKILL, first stop/reconcile the owner and external work, inspect its
+execution claim and release the exact token. Resume then reuses completed model
+and tool steps rather than paying for them or applying their effects again.
+The request identity must still match; changing an agent request while recovering
+returns `REPLAY_MISMATCH`. Pending/unknown usage still needs the separate usage
+receipt reconciliation described above. SDKs that hide their internal model or
+native-tool loop expose only their adapter's replay boundaries.
+
+A tool or shell operation can finish externally before its result is saved.
+Such a record has an explicit unfinished receipt and resume raises
+`TOOL_OUTCOME_UNCERTAIN` / `SHELL_OUTCOME_UNCERTAIN`. It never silently runs that
+operation again. Inspect and resolve only after stopping/reconciling its owner:
+
+```bash
+flowgraph replay inspect graph.yaml --thread issue-123
+flowgraph replay resolve graph.yaml --thread issue-123 --task '<exact-task-key>' --slot '<slot>' --receipt '<id>' --result '<recovered-result-json>' --owner-stopped
+# Only when confirmed stopped and not applied:
+flowgraph replay resolve graph.yaml --thread issue-123 --task '<exact-task-key>' --slot '<slot>' --receipt '<id>' --not-applied --owner-stopped
+```
+
+Shell results have `{ "stdout": "...", "stderr": "...", "exitCode": 0 }` shape.
+The command supports host database overrides and acquires thread admission.
+Stale receipts or a late completion cannot overwrite a reconciled result.
+Ordinary failed-command retries remain explicit retry policy behavior. Process
+groups stop shell children on normal abort/timeout on POSIX, but cannot guarantee
+cleanup when the engine itself receives SIGKILL. The durable unfinished-operation
+guard prevents a competing resume; there is no claim of exactly-once external
+execution. An orphan may already have applied part of an effect.
+
+Historical `resumeFrom` / CLI `resume --from` differs from continuation at the
+current head. Replaying a historical side-effecting graph requires a separate
+`replayWorkspace` / `--replay-workspace <dir>`. Relative outputs go there, preserving
+the source workspace's files; explicit node workspace/cwd escapes are refused.
+Graph references still resolve from their declaring files. Copy any needed inputs
+into the new workspace. This is not a sandbox for arbitrary code or absolute
+paths embedded in commands: review those paths and external effects before
+choosing historical replay. It does not create an immutable fork record or a
+state-patching API.

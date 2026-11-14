@@ -112,7 +112,7 @@ export function createLangChainProvider(
         const ai = cached instanceof AIMessage
           ? cached
           : await invokeModel(bound, messages, req, ctx);
-        if (!(cached instanceof AIMessage)) ctx.replay?.set(llmIndex, ai);
+        if (!(cached instanceof AIMessage)) await ctx.replay?.set(llmIndex, ai);
         final = ai;
         messages.push(ai);
         accumulateUsage(usage, ai);
@@ -219,7 +219,7 @@ async function runWithContext(
       ai = cached;
     } else {
       ai = await invokeModel(bound, input, req, ctx);
-      ctx.replay?.set(llmIndex, ai);
+      await ctx.replay?.set(llmIndex, ai);
     }
     final = ai;
     accumulateUsage(usage, ai);
@@ -336,7 +336,7 @@ async function constrainedOutput(model: ChatModelLike, req: AgentRequest, ctx: P
     : await invoke();
   if (!ctx.meterCall && result.usage) ctx.emit("usage", result.usage);
   const saved = { output: result.output, usage: result.usage ?? {} };
-  ctx.replay?.set("llm:structured", saved);
+  await ctx.replay?.set("llm:structured", saved);
   validateAgentOutput(result.output, req.schema!, `agent node "${ctx.node.nodeId}" schema`);
   return saved;
 }

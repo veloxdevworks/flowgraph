@@ -422,3 +422,5 @@ export { CORE_BUILTIN_NODE_TYPES } from "./nodes/index.js";
 export { inspectThreadUsage, resolveThreadUsage, type RunUsage, type UsageRecord, type UsageReceipt, type UnresolvedUsageReceipt, type UsageCheckpointStore, type MeteredCallOptions } from "./usage/ledger.js";
 
 export {MediaSubmissionRejectedError} from "./media/types.js";
+export {inspectThreadReplay,resolveThreadReplay} from "./providers/replay-persistence.js";
+export type {ReplayCheckpointStore} from "./providers/replay-persistence.js";

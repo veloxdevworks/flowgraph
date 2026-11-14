@@ -6,15 +6,10 @@
  * provider re-invokes the model (re-billed, non-deterministic) and re-executes
  * tools that already ran.
  *
- * Entries live in a {@link ReplayStore} that belongs to one execution of a
- * compiled graph (one `run` / `resume` / `continueRun` call). There is no
- * process-wide cache: the store travels with the LangGraph config of that
- * execution (see {@link RUN_SCOPE_KEY}), so nodes of another thread, run or
- * compiled graph can never see it. Across executions, entries survive only
- * as the snapshot the engine attaches to the interrupt that suspended the
- * node; a resume rebuilds its store from the interrupts of its own thread's
- * checkpoint ({@link replayStoreFromInterrupts}). Nothing is read from graph
- * state.
+ * Entries are isolated by thread, checkpoint task, namespace and nested node
+ * path. Built-in durable savers persist completed steps before execution can
+ * advance. Private interrupt attachments keep older checkpoints compatible.
+ * Memory savers retain steps for the lifetime of the saver instance.
  */
 
 import type { UsageLedger } from "../usage/ledger.js";
@@ -48,7 +43,7 @@ export function serializeReplayValue(value: unknown): unknown {
 export function deserializeReplayValue(value: unknown): unknown {
   if (isPlainObject(value) && value["__fg"] === "AIMessage") {
     const rawContent = value["content"];
-    const content = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent ?? "");
+    const content = typeof rawContent === "string" || Array.isArray(rawContent) ? rawContent : JSON.stringify(rawContent ?? "");
     return new AIMessage({
       content,
       tool_calls: Array.isArray(value["tool_calls"]) ? (value["tool_calls"] as AIMessage["tool_calls"]) : [],
@@ -81,6 +76,31 @@ export function deserializeReplayDump(entries: Record<string, unknown>): Record<
 /** Replay entries of one graph execution, keyed by node path (see {@link replayNodeKey}). */
 export class ReplayStore {
   private readonly nodes = new Map<string, Map<string, unknown>>();
+  private readonly durable = new Map<string, {task:string; write:(entries:Record<string,unknown>,index:string,expected:unknown)=>void|Promise<void>; pending:Promise<void>}>();
+  async bind(key:string, task:string, read:()=>Record<string,unknown>|undefined|Promise<Record<string,unknown>|undefined>, write:(entries:Record<string,unknown>,index:string,expected:unknown)=>void|Promise<void>, initialize?:(entries:Record<string,unknown>)=>void|Promise<void>):Promise<void> {
+    const prior=this.durable.get(key);
+    if(prior?.task===task){await prior.pending;return;}
+    if(prior)await prior.pending;
+    let stored=await read();
+    if(stored===undefined&&initialize){
+      if(prior)this.nodes.delete(key);
+      await initialize(this.snapshot(key));
+      stored=await read();
+      if(stored===undefined)throw Object.assign(new Error("Replay initialization was not persisted"),{code:"REPLAY_WRITE_FAILED",retryable:false});
+    }
+    if(stored!==undefined){this.nodes.delete(key);this.load(key,stored);}
+    else if(prior)this.nodes.delete(key);
+    this.durable.set(key,{task,write,pending:Promise.resolve()});
+  }
+  async flush(key:string):Promise<void>{await this.durable.get(key)?.pending;}
+  async flushAll():Promise<void>{await Promise.all([...this.durable.values()].map(binding=>binding.pending));}
+  private persist(key:string,index:string,expected:unknown):void {
+    const binding=this.durable.get(key);if(!binding)return;
+    const entries=this.snapshot(key);
+    binding.pending=binding.pending.then(()=>binding.write(entries,index,expected===undefined?undefined:serializeReplayValue(expected)));
+    // flush surfaces failures before callers proceed; avoid an unhandled rejection.
+    void binding.pending.catch(()=>undefined);
+  }
 
   get(key: string, index: string): unknown | undefined {
     return this.nodes.get(key)?.get(index);
@@ -92,7 +112,9 @@ export class ReplayStore {
       entries = new Map();
       this.nodes.set(key, entries);
     }
+    const expected=entries.get(index);
     entries.set(index, value);
+    this.persist(key,index,expected);
   }
 
   clear(key: string): void {
@@ -101,8 +123,10 @@ export class ReplayStore {
 
   delete(key: string, index: string): void {
     const entries = this.nodes.get(key);
+    const expected=entries?.get(index);
     entries?.delete(index);
     if (entries?.size === 0) this.nodes.delete(key);
+    this.persist(key,index,expected);
   }
 
   has(key: string): boolean {
@@ -167,6 +191,8 @@ export interface RunScope {
   readonly accounting?: UsageLedger | undefined;
   /** Replay entries of this execution. */
   readonly replay: ReplayStore;
+  readonly checkpointer?: object;
+  readonly replayWorkspace?: string;
   /** Ids of the subgraph nodes between the top graph and the current graph. */
   readonly path: readonly string[];
   /**

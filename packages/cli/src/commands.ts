@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { graphEdges, loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildMediaCommand } from "./media-command.js";
+import {buildReplayCommand} from "./replay-command.js";
 import { buildUsageCommand } from "./usage-command.js";
 import { buildThreadCommand } from "./thread-command.js";
 import { buildSkillsCommand } from "./skills-command.js";
@@ -148,6 +149,7 @@ program.addCommand(buildSkillsCommand());
 program.addCommand(buildThreadCommand());
 program.addCommand(buildUsageCommand());
 program.addCommand(buildMediaCommand());
+program.addCommand(buildReplayCommand());
 
 // ---------------------------------------------------------------------------
 // tui — interactive terminal UI (optional @flowgraph/tui package)
@@ -448,6 +450,7 @@ program
   .option("--list", "List pending interrupts for the thread and exit")
   .option("--resume <json>", "Resume value passed to the interrupt (JSON). When several interrupts are pending, a map keyed by interrupt id")
   .option("--from <checkpointId>", "Resume from a historical checkpoint id")
+  .option("--replay-workspace <dir>", "Separate output workspace for historical side effects")
   .option("--stream", "Stream events to stdout")
   .option("--json", "Emit events as JSONL on stdout")
   .option("--on-interrupt <policy>", "HITL policy if it interrupts again: prompt|fail|approve|webhook", "fail")
@@ -461,6 +464,7 @@ program
       list?: boolean;
       resume?: string;
       from?: string;
+      replayWorkspace?: string;
       stream?: boolean;
       json?: boolean;
       onInterrupt?: "prompt" | "fail" | "approve" | "webhook";
@@ -571,7 +575,7 @@ program
     if (!opts.json && !opts.stream) printBanner(`Resuming ${spec.metadata.name} (thread ${opts.thread})`);
 
     const policy = opts.onInterrupt ?? "fail";
-    const resumeOpts: ResumeOptions = { threadId: opts.thread, resume: resumeValue, onInterrupt: policy };
+    const resumeOpts: ResumeOptions = { threadId: opts.thread, resume: resumeValue, onInterrupt: policy, ...(opts.replayWorkspace?{replayWorkspace:path.resolve(cwd,opts.replayWorkspace)}:{}) };
     if (policy === "prompt") resumeOpts.resolveInterrupt = promptResolver;
     let result;
     try {

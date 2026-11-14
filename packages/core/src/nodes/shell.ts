@@ -5,6 +5,7 @@
  * When `args` is omitted, runs `command` through the OS shell (pipes / && / globs).
  */
 
+import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { ShellWithSchema } from "@flowgraph/spec";
@@ -22,6 +23,9 @@ import {
   spawnMissingToolError,
 } from "../runtime/requires.js";
 import { DEFAULT_INHERITED_ENV, pickHostEnv } from "../runtime/child-env.js";
+
+import {ReplayStore,replayNodeKey,runScopeOf,toolArgsHash} from "../providers/replay-cache.js";
+import {bindNodeReplay,isPendingStep,pendingStep,uncertainStep} from "../providers/replay-persistence.js";
 
 const configSchema = ShellWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -129,8 +133,21 @@ export const shellNode = defineNode<Config>({
           timeoutMs,
         });
 
+        const runScope=runScopeOf((ctx as NodeRunContext&{_lgConfig?:unknown})._lgConfig);
+        const replay=runScope?.replay??new ReplayStore(),key=replayNodeKey(runScope?.path??[],ctx.nodeId),slot=`shell:${ctx.attempt}`;
+        await bindNodeReplay(ctx,key);
+        const identity=toolArgsHash({command,args,cwd,env,stdinData});
+        if(runScope?.replayWorkspace){const rel=path.relative(ctx.workspace,path.resolve(cwd));if(rel.startsWith("..")||path.isAbsolute(rel))throw Object.assign(new Error(`Shell node "${ctx.nodeId}" cwd escapes the replay workspace`),{code:"REPLAY_WORKSPACE_ESCAPE",retryable:false});}
+        const saved=replay.get(key,slot);
+        const inFlight=Object.entries(replay.snapshot(key)).find(([name,value])=>name.startsWith("shell:")&&isPendingStep(value));
+        if(inFlight&&isPendingStep(inFlight[1]))throw uncertainStep(inFlight[1]);
+        const cached=saved as {identity:string;result:{stdout:string;stderr:string;exitCode:number}}|undefined;
+        if(cached&&cached.identity!==identity)throw Object.assign(new Error(`Shell node "${ctx.nodeId}" command changed during crash recovery`),{code:"REPLAY_MISMATCH",retryable:false});
         let proc: { stdout: string; stderr: string; exitCode: number };
         try {
+          if(cached)proc=cached.result;
+          else {
+          replay.set(key,slot,pendingStep("shell",{identity}));await replay.flush(key);
           proc = await runProcess({
             command,
             ...(args !== undefined ? { args } : {}),
@@ -140,10 +157,17 @@ export const shellNode = defineNode<Config>({
             timeoutMs,
             ...(ctx.signal ? { signal: ctx.signal } : {}),
             ...(stdinData !== undefined ? { stdin: stdinData } : {}),
+            onAbort:()=>replay.delete(key,slot),
           });
+          if(allowedExit.includes(proc.exitCode))replay.set(key,slot,{identity,result:proc});
+          else replay.delete(key,slot);
+          await replay.flush(key);
+          }
         } catch (err) {
+          if((err as {processStopped?:boolean})?.processStopped){replay.delete(key,slot);await replay.flush(key);}
           const mapped = spawnMissingToolError(err, command);
           if (mapped) {
+            replay.delete(key,slot);await replay.flush(key);
             ctx.issue(missingToolIssue([{ bin: command }], { command, skipped: false }));
             throw mapped;
           }
@@ -212,6 +236,7 @@ function runProcess(opts: {
   timeoutMs: number;
   signal?: AbortSignal;
   stdin?: string;
+  onAbort?:()=>void;
 }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const { command, args, shell, cwd, env, timeoutMs, signal, stdin } = opts;
 
@@ -226,15 +251,21 @@ function runProcess(opts: {
           shell: true,
           cwd,
           env,
-          signal,
+          detached: process.platform !== "win32",
         })
       : spawn(command, args ?? [], {
           shell: false,
           cwd,
           env,
-          signal,
+          detached: process.platform !== "win32",
         });
 
+    const kill = (sig:NodeJS.Signals):void => {
+      try { if(process.platform!=="win32"&&child.pid)process.kill(-child.pid,sig);else child.kill(sig); } catch { /* already exited */ }
+    };
+    const onAbort=()=>{kill("SIGKILL");opts.onAbort?.();};
+    signal?.addEventListener("abort",onAbort,{once:true});
+    if(signal?.aborted)onAbort();
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -242,19 +273,21 @@ function runProcess(opts: {
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      kill("SIGKILL");
     }, timeoutMs);
 
     const finish = (err?: Error, exitCode = 1) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort",onAbort);
+      if (signal?.aborted) { reject(signal.reason ?? new Error("Aborted"));return; }
       if (err) {
         reject(err);
         return;
       }
       if (timedOut) {
-        reject(new Error(`shell node: command timed out after ${timeoutMs}ms`));
+        reject(Object.assign(new Error(`shell node: command timed out after ${timeoutMs}ms`),{processStopped:true}));
         return;
       }
       resolve({ stdout, stderr, exitCode });
@@ -263,14 +296,14 @@ function runProcess(opts: {
     child.stdout?.on("data", (chunk: Buffer | string) => {
       stdout += String(chunk);
       if (stdout.length > MAX_BUFFER) {
-        child.kill("SIGKILL");
+        kill("SIGKILL");
         finish(new Error(`shell node: stdout exceeded maxBuffer (${MAX_BUFFER} bytes)`));
       }
     });
     child.stderr?.on("data", (chunk: Buffer | string) => {
       stderr += String(chunk);
       if (stderr.length > MAX_BUFFER) {
-        child.kill("SIGKILL");
+        kill("SIGKILL");
         finish(new Error(`shell node: stderr exceeded maxBuffer (${MAX_BUFFER} bytes)`));
       }
     });

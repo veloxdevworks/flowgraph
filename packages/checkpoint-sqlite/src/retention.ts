@@ -190,6 +190,12 @@ export function migrateSqliteCheckpointRetention(db: SqliteDatabase): number {
       db.exec(`CREATE TABLE fg_run_usage (thread_id TEXT PRIMARY KEY, record TEXT NOT NULL) WITHOUT ROWID`);
       db.prepare(`INSERT INTO fg_schema_migrations (component, version, applied_at) VALUES ('usage', 1, ?)`).run(Date.now());
     }
+    const replayVersion = asRow<{v:number|null}>(db.prepare(`SELECT MAX(version) AS v FROM fg_schema_migrations WHERE component='replay'`).get())?.v ?? 0;
+    if(replayVersion>1)throw new Error("Replay schema is newer than this flowgraph supports");
+    if(replayVersion<1){
+      db.exec(`CREATE TABLE fg_run_replay(thread_id TEXT NOT NULL, task TEXT NOT NULL, entries TEXT NOT NULL, PRIMARY KEY(thread_id,task)) WITHOUT ROWID`);
+      db.prepare(`INSERT INTO fg_schema_migrations(component,version,applied_at) VALUES('replay',1,?)`).run(Date.now());
+    }
     return applied;
   });
   return apply.immediate();
@@ -271,6 +277,28 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
 
   noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
     this.threadPolicy.set(threadId, policy);
+  }
+
+  initializeThreadReplay(threadId:string,task:string,entries:Record<string,unknown>):void {
+    this.setup();this.sqlite.prepare(`INSERT INTO fg_run_replay(thread_id,task,entries) VALUES(?,?,?) ON CONFLICT(thread_id,task) DO NOTHING`).run(threadId,task,JSON.stringify(entries));
+  }
+  readThreadReplay(threadId:string,task:string):Record<string,unknown>|undefined {
+    this.setup();const row=asRow<{entries:string}>(this.sqlite.prepare(`SELECT entries FROM fg_run_replay WHERE thread_id=? AND task=?`).get(threadId,task));
+    return row?JSON.parse(row.entries) as Record<string,unknown>:undefined;
+  }
+  writeThreadReplay(threadId:string,task:string,entries:Record<string,unknown>):void {
+    this.setup();this.sqlite.prepare(`INSERT INTO fg_run_replay(thread_id,task,entries) VALUES(?,?,?) ON CONFLICT(thread_id,task) DO UPDATE SET entries=excluded.entries`).run(threadId,task,JSON.stringify(entries));
+  }
+  compareThreadReplay(threadId:string,task:string,index:string,expected:unknown,value:unknown):boolean {
+    this.setup();return this.sqlite.transaction(()=>{
+      const entries=this.readThreadReplay(threadId,task)??{};
+      if(JSON.stringify(entries[index])!==JSON.stringify(expected))return false;
+      if(value===undefined)delete entries[index];else entries[index]=value;
+      this.writeThreadReplay(threadId,task,entries);return true;
+    }).immediate();
+  }
+  listThreadReplay(threadId:string):Array<{task:string;entries:Record<string,unknown>}> {
+    this.setup();return asRows<{task:string;entries:string}>(this.sqlite.prepare(`SELECT task,entries FROM fg_run_replay WHERE thread_id=? ORDER BY task`).all(threadId)).map(row=>({task:row.task,entries:JSON.parse(row.entries) as Record<string,unknown>}));
   }
 
   readThreadUsage(threadId: string): UsageRecord | undefined {
@@ -763,6 +791,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.sqlite.prepare(`DELETE FROM writes WHERE thread_id = ?`).run(threadId);
     this.sqlite.prepare(`DELETE FROM fg_checkpoint_blobs WHERE thread_id = ?`).run(threadId);
     this.sqlite.prepare(`DELETE FROM fg_checkpoint_pins WHERE thread_id = ?`).run(threadId);
+    this.sqlite.prepare(`DELETE FROM fg_run_replay WHERE thread_id = ?`).run(threadId);
     this.sqlite.prepare(`DELETE FROM fg_checkpoint_threads WHERE thread_id = ?`).run(threadId);
     // The scope binding is only meaningful while this thread's checkpoints
     // exist. Thread ownership and memory replay records are not checkpoint

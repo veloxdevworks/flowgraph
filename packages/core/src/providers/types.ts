@@ -118,7 +118,7 @@ export interface ProviderRunContext {
    */
   replay?: {
     get(index: string): unknown | undefined;
-    set(index: string, value: unknown): void;
+    set(index: string, value: unknown): void | Promise<void>;
   };
   /**
    * Context budget for this agent (present when with.context or
