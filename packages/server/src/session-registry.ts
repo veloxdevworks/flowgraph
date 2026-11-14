@@ -1,4 +1,5 @@
 import type { ServerEvent, RunStatus, ThreadOwner } from "./types.js";
+import { initialRunActivity, type RunActivity } from "@flowgraph/core";
 
 export type EventListener = (event: ServerEvent) => void;
 export type GlobalEventListener = (threadId: string, event: ServerEvent) => void;
@@ -21,6 +22,9 @@ export interface ActiveSession {
   dryRun?: boolean;
   /** Principal that started the session (multi-user servers). */
   owner?: ThreadOwner;
+  activity?: RunActivity;
+  labels?: Record<string, string>;
+  nodeIds?: string[];
 }
 
 export class SessionRegistry {
@@ -107,6 +111,7 @@ export class SessionRegistry {
       graphName: opts.graphName,
       ...(opts.label ? { label: opts.label } : {}),
       startedAt: new Date().toISOString(),
+      activity: initialRunActivity("running", new Date().toISOString()),
       yaml: opts.yaml,
       abort: new AbortController(),
       pause: new AbortController(),

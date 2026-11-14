@@ -338,3 +338,29 @@ docker build --platform linux/arm64 -t flowgraph-server -f packages/server/Docke
 docker run --rm -p 8080:8080 -e FLOWGRAPH_AUTH_TOKEN=dev flowgraph-server
 curl -s http://127.0.0.1:8080/ping
 ```
+
+## Active run summaries
+
+`GET /runs?active=true` lists only non-terminal threads owned by the caller. The
+unfiltered endpoint continues to return history. Each new run includes `labels`
+resolved at start from graph-authored `metadata.labels`, and compact `activity`:
+
+```json
+{"phase":"interrupted","currentNodes":["review","callback"],"waitingOn":"both","stateSince":"2026-11-13T12:00:00.000Z"}
+```
+
+Human interrupt kinds report `you`; custom waits report `external`; simultaneous
+human and custom interrupts report `both`. Unknown kinds report `unknown`. Paused
+runs report `you`. `stateSince` changes when the phase, current steps, or waiting
+classification changes, never on polling or token traffic. Parallel declared
+steps are retained; nested graph lifecycle events do not end their parent run.
+
+Summaries survive a process restart. Listing reads metadata only: it does not load
+graph imports, compile graphs, expire waits, or resume execution. Older records
+may omit activity and labels; clients should show missing progress explicitly.
+Running progress writes are throttled to once per second; parked and terminal
+boundaries are persisted immediately. A crash can therefore leave the last
+reported step until recovery. Labels can reference public `input`, `state`
+(initial input), and `run.threadId`; they never receive environment or secrets.
+Only declared keys are exported (up to 32 keys, 128-character keys, 1024-character
+values). Unresolvable metadata does not stop a run.

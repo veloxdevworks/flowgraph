@@ -62,6 +62,18 @@ describe("GET /healthz", () => {
 });
 
 describe("GET /runs", () => {
+  it("passes the active filter and rejects malformed values", async () => {
+    const listRuns = vi.fn(async () => []);
+    const service = { listRuns, config: {} } as unknown as RunService;
+    const req = { method: "GET" } as IncomingMessage;
+    const res = mockRes();
+    await handleRest(req, res, service, new URL("http://localhost/runs?active=true"));
+    expect(listRuns).toHaveBeenCalledWith(undefined, { activeOnly: true });
+    const invalid = mockRes();
+    await handleRest(req, invalid, service, new URL("http://localhost/runs?active=maybe"));
+    expect(invalid.statusCode).toBe(400);
+    expect(listRuns).toHaveBeenCalledTimes(1);
+  });
   it("returns the service listing", async () => {
     const service = {
       listRuns: async () => [

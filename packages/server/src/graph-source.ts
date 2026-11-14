@@ -13,6 +13,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   normalizeNodeTypeAliases,
   validateSpec,
+  parseRunActivity,
 } from "@flowgraph/core";
 import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import { GraphStoreError, isSystemError, ServerRequestError } from "./errors.js";
@@ -387,6 +388,9 @@ async function persistGraphLocked(
     graphName: spec.metadata?.name ?? "graph",
     ...((extras.label ?? existing?.label) ? { label: (extras.label ?? existing?.label) as string } : {}),
     status: extras.status ?? existing?.status ?? "started",
+    startedAt: existing?.startedAt ?? storedAt,
+    ...(existing?.labels ? { labels: existing.labels } : {}),
+    ...(existing?.activity ? { activity: existing.activity } : {}),
     // The first owner sticks: callers check ownership before persisting.
     ...((existing?.owner ?? extras.owner) ? { owner: (existing?.owner ?? extras.owner) as ThreadOwner } : {}),
     // Describes the file just written, so it never carries over.
@@ -503,6 +507,10 @@ export async function readGraphMeta(dir: string, threadId: string): Promise<Grap
     ...(typeof parsed.label === "string" ? { label: parsed.label } : {}),
     ...(typeof parsed.graphName === "string" ? { graphName: parsed.graphName } : {}),
     ...(typeof parsed.status === "string" ? { status: parsed.status as RunStatus } : {}),
+    ...(typeof parsed.startedAt === "string" ? { startedAt: parsed.startedAt } : {}),
+    ...(parsed.labels && typeof parsed.labels === "object" && !Array.isArray(parsed.labels)
+      ? { labels: Object.fromEntries(Object.entries(parsed.labels).filter(([, value]) => typeof value === "string")) } : {}),
+    ...(parseRunActivity(parsed.activity) ? { activity: parseRunActivity(parsed.activity)! } : {}),
     ...(isThreadOwner(parsed.owner) ? { owner: { id: parsed.owner.id, org: parsed.owner.org } } : {}),
     ...(parsed.yamlFormat === "raw" ? { yamlFormat: "raw" as const } : {}),
   };
@@ -511,7 +519,7 @@ export async function readGraphMeta(dir: string, threadId: string): Promise<Grap
 export async function updateGraphMeta(
   dir: string,
   threadId: string,
-  patch: Partial<Pick<GraphMeta, "label" | "status" | "graphName">>,
+  patch: Partial<Pick<GraphMeta, "label" | "status" | "graphName" | "startedAt" | "labels" | "activity">>,
 ): Promise<GraphMeta | null> {
   assertValidThreadId(threadId);
   return storeIo("write", threadId, () => withMetaLock(metaPathFor(dir, threadId), async () => {
