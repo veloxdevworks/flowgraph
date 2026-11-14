@@ -54,6 +54,7 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
 async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | undefined): Promise<MediaJobResult> {
   const { provider, req, mctx, journal } = opts;
   const deadline = Date.now() + parseDuration(opts.timeout);
+  const estimate = provider.estimateCostUSD?.(req);
   let handle: JobHandle;
   let submittedAt = existing?.submittedAt ?? new Date().toISOString();
   if (existing?.state === "submitted") {
@@ -74,12 +75,10 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
       provider: provider.name,
       submittedAt,
       handle,
-      ...(handle.done ? { artifacts: handle.done } : {}),
+      ...(handle.done ? { artifacts: handle.done, ...((handle.costUSD ?? estimate) === undefined ? {} : {costUSD: handle.costUSD ?? estimate}) } : {}),
     });
     opts.emit("submitted", { provider: provider.name, jobId: handle.id });
   }
-
-  const estimate = provider.estimateCostUSD?.(req);
 
   if (handle.done) {
     const reported = typeof handle.costUSD === "number" ? handle.costUSD : undefined;

@@ -13,6 +13,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { Artifact } from "@flowgraph/spec";
 import type { MediaCallContext, MediaInput, MediaOutput, MediaProvider, MediaRequest } from "@flowgraph/core";
 import { VendorHttpError } from "../http.js";
+import {registerMediaVendor,validateSpec} from "@flowgraph/core";
+import {GraphSpecSchema} from "@flowgraph/spec";
 import { openaiVendor } from "./openai.js";
 
 const KEY = "sk-test-SECRET-1234567890";
@@ -436,8 +438,6 @@ it.each(["512x512", "768x768", "1025x1024", "3840x3840", "1536x496"])("rejects i
 });
 
 it("validates static vendor sizes offline and honors the actual params override", async () => {
- const {registerMediaVendor,validateSpec} = await import("@flowgraph/core");
- const {GraphSpecSchema} = await import("@flowgraph/spec");
  registerMediaVendor(openaiVendor);
  const graph = (size:string) => GraphSpecSchema.parse({apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"size"},providers:{art:{kind:"media",vendor:"openai"}},nodes:[{id:"img",type:"image",provider:"art",with:{prompt:"test",size}}],edges:[{from:"START",to:"img"},{from:"img",to:"END"}]});
  expect(validateSpec(graph("768x768"))).toContainEqual(expect.objectContaining({code:"MEDIA_REQUEST_INVALID",severity:"error"}));
