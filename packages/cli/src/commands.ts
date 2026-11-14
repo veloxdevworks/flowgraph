@@ -493,7 +493,7 @@ program
       process.exit(2);
     }
 
-    let resumeValue: unknown = { approved: true };
+    let resumeValue: unknown;
     if (opts.resume !== undefined) {
       try { resumeValue = JSON.parse(opts.resume) as unknown; }
       catch { resumeValue = opts.resume; }

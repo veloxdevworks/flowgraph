@@ -155,7 +155,7 @@ function interruptSpec(): GraphSpec {
 }
 
 describe("resume after checkpoint pruning", () => {
-  it("resumes a paused thread and can resume again from the interrupt checkpoint", async () => {
+  it("resumes a paused thread, retains its interrupt checkpoint, and rejects replacing its saved answer", async () => {
     const compiled = await compileGraph(interruptSpec(), { checkpointer: "memory" });
     const threadId = "retain-resume";
     const paused = await compiled.run({ threadId, onInterrupt: "fail" });
@@ -172,14 +172,12 @@ describe("resume after checkpoint pruning", () => {
     expect(history.length).toBeLessThanOrEqual(2 + 4);
     expect(history.some((item) => item.checkpointId === interruptId)).toBe(true);
 
-    const again = await compiled.resumeFrom({
+    await expect(compiled.resumeFrom({
       threadId,
       checkpointId: interruptId!,
       resume: { go: true },
       onInterrupt: "fail",
-    });
-    expect(again.status).toBe("completed");
-    expect(again.state["tag"]).toBe(6);
+    })).rejects.toMatchObject({ code: "HISTORICAL_DECISION_REPLAY" });
   });
 
   it("returns CHECKPOINT_PRUNED when the requested checkpoint was dropped", async () => {

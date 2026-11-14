@@ -66,10 +66,11 @@ export function attachSse(
 const TERMINAL_EVENTS = new Set(["run.end", "run.error", "run.aborted", "run.paused"]);
 
 /**
- * True when the run has stopped. `interrupt.raised` comes in two kinds: a node
- * emits one every time it calls `interrupt()` (including when it runs again on
- * resume and gets its answer straight back), and the run emits one with
- * `data.interrupts` when it actually stops to wait. Only the second ends a run.
+ * True when the run has stopped. The runtime emits one run-level
+ * interrupt.raised carrying all pending interrupts per stop; newInterruptIds
+ * distinguishes fresh notifications from gates already waiting on a sibling.
+ * Non-terminal custom/node notifications without an interrupts array do not
+ * end the transport stream.
  */
 export function isTerminalEvent(event: ServerEvent): boolean {
   const type = String(event.type);

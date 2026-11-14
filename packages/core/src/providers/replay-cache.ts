@@ -96,6 +96,12 @@ export class ReplayStore {
     this.nodes.delete(key);
   }
 
+  delete(key: string, index: string): void {
+    const entries = this.nodes.get(key);
+    entries?.delete(index);
+    if (entries?.size === 0) this.nodes.delete(key);
+  }
+
   has(key: string): boolean {
     return this.nodes.has(key);
   }

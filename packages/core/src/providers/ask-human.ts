@@ -5,6 +5,7 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
 import type { NodeRunContext } from "../context.js";
+import { interruptUntilValid } from "../runtime/resume-validation.js";
 
 const askSchema = z.object({
   question: z.string(),
@@ -42,14 +43,21 @@ registerTool({
     }
     askSchema.parse({ question, choices });
     const hasChoices = Array.isArray(choices) && choices.length > 0;
-    const resume = ctx.interrupt<{ answer?: string; choice?: string } | string>({
+    const answer = interruptUntilValid(ctx, {
       reason: question,
       kind: hasChoices ? "choice" : "question",
       data: { question, choices },
-    });
-
-    if (typeof resume === "string") return { answer: resume };
-    if (hasChoices && resume?.choice) return { answer: resume.choice };
-    return { answer: resume?.answer ?? "" };
+    }, resume => {
+      const value = resume && typeof resume === "object" ? (resume as { choice?: unknown; answer?: unknown }).choice ?? (resume as { answer?: unknown }).answer : resume;
+      if (hasChoices) {
+        if (typeof value === "string" && choices.includes(value)) return value;
+        const index = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+        if (Number.isInteger(index) && index >= 1 && index <= choices.length) return choices[index - 1]!;
+        throw new Error(`Choose one of: ${choices.join(", ")}, or a one-based index.`);
+      }
+      if ((typeof value === "string" && value.trim()) || typeof value === "number") return String(value);
+      throw new Error("A non-empty answer is required.");
+    }, {});
+    return { answer };
   },
 });

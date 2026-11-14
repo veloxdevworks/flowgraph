@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
+import { compileGraph } from "../compiler.js";
+import type { FlowgraphEvent } from "../events.js";
 import { createHttpTransport } from "./http-transport.js";
 
 const target = { name: "studio", url: "https://studio.lan:8787/", token: "env:STUDIO_TOKEN" };
@@ -242,4 +244,16 @@ describe("attach", () => {
     expect(await collect(a)).toEqual([]);
     expect(calls.some((c) => c.includes("/cancel"))).toBe(false);
   });
+});
+
+
+it("transports every pending gate from the runtime's single stop frame", async () => {
+  const events: FlowgraphEvent[] = [];
+  const graph = await compileGraph({ metadata: { name: "remote-parallel" }, nodes: ["a", "b"].map(id => ({ id, type: "hitl", with: { mode: "approve", message: id } })), edges: [{ from: "START", to: ["a", "b"] }, { from: "a", to: "END" }, { from: "b", to: "END" }] } as unknown as GraphSpec, { sinks: [event => { events.push(event); }] });
+  await graph.run({ threadId: "parallel" });
+  const { fetchFn } = stub(url => url.includes("/events") ? sse(events) : json({ state: null }));
+  const result = await createHttpTransport({ fetch: fetchFn }).attach(w, "parallel").result;
+  expect(result.status).toBe("interrupted");
+  expect(result).toMatchObject({ interrupts: expect.any(Array) });
+  expect((result as { interrupts: unknown[] }).interrupts).toHaveLength(2);
 });

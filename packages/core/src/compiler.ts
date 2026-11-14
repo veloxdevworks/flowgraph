@@ -93,6 +93,8 @@ import type { PlacementInfo, RemoteNodeExecutor } from "./placement/remote.js";
 import { wrapperSpecForNode } from "./placement/remote.js";
 import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { exclusiveRouting, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
+
+import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
 import { MemoryError, type MemoryBackend, type MemoryIdentity } from "./memory/types.js";
 import {
@@ -548,7 +550,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // thread's pending interrupts. Nodes (and embedded subgraphs) reach the
     // store through the invoke config, never through a process-wide cache.
     let replay = new ReplayStore();
-    let pendingResumeInterrupts: Array<{ id?: string }> = [];
+    let pendingResumeInterrupts: Array<{ id?: string; value?: unknown }> = [];
     if (mode !== "start" && checkpointer) {
       const snap = await getCheckpointState(cfg);
       pendingResumeInterrupts = (snap.tasks ?? []).flatMap((task) => task.interrupts ?? []);
@@ -556,6 +558,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       // `<threadId>:<nodeId>`) resume without re-running approved tools.
       const pending = pendingInterrupts(snap);
       replay = replayStoreFromInterrupts(pending.values, { threadId, taskRoots: pending.taskRoots });
+      seedInterruptDeadlines(replay, pending.values, pending.taskRoots);
       await hydrateDurableRuntime(snap, threadId, graphSpec, {
         executeInvoke,
         nodePolicy: opts.nodePolicy,
@@ -580,6 +583,19 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
     const runScope: RunScope = { replay, path: [], meta: runMeta, signal: runOpts.signal };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
+    const raised = new Set(pendingResumeInterrupts.map(it => interruptFingerprint(toInterruptInfo(it))));
+    const emitStopInterrupts = (interrupts: InterruptInfo[]) => {
+      const newInterruptIds: string[] = [];
+      for (const info of interrupts) {
+        const fingerprint = interruptFingerprint(info);
+        if (raised.has(fingerprint)) continue;
+        raised.add(fingerprint);
+        if (info.id) newInterruptIds.push(info.id);
+      }
+      // A stop is a transport boundary even when every remaining gate was
+      // announced earlier. Notification clients can use newInterruptIds.
+      events.emit("interrupt.raised", { interrupts, newInterruptIds });
+    };
 
     const startEvent =
       mode === "resume" ? "interrupt.resumed" : mode === "continue" ? "run.continued" : "run.start";
@@ -754,7 +770,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
         });
 
-        events.emit("interrupt.raised", { interrupts });
+        emitStopInterrupts(interrupts);
 
         if (policy === "fail" || policy === "webhook") {
           const onWaitDeadline = () => {
@@ -936,6 +952,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         // Key the continue over every pending id so a truthy unkeyed
         // value is not refused when several interrupts are waiting.
         const pending = (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []);
+        if (!isPauseInterrupt(pending.map(toInterruptInfo))) throw resumeValueRequiredError(continueOpts.threadId);
         payload = new Command({
           resume: Object.fromEntries(interruptIds(pending).map((id) => [id, true])),
         });
@@ -949,14 +966,24 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       resume: resumeOpts.resume,
     });
     if (checkpointer) {
-      const snap = await getCheckpointState({ configurable: { thread_id: resumeOpts.threadId } });
+      const config = { configurable: { thread_id: resumeOpts.threadId, ...(resumeOpts.checkpointId ? { checkpoint_id: resumeOpts.checkpointId } : {}) } };
+      if (resumeOpts.checkpointId) {
+        const tuple = await checkpointer.getTuple(config);
+        const latest = await checkpointer.getTuple({ configurable: { thread_id: resumeOpts.threadId } });
+        if (resumeOpts.checkpointId !== latest?.checkpoint.id && tuple?.pendingWrites?.some(([, channel]) => channel === "__resume__")) {
+          throw Object.assign(new Error(`Historical checkpoint "${resumeOpts.checkpointId}" already contains a decision; fork before the gate to make a new decision.`), { code: "HISTORICAL_DECISION_REPLAY", retryable: false });
+        }
+      }
+      const snap = await getCheckpointState(config);
       const hasInterrupt = (snap?.tasks ?? []).some(
         (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
       );
       if (hasInterrupt) {
         // A missing answer is not a denial: fail before anything runs and leave the interrupt pending.
-        if (resumeOpts.resume === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
-        payload = resumeCommand(resumeOpts.resume, (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []), resumeOpts.threadId);
+        const pending = (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []);
+        const answer = resumeOpts.resume === undefined && isPauseInterrupt(pending.map(toInterruptInfo)) ? true : resumeOpts.resume;
+        if (answer === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
+        payload = resumeCommand(answer, pending, resumeOpts.threadId);
       }
       // Static breakpoints pause with empty task.interrupts and a non-empty
       // `next`. LangGraph continues those with null input, not Command({ resume }).
@@ -1231,7 +1258,10 @@ async function assembleCompiledLangGraph(
         (attempt, signal) => {
           const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig);
           if (signal && stopsOnTimeout) ctx.signal = signal;
-          return compiled.run(state, ctx).then((res) => ({ res, ctx }));
+          return compiled.run(state, ctx).then((res) => {
+            finishInterruptDeadline(runScopeOf(lgConfig), nodeSpec.id);
+            return { res, ctx };
+          });
         },
         {
           retry: nodeRetry as RetryConfigInput,
@@ -2252,10 +2282,10 @@ function buildNodeCtx(
         payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
           ? { ...withoutReservedKeys(payload.data as Record<string, unknown>), __nodeId: nodeId }
           : { ...(payload.data !== undefined ? { value: payload.data } : {}), __nodeId: nodeId };
-      const replay = replayAttachment(runScope, nodeId);
-      if (replay) (data as Record<string, unknown>)["__agentReplay"] = replay;
+      preserveInterruptDeadline(runScope, nodeId, data);
+      const savedReplay = replayAttachment(runScope, nodeId);
+      if (savedReplay) (data as Record<string, unknown>)["__agentReplay"] = savedReplay;
       const tagged = { ...payload, data };
-      events.emit("interrupt.raised", { reason: tagged.reason, data: tagged.data }, { nodeId, nodeType });
       return lgInterrupt(tagged) as T;
     },
     async once<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
@@ -2615,11 +2645,10 @@ function addCheckpointedMap(
             itemLgConfig,
           );
           if (signal && innerStopsOnTimeout) nodeCtx.signal = signal;
-          return runMapItem(buildCtx, mapId, config, state, nodeCtx, task).then((value) => ({
-            value,
-            onceUpdates: nodeCtx._onceUpdates,
-            issueUpdates: nodeCtx._issueUpdates,
-          }));
+          return runMapItem(buildCtx, mapId, config, state, nodeCtx, task).then((value) => {
+            finishInterruptDeadline(runScopeOf(itemLgConfig), itemId);
+            return { value, onceUpdates: nodeCtx._onceUpdates, issueUpdates: nodeCtx._issueUpdates };
+          });
         },
         {
           retry: nodeRetry,
