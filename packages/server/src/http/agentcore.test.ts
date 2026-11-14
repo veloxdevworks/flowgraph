@@ -114,12 +114,12 @@ describe("/invocations streams", () => {
     // The run is marked finished once its meta file is written, just after the event.
     await expect.poll(async () => ((await (await fetch(`${base}/ping`)).json()) as { status: string }).status).toBe("Healthy");
 
-    // On resume the gate runs again and emits a node-level interrupt.raised before it
-    // gets its answer; the stream must carry on to run.end, not stop there.
+    // Replaying an answered interrupt must not announce a new human decision.
     const resumed = await invoke(base, { action: "resume", threadId: "ac-t1", resume: { approved: true } });
     expect(resumed.status).toBe(200);
     const after = sseEvents(await resumed.text());
-    expect(after.map((e) => e.type)).toContain("interrupt.raised");
+    expect(after.map((e) => e.type)).not.toContain("interrupt.raised");
+    expect(after.map((e) => e.type)).toContain("interrupt.resumed");
     expect(after.at(-1)?.type).toBe("run.end");
   });
 });
