@@ -20,6 +20,8 @@ import {
   defaultThreadRunOwner,
   type ThreadRunOwner,
   type ThreadRunInfo,
+
+  type UsageRecord,
   type ActiveThreadMark,
   type CheckpointThreadStatus,
   type ResolvedCheckpointRetention,
@@ -180,6 +182,14 @@ export function migrateSqliteCheckpointRetention(db: SqliteDatabase): number {
       );
       applied += 1;
     }
+    const usageVersion = asRow<{ v: number | null }>(db.prepare(
+      `SELECT MAX(version) AS v FROM fg_schema_migrations WHERE component = 'usage'`,
+    ).get())?.v ?? 0;
+    if (usageVersion > 1) throw new Error("Usage schema is newer than this flowgraph supports");
+    if (usageVersion < 1) {
+      db.exec(`CREATE TABLE fg_run_usage (thread_id TEXT PRIMARY KEY, record TEXT NOT NULL) WITHOUT ROWID`);
+      db.prepare(`INSERT INTO fg_schema_migrations (component, version, applied_at) VALUES ('usage', 1, ?)`).run(Date.now());
+    }
     return applied;
   });
   return apply.immediate();
@@ -261,6 +271,31 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
 
   noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
     this.threadPolicy.set(threadId, policy);
+  }
+
+  readThreadUsage(threadId: string): UsageRecord | undefined {
+    this.setup();
+    const row = asRow<{ record: string }>(this.sqlite.prepare(
+      `SELECT record FROM fg_run_usage WHERE thread_id = ?`,
+    ).get(threadId));
+    return row ? JSON.parse(row.record) as UsageRecord : undefined;
+  }
+
+  writeThreadUsage(threadId: string, record: UsageRecord): void {
+    this.setup();
+    this.sqlite.prepare(
+      `INSERT INTO fg_run_usage (thread_id, record) VALUES (?, ?)
+       ON CONFLICT (thread_id) DO UPDATE SET record = excluded.record`,
+    ).run(threadId, JSON.stringify(record));
+  }
+
+  compareThreadUsage(threadId: string, revision: number, record: UsageRecord): boolean {
+    this.setup();
+    return this.sqlite.transaction(() => {
+      const current = this.readThreadUsage(threadId);
+      if ((current?.revision ?? 0) !== revision) return false;
+      this.writeThreadUsage(threadId, record); return true;
+    }).immediate();
   }
 
   /** Non-expiring execution claims are independent of checkpoint retention. */

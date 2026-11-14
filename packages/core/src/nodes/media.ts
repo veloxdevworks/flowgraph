@@ -250,6 +250,7 @@ function buildMediaNode(spec: ModalitySpec) {
                 journal: createFileJournal({ workspace: ctx.workspace, scope: jobScope, nodeId, fingerprint }),
                 workspace: ctx.workspace,
                 timeout: config.timeout ?? spec.defaultTimeout,
+                ...(ctx.accounting ? { meter: (invoke: () => Promise<import("../media/run-job.js").MediaJobResult>, estimateUSD: number | undefined) => ctx.accounting!.call(ctx, invoke, { kind: "media", estimateUSD, usage: result => result.costKnown ? { costUSD: result.costUSD } : undefined }) } : {}),
                 emit: (phase, data) => ctx.emit("custom.media.job", { nodeId, modality, phase, ...data }),
               });
             }),
@@ -257,7 +258,8 @@ function buildMediaNode(spec: ModalitySpec) {
 
           const artifacts: Artifact[] = results.flatMap((r) => r.artifacts);
           const costUSD = results.reduce((sum, r) => sum + r.costUSD, 0);
-          if (costUSD > 0) enforceBudget(ctx, { costUSD });
+          if (ctx.accounting) ctx.accounting.enforce(ctx);
+          else if (costUSD > 0) enforceBudget(ctx, { costUSD });
 
           const output = {
             artifact: artifacts[0],
@@ -267,6 +269,8 @@ function buildMediaNode(spec: ModalitySpec) {
             vendor: provider.vendor,
             ...(model ? { model } : {}),
             costUSD,
+            costKnown: results.every(r => r.costKnown !== false),
+            costEstimated: results.some(r => r.costEstimated),
             reused: results.every((r) => r.reused),
           };
           ctx.emit("node.output", output);

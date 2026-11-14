@@ -18,6 +18,7 @@ import {
   HumanMessage,
   ToolMessage,
   AIMessage,
+  type AIMessageChunk,
   type BaseMessage,
 } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
@@ -32,12 +33,14 @@ import type {
 import type { ContextMessage, ProviderContextManager } from "../../context/types.js";
 import { toLangChainMessage } from "../../context/messages.js";
 import { redactProviderErrors } from "../redact-errors.js";
+import { rejectedRequestUsage } from "../../usage/rejected-request.js";
 import { validateAgentOutput } from "../../runtime/agent-output.js";
 
 // Minimal structural type for a LangChain chat model (avoids a hard type dep
 // on a specific @langchain/core version's class shape).
 export interface ChatModelLike {
   invoke(input: BaseMessage[], options?: unknown): Promise<AIMessage>;
+  stream?(input: BaseMessage[], options?: unknown): AsyncIterable<AIMessageChunk> | Promise<AsyncIterable<AIMessageChunk>>;
   bindTools?(tools: unknown[], kwargs?: unknown): ChatModelLike;
   withStructuredOutput?(schema: unknown, config?: unknown): { invoke(input: BaseMessage[], options?: unknown): Promise<unknown> };
 }
@@ -60,7 +63,8 @@ export function createLangChainProvider(
       toolCalling: typeof model.bindTools === "function",
       contextMessages: true,
       structuredOutput: typeof model.withStructuredOutput === "function",
-      streaming: false,
+      streaming: typeof model.stream === "function",
+      callAccounting: true,
       ...(options.models ? { models: options.models } : {}),
     },
 
@@ -107,7 +111,7 @@ export function createLangChainProvider(
         const cached = ctx.replay?.get(llmIndex);
         const ai = cached instanceof AIMessage
           ? cached
-          : await bound.invoke(messages, { signal: ctx.signal });
+          : await invokeModel(bound, messages, req, ctx);
         if (!(cached instanceof AIMessage)) ctx.replay?.set(llmIndex, ai);
         final = ai;
         messages.push(ai);
@@ -136,7 +140,6 @@ export function createLangChainProvider(
       }
 
       usage.totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
-      ctx.emit("usage", usage);
 
       const content = extractText(final);
       let output: unknown = { text: content };
@@ -215,7 +218,7 @@ async function runWithContext(
     if (cached instanceof AIMessage) {
       ai = cached;
     } else {
-      ai = await bound.invoke(input, { signal: ctx.signal });
+      ai = await invokeModel(bound, input, req, ctx);
       ctx.replay?.set(llmIndex, ai);
     }
     final = ai;
@@ -254,7 +257,6 @@ async function runWithContext(
   }
 
   usage.totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
-  ctx.emit("usage", usage);
 
   const content = extractText(final);
   let output: unknown = { text: content };
@@ -297,7 +299,7 @@ function accumulateUsage(usage: TokenUsage, ai: AIMessage): void {
   }
 }
 
-function extractText(ai: AIMessage | undefined): string {
+function extractText(ai: { content: unknown } | undefined): string {
   if (!ai) return "";
   const content = ai.content;
   if (typeof content === "string") return content;
@@ -321,15 +323,52 @@ function tryParseJson(text: string): unknown {
 }
 
 async function constrainedOutput(model: ChatModelLike, req: AgentRequest, ctx: ProviderRunContext, messages: BaseMessage[]): Promise<{ output: unknown; usage: TokenUsage }> {
-  const result = await model.withStructuredOutput!(req.schema, { includeRaw: true }).invoke(messages, { signal: ctx.signal });
-  const wrapped = result && typeof result === "object" && Object.hasOwn(result, "parsed") && Object.hasOwn(result, "raw")
-    ? result as { parsed: unknown; raw: AIMessage; parsing_error?: unknown } : undefined;
-  const output = wrapped ? wrapped.parsed : result;
-  validateAgentOutput(output, req.schema, `agent node "${ctx.node.nodeId}" schema`);
-  const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-  if (wrapped?.raw) accumulateUsage(usage, wrapped.raw);
-  usage.totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
-  return { output, usage };
+  const cached = ctx.replay?.get("llm:structured");
+  if (cached && typeof cached === "object" && "output" in cached) return cached as { output: unknown; usage: TokenUsage };
+  const invoke = async () => {
+    const result = await model.withStructuredOutput!(req.schema, { includeRaw: true }).invoke(messages, { signal: ctx.signal });
+    const wrapped = result && typeof result === "object" && Object.hasOwn(result, "parsed") && Object.hasOwn(result, "raw")
+      ? result as { parsed: unknown; raw: AIMessage; parsing_error?: unknown } : undefined;
+    return { output: wrapped ? wrapped.parsed : result, usage: wrapped?.raw ? modelUsage(wrapped.raw) : undefined };
+  };
+  const result = ctx.meterCall
+    ? await ctx.meterCall(invoke, { usage: value => value.usage, errorUsage: rejectedRequestUsage })
+    : await invoke();
+  if (!ctx.meterCall && result.usage) ctx.emit("usage", result.usage);
+  const saved = { output: result.output, usage: result.usage ?? {} };
+  ctx.replay?.set("llm:structured", saved);
+  validateAgentOutput(result.output, req.schema!, `agent node "${ctx.node.nodeId}" schema`);
+  return saved;
+}
+
+function modelUsage(ai: AIMessage): TokenUsage | undefined {
+  const meta = (ai as unknown as { usage_metadata?: { input_tokens?: number; output_tokens?: number; total_tokens?: number } }).usage_metadata;
+  return meta ? {
+    ...(meta.input_tokens === undefined ? {} : { inputTokens: meta.input_tokens }),
+    ...(meta.output_tokens === undefined ? {} : { outputTokens: meta.output_tokens }),
+    ...(meta.total_tokens === undefined ? {} : { totalTokens: meta.total_tokens }),
+  } : undefined;
+}
+async function invokeModel(model: ChatModelLike, input: BaseMessage[], req: AgentRequest, ctx: ProviderRunContext): Promise<AIMessage> {
+  let responseStarted = false;
+  let partialUsage: TokenUsage | undefined;
+  const invoke = async () => {
+    if (!req.streaming || !model.stream) return model.invoke(input, { signal: ctx.signal });
+    let combined: AIMessageChunk | undefined;
+    for await (const chunk of await model.stream(input, { signal: ctx.signal })) {
+      responseStarted = true;
+      const text = extractText(chunk);
+      if (text) ctx.emit("token", { text });
+      combined = combined ? combined.concat(chunk) : chunk;
+      partialUsage = modelUsage(combined as unknown as AIMessage);
+    }
+    if (!combined) throw new Error("Model stream ended without a response");
+    return new AIMessage({ content: combined.content, tool_calls: combined.tool_calls ?? [],
+      ...(combined.usage_metadata ? { usage_metadata: combined.usage_metadata } : {}) });
+  };
+  const ai = ctx.meterCall ? await ctx.meterCall(invoke, { usage: modelUsage, errorUsage: error => responseStarted ? partialUsage : rejectedRequestUsage(error), errorOutcomeUnknown: () => responseStarted }) : await invoke();
+  if (!ctx.meterCall) { const usage = modelUsage(ai); if (usage) ctx.emit("usage", usage); }
+  return ai;
 }
 
 function addUsage(total: TokenUsage, inc: TokenUsage): void {

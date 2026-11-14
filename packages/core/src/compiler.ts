@@ -82,7 +82,7 @@ import type { MediaProvider } from "./media/types.js";
 import { ReplayStore, RUN_SCOPE_KEY, replayNodeKey, replayStoreFromInterrupts, runScopeOf, runSignalOf, type RunScope } from "./providers/replay-cache.js";
 import { collectMapResults, mapSyntheticIds, runMapItem, type MapTask } from "./nodes/map.js";
 import type { ToolWiring } from "./providers/tools.js";
-import type { BudgetState } from "./context.js";
+import { UsageLedger, usageLedgerOf, withUsageLedger, type RunUsage } from "./usage/ledger.js";
 import type { McpHub } from "./mcp/types.js";
 import { createHookBus, type HookBus } from "./hooks/bus.js";
 import type { Hook } from "./hooks/types.js";
@@ -281,6 +281,8 @@ export interface ContinueOptions {
 }
 
 export interface RunResult {
+  /** Cumulative known usage, with unknown/unpriced/pending call counts. */
+  usage?: RunUsage | undefined;
   status: "completed" | "interrupted" | "paused" | "error" | "aborted";
   state: Record<string, unknown>;
   runId: string;
@@ -446,7 +448,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     }
     clearWaitTimeoutTimer(waitTimers, threadId);
     const startedAt = new Date().toISOString();
-    const runMeta: RunMeta = { runId, graph: graphSpec.metadata.name, startedAt, threadId };
+    const accounting = usageLedgerOf()!;
+    const runMeta: RunMeta = { runId, graph: graphSpec.metadata.name, startedAt, threadId, get usage() { return accounting.snapshot(); } };
 
     (baseCtx as RunContext).meta = runMeta;
     (baseCtx as RunContext).logger = createLogger(events, graphSpec.metadata.name);
@@ -494,6 +497,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           if ((r.error as { code?: unknown } | undefined)?.code === THREAD_WAIT_NOT_RECORDED) Object.assign(r.error!, { parkError: err });
         }
       }
+      r.usage = accounting.snapshot();
       return r;
     };
 
@@ -598,7 +602,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
     }
 
-    const runScope: RunScope = { replay, path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal };
+    const runScope: RunScope = { replay, path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal, accounting };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
     const raised = new Set(pendingResumeInterrupts.map(it => interruptFingerprint(toInterruptInfo(it))));
     const emitStopInterrupts = (interrupts: InterruptInfo[]) => {
@@ -972,7 +976,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (!overrides.prepared) adoptThreadRunClaim(checkpointer ?? compiledLg, threadId, claim);
       try {
         payload = await validateAdmission(payload, runOpts, mode);
-        return await invokeOwned(payload, runOpts, mode, overrides);
+        const accounting = await UsageLedger.open(checkpointer ?? compiledLg, threadId, graphSpec.runtime?.budget);
+        return await withUsageLedger(accounting, () => invokeOwned(payload, runOpts, mode, overrides));
       } finally { await claim.release(); }
     });
   };
@@ -1222,16 +1227,6 @@ async function assembleCompiledLangGraph(
   const graph = new StateGraph(StateAnnotation);
   const executionLimit = createExecutionLimit(spec.runtime?.concurrency);
 
-  let budget: BudgetState | undefined;
-  if (spec.runtime?.budget) {
-    budget = {
-      maxUSD: spec.runtime.budget.maxUSD,
-      maxTokens: spec.runtime.budget.maxTokens,
-      onExceed: spec.runtime.budget.onExceed ?? "warn",
-      usedTokens: 0,
-      usedUSD: 0,
-    };
-  }
 
   assertGraphToolsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
   assertGraphRuntimeAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
@@ -1278,7 +1273,6 @@ async function assembleCompiledLangGraph(
     secrets: createEnvSecretProvider(),
     events,
     workspace: graphWorkspace,
-    budget,
     hooks,
     mcp: mcpHub,
     store,
@@ -2379,6 +2373,7 @@ function buildNodeCtx(
     _lgConfig?: LangGraphRunnableConfig;
   } = {
     ...(base as RunContext),
+    accounting: runScope?.accounting,
     meta: (meta ?? { runId: "", graph: "", startedAt: "" }) as RunContext["meta"],
     secrets: base.secrets!,
     events,

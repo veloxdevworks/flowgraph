@@ -377,6 +377,7 @@ export const AgentContextSchema = z
 
 // agent node (formerly "intelligent")
 export const AgentWithSchema = BaseWithSchema.extend({
+  streaming: z.boolean().optional(),
   /** Reference to a reusable agent definition (AGENT.md), resolved at run time. */
   agent: z.string().optional(),
   system: z.string().optional(),

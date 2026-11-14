@@ -17,6 +17,7 @@
  * state.
  */
 
+import type { UsageLedger } from "../usage/ledger.js";
 import { createHash } from "node:crypto";
 import { AIMessage } from "@langchain/core/messages";
 
@@ -34,6 +35,7 @@ export function serializeReplayValue(value: unknown): unknown {
       id: value.id,
       name: value.name,
       additional_kwargs: value.additional_kwargs,
+      usage_metadata: value.usage_metadata,
     };
   }
   try {
@@ -51,6 +53,7 @@ export function deserializeReplayValue(value: unknown): unknown {
       content,
       tool_calls: Array.isArray(value["tool_calls"]) ? (value["tool_calls"] as AIMessage["tool_calls"]) : [],
       additional_kwargs: isPlainObject(value["additional_kwargs"]) ? value["additional_kwargs"] : {},
+      ...(isPlainObject(value["usage_metadata"]) ? { usage_metadata: value["usage_metadata"] } : {}),
       ...(typeof value["id"] === "string" ? { id: value["id"] } : {}),
       ...(typeof value["name"] === "string" ? { name: value["name"] } : {}),
     } as ConstructorParameters<typeof AIMessage>[0]);
@@ -161,6 +164,7 @@ export const RUN_SCOPE_KEY = "__flowgraphRunScope";
 
 /** Per-execution values nodes read from their LangGraph config. */
 export interface RunScope {
+  readonly accounting?: UsageLedger | undefined;
   /** Replay entries of this execution. */
   readonly replay: ReplayStore;
   /** Ids of the subgraph nodes between the top graph and the current graph. */

@@ -311,9 +311,9 @@ MCP OAuth tokens (`.flowgraph/mcp-oauth/`) and LLM API keys are independent. For
 
 ## 9. Cost & pricing tables
 
-Each adapter supplies a pricing function (model → $/token) used by the budget/cost machinery ([06 §6](./06-events-and-hooks.md#6-cost--token-accounting)). Tables are overridable via config for negotiated rates or new models.
+Adapters may report `costUSD`; media providers may also supply pre-call estimates. The runtime does not invent vendor prices or provide an overridable pricing table.
 
-**LangChain vendors (including Bedrock):** the built-in LangChain adapter records token usage from the model response but does **not** populate `costUSD`. USD budgets (`runtime.budget.maxUSD` / related hooks) therefore do not enforce for LangChain backends today — use token budgets, or supply a custom pricing/cost path. This is an accepted limitation until vendor pricing maps are added.
+**LangChain vendors (including Bedrock):** the adapter records tokens after every real model call, including native structured finalization, before executing tools. It does not populate `costUSD`. Offline validation emits `BUDGET_USD_UNPRICED` when a LangChain node (including a configured alias) uses `budget.maxUSD`; runtime accounting also warns about unpriced calls. Use `maxTokens` or a provider that reports prices. An unpriced call never becomes a known zero-dollar call.
 
 ## 10. Agent completion and retries
 
@@ -322,3 +322,34 @@ Each adapter supplies a pricing function (model → $/token) used by the budget/
 Tools are explicit. To offer issue reporting, add `tools: [{ function: report_issue }]`; it is no longer injected into every call. Recoverable tool-handler exceptions become `{ isError: true, error: { code, message } }` tool results, allowing the model to recover. Permission denial, interrupts, replay mismatches, cancellation, and non-retryable runtime failures still propagate. MCP `isError` fails deterministic nodes and becomes a recoverable tool failure inside an agent.
 
 Exhausting `with.maxSteps` fails with `AGENT_MAX_STEPS` (including `partialOutput` on the error) instead of reporting success. Configured LangChain models force SDK `maxRetries` to zero. Configure the node's `retry` policy for bounded retries with `node.retry` events; raw models supplied to `createLangChainProvider` remain the caller's responsibility.
+
+
+## 11. Paid-call accounting contract
+
+Providers that own a model loop should set `capabilities.callAccounting: true`
+and wrap each actual vendor call with `ctx.meterCall(invoke, { usage })`.
+`usage(result)` returns `TokenUsage` or `undefined` when the outcome is unknown.
+Call the meter only for real calls; reuse cached responses without metering.
+The meter persists an admission receipt before invoking the vendor and records
+usage before control can reach a tool/HITL interrupt. It emits the usage event;
+do not emit the same usage again or charge an aggregate `AgentResult.usage`.
+Use `errorUsage(error)` for usage reported by a failed call, and
+`errorOutcomeUnknown(error)` when reported partial usage does not establish its
+final outcome. Classify a failure as known zero only when the individual request
+was rejected before a response; a timeout or a failed multi-call SDK operation
+does not establish that nothing was billed. Uncertain receipts remain inspectable
+and can be explicitly reconciled using the usage CLI/API.
+
+Legacy adapters remain supported: the runtime meters one provider operation,
+deduplicating emitted usage against `result.usage`. Their internal calls cannot
+be guarded individually. The native DeepAgents SDK is likewise metered at its
+SDK operation boundary; its LangChain fallback uses per-model-call admission.
+A native SDK error marked non-retryable propagates instead of triggering a
+second provider call. SDKs that hide internal model loops require their own
+internal limits; use the LangChain loop for per-model-call budget admission.
+
+`with.streaming: true` uses a LangChain model's real `stream` method for ordinary
+model calls and emits `agent.token` with `{ text }` for each text chunk. Usage
+is charged once after the assembled response. Native constrained finalization
+uses the SDK's structured invocation and does not manufacture token events from
+the completed object. Models without a stream method use ordinary invocation.

@@ -6,7 +6,7 @@
 import type { Artifact } from "@flowgraph/spec";
 import { parseDuration, sleep } from "../runtime/duration.js";
 import { artifactsExist } from "./artifacts.js";
-import type { Journal } from "./journal.js";
+import type { Journal, JournalEntry } from "./journal.js";
 import type { JobHandle, JobStatus, MediaCallContext, MediaProvider, MediaRequest } from "./types.js";
 
 export interface RunMediaJobOptions {
@@ -18,12 +18,16 @@ export interface RunMediaJobOptions {
   /** Whole-job limit, e.g. "10m". */
   timeout: string;
   emit(phase: string, data: Record<string, unknown>): void;
+  meter?(invoke: () => Promise<MediaJobResult>, estimateUSD: number | undefined): Promise<MediaJobResult>;
 }
 
 export interface MediaJobResult {
   artifacts: Artifact[];
   /** Cost to charge this run's budget; 0 when the result came from the journal. */
   costUSD: number;
+  /** False when neither the provider nor its estimator reports a price. */
+  costKnown?: boolean;
+  costEstimated?: boolean;
   /** True when finished outputs were reused instead of generating again. */
   reused: boolean;
 }
@@ -32,16 +36,20 @@ const DEFAULT_POLL_START_MS = 2000;
 const DEFAULT_POLL_MAX_MS = 10_000;
 
 export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobResult> {
-  const { provider, req, mctx, journal } = opts;
-  const timeoutMs = parseDuration(opts.timeout);
-  const deadline = Date.now() + timeoutMs;
-
+  const { provider, req, journal } = opts;
   const existing = await journal.read();
   if (existing?.state === "done" && existing.artifacts && (await artifactsExist(opts.workspace, existing.artifacts))) {
     opts.emit("reused", { provider: provider.name, jobId: existing.handle.id });
-    return { artifacts: existing.artifacts, costUSD: 0, reused: true };
+    return { artifacts: existing.artifacts, costUSD: 0, costKnown: true, reused: true };
   }
 
+  const invoke = () => runActiveJob(opts, existing);
+  return opts.meter ? opts.meter(invoke, provider.estimateCostUSD?.(req)) : invoke();
+}
+
+async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | undefined): Promise<MediaJobResult> {
+  const { provider, req, mctx, journal } = opts;
+  const deadline = Date.now() + parseDuration(opts.timeout);
   let handle: JobHandle;
   let submittedAt = existing?.submittedAt ?? new Date().toISOString();
   if (existing?.state === "submitted") {
@@ -65,7 +73,10 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
 
   if (handle.done) {
     const reported = typeof handle.costUSD === "number" ? handle.costUSD : undefined;
-    return { artifacts: handle.done, costUSD: reported ?? estimate ?? 0, reused: false };
+    const costUSD = reported ?? estimate;
+    await journal.write({ version: 1, state: "done", provider: provider.name, submittedAt, handle, artifacts: handle.done, ...(costUSD === undefined ? {} : { costUSD }) });
+    opts.emit("done", { provider: provider.name, jobId: handle.id, artifacts: handle.done.length, ...(costUSD === undefined ? { costKnown: false } : { costUSD, costKnown: true, costEstimated: reported === undefined }) });
+    return { artifacts: handle.done, costUSD: costUSD ?? 0, costKnown: costUSD !== undefined, costEstimated: reported === undefined && estimate !== undefined, reused: false };
   }
   if (!provider.poll || !provider.fetch) {
     throw new Error(`media provider "${provider.name}" returned a pending job but has no poll/fetch`);
@@ -115,7 +126,8 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
   }
 
   const artifacts = await provider.fetch(handle, mctx);
-  const costUSD = status.costUSD ?? estimate ?? 0;
+  const reportedCost = status.costUSD ?? estimate;
+  const costUSD = reportedCost ?? 0;
   await journal.write({
     version: 1,
     state: "done",
@@ -125,6 +137,6 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
     artifacts,
     costUSD,
   });
-  opts.emit("done", { provider: provider.name, jobId: handle.id, artifacts: artifacts.length, costUSD });
-  return { artifacts, costUSD, reused: false };
+  opts.emit("done", { provider: provider.name, jobId: handle.id, artifacts: artifacts.length, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, ...(reportedCost === undefined ? {} : { costUSD }) });
+  return { artifacts, costUSD, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, reused: false };
 }

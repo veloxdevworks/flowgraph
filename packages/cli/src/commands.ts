@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { graphEdges, loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
+import { buildUsageCommand } from "./usage-command.js";
 import { buildThreadCommand } from "./thread-command.js";
 import { buildSkillsCommand } from "./skills-command.js";
 import { abortOnSignals } from "./run-signal.js";
@@ -16,6 +17,12 @@ import { loadTargetsFile, placementCompileOptions, placementLines } from "./plac
 import { templateFor, listTemplates } from "./templates.js";
 import { migrateSpec } from "./migrate.js";
 import { printDiagnostics, printBanner, printSuccess, printError, printInfo, printWarning, formatDuration } from "./ui.js";
+
+function printFailedUsage(result: RunResult): void {
+  if (!["error", "aborted"].includes(result.status)) return;
+  console.error(`Thread: ${result.threadId ?? "unknown"}`);
+  if (result.usage) console.error(`Usage (known): tokens=${result.usage.totalTokens}, usd=${result.usage.costUSD}; pending=${result.usage.pendingCalls}, unknown=${result.usage.unknownCalls}, unpriced=${result.usage.unpricedCalls}, unreportedTokens=${result.usage.unreportedTokenCalls}`);
+}
 
 function printIssues(result: RunResult): void {
   const issues = result.issues ?? [];
@@ -138,6 +145,7 @@ const program = new Command()
 
 program.addCommand(buildSkillsCommand());
 program.addCommand(buildThreadCommand());
+program.addCommand(buildUsageCommand());
 
 // ---------------------------------------------------------------------------
 // tui — interactive terminal UI (optional @flowgraph/tui package)
@@ -388,6 +396,7 @@ program
     let result;
     try {
       result = await withCtrlC(opts.json, (signal) => compiled.run({ ...runOpts, signal }));
+      printFailedUsage(result);
 
       if (!opts.json) {
         if (result.status === "completed") {
@@ -569,6 +578,7 @@ program
           ? compiled.resumeFrom({ ...resumeOpts, signal, checkpointId: opts.from })
           : compiled.resume({ ...resumeOpts, signal }),
       );
+      printFailedUsage(result);
 
       if (!opts.json) {
         if (result.status === "completed") {

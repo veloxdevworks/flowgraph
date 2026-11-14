@@ -2,6 +2,7 @@
  * RunContext — threaded through compilation and execution.
  */
 
+import type { RunUsage, UsageLedger } from "./usage/ledger.js";
 import type { GraphSpec } from "@flowgraph/spec";
 import type { EventBus, EventType } from "./events.js";
 import type { HookBus } from "./hooks/bus.js";
@@ -24,6 +25,8 @@ export type InterruptKind =
   | "custom";
 
 export interface RunMeta {
+  /** Cumulative usage of this thread, available to output mappings as run.usage. */
+  readonly usage?: RunUsage | undefined;
   runId: string;
   threadId?: string | undefined;
   startedAt: string;
@@ -83,6 +86,8 @@ export interface RunContext {
   workspace: string;
   /** Run-level token/cost budget tracker, shared across agent nodes. */
   budget?: BudgetState | undefined;
+  /** Durable paid-call accounting for this invocation. */
+  accounting?: UsageLedger | undefined;
   /** Hook bus for lifecycle interception (mutate/veto/route/retry/interrupt). */
   hooks?: HookBus | undefined;
   /** MCP hub for deterministic mcp nodes and agent MCP tools. */
@@ -106,7 +111,7 @@ export function createLogger(events: EventBus, graphName: string): Logger {
       const out = `[${graphName}] ${level.toUpperCase()} ${msg}`;
       if (level === "error") console.error(out, data ?? "");
       else if (level === "warn") console.warn(out, data ?? "");
-      else if (process.env["FLOWGRAPH_LOG_LEVEL"] !== "warn") console.log(out, data ?? "");
+      else if (process.env["FLOWGRAPH_LOG_LEVEL"] !== "warn") console.error(out, data ?? "");
     }
   };
   return {

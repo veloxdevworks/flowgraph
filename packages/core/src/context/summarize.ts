@@ -78,14 +78,18 @@ export async function summarizeWithProvider(
   const refuse = async (): Promise<never> => {
     throw new Error("the context summarizer cannot call tools");
   };
-  const result = await provider.run(agentReq, {
+  const invoke = () => provider.run(agentReq, {
     node: opts.node,
+    ...(opts.node.accounting && provider.capabilities.callAccounting ? { meterCall: <T>(invoke: () => Promise<T>, options: import("../usage/ledger.js").MeteredCallOptions<T>) => opts.node.accounting!.call(opts.node, invoke, { ...options, kind: "summary" }) } : {}),
     invokeTool: refuse,
     checkToolCall: refuse,
     reportToolResult: async (_n, _a, r) => r,
     emit: () => {},
     signal: opts.signal,
   });
+  const result = opts.node.accounting && !provider.capabilities.callAccounting
+    ? await opts.node.accounting.call(opts.node, invoke, { kind: "summary", usage: result => result.usage }) : await invoke();
+  opts.node.accounting?.enforce(opts.node);
   if (result.stopReason === "error") throw new Error("the context summarizer returned an error");
   return { text: outputText(result.output), usage: result.usage };
 }

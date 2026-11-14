@@ -13,7 +13,7 @@ import type { NodeRunContext } from "../context.js";
 import { providerFor, providerNamesFor } from "../providers/registry.js";
 import { normalizeTools, mergeTools, type ToolRef, type ToolWiring } from "../providers/tools.js";
 import { expandMcpTools, requireMcpHub } from "../mcp/expand.js";
-import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
+import type { AgentRequest, ProviderRunContext, TokenUsage } from "../providers/types.js";
 import { checkToolCall, reportToolResult } from "../providers/governance.js";
 import { loadResolvedAgent } from "./agent-runner.js";
 import { assertAgentRefAllowed, nodePolicyOf } from "../node-policy.js";
@@ -137,6 +137,7 @@ export const agentNode = defineNode<Config>({
           maxSteps: config.maxSteps,
           maxTokens: config.maxTokens,
           permission: config.permission ?? "auto",
+          streaming: config.streaming,
         };
 
         const governance = {
@@ -161,10 +162,18 @@ export const agentNode = defineNode<Config>({
         // mismatch must fail the node instead.
         let mismatch: ReplayMismatchError | undefined;
 
+        let reportedUsage: TokenUsage | undefined;
         const providerCtx: ProviderRunContext = {
+          ...(ctx.accounting && provider.capabilities.callAccounting ? { meterCall: <T>(invoke: () => Promise<T>, options: import("../usage/ledger.js").MeteredCallOptions<T>) => ctx.accounting!.call(ctx, invoke, options) } : {}),
           node: ctx,
           signal: ctx.signal,
-          emit: (type, data) => ctx.emit(`agent.${type}` as import("../events.js").EventType, data),
+          emit: (type, data) => {
+            if (type === "usage") {
+              if (!provider.capabilities.callAccounting) reportedUsage = sumUsage(reportedUsage, data as TokenUsage);
+              return; // The accounting layer owns usage events; result.usage is a fallback.
+            }
+            ctx.emit(`agent.${type}` as import("../events.js").EventType, data);
+          },
           replay: {
             get: (index) => replayStore.get(cacheKey, index),
             set: (index, value) => replayStore.set(cacheKey, index, value),
@@ -256,6 +265,7 @@ export const agentNode = defineNode<Config>({
               prompt,
               tools: specs,
               onUsage: (usage) => {
+                if (ctx.accounting) return;
                 ctx.emit("agent.usage", { ...usage, purpose: "context.summary" });
                 enforceBudget(ctx, usage);
               },
@@ -264,7 +274,12 @@ export const agentNode = defineNode<Config>({
             providerCtx.context = contextSession.manager;
           }
 
-          const result = await provider.run(req, providerCtx);
+          const result = ctx.accounting && !provider.capabilities.callAccounting
+            ? await ctx.accounting.call(ctx, () => provider.run(req, providerCtx), {
+                kind: "provider", usage: r => maxUsage(r.usage, reportedUsage), errorUsage: () => reportedUsage, errorOutcomeUnknown: err => !isGraphInterrupt(err),
+              })
+            : await provider.run(req, providerCtx);
+          if (ctx.accounting) ctx.accounting.enforce(ctx);
           if (mismatch) throw mismatch;
 
           if (result.stopReason === "maxSteps") {
@@ -283,7 +298,7 @@ export const agentNode = defineNode<Config>({
             });
           }
 
-          if (result.usage) {
+          if (!ctx.accounting && result.usage) {
             ctx.emit("agent.usage", result.usage);
             enforceBudget(ctx, result.usage);
           }
@@ -390,7 +405,7 @@ export function enforceBudget(ctx: NodeRunContext, usage: { totalTokens?: number
   const overUSD = budget.maxUSD !== undefined && budget.usedUSD > budget.maxUSD;
   if (!overTokens && !overUSD) return;
 
-  const detail = `tokens=${budget.usedTokens}/${budget.maxTokens ?? "∞"}, usd=${budget.usedUSD.toFixed(4)}/${budget.maxUSD ?? "∞"}`;
+  const detail = `tokens=${budget.usedTokens}/${budget.maxTokens ?? "∞"}, usd=${budget.usedUSD}/${budget.maxUSD ?? "∞"}`;
   ctx.emit("custom.budget.exceeded", { detail, onExceed: budget.onExceed });
   if (budget.onExceed === "fail") {
     throw new Error(`Budget exceeded (${detail}).`);
@@ -469,4 +484,16 @@ function ownSubgraphCounter(scratchpad: object): object {
 
 function lgConfigOf(ctx: unknown): { configurable?: Record<string, unknown> } | undefined {
   return (ctx as { _lgConfig?: { configurable?: Record<string, unknown> } })._lgConfig;
+}
+
+function sumUsage(a: TokenUsage | undefined, b: TokenUsage): TokenUsage {
+  const out = { ...a };
+  for (const key of ["inputTokens", "outputTokens", "totalTokens", "costUSD"] as const) if (b[key] !== undefined) out[key] = (out[key] ?? 0) + b[key]!;
+  return out;
+}
+function maxUsage(a?: TokenUsage, b?: TokenUsage): TokenUsage | undefined {
+  if (!a && !b) return undefined;
+  const out = { ...a };
+  for (const key of ["inputTokens", "outputTokens", "totalTokens", "costUSD"] as const) if (b?.[key] !== undefined) out[key] = Math.max(out[key] ?? 0, b[key]!);
+  return out;
 }
