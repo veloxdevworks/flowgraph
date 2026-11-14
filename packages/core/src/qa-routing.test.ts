@@ -36,6 +36,13 @@ function register() {
 }
 
 describe("PLAT-300/301: recovery policies", () => {
+  it("supports a programmatic recovery target without a dummy inbound edge", async () => {
+    register();
+    const spec = graph([fail(), mark("recover")], [{ from: "START", to: "fail" }, { from: "fail", to: "END" }, { from: "recover", to: "END" }]);
+    const r = await (await compileGraph(spec, { hooks: [{ phase: "node:error", where: { nodeId: "fail" }, handler: () => ({ kind: "route", to: "recover" }) }] })).run();
+    expect(r.status).toBe("completed");
+    expect(r.state.seen).toEqual(["recover"]);
+  });
   it.each(["continue", "ignore"])(
     "honors on.error %s without abandoning siblings",
     async (policy) => {

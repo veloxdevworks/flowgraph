@@ -1031,7 +1031,8 @@ async function assembleCompiledLangGraph(
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
   // does not silently drop node updates when authors omit state.channels entries.
   spec = ensureDeclaredOutputChannels(spec);
-  const invalidTopology = topologyDiagnostics(spec).filter((d) => d.severity === "error");
+  const policyEdges = spec.nodes.flatMap(node => recoveryTargets(spec, node, opts.hooks).map(to => ({ from: node.id, to })));
+  const invalidTopology = topologyDiagnostics({ ...spec, edges: [...spec.edges, ...policyEdges] }).filter((d) => d.severity === "error");
   if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
 
   const cwd = opts.cwd ?? process.cwd();
