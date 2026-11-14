@@ -254,7 +254,7 @@ async function loadChild(
   parentEvents: EventBus,
   ctx: NodeRunContext,
 ): Promise<EmbeddedChild> {
-  const { compileGraphForEmbedding } = await import("../compiler.js");
+  const { compileGraphForEmbedding, resolveGraphWorkspace } = await import("../compiler.js");
   const { spec, cwd, channels, channelDefs } = await loadChildSpec(uses, inlineSpec, parentNodeId, ctx);
 
   const forwardSink = (event: FlowgraphEvent) => {
@@ -266,6 +266,7 @@ async function loadChild(
 
   const { compiledLg } = await compileGraphForEmbedding(spec, {
     cwd,
+    workspace: resolveGraphWorkspace(spec, ctx.workspace),
     sinks: [forwardSink],
     store: childStore(spec, ctx),
     ...(nodePolicyOf(ctx) ? { nodePolicy: nodePolicyOf(ctx)! } : {}),

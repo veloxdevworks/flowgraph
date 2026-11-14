@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
@@ -199,6 +199,31 @@ describe("PLAT-302 / PLAT-335: validate before execution", () => {
 });
 
 describe("PLAT-304 / PLAT-305 / PLAT-335: source-relative imports", () => {
+  it.each([
+    { kind: "inline", workspace: undefined },
+    { kind: "file", workspace: undefined },
+    { kind: "inline", workspace: "child" },
+    { kind: "file", workspace: "child" },
+  ])("keeps $kind child execution in the run workspace ($workspace)", async ({ kind, workspace }) => {
+    const dir = await directory();
+    await mkdir(join(dir, "graphs/sub"), { recursive: true });
+    await mkdir(join(dir, "workspace/child"), { recursive: true });
+    const child = graph([
+      { id: "mark", type: "shell", with: { command: process.execPath, args: ["-e", "require('node:fs').writeFileSync('marker', 'ok')"] } },
+    ], [{ from: "START", to: "mark" }, { from: "mark", to: "END" }], workspace ? { runtime: { workspace } } : {});
+    await writeFile(join(dir, "graphs/sub/child.yaml"), JSON.stringify(child));
+    const parent = graph([
+      { id: "child", type: "subgraph", ...(kind === "inline" ? { spec: child } : { uses: "./sub/child.yaml" }) },
+    ], [{ from: "START", to: "child" }, { from: "child", to: "END" }], { runtime: { workspace: "../workspace" } });
+    const file = join(dir, "graphs/parent.yaml");
+    await writeFile(file, JSON.stringify(parent));
+    const loaded = await loadGraph(file);
+    const result = await (await compileGraph(loaded.spec!, { graphPath: file })).run();
+    expect(result.status).toBe("completed");
+    expect(await readFile(join(dir, "workspace", workspace ?? "", "marker"), "utf8")).toBe("ok");
+    await expect(readFile(join(dir, "graphs/marker"))).rejects.toThrow();
+    await expect(readFile(join(dir, "graphs/sub/marker"))).rejects.toThrow();
+  });
   it("loads a child's module imports from the child file rather than the parent workspace", async () => {
     const dir = await directory();
     await mkdir(join(dir, "child"));

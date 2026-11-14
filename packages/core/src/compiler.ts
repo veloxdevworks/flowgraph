@@ -113,6 +113,8 @@ export type InterruptPolicy = "prompt" | "fail" | "approve" | "webhook";
 
 export interface CompileOptions {
   cwd?: string;
+  /** Explicit execution workspace; graph references still resolve against graphPath/source. */
+  workspace?: string;
   /** Graph file path — `imports` specifiers resolve relative to this file's directory. */
   graphPath?: string;
   sinks?: EventSink[];
@@ -1019,7 +1021,9 @@ async function assembleCompiledLangGraph(
     opts.graphPath != null
       ? path.dirname(path.resolve(cwd, opts.graphPath))
       : sourceFile ? path.dirname(sourceFile) : cwd;
-  const graphWorkspace = resolveGraphWorkspace(spec, graphDir);
+  const graphWorkspace = opts.workspace !== undefined
+    ? path.resolve(cwd, opts.workspace)
+    : resolveGraphWorkspace(spec, graphDir);
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const events = createEventBus({ runId, graph: spec.metadata.name });
   for (const sink of opts.sinks ?? []) events.subscribe(sink);
