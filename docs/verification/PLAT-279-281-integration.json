@@ -1,0 +1,95 @@
+{
+  "sourceHeads": {
+    "PLAT-279": "56723ace4d1b23fa6fd3ff171909854254de953c",
+    "PLAT-281": "0f083ffa605ec1f9ef4eaea82d87cc2835284b12",
+    "testedMerge": "fb08a14050a3652a1c0e70e714e0c36d1e4b5cb0"
+  },
+  "node": "v25.2.1",
+  "platform": "darwin/arm64",
+  "checks": {
+    "rootBuildTasks": 16,
+    "rootTypecheckTasks": 30,
+    "focusedCoreTestsPassed": 113,
+    "specTestsPassed": 2
+  },
+  "progressHarness": [
+    "built API stream, parallel reducers and terminal delivery",
+    "real CLI JSONL quickstart and natural exit 0",
+    "SQLite interrupt and resume in separate CLI processes",
+    "real authenticated REST, live SSE across resume, Last-Event-ID replay and journal"
+  ],
+  "correlationHarness": [
+    "authentication and validation rejection leave the original wait usable",
+    "SQLite and receipts survive SIGKILL before callback, after partial reply, and after completion",
+    "ambiguous external ids fail closed and a more precise callback selects one run",
+    "twelve overlapping deliveries across two Node processes apply one effect",
+    "crash after a durable claim fails closed instead of invoking the effect again",
+    "real CLI declares correlation from input and restores a signed wait using resume --listen"
+  ],
+  "combinedAdmission": {
+    "scenario": "Combined correlated callbacks and progress streams",
+    "heldCallbackEffects": 1,
+    "rejectedResume": "WEBHOOK_THREAD_BUSY",
+    "rejectedStreamEvents": 0,
+    "warnings": 2,
+    "ownerStayedOpenAcrossBusyAdmission": true,
+    "duplicateProducedNoProgress": true,
+    "stateUpdates": [
+      {
+        "channels": [
+          "first",
+          "outputs"
+        ],
+        "update": {
+          "first": {
+            "answer": "first-answer"
+          },
+          "outputs": {
+            "first-gate": {
+              "answer": "first-answer"
+            }
+          }
+        }
+      },
+      {
+        "channels": [
+          "second",
+          "outputs"
+        ],
+        "update": {
+          "second": {
+            "answer": "second-answer"
+          },
+          "outputs": {
+            "first-gate": {
+              "answer": "first-answer"
+            },
+            "second-gate": {
+              "answer": "second-answer"
+            }
+          }
+        }
+      }
+    ],
+    "edges": [
+      [
+        "START",
+        "first-gate"
+      ],
+      [
+        "first-gate",
+        "hold"
+      ],
+      [
+        "hold",
+        "second-gate"
+      ],
+      [
+        "second-gate",
+        "END"
+      ]
+    ],
+    "privateCorrelationHidden": true,
+    "terminal": "run.end"
+  }
+}
