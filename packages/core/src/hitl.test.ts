@@ -374,16 +374,13 @@ describe("parallel HITL interrupts", () => {
     expect(r.state["gateB"]).toMatchObject({ approved: true });
   });
 
-  it("continueRun keys true over every pending interrupt", async () => {
+  it("continueRun requires explicit answers for parallel human decisions", async () => {
     const compiled = await compileGraph(parallelHitlSpec(), {});
     const first = await compiled.run({ threadId: "hitl-par-continue", onInterrupt: "fail" });
     expect(first.status).toBe("interrupted");
     expect(first.interrupts).toHaveLength(2);
-    const r = await compiled.continueRun({ threadId: "hitl-par-continue", onInterrupt: "fail" });
-    expect(r.status).toBe("completed");
-    expect(r.error).toBeUndefined();
-    expect((r.state["gateA"] as { approved: boolean }).approved).toBe(true);
-    expect((r.state["gateB"] as { answer: string }).answer).toBe("true");
+    await expect(compiled.continueRun({ threadId: "hitl-par-continue", onInterrupt: "fail" })).rejects.toMatchObject({ code: "RESUME_VALUE_REQUIRED" });
+    expect((await compiled.getState("hitl-par-continue"))?.interrupts).toHaveLength(2);
   });
 
   it("partial map resume re-raises the remaining interrupt", async () => {
