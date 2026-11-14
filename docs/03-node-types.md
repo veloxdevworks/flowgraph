@@ -563,6 +563,10 @@ On resume, the parent `subgraph` node re-executes from the top (recomputing `sta
 
 Run a node/subgraph once per item in a collection, concurrently, then fan-in. (Sugar over LangGraph's parallel branches + reducers.)
 
+`with.concurrency` limits active items in that map. `runtime.concurrency` limits active node executions across the invocation, including map workers; dispatch and join bookkeeping do not consume slots. A limit of 1 serializes work without dropping it. Queued work can be cancelled, and unrelated branches do not inherit a map's cap.
+
+Each entry into a map has a separate collection round, in input order. Looping back replaces the internal collection bag; an explicitly append-reduced destination channel still follows its declared reducer. Inner `output.map` expressions run after execution with both `item` and `result` in scope. Inner retry/timeout settings override the map/default policy. Item IDs such as `views[0]` are stable across resume and are used by media journals and artifact writers. Older array-format collection checkpoints remain readable.
+
 ```yaml
 - id: implement-all
   type: map
