@@ -5,6 +5,8 @@ import type { Readable } from "node:stream";
 import { assertSha256, DEFAULT_ARTIFACT_MAX_BYTES, hasBlob, materializeStaged, putBlob, resolveInWorkspace, storeScopeOf } from "./artifact-store.js";
 import {
   compileGraph,
+  acquireThreadRun,
+  type ThreadRunClaim,
   assertResumeValue,
   createInMemoryMemoryBackend,
   startMemorySweeper,
@@ -388,6 +390,7 @@ export class RunService {
     const collides = Boolean(meta && meta.threadId !== threadId);
     if (!this.multiUser) {
       if (collides) throw this.threadIdConflict(threadId, meta!);
+
       return meta;
     }
     const notOwned = () => new ServerRequestError(403, "THREAD_NOT_OWNED", `Thread "${threadId}" belongs to another user`);
@@ -745,6 +748,32 @@ export class RunService {
     });
   }
 
+  private admissionError(err: unknown): never {
+    const code = (err as { code?: string } | null)?.code;
+    const status = code === "THREAD_NOT_FOUND" ? 404
+      : code === "THREAD_BUSY" || code === "THREAD_NOT_WAITING" || code === "HISTORICAL_DECISION_REPLAY" ? 409
+      : code === "RESUME_MAP_REQUIRED" || code === "RESUME_VALUE_REQUIRED" ? 400 : undefined;
+    if (status && code) throw new ServerRequestError(status, code, (err as Error).message);
+    throw err;
+  }
+
+  private async controlClaim(threadId: string, mustExist = false): Promise<ThreadRunClaim> {
+    try {
+      const saver = await this.getCheckpointer();
+      const claim = await acquireThreadRun(saver, threadId);
+      try {
+        if (mustExist && !await saver.getTuple({ configurable: { thread_id: threadId } })) throw new ServerRequestError(404, "THREAD_NOT_FOUND", `No run "${threadId}"`);
+        return claim;
+      } catch (err) { await claim.release(); throw err; }
+    }
+    catch (err) { return this.admissionError(err); }
+  }
+
+  private async prepareControl(compiled: CompiledGraph, request: Parameters<CompiledGraph["prepare"]>[0], claim: ThreadRunClaim) {
+    try { return await compiled.prepare(request, claim); }
+    catch (err) { return this.admissionError(err); }
+  }
+
   startRun(req: StartRunRequest, caller?: Principal): Promise<StartRunResult> {
     try {
       this.assertOpen();
@@ -779,111 +808,114 @@ export class RunService {
       throw new TooManyRunsError(max);
     }
 
-    const { spec, yaml, cwd, importsStripped } = await this.resolveSpec(req.threadId, req.yaml, principal, {
-      ...(req.label ? { label: req.label } : {}),
-      status: "running",
-    });
-    const graphName = spec.metadata?.name ?? "graph";
-
-    // Staged artifacts (ADR-0020 section 10) become files in this run's workspace before anything starts.
-    let runInput = req.input;
+    const claim = await this.controlClaim(req.threadId);
+    let launched = false;
     try {
-      runInput = await materializeStaged(
-        this.config.graphStoreDir,
-        this.storeScope(principal),
-        resolveGraphWorkspace(spec, cwd),
-        req.threadId,
-        req.input,
-      );
-    } catch (err) {
-      await this.patchMeta(req.threadId, { status: "error" });
-      throw err;
-    }
-
-    // Pre-create session so events during compile/run are buffered.
-    const placeholder = this.registry.create({
-      threadId: req.threadId,
-      runId: "pending",
-      graphName,
-      ...(req.label ? { label: req.label } : {}),
-      yaml,
-      ...(req.dryRun ? { dryRun: true } : {}),
-      owner: this.ownerOf(principal),
-    });
-
-    let compiled: CompiledGraph;
-    try {
-      compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
-        this.pushEvent(req.threadId, ev);
-      }, principal, Boolean(req.dryRun));
-    } catch (err) {
-      // Don't leave a "running" placeholder behind for a run that never started.
-      if (this.registry.get(req.threadId) === placeholder) this.registry.remove(req.threadId);
-      await this.patchMeta(req.threadId, { status: "error" });
-      throw err;
-    }
-
-    let resolvedInput: Record<string, unknown>;
-    try {
-      resolvedInput = resolveAndValidateInput(spec.inputs, {
-        ...(spec.input ?? {}),
-        ...(runInput ?? {}),
+      const { spec, yaml, cwd, importsStripped } = await this.resolveSpec(req.threadId, req.yaml, principal, {
+        ...(req.label ? { label: req.label } : {}),
+        status: "running",
       });
-    } catch (err) {
-      this.registry.remove(req.threadId);
-      if (isInputValidationError(err)) {
-        throw new Error(err.message);
-      }
-      throw err;
-    }
+      const graphName = spec.metadata?.name ?? "graph";
 
-    placeholder.runId = compiled.runId;
-    this.registry.setStatus(req.threadId, "running");
-    this.metrics.recordStart();
-
-    log("info", "run.start", {
-      threadId: req.threadId,
-      runId: compiled.runId,
-      graph: graphName,
-    });
-
-    void this.track((async () => {
+      // Staged artifacts (ADR-0020 section 10) become files in this run's workspace before anything starts.
+      let runInput = req.input;
       try {
-        const result = await compiled.run({
-          input: resolvedInput,
-          threadId: req.threadId,
-          onInterrupt: "fail",
-          signal: placeholder.abort.signal,
-          pauseSignal: placeholder.pause.signal,
-        });
-        await this.applyResult(req.threadId, result);
+        runInput = await materializeStaged(
+          this.config.graphStoreDir,
+          this.storeScope(principal),
+          resolveGraphWorkspace(spec, cwd),
+          req.threadId,
+          req.input,
+        );
       } catch (err) {
-        const errorId = newErrorId();
-        log("error", "run.error", { threadId: req.threadId, errorId, ...errorFields(err) });
         await this.patchMeta(req.threadId, { status: "error" });
-        this.registry.setStatus(req.threadId, "error");
-        this.metrics.recordResult("error");
-        const { message, redacted } = runErrorMessage(err, errorId);
-        this.registry.pushEvent(req.threadId, {
-          id: `err-${Date.now()}`,
-          type: "run.error",
-          ts: new Date().toISOString(),
-          runId: compiled.runId,
-          threadId: req.threadId,
-          graph: graphName,
-          scope: {},
-          data: redacted ? { message, errorId } : { message },
-          seq: -1,
-        });
+        throw err;
       }
-    })());
 
-    return {
-      threadId: req.threadId,
-      runId: compiled.runId,
-      status: "started",
-      ...(importsStripped ? { importsStripped: true } : {}),
-    };
+      // Pre-create session so events during compile/run are buffered.
+      const placeholder = this.registry.create({
+        threadId: req.threadId,
+        runId: "pending",
+        graphName,
+        ...(req.label ? { label: req.label } : {}),
+        yaml,
+        ...(req.dryRun ? { dryRun: true } : {}),
+        owner: this.ownerOf(principal),
+      });
+
+      let compiled: CompiledGraph;
+      try {
+        compiled = await this.compile(spec, cwd, req.threadId, (ev) => {
+          this.pushEvent(req.threadId, ev);
+        }, principal, Boolean(req.dryRun));
+      } catch (err) {
+        // Don't leave a "running" placeholder behind for a run that never started.
+        if (this.registry.get(req.threadId) === placeholder) this.registry.remove(req.threadId);
+        await this.patchMeta(req.threadId, { status: "error" });
+        throw err;
+      }
+
+      let resolvedInput: Record<string, unknown>;
+      try {
+        resolvedInput = resolveAndValidateInput(spec.inputs, {
+          ...(spec.input ?? {}),
+          ...(runInput ?? {}),
+        });
+      } catch (err) {
+        this.registry.remove(req.threadId);
+        if (isInputValidationError(err)) {
+          throw new Error(err.message);
+        }
+        throw err;
+      }
+
+      const prepared = await this.prepareControl(compiled, { mode: "start", options: { threadId: req.threadId, input: resolvedInput, onInterrupt: "fail" } }, claim);
+      placeholder.runId = compiled.runId;
+      this.registry.setStatus(req.threadId, "running");
+      this.metrics.recordStart();
+
+      log("info", "run.start", {
+        threadId: req.threadId,
+        runId: compiled.runId,
+        graph: graphName,
+      });
+
+      launched = true;
+      void this.track((async () => {
+        try {
+          const result = await prepared.execute({
+            signal: placeholder.abort.signal,
+            pauseSignal: placeholder.pause.signal,
+          });
+          await this.applyResult(req.threadId, result);
+        } catch (err) {
+          const errorId = newErrorId();
+          log("error", "run.error", { threadId: req.threadId, errorId, ...errorFields(err) });
+          await this.patchMeta(req.threadId, { status: "error" });
+          this.registry.setStatus(req.threadId, "error");
+          this.metrics.recordResult("error");
+          const { message, redacted } = runErrorMessage(err, errorId);
+          this.registry.pushEvent(req.threadId, {
+            id: `err-${Date.now()}`,
+            type: "run.error",
+            ts: new Date().toISOString(),
+            runId: compiled.runId,
+            threadId: req.threadId,
+            graph: graphName,
+            scope: {},
+            data: redacted ? { message, errorId } : { message },
+            seq: -1,
+          });
+        }
+      })());
+
+      return {
+        threadId: req.threadId,
+        runId: compiled.runId,
+        status: "started",
+        ...(importsStripped ? { importsStripped: true } : {}),
+      };
+    } finally { if (!launched) await claim.release(); }
   }
 
   /**
@@ -1068,99 +1100,105 @@ export class RunService {
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(req.threadId, principal, { mustExist: true });
 
-    const existing = this.registry.get(req.threadId);
-    const yaml = req.yaml ?? existing?.yaml;
-    const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(req.threadId, yaml, principal);
-    const graphName = spec.metadata?.name ?? "graph";
-
-    const dryRun = Boolean(existing?.dryRun);
-    const compiled = await this.compile(
-      spec,
-      cwd,
-      req.threadId,
-      (ev) => {
-        this.pushEvent(req.threadId, ev);
-      },
-      principal,
-      dryRun,
-    );
-    // Refuse an unkeyed multi-gate resume here, before a session is created
-    // or the run is marked started, so a 400 cannot leave a "started"
-    // placeholder or mark the thread error while its gates are still pending.
-    // Peek state without applying wait deadlines so a validation failure
-    // leaves the thread untouched.
-    const pending = (await compiled.getState(req.threadId, { applyWaitTimeouts: false }))?.interrupts ?? [];
+    const claim = await this.controlClaim(req.threadId, true);
+    let launched = false;
     try {
-      assertResumeValue(req.resume, pending, req.threadId);
-    } catch (err) {
-      const code = (err as { code?: string }).code;
-      if (code === "RESUME_MAP_REQUIRED" || code === "RESUME_VALUE_REQUIRED") {
-        throw new ServerRequestError(400, code, (err as Error).message);
-      }
-      throw err;
-    }
+      const existing = this.registry.get(req.threadId);
+      const yaml = req.yaml ?? existing?.yaml;
+      const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(req.threadId, yaml, principal);
+      const graphName = spec.metadata?.name ?? "graph";
 
-    const abort = new AbortController();
-    const pause = new AbortController();
-    let session = this.registry.get(req.threadId);
-    if (!session) {
-      session = this.registry.create({
-        threadId: req.threadId,
-        runId: "pending",
-        graphName,
-        yaml: resolvedYaml,
-        owner: this.ownerOf(principal),
-      });
-    } else {
+      const dryRun = Boolean(existing?.dryRun);
+      const compiled = await this.compile(
+        spec,
+        cwd,
+        req.threadId,
+        (ev) => {
+          this.pushEvent(req.threadId, ev);
+        },
+        principal,
+        dryRun,
+      );
+      // Refuse an unkeyed multi-gate resume here, before a session is created
+      // or the run is marked started, so a 400 cannot leave a "started"
+      // placeholder or mark the thread error while its gates are still pending.
+      // Peek state without applying wait deadlines so a validation failure
+      // leaves the thread untouched.
+      const pending = (await compiled.getState(req.threadId, { applyWaitTimeouts: false }))?.interrupts ?? [];
+      try {
+        assertResumeValue(req.resume, pending, req.threadId);
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === "RESUME_MAP_REQUIRED" || code === "RESUME_VALUE_REQUIRED") {
+          throw new ServerRequestError(400, code, (err as Error).message);
+        }
+        throw err;
+      }
+
+      const prepared = await this.prepareControl(compiled, { mode: "resume", options: { threadId: req.threadId, resume: req.resume, onInterrupt: "fail" } }, claim);
+      const abort = new AbortController();
+      const pause = new AbortController();
+      let session = this.registry.get(req.threadId);
+      if (!session) {
+        session = this.registry.create({
+          threadId: req.threadId,
+          runId: "pending",
+          graphName,
+          yaml: resolvedYaml,
+          owner: this.ownerOf(principal),
+        });
+      } else {
+        session.abort = abort;
+        session.pause = pause;
+        session.yaml = resolvedYaml;
+      }
+
       session.abort = abort;
       session.pause = pause;
       session.yaml = resolvedYaml;
-    }
+      session.runId = compiled.runId;
+      session.dryRun = dryRun;
+      this.registry.setStatus(req.threadId, "running");
+      // Not awaited: the run starts now. close() still waits for this write,
+      // and the run's final status patch is queued after it.
+      void this.patchMeta(req.threadId, { status: "running" });
 
-    session.runId = compiled.runId;
-    session.dryRun = dryRun;
-    this.registry.setStatus(req.threadId, "running");
-    // Not awaited: the run starts now. close() still waits for this write,
-    // and the run's final status patch is queued after it.
-    void this.patchMeta(req.threadId, { status: "running" });
+      // Fire-and-forget like start/continue — resumed execution can be long-running.
+      launched = true;
+      void this.track((async () => {
+        try {
+          const result = await prepared.execute({
+            signal: abort.signal,
+            pauseSignal: pause.signal,
+          });
+          await this.applyResult(req.threadId, result);
+        } catch (err) {
+          const errorId = newErrorId();
+          log("error", "resume.error", { threadId: req.threadId, errorId, ...errorFields(err) });
+          await this.patchMeta(req.threadId, { status: "error" });
+          this.registry.setStatus(req.threadId, "error");
+          this.metrics.recordResult("error");
+          const { message, redacted } = runErrorMessage(err, errorId);
+          this.registry.pushEvent(req.threadId, {
+            id: `err-${Date.now()}`,
+            type: "run.error",
+            ts: new Date().toISOString(),
+            runId: compiled.runId,
+            threadId: req.threadId,
+            graph: graphName,
+            scope: {},
+            data: redacted ? { message, errorId } : { message },
+            seq: -1,
+          });
+        }
+      })());
 
-    // Fire-and-forget like start/continue — resumed execution can be long-running.
-    void this.track((async () => {
-      try {
-        const result = await compiled.resume({
-          threadId: req.threadId,
-          resume: req.resume,
-          onInterrupt: "fail",
-          signal: abort.signal,
-          pauseSignal: pause.signal,
-        });
-        await this.applyResult(req.threadId, result);
-      } catch (err) {
-        const errorId = newErrorId();
-        log("error", "resume.error", { threadId: req.threadId, errorId, ...errorFields(err) });
-        await this.patchMeta(req.threadId, { status: "error" });
-        this.registry.setStatus(req.threadId, "error");
-        this.metrics.recordResult("error");
-        const { message, redacted } = runErrorMessage(err, errorId);
-        this.registry.pushEvent(req.threadId, {
-          id: `err-${Date.now()}`,
-          type: "run.error",
-          ts: new Date().toISOString(),
-          runId: compiled.runId,
-          threadId: req.threadId,
-          graph: graphName,
-          scope: {},
-          data: redacted ? { message, errorId } : { message },
-          seq: -1,
-        });
-      }
-    })());
-
-    return {
-      threadId: req.threadId,
-      runId: compiled.runId,
-      status: "started",
-    };
+      return {
+        threadId: req.threadId,
+        runId: compiled.runId,
+        status: "started",
+      };
+    } finally { if (!launched) await claim.release(); }
   }
 
   /**
@@ -1222,62 +1260,69 @@ export class RunService {
   private async continueRunNow(threadId: string, yaml?: string, caller?: Principal): Promise<ControlResult> {
     const principal = this.principalFor(caller);
     await this.checkThreadAccess(threadId, principal, { mustExist: true });
-    const existing = this.registry.get(threadId);
-    const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
+    const claim = await this.controlClaim(threadId, true);
+    let launched = false;
+    try {
+      const existing = this.registry.get(threadId);
+      const { spec, yaml: resolvedYaml, cwd } = await this.resolveSpec(threadId, yaml ?? existing?.yaml, principal);
 
-    const abort = new AbortController();
-    const pause = new AbortController();
-    let session = this.registry.get(threadId);
-    if (!session) {
-      session = this.registry.create({
+      const dryRun = Boolean(existing?.dryRun);
+      const compiled = await this.compile(
+        spec,
+        cwd,
         threadId,
-        runId: "pending",
-        graphName: spec.metadata?.name ?? "graph",
-        yaml: resolvedYaml,
-        owner: this.ownerOf(principal),
-      });
-    } else {
+        (ev) => {
+          this.pushEvent(threadId, ev);
+        },
+        principal,
+        dryRun,
+      );
+      const prepared = await this.prepareControl(compiled, { mode: "continue", options: { threadId, onInterrupt: "fail" } }, claim);
+      const abort = new AbortController();
+      const pause = new AbortController();
+      let session = this.registry.get(threadId);
+      if (!session) {
+        session = this.registry.create({
+          threadId,
+          runId: "pending",
+          graphName: spec.metadata?.name ?? "graph",
+          yaml: resolvedYaml,
+          owner: this.ownerOf(principal),
+        });
+      } else {
+        session.abort = abort;
+        session.pause = pause;
+      }
+
       session.abort = abort;
       session.pause = pause;
-    }
+      session.yaml = resolvedYaml;
+      session.runId = compiled.runId;
+      session.dryRun = dryRun;
+      this.registry.setStatus(threadId, "running");
+      // Not awaited: the run starts now. close() still waits for this write,
+      // and the run's final status patch is queued after it.
+      void this.patchMeta(threadId, { status: "running" });
 
-    const dryRun = Boolean(existing?.dryRun);
-    const compiled = await this.compile(
-      spec,
-      cwd,
-      threadId,
-      (ev) => {
-        this.pushEvent(threadId, ev);
-      },
-      principal,
-      dryRun,
-    );
-    session.runId = compiled.runId;
-    session.dryRun = dryRun;
-    this.registry.setStatus(threadId, "running");
-    // Not awaited: the run starts now. close() still waits for this write,
-    // and the run's final status patch is queued after it.
-    void this.patchMeta(threadId, { status: "running" });
+      // Fire-and-forget like start (continue can be long-running)
+      launched = true;
+      void this.track((async () => {
+        try {
+          const result = await prepared.execute({
+            signal: abort.signal,
+            pauseSignal: pause.signal,
+          });
+          await this.applyResult(threadId, result);
+        } catch (err) {
+          log("error", "continue.error", { threadId, ...errorFields(err) });
+          await this.patchMeta(threadId, { status: "error" });
+          this.registry.setStatus(threadId, "error");
+          this.metrics.recordResult("error");
+        }
+      })());
 
-    // Fire-and-forget like start (continue can be long-running)
-    void this.track((async () => {
-      try {
-        const result = await compiled.continueRun({
-          threadId,
-          onInterrupt: "fail",
-          signal: abort.signal,
-          pauseSignal: pause.signal,
-        });
-        await this.applyResult(threadId, result);
-      } catch (err) {
-        log("error", "continue.error", { threadId, ...errorFields(err) });
-        await this.patchMeta(threadId, { status: "error" });
-        this.registry.setStatus(threadId, "error");
-        this.metrics.recordResult("error");
-      }
-    })());
-
-    return { threadId, runId: compiled.runId, status: "started" };
+      return { threadId, runId: compiled.runId, status: "started" };
+    } finally { if (!launched) await claim.release(); }
   }
 
   getState(threadId: string, yaml?: string, caller?: Principal): Promise<GetStateResult> {

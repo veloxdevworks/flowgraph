@@ -73,13 +73,13 @@ async function checkpointCount(pool: pg.Pool, schema: string, threadId: string):
 }
 
 describe.skipIf(!DB)("postgres abandoned active threads", () => {
-  it("migrates the checkpoint schema to version 5 with active_ttl_ms and execution claims", async () => {
+  it("migrates the checkpoint schema to version 6 with activity and execution owner identity", async () => {
     const schema = schemaName();
     const { pool } = await saverAt({ finishedTtl: "1h" }, schema);
     const v = await pool.query<{ v: number }>(
       `SELECT MAX(version) AS v FROM "${schema}".fg_schema_migrations WHERE component = 'checkpoint'`,
     );
-    expect(v.rows[0]?.v).toBe(5);
+    expect(v.rows[0]?.v).toBe(6);
     const col = await pool.query(
       `SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'fg_checkpoint_threads' AND column_name = 'active_ttl_ms'`,
       [schema],
@@ -362,4 +362,21 @@ describe.skipIf(!DB)("postgres run waiting for an answer", () => {
     expect(seenInPost).toEqual([]);
     expect(await b.saver.savedThreadStatus(threadId)).toEqual({ status: "active", updatedAt: T0 + 1 });
   });
+});
+
+
+it.skipIf(!DB)("keeps unresolved claims out of retention and preserves the checkpoint for explicit recovery", async () => {
+  const schema = schemaName(), policy = { activeTtl: "1d", finishedTtl: "1h" };
+  const first = await saverAt(policy, schema);
+  await first.saver.acquireThreadRun("owned"); await first.saver.markThreadActive("owned"); await write(first.saver, "owned", 1);
+  const second = await saverAt(policy, schema);
+  second.clock.now = T0 + 3 * DAY;
+  await second.saver.sweep();
+  expect((await second.saver.savedThreadStatus("owned"))?.status).toBe("active");
+  expect(await checkpointCount(second.pool, schema, "owned")).toBe(1);
+  const info = (await second.saver.inspectThreadRun("owned"))!;
+  expect(await second.saver.releaseThreadRun("owned", info.token)).toBe(true);
+  await second.saver.sweep();
+  expect((await second.saver.savedThreadStatus("owned"))?.status).toBe("paused");
+  expect(await checkpointCount(second.pool, schema, "owned")).toBe(1);
 });

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "no
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync as requireSpawnSync, type ChildProcess } from "node:child_process";
 import { openSqliteBackend } from "@flowgraph/checkpoint-sqlite";
 
 const dirs: string[] = [], children = new Set<ChildProcess>();
@@ -16,7 +16,6 @@ function fixture(gate = false) {
     import { registerFunction } from ${JSON.stringify(core)};
     import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
     registerFunction('qaThreadWork', async () => {
-      appendFileSync(${JSON.stringify(effect)}, 'ran\\n');
       if (!existsSync(${JSON.stringify(ready)})) {
         writeFileSync(${JSON.stringify(ready)}, 'ready');
         const until = Date.now() + 30000;
@@ -25,6 +24,7 @@ function fixture(gate = false) {
           await new Promise(r => setTimeout(r, 20));
         }
       }
+      appendFileSync(${JSON.stringify(effect)}, 'ran\\n');
       return 'done';
     }); export default [];
   `);
@@ -34,16 +34,18 @@ function fixture(gate = false) {
     edges: [{ from: "START", to: gate ? "gate" : "work" }, ...(gate ? [{ from: "gate", to: "work" }] : []), { from: "work", to: "END" }],
     runtime: { checkpoint: { backend: "sqlite", path: "checkpoints.sqlite" } },
   }));
-  const run = (mode: string) => {
+  const launch = (mode: string) => {
     const child = spawn(process.execPath, [resolve(import.meta.dirname, "../dist/bin.js"), mode, "flow.yaml", "--thread", "same", ...(mode === "resume" ? ["--resume", "true"] : []), "--json"], { cwd: dir });
     children.add(child); let output = "";
     child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
     const timer = setTimeout(() => child.kill(), 40_000);
-    return new Promise<{ code: number | null; output: string }>((resolve, reject) => {
+    const done = new Promise<{ code: number | null; output: string }>((resolve, reject) => {
       child.once("error", reject); child.once("close", code => { clearTimeout(timer); children.delete(child); resolve({ code, output }); });
     });
+    return { child, done };
   };
-  return { effect, ready, release, run, db: join(dir, "checkpoints.sqlite") };
+  const run = (mode: string) => launch(mode).done;
+  return { effect, ready, release, run, launch, dir, db: join(dir, "checkpoints.sqlite") };
 }
 
 describe("thread admission across CLI processes", () => {
@@ -77,3 +79,30 @@ describe("thread admission across CLI processes", () => {
     } finally { backend.close(); }
   }, 30_000);
 });
+
+
+it("inspects and explicitly recovers a killed owner without releasing a live or mismatched owner", async () => {
+  const f = fixture(); const owner = f.launch("run");
+  const admin = (...args: string[]) => {
+    const result = requireSpawnSync(process.execPath, [resolve(import.meta.dirname, "../dist/bin.js"), "thread", ...args, "flow.yaml", "--thread", "same"], { cwd: f.dir, encoding: "utf8", timeout: 25_000 });
+    return result;
+  };
+  let token = "";
+  try {
+    const until = Date.now() + 20_000;
+    while (!existsSync(f.ready) && Date.now() < until) await new Promise(r => setTimeout(r, 20));
+    expect(existsSync(f.ready)).toBe(true);
+    const inspected = admin("inspect"); expect(inspected.status, inspected.stderr).toBe(0);
+    const info = JSON.parse(inspected.stdout).claim;
+    expect(info.owner).toMatchObject({ pid: owner.child.pid, host: expect.any(String), invocationId: expect.any(String) });
+    token = info.token;
+    expect(admin("release", "--token", token, "--owner-stopped").stderr).toContain("still alive");
+  } finally { owner.child.kill("SIGKILL"); await owner.done; }
+  expect(admin("release", "--token", "wrong", "--owner-stopped").status).toBe(1);
+  expect(admin("release", "--token", token).status).toBe(1);
+  const released = admin("release", "--token", token, "--owner-stopped");
+  expect(released.status, released.stderr).toBe(0);
+  writeFileSync(f.release, "go");
+  const resumed = await f.run("resume"); expect(resumed.code, resumed.output).toBe(0);
+  expect(readFileSync(f.effect, "utf8")).toBe("ran\n");
+}, 90_000);

@@ -362,21 +362,25 @@ this admission guard. A competitor receives non-retryable `THREAD_BUSY` before
 execution or checkpoint bookkeeping. Independent thread ids can run concurrently;
 compiled-graph streams contain only the selected invocation's thread events.
 
-SQLite and PostgreSQL savers coordinate through checkpoint schema 5's
-`fg_thread_run_claims` table, even with retention disabled. Memory/custom savers
+SQLite and PostgreSQL savers coordinate through `fg_thread_run_claims`, even
+with retention disabled. Schema 5 creates claims; schema 6 adds owner identity
+(host, PID, invocation id and optional run/graph ids). Memory/custom savers
 without `ThreadRunCoordinator.acquireThreadRun` coordinate within one saver
 instance in one process. Custom durable savers should implement that interface
 for coordination across processes. Every writer must use the new runtime;
 already-running older clients do not participate. A database migrated to schema
-5 cannot be reopened by an older runtime.
+6 cannot be reopened by an older runtime that supports only schema 5.
 
 Claims have a random ownership token and no expiry. Normal completion, errors,
 interrupts and cancellation release the owner's token. A process crash leaves
 the claim in place. Before removing such a claim, stop/reconcile the owning
 worker and any external work it started, inspect the checkpoint and vendor
-outcome, and delete only the inspected `thread_id`/`token` row. A stale timestamp
-alone does not prove the owner stopped. Checkpoint deletion and retention do not
-clear execution claims. This prevents concurrent admission; side effects still
+outcome, and release only the inspected ownership token using the supported
+CLI/API. A stale timestamp alone does not prove the owner stopped. Automatic
+retention skips claimed threads. Explicit recovery parks an active thread so a
+subsequent open cannot discard its checkpoint as abandoned. Normal completion
+still applies opted-in finished-thread cleanup after releasing the claim.
+Checkpoint deletion does not clear execution claims. This prevents concurrent admission; side effects still
 need idempotency and crash recovery.
 
 Resuming, continuing or stepping an unknown thread raises `THREAD_NOT_FOUND`
@@ -385,3 +389,37 @@ with no pending work raises `THREAD_NOT_WAITING`. Default retention now records
 active, paused and finished rows in `fg_checkpoint_threads`; finished rows remain
 non-deletable unless a finished-thread deletion policy is configured. With
 retention disabled, that optional metadata remains disabled.
+
+
+### Inspecting and recovering an execution claim
+
+```sh
+flowgraph thread inspect graph.yaml --thread issue-123
+flowgraph thread release graph.yaml --thread issue-123 --token <inspected-token> --owner-stopped
+flowgraph resume graph.yaml --thread issue-123 --resume true
+```
+
+Inspection prints JSON with owner identity and the token. Release requires an
+explicit attestation that the owner is stopped and its external work has been
+reconciled. It refuses a mismatched token and a PID still alive on the same host.
+It does not infer that a remote owner is dead or reclaim by age. A legacy claim
+without identity requires operator reconciliation too. Hosts can use
+`inspectThreadRun(checkpointer, threadId)` and
+`releaseThreadRun(checkpointer, threadId, token)` under the same quiescence rule.
+
+A host that changes session metadata before execution should first acquire a
+claim with `acquireThreadRun(checkpointer, threadId)` and pass it to
+`compiled.prepare({ mode, options }, claim)`. Preparation validates pending work
+and answers without starting nodes. Only then should the host mark its session
+running or replace cancellation/pause controllers. `prepared.execute(...)`
+consumes that admission once; `prepared.release()` cancels a preparation that
+was not executed. Foreign, released or reused claims are rejected. The HTTP
+server follows this flow and returns 409 for busy/completed controls, 404 for
+unknown threads and 400 for invalid/missing human answers, without changing the
+active owner's stream or status. Human gates still require explicit answers;
+continue/step only advance graceful pauses or static checkpoints.
+
+A background timeout that cannot acquire admission emits a non-terminal
+`run.issue` (`WAIT_TIMEOUT_DEFERRED` for a busy owner), rather than silently
+vanishing or sending an unrelated `run.error` into the owner's stream. Inspect
+the pending deadline and retry once ownership is available.

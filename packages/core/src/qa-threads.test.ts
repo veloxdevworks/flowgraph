@@ -85,3 +85,37 @@ describe("PLAT-307: unknown threads", () => {
     expect(await saver.getTuple({ configurable: { thread_id: "unknown" } })).toBeUndefined();
   });
 });
+
+
+it("reserves one prepared invocation without starting work and prevents claim reuse", async () => {
+  let effects = 0; registerFunction("qaThreadWork", () => { effects++; return "done"; });
+  const g = await compileGraph(graph());
+  const prepared = await g.prepare({ mode: "start", options: { threadId: "reserved" } });
+  expect(effects).toBe(0);
+  await expect(g.run({ threadId: "reserved" })).rejects.toMatchObject({ code: "THREAD_BUSY" });
+  expect((await prepared.execute()).status).toBe("completed");
+  await expect(prepared.execute()).rejects.toMatchObject({ code: "THREAD_CLAIM_INVALID" });
+  expect(effects).toBe(1);
+});
+
+it("does not accept or release a supplied claim for another saver or thread", async () => {
+  const { acquireThreadRun, inspectThreadRun } = await import("./checkpoint/execution-claim.js");
+  const saver = new MemorySaver(), g = await compileGraph(graph(), { checkpointer: saver });
+  const claim = await acquireThreadRun(saver, "a");
+  await expect(g.prepare({ mode: "start", options: { threadId: "b" } }, claim)).rejects.toMatchObject({ code: "THREAD_CLAIM_INVALID" });
+  expect(await inspectThreadRun(saver, "a")).toBeDefined();
+  await claim.release();
+  expect(await inspectThreadRun(saver, "a")).toBeUndefined();
+});
+
+
+it("can inspect an overdue wait while another owner holds admission", async () => {
+  const { acquireThreadRun } = await import("./checkpoint/execution-claim.js");
+  let now = Date.now(); const saver = new MemorySaver();
+  const s = GraphSpecSchema.parse({ apiVersion: "flowgraph/v1", kind: "Graph", metadata: { name: "busy-inspection" }, nodes: [{ id: "wait", type: "wait", with: { signal: "ready", timeout: "1s" } }], edges: [{ from: "START", to: "wait" }, { from: "wait", to: "END" }] });
+  const g = await compileGraph(s, { checkpointer: saver, now: () => now, scheduleTimeout: () => ({ unref() {} }) });
+  await g.run({ threadId: "inspection" });
+  const claim = await acquireThreadRun(saver, "inspection"); now += 2000;
+  try { expect((await g.getState("inspection"))?.interrupts).toHaveLength(1); }
+  finally { await claim.release(); }
+});

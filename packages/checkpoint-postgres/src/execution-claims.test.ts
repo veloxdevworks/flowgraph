@@ -47,4 +47,16 @@ describe.skipIf(!DB)("PostgreSQL execution admission", () => {
     expect((await g.resume({ threadId: "t", resume: true })).status).toBe("completed");
     expect((await a.pool.query(`SELECT status, deletable FROM "${schema}".fg_checkpoint_threads WHERE thread_id='t'`)).rows[0]).toEqual({ status: "finished", deletable: 0 });
   });
+  it("records owner identity and exposes token-checked explicit recovery", async () => {
+    const { owner, other } = await pair();
+    const identity = { host: "quiesced-worker", pid: 424242, invocationId: "request-123", runId: "run-123" };
+    expect(await owner.acquireThreadRun("recover", identity)).not.toBeNull();
+    const info = await other.inspectThreadRun!("recover");
+    expect(info).toMatchObject({ threadId: "recover", owner: identity, token: expect.any(String) });
+    expect(await other.releaseThreadRun!("recover", "wrong-token")).toBe(false);
+    expect(await other.acquireThreadRun("recover")).toBeNull();
+    expect(await other.releaseThreadRun!("recover", info!.token)).toBe(true);
+    const next = await other.acquireThreadRun("recover"); expect(next).not.toBeNull(); await next!.release();
+  });
+
 });
