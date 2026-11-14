@@ -35,7 +35,10 @@ class Parser {
   private expect(kind: TokenKind): Token {
     const t = this.peek();
     if (t.kind !== kind) {
-      throw new ParseError(`Expected ${kind} but got ${t.kind} (${JSON.stringify(t.value)})`, t.pos);
+      throw new ParseError(
+        `Expected ${kind} but got ${t.kind} (${JSON.stringify(t.value)})`,
+        t.pos,
+      );
     }
     return this.advance();
   }
@@ -55,6 +58,12 @@ class Parser {
   // Parse the full expression
   parseExpression(): Expr {
     return this.parseTernary();
+  }
+
+  parseComplete(): Expr {
+    const expr = this.parseExpression();
+    this.expect("EOF");
+    return expr;
   }
 
   private parseTernary(): Expr {
@@ -166,7 +175,9 @@ class Parser {
     while (true) {
       if (this.check("DOT")) {
         this.advance();
-        const prop = this.parseMemberPropertyName();
+        const prop = this.parseMemberPropertyName(
+          expr.kind === "Member" && expr.property === "outputs",
+        );
         expr = { kind: "Member", object: expr, property: prop };
       } else if (this.check("LBRACKET")) {
         this.advance();
@@ -192,13 +203,18 @@ class Parser {
    * subtraction (`a.b - c`, with any whitespace) is unaffected because the
    * adjacency check fails as soon as a space separates the tokens.
    */
-  private parseMemberPropertyName(): string {
+  private parseMemberPropertyName(outputId = false): string {
     const first = this.expect("IDENT");
     let prop = first.value;
     let end = first.pos + first.value.length;
     while (this.check("MINUS") && this.peek().pos === end) {
       const next = this.tokens[this.pos + 1];
-      if (!next || (next.kind !== "IDENT" && next.kind !== "NUMBER") || next.pos !== end + 1) break;
+      if (
+        !next ||
+        (next.kind !== "IDENT" && !(next.kind === "NUMBER" && (outputId || prop.includes("-")))) ||
+        next.pos !== end + 1
+      )
+        break;
       this.advance(); // MINUS
       const piece = this.advance(); // IDENT or NUMBER
       prop += `-${piece.value}`;
@@ -265,9 +281,7 @@ class Parser {
       const entries: Array<{ key: string; value: Expr }> = [];
       while (!this.check("RBRACE") && !this.check("EOF")) {
         const key =
-          this.peek().kind === "STRING"
-            ? this.advance().value
-            : this.expect("IDENT").value;
+          this.peek().kind === "STRING" ? this.advance().value : this.expect("IDENT").value;
         this.expect("COLON");
         const value = this.parseExpression();
         entries.push({ key, value });
@@ -293,6 +307,5 @@ class Parser {
 export function parseExpr(input: string): Expr {
   const tokens = tokenize(input);
   const parser = new Parser(tokens);
-  const expr = parser.parseExpression();
-  return expr;
+  return parser.parseComplete();
 }

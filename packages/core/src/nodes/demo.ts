@@ -270,6 +270,10 @@ function buildScope(
     config: ctx.config,
     run: ctx.meta,
     secret: new Proxy({} as Record<string, string>, {
+      getOwnPropertyDescriptor: (_t, prop) =>
+        typeof prop === "string" && Object.hasOwn(process.env, prop)
+          ? { configurable: true, enumerable: true }
+          : undefined,
       get: (_t, prop) => {
         const value = process.env[String(prop)] ?? "";
         if (value) usedSecrets.add(value);

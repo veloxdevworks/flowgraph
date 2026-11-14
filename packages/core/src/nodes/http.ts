@@ -37,8 +37,14 @@ export const httpNode = defineNode<Config>({
           config: { vars: {} },
           run: ctx.meta,
           secret: new Proxy({} as Record<string, string>, {
+            getOwnPropertyDescriptor: (_t, prop) => {
+              if (typeof prop !== "string" || !Object.hasOwn(process.env, prop)) return undefined;
+              assertSecretAllowed(nodePolicyOf(ctx), prop, `http node "${ctx.nodeId}"`);
+              return { configurable: true, enumerable: true };
+            },
             get: (_t, prop) => {
-              if (typeof prop === "string") assertSecretAllowed(nodePolicyOf(ctx), prop, `http node "${ctx.nodeId}"`);
+              if (typeof prop === "string")
+                assertSecretAllowed(nodePolicyOf(ctx), prop, `http node "${ctx.nodeId}"`);
               const val = process.env[String(prop)];
               return val ?? "";
             },
@@ -51,8 +57,7 @@ export const httpNode = defineNode<Config>({
         const headers = config.headers
           ? (renderDeep(config.headers, scope) as Record<string, string>)
           : undefined;
-        const renderedBody =
-          config.body != null ? renderDeep(config.body, scope) : undefined;
+        const renderedBody = config.body != null ? renderDeep(config.body, scope) : undefined;
         const query = config.query
           ? (renderDeep(config.query, scope) as Record<string, unknown>)
           : undefined;

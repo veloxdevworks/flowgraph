@@ -35,6 +35,10 @@ export const webhookNode = defineNode<Config>({
           config: ctx.config,
           run: ctx.meta,
           secret: new Proxy({} as Record<string, string>, {
+            getOwnPropertyDescriptor: (_t, prop) =>
+              typeof prop === "string" && Object.hasOwn(process.env, prop)
+                ? { configurable: true, enumerable: true }
+                : undefined,
             get: (_t, prop) => {
               if (typeof prop === "string") assertSecretAllowed(nodePolicyOf(ctx), prop, `webhook node "${ctx.nodeId}"`);
               const val = process.env[String(prop)];

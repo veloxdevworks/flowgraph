@@ -11,6 +11,10 @@ The hybrid authoring model ([ADR-0002](./0002-hybrid-authoring-model.md)) needs 
 
 Build a **purpose-built, sandboxed expression evaluator** (`@flowgraph/expr`): member/index access, literals, comparison/logical/arithmetic operators, ternary/nullish/pipe, and a curated, side-effect-free standard library. **No JavaScript `eval`/`Function`**, no host access (`process`, `require`, prototypes). Expressions are parsed at compile time so referenced channels/inputs can be statically checked.
 
+Property and object-helper lookups read own properties only; an own JSON key such as `constructor` remains ordinary data. Function calls and pipes resolve only declared standard-library functions. Parsing rejects any trailing tokens. Template delimiters inside quoted strings and object literals are preserved, and multiple blocks interpolate in order.
+
+Numeric subtraction needs no spaces (`state.n-1`). Dotted kebab-case properties remain supported (`state.outputs.generate-topics-2`); use bracket notation for ambiguous numeric-suffix data keys (`state['step-1']`) or put spaces around subtraction from an output (`state.outputs.total - 1`).
+
 ## Consequences
 
 - Specs remain safe to share and run from untrusted sources; no arbitrary code execution.
