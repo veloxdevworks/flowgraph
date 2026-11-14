@@ -276,6 +276,8 @@ The primary escape hatch for custom logic: run any CLI, script, or shell pipelin
 
 **Input:** optional `with.input` is rendered, JSON-stringified into the `FLOWGRAPH_INPUT` env var, and also written to the child's stdin — same convention as skill `kind_of: command` handlers.
 
+**Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"`. Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
+
 **Defaults:** timeout `30s`, `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
 
 Declare toolchains with `requires` so missing binaries are caught at preflight and (optionally) skipped instead of failing the run:
@@ -485,7 +487,7 @@ export default async function (input, ctx) {
     #   childProcess: false
     #   workerThreads: false
     # env:
-    #   MARK: "1"                 # opt-in; host process.env is NOT inherited
+    #   MARK: "1"                 # opt-in; only a small default allowlist is inherited
     output: { to: greet }
 ```
 
@@ -509,7 +511,7 @@ export default async function (input, ctx) {
 | Third-party npm packages | Unreachable (no `node_modules`) | Not supported |
 | `node:*` builtins | Available (subject to the rows above) | — |
 
-Directory grants should end with `/` (or omit the trailing slash — the engine normalizes directories). Host `process.env` is **not** inherited; pass values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
+Directory grants should end with `/` (or omit the trailing slash — the engine normalizes directories). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
 
 **Network caveat:** Node's permission model has **no** `--allow-net` flag. Scripts can open sockets / `fetch` unless the host environment (container network policy, OS firewall) blocks them. Treat network restriction as a deploy-time concern, same class of trust as `shell`.
 

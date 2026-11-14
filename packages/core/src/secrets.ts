@@ -123,6 +123,7 @@ export function createRedactor(
  * even when we don't know the exact value.
  */
 export const DEFAULT_REDACT_PATTERNS: RegExp[] = [
+  /Incorrect API key provided:\s*[^\s,;]+/gi,
   /Bearer\s+[A-Za-z0-9\-._~+/]+=*/g,
   /token["\s:=]+["']?[A-Za-z0-9\-._~+/]{20,}["']?/gi,
   /api[_-]?key["\s:=]+["']?[A-Za-z0-9\-._~+/]{20,}["']?/gi,

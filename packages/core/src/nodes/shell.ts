@@ -11,7 +11,8 @@ import { ShellWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import { assertHostProbeAllowed, nodePolicyOf } from "../node-policy.js";
+import { assertHostProbeAllowed, assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
+import { secretScope } from "../runtime/secret-scope.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import {
@@ -20,6 +21,7 @@ import {
   missingToolIssue,
   spawnMissingToolError,
 } from "../runtime/requires.js";
+import { DEFAULT_INHERITED_ENV, pickHostEnv } from "../runtime/child-env.js";
 
 const configSchema = ShellWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -54,6 +56,7 @@ export const shellNode = defineNode<Config>({
           input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
           config: ctx.config,
           run: ctx.meta,
+          secret: secretScope(ctx),
         };
 
         const command = normalizeShellText(String(renderDeep(config.command, scope)));
@@ -103,8 +106,11 @@ export const shellNode = defineNode<Config>({
           throw new Error(missingToolIssue(missing, { command, skipped: false }).message);
         }
 
+        for (const name of config.inheritEnv ?? []) {
+          assertSecretAllowed(nodePolicyOf(ctx), name, `shell node "${ctx.nodeId}"`);
+        }
         const env: NodeJS.ProcessEnv = {
-          ...process.env,
+          ...pickHostEnv([...DEFAULT_INHERITED_ENV, ...(config.inheritEnv ?? [])]),
           ...renderedEnv,
         };
         let stdinData: string | undefined;

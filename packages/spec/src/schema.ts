@@ -703,6 +703,7 @@ export const ShellWithSchema = BaseWithSchema.extend({
   args: z.array(z.string()).optional().describe("Argv; when set, runs without a shell"),
   cwd: z.string().optional(),
   env: z.record(z.string()).optional(),
+  inheritEnv: z.array(z.string().min(1)).optional().describe("Host environment variable names to pass to the child, in addition to the default allowlist (PATH, HOME, TMPDIR, TEMP, TMP, LANG, LC_ALL, and Windows SystemRoot/WINDIR)"),
   input: z.record(z.unknown()).optional().describe("Rendered, passed via FLOWGRAPH_INPUT env + stdin JSON"),
   timeout: DurationSchema.optional(),
   expect: z.object({ exitCode: z.array(z.number()).optional() }).optional(),

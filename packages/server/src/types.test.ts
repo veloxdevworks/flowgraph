@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { defaultServerConfig } from "./types.js";
 
 describe("defaultServerConfig", () => {
+  it("binds localhost unless the operator explicitly enables remote access", () => {
+    expect(defaultServerConfig({}).host).toBe("127.0.0.1");
+    expect(defaultServerConfig({ FLOWGRAPH_HOST: "0.0.0.0" }).host).toBe("0.0.0.0");
+  });
   it("requires auth unless FLOWGRAPH_AUTH_DISABLED is set", () => {
     const cfg = defaultServerConfig({});
     expect(cfg.authDisabled).toBe(false);

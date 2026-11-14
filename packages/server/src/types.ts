@@ -437,7 +437,7 @@ function envInt(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
 
 export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const config: ServerConfig = {
-    host: env.FLOWGRAPH_HOST ?? "0.0.0.0",
+    host: env.FLOWGRAPH_HOST ?? "127.0.0.1",
     port: Number(env.FLOWGRAPH_PORT ?? env.PORT ?? 8080),
     graphStoreDir: env.FLOWGRAPH_GRAPH_STORE ?? "/tmp/flowgraph-graphs",
     eventBufferSize: Number(env.FLOWGRAPH_EVENT_BUFFER ?? 5000),

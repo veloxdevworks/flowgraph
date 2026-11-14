@@ -1,8 +1,8 @@
 /**
  * Build provider adapters from a graph spec's `providers` block.
  *
- * When an SDK-based provider (claude/cursor/langchain) has no API key but a
- * matching local CLI binary is on PATH, we auto-prefer `createCliProvider`.
+ * SDK providers retain their declared credentials and endpoint. Local agents
+ * are used only when the graph explicitly declares `kind: cli`.
  */
 
 import type { ProviderAdapter } from "@flowgraph/core";
@@ -11,9 +11,6 @@ import {
   isKnownLangChainVendor,
   createCliProvider,
   detectLocalCli,
-  cliVendorForProviderKind,
-  apiKeyEnvForProviderKind,
-  hasApiKey,
   type CliVendor,
 } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
@@ -29,7 +26,7 @@ async function loadClaudeFactory() {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("Cannot find") || msg.includes("ERR_MODULE_NOT_FOUND")) {
       throw new Error(
-        'Claude provider is not installed. Install it: pnpm add @flowgraph/provider-claude @anthropic-ai/claude-agent-sdk',
+        "Claude provider is not installed. Install it: pnpm add @flowgraph/provider-claude @anthropic-ai/claude-agent-sdk",
         { cause: err },
       );
     }
@@ -45,7 +42,7 @@ async function loadCursorFactory() {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("Cannot find") || msg.includes("ERR_MODULE_NOT_FOUND")) {
       throw new Error(
-        'Cursor provider is not installed. Install it: pnpm add @flowgraph/provider-cursor @cursor/sdk',
+        "Cursor provider is not installed. Install it: pnpm add @flowgraph/provider-cursor @cursor/sdk",
         { cause: err },
       );
     }
@@ -56,19 +53,23 @@ async function loadCursorFactory() {
 async function loadDeepAgentsFactory() {
   const specifier = "@flowgraph/provider-deepagents";
   try {
-    const mod = (await (Function("s", "return import(s)")(specifier) as Promise<{
+    const mod = await (Function("s", "return import(s)")(specifier) as Promise<{
       createDeepAgentsProviderFromConfig: (
         name: string,
         cfg: unknown,
         opts: { cwd?: string; spec?: GraphSpec },
       ) => Promise<ProviderAdapter>;
-    }>));
+    }>);
     return mod.createDeepAgentsProviderFromConfig;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("Cannot find") || msg.includes("ERR_MODULE_NOT_FOUND") || msg.includes("Failed to resolve")) {
+    if (
+      msg.includes("Cannot find") ||
+      msg.includes("ERR_MODULE_NOT_FOUND") ||
+      msg.includes("Failed to resolve")
+    ) {
       throw new Error(
-        'Deep Agents provider is not installed. Install it: pnpm add @flowgraph/provider-deepagents deepagents',
+        "Deep Agents provider is not installed. Install it: pnpm add @flowgraph/provider-deepagents deepagents",
         { cause: err },
       );
     }
@@ -76,38 +77,10 @@ async function loadDeepAgentsFactory() {
   }
 }
 
-async function tryCliFallback(
-  name: string,
-  kind: string,
-  cfg: {
-    vendor?: string | undefined;
-    model?: string | undefined;
-    cwd?: string | undefined;
-    binary?: string | undefined;
-  },
-  cwd: string,
-): Promise<ProviderAdapter | undefined> {
-  const cliVendor = cliVendorForProviderKind(kind, cfg.vendor);
-  if (!cliVendor) return undefined;
-
-  const keyEnv = apiKeyEnvForProviderKind(kind, cfg.vendor);
-  if (hasApiKey(keyEnv)) return undefined;
-
-  const detected = await detectLocalCli(cliVendor, {
-    ...(cfg.binary ? { binary: cfg.binary } : {}),
-  });
-  if (!detected.ok) return undefined;
-
-  return createCliProvider({
-    name,
-    vendor: cliVendor,
-    ...(cfg.model ? { model: cfg.model } : {}),
-    cwd: cfg.cwd ?? cwd,
-    ...(cfg.binary ? { binary: cfg.binary } : {}),
-  });
-}
-
-export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Promise<ProviderAdapter[]> {
+export async function buildProviders(
+  spec: GraphSpec,
+  cwd = process.cwd(),
+): Promise<ProviderAdapter[]> {
   const providers: ProviderAdapter[] = [];
   const built = new Set<string>();
 
@@ -135,32 +108,17 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
         break;
       }
       case "langchain": {
-        const fallback = await tryCliFallback(name, "langchain", cfg, cwd);
-        if (fallback) {
-          providers.push(fallback);
-        } else {
-          providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd }));
-        }
+        providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd }));
         break;
       }
       case "claude": {
-        const fallback = await tryCliFallback(name, "claude", cfg, cwd);
-        if (fallback) {
-          providers.push(fallback);
-        } else {
-          const createClaude = await loadClaudeFactory();
-          providers.push(await createClaude(name, cfg, { cwd }));
-        }
+        const createClaude = await loadClaudeFactory();
+        providers.push(await createClaude(name, cfg, { cwd }));
         break;
       }
       case "cursor": {
-        const fallback = await tryCliFallback(name, "cursor", cfg, cwd);
-        if (fallback) {
-          providers.push(fallback);
-        } else {
-          const createCursor = await loadCursorFactory();
-          providers.push(await createCursor(name, cfg, { cwd }));
-        }
+        const createCursor = await loadCursorFactory();
+        providers.push(await createCursor(name, cfg, { cwd }));
         break;
       }
       case "deepagents": {
@@ -173,7 +131,9 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
         // same providers: block; there is no agent adapter to create here.
         continue;
       default:
-        throw new Error(`Provider "${name}": unsupported kind "${(cfg as { kind?: string }).kind}".`);
+        throw new Error(
+          `Provider "${name}": unsupported kind "${(cfg as { kind?: string }).kind}".`,
+        );
     }
     built.add(name);
   }
@@ -181,27 +141,13 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
   const defaultName = spec.config?.defaults?.provider;
   if (defaultName && !built.has(defaultName) && isKnownLangChainVendor(defaultName)) {
     const model = spec.config?.defaults?.model;
-    const fallback = await tryCliFallback(
-      defaultName,
-      "langchain",
-      { vendor: defaultName, ...(model ? { model } : {}) },
-      cwd,
+    providers.push(
+      await createLangChainProviderFromConfig(
+        defaultName,
+        { kind: "langchain", vendor: defaultName, ...(model ? { model } : {}) },
+        { cwd },
+      ),
     );
-    if (fallback) {
-      providers.push(fallback);
-    } else {
-      providers.push(
-        await createLangChainProviderFromConfig(
-          defaultName,
-          {
-            kind: "langchain",
-            vendor: defaultName,
-            ...(model ? { model } : {}),
-          },
-          { cwd },
-        ),
-      );
-    }
     built.add(defaultName);
   }
 
@@ -210,9 +156,7 @@ export async function buildProviders(spec: GraphSpec, cwd = process.cwd()): Prom
     Object.values(spec.providers ?? {}).some((p) => p.kind === "deepagents");
   if (needsDeepHub && !built.has("deepagents") && !providers.some((p) => p.name === "deepagents")) {
     const createDeep = await loadDeepAgentsFactory();
-    providers.push(
-      await createDeep("deepagents", { kind: "deepagents" }, { cwd, spec }),
-    );
+    providers.push(await createDeep("deepagents", { kind: "deepagents" }, { cwd, spec }));
     built.add("deepagents");
   }
 

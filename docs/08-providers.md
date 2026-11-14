@@ -170,6 +170,8 @@ Suno has no public API today (invite-only partner beta), so there is no Suno ada
 
 ### Local CLI providers (`kind: cli`)
 
+SDK providers keep their declared backend: a missing key fails with the configured environment-variable name, even when a local agent CLI is installed. To use a local agent and its login/billing, declare `kind: cli` explicitly. For OpenAI, the top-level `baseUrl` overrides `options.configuration.baseURL`; other client configuration fields are retained. For Anthropic and xAI it is passed as the client's own endpoint option (`anthropicApiUrl`, `baseURL`). Generated agent templates require choosing a model before running them.
+
 When Claude Code, Cursor CLI, Codex, or Grok Build is installed on `PATH`, you can run agent nodes against that local CLI instead of an API key:
 
 ```yaml
@@ -182,7 +184,7 @@ providers:
     # cwd: ./workspace
 ```
 
-**Auto-prefer:** if a graph declares `kind: claude`, `kind: cursor`, or `kind: langchain` (vendors `openai`→Codex, `xai`→Grok, `anthropic`→Claude) and the matching API key env var is **absent**, but the corresponding CLI binary is on `PATH`, the runtime silently builds a `cli` provider instead of failing on a missing key. Set the API key to force the SDK/API path.
+**Explicit backend:** `claude`, `cursor`, and `langchain` entries always use their declared SDK/API backend. An installed CLI does not change credential selection or billing. Choose `kind: cli` when local-agent execution is intended.
 
 **v1 limits:** the CLI provider is single-shot (prompt → text). It does not mediate flowgraph tools/MCP through the CLI; the installed CLI runs its own agent loop. For hub-and-spoke tool wiring, use the SDK providers (`claude` / `cursor` / `langchain`) with an API key.
 

@@ -46,7 +46,20 @@ describe("redactHeaders", () => {
 describe("http node", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it("renders config vars and explicit secrets in the same scope", async () => {
+    vi.stubEnv("FGQA_DECOY", "decoy-only");
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("ok"));
+    vi.stubGlobal("fetch", fetchMock);
+    const spec = httpGraph({ url: "https://example.com/{{ config.vars.path }}", headers: { Authorization: "{{ secret.FGQA_DECOY }}" } });
+    spec.config = { vars: { path: "configured" } };
+    const result = await (await compileGraph(spec)).run();
+    expect(result.status).toBe("completed");
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://example.com/configured");
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: "decoy-only" });
   });
 
   it("emits node.output with request and response, redacting Authorization", async () => {

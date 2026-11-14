@@ -35,7 +35,7 @@ export const httpNode = defineNode<Config>({
         const scope = {
           state,
           input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
-          config: { vars: {} },
+          config: ctx.config,
           run: ctx.meta,
           secret: secretScope(ctx),
         };
