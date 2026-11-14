@@ -9,6 +9,7 @@
 import { z } from "zod";
 import { MapWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
+import type { OutputMapping } from "@flowgraph/spec";
 import { registry, defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { assertNodeSpecAllowed, assertNodeTypeAllowed, isReservedChannel, nodePolicyOf, withoutReservedKeys } from "../node-policy.js";
@@ -35,6 +36,8 @@ export const mapNode = defineNode<Config>({
 });
 
 export interface MapTask {
+  /** Absent on checkpoints from versions before per-invocation collection bags. */
+  round?: string;
   mapId: string;
   index: number;
   item: unknown;
@@ -76,12 +79,16 @@ export async function runMapItem(
       `map node inner config error: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ")}`,
     );
   }
-  const renderedWith = renderDeep(originalWith, itemScope) as Record<string, unknown>;
+  // Output expressions need the completed result as well as the item. Build
+  // the inner node with its default raw output, then apply that projection once.
+  const { output: rawOutput, ...requestWith } = originalWith;
+  const { output: _parsedOutput, ...parsedWith } = parsed.data as Record<string, unknown>;
+  const renderedWith = renderDeep(requestWith, itemScope) as Record<string, unknown>;
   const renderedInput = withoutReservedKeys(
     innerSpec["input"] ? (renderDeep(innerSpec["input"], itemScope) as Record<string, unknown>) : {},
   );
-  const mergedConfig = { ...(parsed.data as Record<string, unknown>), ...renderedWith };
-  const innerNodeSpec = { ...innerSpec, with: mergedConfig };
+  const mergedConfig = { ...parsedWith, ...renderedWith };
+  const innerNodeSpec = { ...innerSpec, id: ctx.nodeId, with: mergedConfig };
   const compiledInner = factory.build(buildCtx, innerNodeSpec, mergedConfig);
 
   const childCtx: NodeRunContext & { _input: Record<string, unknown> } = {
@@ -94,7 +101,12 @@ export async function runMapItem(
   };
 
   const res = await compiledInner.run(state, childCtx);
-  return unwrapUpdate(res);
+  const value = unwrapUpdate(res);
+  if (rawOutput === undefined) return value;
+  const output = typeof rawOutput === "object" && rawOutput !== null
+    ? { ...rawOutput, ...("to" in rawOutput ? { to: renderDeep(rawOutput.to, itemScope) } : {}) }
+    : rawOutput;
+  return unwrapUpdate({ update: applyOutput(output as OutputMapping, value, { nodeId: ctx.nodeId, scope: itemScope }) });
 }
 
 /**

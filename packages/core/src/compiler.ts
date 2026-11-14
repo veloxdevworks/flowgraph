@@ -7,6 +7,8 @@ import { START, END, StateGraph, Command, Send, type BaseCheckpointSaver, type B
 import { interrupt as lgInterrupt } from "@langchain/langgraph";
 import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
+import { createExecutionLimit, type ExecutionLimit } from "./runtime/concurrency.js";
 import type { GraphSpec, NodeSpec, OutputMapping } from "@flowgraph/spec";
 import { applyOutput } from "./runtime/apply-output.js";
 import { walkNodes } from "./discover-skills.js";
@@ -77,7 +79,7 @@ import { registerProvider, type ProviderAdapter } from "./providers/index.js";
 import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
 import { GRAPH_MEDIA_PROVIDERS, deriveMediaProviders, type GraphMediaProviders } from "./media/registry.js";
 import type { MediaProvider } from "./media/types.js";
-import { ReplayStore, RUN_SCOPE_KEY, replayNodeKey, replayStoreFromInterrupts, runScopeOf, type RunScope } from "./providers/replay-cache.js";
+import { ReplayStore, RUN_SCOPE_KEY, replayNodeKey, replayStoreFromInterrupts, runScopeOf, runSignalOf, type RunScope } from "./providers/replay-cache.js";
 import { collectMapResults, mapSyntheticIds, runMapItem, type MapTask } from "./nodes/map.js";
 import type { ToolWiring } from "./providers/tools.js";
 import type { BudgetState } from "./context.js";
@@ -375,6 +377,15 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     defaultPolicy,
   } = assembled;
 
+  const authoredMapNames = new Map<string, string>();
+  for (const node of graphSpec.nodes) {
+    if (node.type !== "map") continue;
+    const { workerId, joinId } = mapSyntheticIds(node.id);
+    authoredMapNames.set(workerId, node.id);
+    authoredMapNames.set(joinId, node.id);
+  }
+  const publicNodeId = (id: string): string => authoredMapNames.get(id) ?? id;
+
   // Per compiled graph: two graphs that reuse a thread id must not cancel each other's timers.
   const waitTimers: WaitTimerMap = new Map();
   const clock = () => (opts.now ?? Date.now)();
@@ -566,7 +577,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
     }
 
-    const runScope: RunScope = { replay, path: [], meta: runMeta };
+    const runScope: RunScope = { replay, path: [], meta: runMeta, signal: runOpts.signal };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
 
     const startEvent =
@@ -673,7 +684,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           const snap = await compiledLg.getState(cfg);
           if (snap && Array.isArray(snap.next) && snap.next.length > 0) {
             const clean = stripReserved(result);
-            events.emit("run.paused", { state: clean, next: [...snap.next], step: true, durationMs: Date.now() - startMs });
+            events.emit("run.paused", { state: clean, next: [...new Set(snap.next.map(publicNodeId))], step: true, durationMs: Date.now() - startMs });
             return finish({ status: "paused", state: clean, runId, threadId, durationMs: Date.now() - startMs });
           }
         }
@@ -683,7 +694,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             const snap = await compiledLg.getState(cfg);
             if (snap && Array.isArray(snap.next) && snap.next.length > 0) {
               const clean = stripReserved(result);
-              const bp: InterruptInfo[] = [{ id: `breakpoint:${snap.next.join(",")}`, reason: `Paused before: ${snap.next.join(", ")}` }];
+              const next = [...new Set(snap.next.map(publicNodeId))];
+              const bp: InterruptInfo[] = [{ id: `breakpoint:${next.join(",")}`, reason: `Paused before: ${next.join(", ")}` }];
               events.emit("interrupt.raised", { interrupts: bp });
               if (policy === "fail" || policy === "webhook" || !runOpts.resolveInterrupt) {
                 return finish({ status: "interrupted", state: clean, runId, threadId, interrupts: bp, durationMs: Date.now() - startMs });
@@ -871,7 +883,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     threadId?: string,
   ): StateSnapshot => {
     const interrupts: InterruptInfo[] = [];
-    const next = [...snap.next];
+    const next = [...new Set(snap.next.map(publicNodeId))];
     for (const task of snap.tasks ?? []) {
       for (const it of task.interrupts ?? []) {
         interrupts.push(toInterruptInfo(it));
@@ -879,8 +891,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       // LangGraph drops a task from `next` once it has pending writes (e.g. the
       // persisted resume values of a re-prompted hitl node), even though it is
       // still waiting on an interrupt. Report it as pending.
-      if ((task.interrupts?.length ?? 0) > 0 && task.name && !next.includes(task.name)) {
-        next.push(task.name);
+      if ((task.interrupts?.length ?? 0) > 0 && task.name && !next.includes(publicNodeId(task.name))) {
+        next.push(publicNodeId(task.name));
       }
     }
     if (threadId) enrichInterruptsWithWebhookUrls(interrupts, threadId);
@@ -890,8 +902,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       (interruptBefore.length || interruptAfter.length)
     ) {
       interrupts.push({
-        id: `breakpoint:${snap.next.join(",")}`,
-        reason: `Paused before: ${snap.next.join(", ")}`,
+        id: `breakpoint:${next.join(",")}`,
+        reason: `Paused before: ${next.join(", ")}`,
       });
     }
     return {
@@ -1047,6 +1059,7 @@ async function assembleCompiledLangGraph(
     events.emit("log", { level: "warn", msg, ...data }, {});
   });
   const graph = new StateGraph(StateAnnotation);
+  const executionLimit = createExecutionLimit(spec.runtime?.concurrency);
 
   let budget: BudgetState | undefined;
   if (spec.runtime?.budget) {
@@ -1170,6 +1183,7 @@ async function assembleCompiledLangGraph(
           toolWiring,
           defaultRetry,
           defaultTimeout,
+          executionLimit,
         },
         mapJoinById,
       );
@@ -1214,7 +1228,7 @@ async function assembleCompiledLangGraph(
         {
           retry: nodeRetry as RetryConfigInput,
           timeout: nodeTimeout,
-          signal: baseCtx.signal,
+          signal: runSignalOf(lgConfig, baseCtx.signal),
           stopGraceMs: stopsOnTimeout ? TIMED_OUT_ATTEMPT_STOP_MS : 0,
           onRetry: (info) => events.emit("node.retry", { nodeId: nodeSpec.id, ...info }, scope),
           onTimeout: (info) => events.emit("node.timeout", { nodeId: nodeSpec.id, ...info }, scope),
@@ -1237,7 +1251,7 @@ async function assembleCompiledLangGraph(
     const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id), ...nodeToolTargets(spec, nodeSpec.id)].map((target) => target === "END" ? END : target))];
     const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
 
-    graph.addNode(nodeSpec.id, async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
+    const executeNode = async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
       const runMeta = (runScopeOf(lgConfig)?.meta ?? baseCtx.meta ?? { runId, graph: spec.metadata.name, startedAt: "" }) as RunMeta;
 
       // Graceful pause: park before this node so continueRun can resume it.
@@ -1373,7 +1387,11 @@ async function assembleCompiledLangGraph(
         events.emit("node.error", { nodeId: nodeSpec.id, error: String(err) }, scope);
         throw err;
       }
-    }, addNodeOpts as Parameters<typeof graph.addNode>[2]);
+    };
+    graph.addNode(nodeSpec.id,
+      (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) =>
+        executionLimit(() => executeNode(state, lgConfig), lgConfig, lgConfig?.signal ?? runSignalOf(lgConfig, baseCtx.signal)),
+      addNodeOpts as Parameters<typeof graph.addNode>[2]);
   }
 
   // Node-as-tool: run a sibling node's logic with the agent-supplied args as
@@ -1567,21 +1585,12 @@ function buildInvokeConfig(
   spec: GraphSpec,
   checkpointId?: string,
 ): Record<string, unknown> {
-  const mapConc = spec.nodes
-    .filter((n) => n.type === "map")
-    .map((n) => {
-      const c = (n.with as { concurrency?: number } | undefined)?.concurrency;
-      return typeof c === "number" ? c : undefined;
-    })
-    .filter((n): n is number => n != null);
-  const concurrency = spec.runtime?.concurrency ?? (mapConc.length ? Math.min(...mapConc) : undefined);
   const recursionLimit = spec.runtime?.recursionLimit;
   return {
     configurable: {
       thread_id: threadId,
       ...(checkpointId ? { checkpoint_id: checkpointId } : {}),
     },
-    ...(concurrency ? { maxConcurrency: concurrency } : {}),
     ...(recursionLimit ? { recursionLimit } : {}),
   };
 }
@@ -2248,7 +2257,9 @@ function buildNodeCtx(
     },
   };
   if (lgConfig !== undefined) ctx._lgConfig = lgConfig;
-  if (base.signal !== undefined) ctx.signal = base.signal;
+  const signal = runSignalOf(lgConfig, base.signal);
+  if (signal !== undefined) ctx.signal = signal;
+  else delete ctx.signal;
   const memoryRuntime = (base as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
   if (memoryRuntime?.exposeMemory) {
     const conf = (lgConfig?.configurable ?? {}) as Record<string, unknown>;
@@ -2467,6 +2478,7 @@ function addCheckpointedMap(
     toolWiring: ToolWiring;
     defaultRetry: unknown;
     defaultTimeout: unknown;
+    executionLimit: ExecutionLimit;
   },
   mapJoinById: Map<string, string>,
 ): void {
@@ -2490,8 +2502,10 @@ function addCheckpointedMap(
     ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
     ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
   };
-  const nodeRetry = (nodeSpec.retry ?? ctx.defaultRetry) as RetryConfigInput;
-  const nodeTimeout = (nodeSpec.timeout ?? ctx.defaultTimeout) as string | undefined;
+  const nodeRetry = ((config.node as Record<string, unknown>)["retry"] ?? nodeSpec.retry ?? ctx.defaultRetry) as RetryConfigInput;
+  const nodeTimeout = ((config.node as Record<string, unknown>)["timeout"] ?? nodeSpec.timeout ?? ctx.defaultTimeout) as string | undefined;
+
+  const mapLimit = createExecutionLimit(config.concurrency);
 
   graph.addNode(
     mapId,
@@ -2503,17 +2517,20 @@ function addCheckpointedMap(
       }
       ctx.events.emit("node.start", { nodeId: mapId, type: "map" }, { nodeId: mapId, nodeType: "map" });
       ctx.events.emit("node.output", { map: { over: config.over, count: collection.length, concurrency: config.concurrency } }, { nodeId: mapId, nodeType: "map" });
+      const round = randomUUID();
+      const reset = { [MAP_COLLECT_CHANNEL]: { [mapId]: { round, items: [], reset: true } } };
       if (collection.length === 0) {
         const update = collectMapResults(config, [], mapId, scope);
         ctx.events.emit("node.end", { nodeId: mapId, update }, { nodeId: mapId, nodeType: "map" });
-        return new Command({ goto: joinId, update }) as unknown as Record<string, unknown>;
+        return new Command({ goto: joinId, update: { ...update, ...reset } }) as unknown as Record<string, unknown>;
       }
       return new Command({
+        update: reset,
         goto: collection.map(
           (item, index) =>
             new Send(workerId, {
               ...state,
-              [MAP_TASK_CHANNEL]: { mapId, index, item, as: config.as, count: collection.length } satisfies MapTask,
+              [MAP_TASK_CHANNEL]: { mapId, index, item, as: config.as, count: collection.length, round } satisfies MapTask,
             }),
         ),
       }) as unknown as Record<string, unknown>;
@@ -2529,10 +2546,9 @@ function addCheckpointedMap(
     const itemId = `${mapId}[${task.index}]`;
     const itemScope = { nodeId: itemId, nodeType: innerType, parentSpanId: mapId };
     const itemLgConfig = namespacedRunnableConfig(lgConfig, itemId);
-    ctx.events.emit("node.start", { nodeId: itemId, type: innerType, mapId, index: task.index }, itemScope);
 
     try {
-      const run = await runWithPolicy(
+      const executeItem = () => runWithPolicy(
         (attempt, signal) => {
           const nodeCtx = buildNodeCtx(
             {
@@ -2559,15 +2575,22 @@ function addCheckpointedMap(
         {
           retry: nodeRetry,
           timeout: nodeTimeout,
-          signal: ctx.baseCtx.signal,
+          signal: runSignalOf(lgConfig, ctx.baseCtx.signal),
           stopGraceMs: innerStopsOnTimeout ? TIMED_OUT_ATTEMPT_STOP_MS : 0,
           onRetry: (info) => ctx.events.emit("node.retry", { nodeId: itemId, ...info }, itemScope),
           onTimeout: (info) => ctx.events.emit("node.timeout", { nodeId: itemId, ...info }, itemScope),
         },
       );
+      // Internal task cancellation can stop queued admission, but only caller
+      // cancellation reaches an admitted node (media jobs survive node timeouts).
+      const signal = lgConfig?.signal ?? runSignalOf(lgConfig, ctx.baseCtx.signal);
+      const run = await mapLimit(() => ctx.executionLimit(() => {
+        ctx.events.emit("node.start", { nodeId: itemId, type: innerType, mapId, index: task.index }, itemScope);
+        return executeItem();
+      }, lgConfig, signal), lgConfig, signal);
       ctx.events.emit("node.end", { nodeId: itemId, mapId, index: task.index }, itemScope);
       const update: Record<string, unknown> = {
-        [MAP_COLLECT_CHANNEL]: { [mapId]: [{ i: task.index, v: run.value }] },
+        [MAP_COLLECT_CHANNEL]: { [mapId]: task.round ? { round: task.round, items: [{ i: task.index, v: run.value }] } : [{ i: task.index, v: run.value }] },
       };
       if (Object.keys(run.onceUpdates).length > 0) update[ONCE_CHANNEL] = run.onceUpdates;
       if (run.issueUpdates.length > 0) update[ISSUES_CHANNEL] = run.issueUpdates;
@@ -2581,7 +2604,8 @@ function addCheckpointedMap(
 
   graph.addNode(joinId, async (state: Record<string, unknown>) => {
     const bagRaw = (state[MAP_COLLECT_CHANNEL] as Record<string, unknown> | undefined)?.[mapId];
-    const bag = Array.isArray(bagRaw) ? (bagRaw as Array<{ i: number; v: unknown }>) : [];
+    const roundItems = (bagRaw as { items?: unknown } | undefined)?.items;
+    const bag = (Array.isArray(bagRaw) ? bagRaw : Array.isArray(roundItems) ? roundItems : []) as Array<{ i: number; v: unknown }>;
     const scope = { state, config: ctx.baseCtx.config ?? {}, run: ctx.baseCtx.meta ?? {} };
     const update = collectMapResults(config, bag, mapId, scope);
     ctx.events.emit("node.end", { nodeId: mapId, update, joined: true }, { nodeId: mapId, nodeType: "map" });

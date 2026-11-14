@@ -170,6 +170,8 @@ export interface RunScope {
   readonly root?: string | undefined;
   /** Run metadata of the top graph; embedded subgraphs report the same run and thread. */
   readonly meta?: { runId: string; threadId?: string | undefined; startedAt: string; graph: string } | undefined;
+  /** Caller cancellation, excluding LangGraph's internal task-abort signal. */
+  readonly signal?: AbortSignal | undefined;
 }
 
 /** The run scope in a LangGraph config, if the node runs inside a compiled graph execution. */
@@ -179,6 +181,11 @@ export function runScopeOf(config: unknown): RunScope | undefined {
   return scope && typeof scope === "object" && (scope as RunScope).replay instanceof ReplayStore
     ? (scope as RunScope)
     : undefined;
+}
+
+export function runSignalOf(config: unknown, fallback?: AbortSignal): AbortSignal | undefined {
+  const scope = runScopeOf(config);
+  return scope ? scope.signal : fallback;
 }
 
 /** A copy of `config` whose run scope sits one subgraph level deeper, under node `nodeId`. */

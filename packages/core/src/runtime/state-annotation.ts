@@ -12,7 +12,7 @@ import { ISSUES_CHANNEL_CAP, issueDedupeKey, type RunIssue } from "./run-issues.
 export const ONCE_CHANNEL = "__once";
 /** Declared so checkpoints written by older versions still load; the engine no longer reads or writes it. */
 export const REPLAY_CHANNEL = "__agentReplay";
-/** Fan-in bag for checkpointed map workers: `{ [mapId]: Array<{ i, v }> }`. */
+/** Fan-in bags keyed by map id and dispatch round; legacy arrays remain readable. */
 export const MAP_COLLECT_CHANNEL = "__mapCollect";
 /** Per-Send map worker payload (index, item, binding name). */
 export const MAP_TASK_CHANNEL = "__mapTask";
@@ -185,19 +185,32 @@ export function buildStateAnnotation(
     default: () => [],
   });
   fields[MAP_COLLECT_CHANNEL] = Annotation<Record<string, unknown>>({
-    reducer: (cur: Record<string, unknown> = {}, inc: Record<string, unknown>) => {
-      const out: Record<string, unknown> = { ...cur };
-      for (const [k, v] of Object.entries(inc ?? {})) {
-        const prev = Array.isArray(out[k]) ? (out[k] as unknown[]) : [];
-        const add = Array.isArray(v) ? v : [v];
-        out[k] = [...prev, ...add];
-      }
-      return out;
-    },
+    reducer: reduceMapCollect,
     default: () => ({}),
   });
 
   return Annotation.Root(fields as Parameters<typeof Annotation.Root>[0]);
+}
+
+export function reduceMapCollect(cur: Record<string, unknown> = {}, inc: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...cur };
+  for (const [id, value] of Object.entries(inc ?? {})) {
+    if (Array.isArray(value)) {
+      // Resume pending tasks saved by an older build without discarding their results.
+      out[id] = [...(Array.isArray(out[id]) ? out[id] as unknown[] : []), ...value];
+      continue;
+    }
+    if (!value || typeof value !== "object") continue;
+    const next = value as { round?: string; items?: Array<{ i: number; v: unknown }>; reset?: boolean };
+    if (typeof next.round !== "string" || !Array.isArray(next.items)) continue;
+    if (next.reset) { out[id] = { round: next.round, items: next.items }; continue; }
+    const prior = out[id] as { round?: string; items?: Array<{ i: number; v: unknown }> } | undefined;
+    if (prior?.round !== next.round) continue;
+    const items = new Map((prior.items ?? []).map((item) => [item.i, item]));
+    for (const item of next.items) items.set(item.i, item);
+    out[id] = { round: next.round, items: [...items.values()] };
+  }
+  return out;
 }
 
 /**
