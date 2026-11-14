@@ -141,6 +141,7 @@ describe("LangChain provider factory — bedrock construction", () => {
         vendor: "bedrock",
         model: "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
         region: "us-west-2",
+        options: { maxRetries: 9 },
       },
       { cwd: tmpDir },
     );

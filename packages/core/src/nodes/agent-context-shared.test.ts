@@ -20,7 +20,7 @@ const agent = (id: string, provider: string, context: Record<string, unknown>) =
   id,
   type: "agent",
   provider,
-  with: { prompt: `${id} turn`, context: { history: "chat", ...context } },
+  with: { tools: [{ function: "report_issue" }], prompt: `${id} turn`, context: { history: "chat", ...context } },
 });
 
 function graph(name: string, nodes: Array<ReturnType<typeof agent>>, parallel: boolean): GraphSpec {

@@ -264,27 +264,25 @@ describe("start_service / stop_service / restart_service tools", () => {
 
   it("rejects start_service without command", async () => {
     const scripted = createScriptedProvider("scripted-manage", async (_req, ctx) => {
-      await ctx.invokeTool("start_service", { name: "x" });
+      expect(await ctx.invokeTool("start_service", { name: "x" })).toMatchObject({ isError: true, error: { message: expect.stringMatching(/requires a "command"/) } });
       return { output: {}, stopReason: "done" };
     });
     const compiled = await compileGraph(agentGraph([{ function: "start_service" }]), {
       providers: [scripted],
     });
     const result = await compiled.run({ threadId: "agent-bad-start" });
-    expect(result.status).toBe("error");
-    expect(result.error?.message).toMatch(/requires a "command"/);
+    expect(result.status).toBe("completed");
   });
 
   it("rejects stop_service without name", async () => {
     const scripted = createScriptedProvider("scripted-manage", async (_req, ctx) => {
-      await ctx.invokeTool("stop_service", {});
+      expect(await ctx.invokeTool("stop_service", {})).toMatchObject({ isError: true, error: { message: expect.stringMatching(/requires a "name"/) } });
       return { output: {}, stopReason: "done" };
     });
     const compiled = await compileGraph(agentGraph([{ function: "stop_service" }]), {
       providers: [scripted],
     });
     const result = await compiled.run({ threadId: "agent-bad-stop" });
-    expect(result.status).toBe("error");
-    expect(result.error?.message).toMatch(/requires a "name"/);
+    expect(result.status).toBe("completed");
   });
 });

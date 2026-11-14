@@ -89,7 +89,7 @@ function toolGraph(name: string, provider: string, context: Record<string, unkno
         with: {
           system: "Investigate.",
           prompt: "Find the cause.",
-          tools: [{ function: "ctx_logs" }],
+          tools: [{ function: "ctx_logs" }, { function: "report_issue" }],
           maxSteps: 40,
           ...(context ? { context } : {}),
           output: { to: "answer" },
@@ -248,7 +248,7 @@ function chatGraph(name: string, provider: string, context: Record<string, unkno
         id: "support",
         type: "agent",
         provider,
-        with: { system: "You are support.", prompt: "{{ state.q }}", context: { history: "chat", ...context }, output: { to: "last" } },
+        with: { tools: [{ function: "report_issue" }], system: "You are support.", prompt: "{{ state.q }}", context: { history: "chat", ...context }, output: { to: "last" } },
       },
     ],
     edges: [
@@ -616,7 +616,7 @@ describe("agent with.context known issues", () => {
           id: "agent",
           type: "agent",
           provider,
-          with: { system: "Sys.", prompt: "Go.", ...(context ? { context } : {}), output: { to: "answer" } },
+          with: { tools: [{ function: "report_issue" }], system: "Sys.", prompt: "Go.", ...(context ? { context } : {}), output: { to: "answer" } },
         },
       ],
       edges: [
@@ -699,7 +699,7 @@ describe("agent with.context summary placement", () => {
           id: "a",
           type: "agent",
           provider: "ctx-summary-fence",
-          with: { system: "You are careful.", prompt: "go", context: { history: "chat", maxTokens: 600, strategy: "summarize", summarize: { mode: "extract", maxTokens: 300 } } },
+          with: { tools: [{ function: "report_issue" }], system: "You are careful.", prompt: "go", context: { history: "chat", maxTokens: 600, strategy: "summarize", summarize: { mode: "extract", maxTokens: 300 } } },
         },
       ],
       edges: [
