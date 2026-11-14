@@ -88,6 +88,8 @@ export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}):
     importsStripped = stripImports(parsed as Record<string, unknown>, 0);
   }
 
+  if(importsStripped)return {spec:null,yaml:raw,importsStripped:true,diagnostics:[{severity:"error",code:"UPLOAD_IMPORTS_BLOCKED",path:"imports",message:"Client graph uploads cannot load imports (including nested graphs). Register modules on the server and reference server-provided capabilities instead."}]};
+
   const result = GraphSpecSchema.safeParse(parsed);
   if (!result.success) {
     return {

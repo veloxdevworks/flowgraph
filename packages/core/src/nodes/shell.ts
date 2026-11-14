@@ -159,9 +159,9 @@ export const shellNode = defineNode<Config>({
                 (stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : ""),
             );
           }
-          const excerpt = stderr.trim().slice(0, 500) || stdout.trim().slice(0, 500);
+          const excerpt = stderr.trim().slice(-500) || stdout.trim().slice(-500);
           throw new Error(
-            `shell node: command exited with code ${exitCode}` +
+            `shell node "${ctx.nodeId}": command exited with code ${exitCode}` +
               (excerpt ? `: ${excerpt}` : ""),
           );
         }

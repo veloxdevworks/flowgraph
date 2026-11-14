@@ -34,7 +34,7 @@ describe("parseGraphYaml", () => {
     expect(result.importsStripped).toBe(false);
   });
 
-  it("strips client imports", () => {
+  it("rejects client imports explicitly", () => {
     const yaml = `
 apiVersion: flowgraph/v1
 kind: Graph
@@ -55,14 +55,11 @@ edges:
   - { from: echo, to: END }
 `;
     const result = parseGraphYaml(yaml);
-    if (!result.spec) {
-      throw new Error(result.diagnostics.map((d) => d.message).join("; "));
-    }
-    expect(result.importsStripped).toBe(true);
-    expect(result.spec.imports).toBeUndefined();
+    expect(result.spec).toBeNull();
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({code:"UPLOAD_IMPORTS_BLOCKED"}));
   });
 
-  it("strips imports from inline subgraphs and map inners at any depth", () => {
+  it("rejects imports from inline subgraphs and map inners at any depth", () => {
     const yaml = `
 apiVersion: flowgraph/v1
 kind: Graph
@@ -120,9 +117,8 @@ edges:
   - { from: m, to: END }
 `;
     const result = parseGraphYaml(yaml, { expandEnv: false });
-    if (!result.spec) throw new Error(result.diagnostics.map((d) => d.message).join("; "));
-    expect(result.importsStripped).toBe(true);
-    expect(JSON.stringify(result.spec)).not.toContain("anything.mjs");
+    expect(result.spec).toBeNull();
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({code:"UPLOAD_IMPORTS_BLOCKED"}));
   });
 
   it("rejects invalid yaml", () => {

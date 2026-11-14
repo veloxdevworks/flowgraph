@@ -30,26 +30,14 @@ packages via `link:` to a sibling checkout of this repo.
 - Standard commands live in `CONTRIBUTING.md` and `package.json`
   (`pnpm build`, `pnpm test`, `pnpm typecheck`).
 
-### Pre-existing DTS build break (important)
+### Validation
 
-- `pnpm build`, `pnpm test`, and `pnpm typecheck` currently **fail at the
-  type-declaration (DTS) step** on a pre-existing type error, not an env issue:
-  `packages/testing` (`TestRunResult.status` omits the `"paused"` run status that
-  `core` now returns) and `packages/cli` (`src/commands.ts` compares against a
-  status that can no longer be `"interrupted"`). CI would be red on `main` for the
-  same reason.
-- The important consequence: every package's **runtime JS bundle still builds
-  fine** (tsup emits `dist/*.js` before DTS fails), so the engine is fully
-  runnable. `packages/cli/dist/bin.js` is produced and works. To get a complete
-  build without the aborted `cli` step, run
-  `pnpm --filter @flowgraph/cli build` after the top-level build.
-- Because turbo's `test`/`typecheck` tasks depend on `build`, the aggregate
-  `pnpm test` aborts before running specs. Run a package's tests directly instead,
-  e.g. `pnpm --filter @flowgraph/core exec vitest run` (core: 132
-  tests pass).
-- Downstream repos (`flowgraph-app`, `flowgraph-desktop`) still build/test fine
-  against this checkout, since they consume `core`/`spec`/`expr`/`skills` (whose
-  DTS builds succeed), not `testing`/`cli` types.
+- Run root `pnpm build`, `pnpm typecheck`, and `pnpm test`. The earlier DTS
+  mismatch in `testing`/`cli` has been fixed; do not assume aggregate checks fail.
+- When diagnosing a local environment failure, compare the same test on unchanged
+  `main` and record it separately from regressions introduced by your change.
+- PostgreSQL integration tests use `FLOWGRAPH_TEST_POSTGRES_URL`. CI runs them
+  again against the same service database after the aggregate test suite.
 
 ### Running the CLI / a graph
 
@@ -65,9 +53,7 @@ packages via `link:` to a sibling checkout of this repo.
 - `pnpm lint` (turbo) is effectively a no-op — packages define no `lint` task and
   CI has no lint job. The root `eslint.config.js` imports `@eslint/js` /
   `typescript-eslint`, which are not in `devDependencies`, so invoking `eslint`
-  directly fails. `pnpm typecheck` + `pnpm test` currently also fail at the DTS
-  step (see "Pre-existing DTS build break" above) — validate with per-package
-  `vitest run` until those type errors are fixed.
+  directly fails. Use the standard build, typecheck and test commands.
 
 ### Providers gotcha
 

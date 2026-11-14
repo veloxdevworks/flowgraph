@@ -14,7 +14,7 @@ const result = await runGraph(compiled, {
   signal,                       // AbortSignal → run.aborted
   onInterrupt: "prompt",        // override env policy for this run
 });
-// result: { state, status: "completed" | "interrupted" | "error", interrupts?, usage, runId }
+// result: { state, status: "completed" | "interrupted" | "paused" | "aborted" | "error", interrupts?, usage, runId }
 ```
 
 Under the hood flowgraph calls LangGraph's `invoke`/`stream` with `{ configurable: { thread_id } }`, wraps each node in the middleware stack, and translates LangGraph stream chunks into flowgraph events.
@@ -515,3 +515,29 @@ multiple internal model calls. `warn` deliberately permits continued work and
 concurrency. Exceeded-budget messages preserve small cost differences instead of
 rounding to four decimal places. LangChain has no USD price table; validation
 warns that `maxUSD` cannot cap its unpriced calls.
+
+### Inspectable diagnostics and public messages
+
+`Diagnostic.file` identifies an agent definition's declaring `AGENT.md`; `path`
+identifies its front-matter field. YAML parse failures return diagnostics instead
+of escaping as graph-level exceptions. Custom reducer failures name the channel
+and reducer. Shell failures name the node and keep the last 500 characters of
+stderr (or stdout when stderr is empty).
+
+Interrupt replay attachments remain private checkpoint data. Public interrupt
+payloads omit `__agentReplay`; normal resume still restores the private snapshot.
+Message channels retain LangChain message objects for reducer/provider fidelity.
+Use the exported `fromStoredMessage` helper to inspect/reuse a provider-neutral
+`ContextMessage` with `role`, `content`, `toolCalls` and `toolCallId`. It accepts
+both runtime message objects and their LangChain JSON constructor form (such as
+HTTP/JSONL state snapshots), without loading or evaluating constructors. For example:
+
+```ts
+import { fromStoredMessage } from "@flowgraph/core";
+const messages = (result.state.messages as unknown[])
+  .map(fromStoredMessage).filter(message => message !== undefined);
+```
+
+CLI state patching and dynamic computed routing remain separate capability work.
+Use a new run with explicit inputs, or registered function/router logic, for those
+workflows today; historical resume is not a state-editing API.

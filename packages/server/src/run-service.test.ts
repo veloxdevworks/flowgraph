@@ -123,18 +123,13 @@ describe("RunService", () => {
     expect(service.registry.get(threadId)?.status).toBe("completed");
   });
 
-  it("reports importsStripped on start", async () => {
+  it("rejects uploaded imports before starting", async () => {
     const threadId = `imports-${Date.now()}`;
     const yaml = COMPLETE_GRAPH.replace(
       "kind: Graph\n",
       "kind: Graph\nimports:\n  - { reducers: \"./register.ts\" }\n",
     );
-    const result = await service.startRun({
-      threadId,
-      yaml,
-      input: { text: "hi" },
-    });
-    expect(result.importsStripped).toBe(true);
+    await expect(service.startRun({threadId,yaml,input:{text:"hi"}})).rejects.toMatchObject({status:400,diagnostics:expect.arrayContaining([expect.objectContaining({code:"UPLOAD_IMPORTS_BLOCKED"})])});
   });
 
   it("persists uploaded yaml", async () => {

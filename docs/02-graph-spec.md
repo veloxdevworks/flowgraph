@@ -10,12 +10,12 @@ A graph file is a single YAML document:
 
 ```yaml
 apiVersion: flowgraph/v1        # required — versioned contract
-kind: Graph                 # required — Graph | Skill | Subgraph
+kind: Graph                 # required — only Graph is accepted
 metadata: { ... }           # name, labels, description
 triggers: [ ... ]           # optional — host-interpreted auto-start conditions
 imports: [ ... ]            # optional — reusable subgraphs/skills/node packages
 config: { ... }             # optional — graph-level config/defaults
-state: { ... }              # required — channel (state) definitions
+state: { ... }              # optional — channel (state) definitions
 inputs: [ ... ]             # optional — typed run parameters (collected before start)
 input: { ... }              # optional — default seed values for a run
 nodes: [ ... ]              # required — the node list

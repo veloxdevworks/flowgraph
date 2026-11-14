@@ -191,7 +191,7 @@ Agent nodes emit one `agent.usage` event per actual metered call. Replayed respo
 runtime:
   budget:
     maxUSD: 5.00            # veto further LLM calls; raises interrupt or fails per policy
-    maxTokens: 2_000_000
+    maxTokens: 2000000
     onExceed: interrupt     # interrupt | fail | warn
 ```
 

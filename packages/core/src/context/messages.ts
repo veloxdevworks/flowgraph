@@ -115,6 +115,15 @@ function roleOf(m: LcLike): ContextMessage["role"] | undefined {
 /** Convert one stored message (LangChain instance or plain object). Unknown kinds return undefined. */
 export function fromStoredMessage(raw: unknown): ContextMessage | undefined {
   if (!raw || typeof raw !== "object") return undefined;
+  const serialized = raw as Record<string, unknown>;
+  if (serialized["lc"] === 1 && serialized["type"] === "constructor" && Array.isArray(serialized["id"])) {
+    const ids = serialized["id"] as unknown[];
+    const kinds: Record<string, string> = { HumanMessage: "human", AIMessage: "ai", SystemMessage: "system", ToolMessage: "tool" };
+    const kind = ids[ids.length - 1];
+    const kwargs = serialized["kwargs"];
+    if (typeof kind !== "string" || !kinds[kind] || !kwargs || typeof kwargs !== "object" || Array.isArray(kwargs)) return undefined;
+    raw = { ...kwargs, type: kinds[kind], _getType: undefined, getType: undefined };
+  }
   const m = raw as LcLike;
   const role = roleOf(m);
   if (!role) return undefined;

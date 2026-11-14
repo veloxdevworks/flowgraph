@@ -341,3 +341,11 @@ docker build --platform linux/arm64 -t flowgraph-server -f packages/server/Docke
 docker run --rm -p 8080:8080 -e FLOWGRAPH_AUTH_TOKEN=dev flowgraph-server
 curl -s http://127.0.0.1:8080/ping
 ```
+
+### Request and failure diagnostics
+
+Malformed JSON request bodies return 400 `INVALID_JSON`. `GET /runs/:threadId` includes `error.message` for failed
+runs, recovered from the durable event journal after restart as well as live runs.
+Client-supplied imports are rejected at upload/preflight with
+`UPLOAD_IMPORTS_BLOCKED`, including imports nested in subgraphs/maps. Install and
+register required modules on the server; uploads never execute client code modules.
