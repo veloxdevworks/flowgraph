@@ -173,14 +173,12 @@ describe("sqlite checkpoint retention", () => {
 
     const second = createSqliteCheckpointer({ path: dbPath, retention });
     const recompiled = await compileGraph(interruptSpec, { checkpointer: second });
-    const again = await recompiled.resumeFrom({
+    await expect(recompiled.resumeFrom({
       threadId,
       checkpointId: interruptId!,
       resume: { go: true },
       onInterrupt: "fail",
-    });
-    expect(again.status).toBe("completed");
-    expect(again.state["tag"]).toBe("done");
+    })).rejects.toMatchObject({ code: "HISTORICAL_DECISION_REPLAY" });
     (second as unknown as { db: { close(): void } }).db.close();
   });
 

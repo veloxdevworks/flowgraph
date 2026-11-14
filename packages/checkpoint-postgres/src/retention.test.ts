@@ -84,14 +84,12 @@ describe.skipIf(!DB)("postgres checkpoint retention", () => {
     expect(history.some((item) => item.checkpointId === interruptId)).toBe(true);
     expect(history.length).toBeLessThanOrEqual(6);
 
-    const again = await compiled.resumeFrom({
+    await expect(compiled.resumeFrom({
       threadId,
       checkpointId: interruptId!,
       resume: { go: true },
       onInterrupt: "fail",
-    });
-    expect(again.status).toBe("completed");
-    expect(again.state["tag"]).toBe("done");
+    })).rejects.toMatchObject({ code: "HISTORICAL_DECISION_REPLAY" });
   });
 
   it("deletes finished threads and leaves fg_memory rows in place", async () => {
