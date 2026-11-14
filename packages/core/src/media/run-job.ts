@@ -4,6 +4,7 @@
  */
 
 import type { Artifact } from "@flowgraph/spec";
+import { randomUUID } from "node:crypto";
 import { parseDuration, sleep } from "../runtime/duration.js";
 import { artifactsExist } from "./artifacts.js";
 import type { Journal, JournalEntry } from "./journal.js";
@@ -38,11 +39,14 @@ const DEFAULT_POLL_MAX_MS = 10_000;
 export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobResult> {
   const { provider, req, journal } = opts;
   const existing = await journal.read();
+  if (existing?.state === "intent") throw Object.assign(new Error(`Media submission ${existing.submissionId} has an uncertain outcome. Stop/reconcile its owner and vendor work, then use 'flowgraph media inspect/resolve' before retrying.`), { code: "MEDIA_SUBMISSION_UNCERTAIN", retryable: false });
   if (existing?.state === "done" && existing.artifacts && (await artifactsExist(opts.workspace, existing.artifacts))) {
     opts.emit("reused", { provider: provider.name, jobId: existing.handle.id });
     return { artifacts: existing.artifacts, costUSD: 0, costKnown: true, reused: true };
   }
+  if (existing?.state === "done") throw Object.assign(new Error("Completed media artifacts are missing. Restore them or explicitly change with.variant to request new generation."), { code: "MEDIA_ARTIFACTS_MISSING", retryable: false });
 
+  provider.validateRequest?.(req);
   const invoke = () => runActiveJob(opts, existing);
   return opts.meter ? opts.meter(invoke, provider.estimateCostUSD?.(req)) : invoke();
 }
@@ -50,26 +54,48 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
 async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | undefined): Promise<MediaJobResult> {
   const { provider, req, mctx, journal } = opts;
   const deadline = Date.now() + parseDuration(opts.timeout);
+  const estimate = provider.estimateCostUSD?.(req);
   let handle: JobHandle;
   let submittedAt = existing?.submittedAt ?? new Date().toISOString();
   if (existing?.state === "submitted") {
     handle = existing.handle;
     opts.emit("resumed", { provider: provider.name, jobId: handle.id });
   } else {
-    handle = await provider.start(req, mctx);
+    const submissionId = randomUUID();
+    const intent: JournalEntry = { version: 1, state: "intent", provider: provider.name, submittedAt, submissionId, handle: { id: submissionId } };
+    if (journal.reserve) {
+      if (!await journal.reserve(intent)) throw Object.assign(new Error("Media journal changed before submission; inspect/retry without submitting another request"), { code: "MEDIA_SUBMISSION_UNCERTAIN", retryable: false });
+    } else await journal.write(intent);
+    opts.emit("intent", { provider: provider.name, submissionId });
+    let attempted=false,accepted=false;
+    const trackedFetch:typeof fetch=async(input,init)=>{
+      attempted=true;
+      const response=await mctx.fetch(input,init);
+      const method=(init?.method??(typeof input==="object"&&"method" in input?input.method:"GET")).toUpperCase();
+      if(response.ok&&method!=="GET"&&method!=="HEAD")accepted=true;
+      return response;
+    };
+    try {handle = await provider.start(req, { ...mctx, submissionId,fetch:trackedFetch });}
+    catch(error){
+      const explicit=(error as {mediaSubmissionRejected?:boolean}|null)?.mediaSubmissionRejected===true;
+      if(explicit||provider.submissionTransport==="fetch"&&!accepted&&(!attempted||unacceptedRequest(error))){
+        await journal.remove();
+        throw Object.assign(error instanceof Error?error:new Error(String(error)),{mediaNotBilled:true});
+      }
+      throw error;
+    }
     submittedAt = new Date().toISOString();
+    const immediateCost = handle.costUSD ?? estimate;
     await journal.write({
       version: 1,
       state: handle.done ? "done" : "submitted",
       provider: provider.name,
       submittedAt,
       handle,
-      ...(handle.done ? { artifacts: handle.done } : {}),
+      ...(handle.done ? { artifacts: handle.done, ...(immediateCost === undefined ? {} : {costUSD: immediateCost}) } : {}),
     });
     opts.emit("submitted", { provider: provider.name, jobId: handle.id });
   }
-
-  const estimate = provider.estimateCostUSD?.(req);
 
   if (handle.done) {
     const reported = typeof handle.costUSD === "number" ? handle.costUSD : undefined;
@@ -120,7 +146,8 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
   } catch (err) {
     if (mctx.signal?.aborted) {
       await provider.cancel?.(handle, mctx).catch(() => undefined);
-      await journal.remove().catch(() => undefined);
+      // Cancellation is best-effort; retain the handle until the vendor confirms
+      // a terminal state, so a later resume cannot silently purchase again.
     }
     throw err;
   }
@@ -139,4 +166,16 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
   });
   opts.emit("done", { provider: provider.name, jobId: handle.id, artifacts: artifacts.length, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, ...(reportedCost === undefined ? {} : { costUSD }) });
   return { artifacts, costUSD, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, reused: false };
+}
+
+/** Rejected HTTP requests and failures before a connection; never resets/timeouts/5xx. */
+function unacceptedRequest(error:unknown):boolean {
+  let current=error;
+  for(let i=0;i<5&&current&&typeof current==="object";i++){
+    const e=current as {status?:unknown;statusCode?:unknown;code?:unknown;cause?:unknown};
+    if([400,401,403,404,405,413,415,422,429].includes(Number(e.status??e.statusCode)))return true;
+    if(["ECONNREFUSED","ENOTFOUND","EAI_AGAIN"].includes(String(e.code)))return true;
+    current=e.cause;
+  }
+  return false;
 }

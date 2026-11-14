@@ -320,7 +320,7 @@ describe("async jobs and the journal", () => {
     expect(left).toHaveLength(1);
   });
 
-  it("cancels the vendor job and drops the journal on abort", async () => {
+  it("attempts cancellation but retains the handle until the vendor confirms its outcome", async () => {
     const calls = newCalls();
     const ac = new AbortController();
     const provider = asyncProvider(calls, [{ state: "running" }], {
@@ -338,7 +338,7 @@ describe("async jobs and the journal", () => {
     await vi.waitFor(async () => {
       expect(calls.cancel).toBe(1);
       const left = await readdir(path.join(dir, ".flowgraph", "jobs", "ta")).catch(() => [] as string[]);
-      expect(left).toHaveLength(0);
+      expect(left).toHaveLength(1);
     });
   });
 });

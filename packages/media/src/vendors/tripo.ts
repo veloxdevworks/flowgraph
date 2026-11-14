@@ -391,6 +391,7 @@ export const tripoVendor: MediaVendor = {
     return {
       name: opts.name,
       vendor: VENDOR,
+      submissionTransport: "fetch",
       modalities: MODALITIES,
       models: { model3d: KNOWN_MODELS },
       pollIntervalMs: 2000, // docs recommend polling every 1-2 s
