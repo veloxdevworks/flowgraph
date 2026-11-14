@@ -92,6 +92,11 @@ CREATE TABLE fg_thread_run_claims (
 
 const MIGRATION_V6 = `ALTER TABLE fg_thread_run_claims ADD COLUMN owner TEXT;`;
 
+/** Small, serializer-independent reference metadata; NULL marks legacy/in-flight rows. */
+const MIGRATION_V7 = `
+ALTER TABLE checkpoints ADD COLUMN fg_channel_versions TEXT;
+`;
+
 interface IdRow {
   checkpoint_id: string;
 }
@@ -99,10 +104,6 @@ interface CpRow {
   checkpoint_id: string;
   type: string | null;
   checkpoint: Uint8Array;
-}
-interface BlobRow {
-  channel: string;
-  version: string;
 }
 interface ThreadRow {
   thread_id: string;
@@ -160,6 +161,8 @@ export function migrateSqliteCheckpointRetention(db: SqliteDatabase): number {
       { version: 4, sql: MIGRATION_V4 },
       { version: 5, sql: MIGRATION_V5 },
       { version: 6, sql: MIGRATION_V6 },
+
+      { version: 7, sql: MIGRATION_V7 },
     ];
     const latest = steps[steps.length - 1]?.version ?? 0;
     if (current > latest) {
@@ -448,6 +451,15 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
       deduped = await this.writeBlobs(threadId, ns, stored, typeof parentId === "string" ? parentId : undefined);
     }
     const result = await super.put(config, stored, metadata);
+    if (typeof threadId === "string") {
+      // Publish references after the parent saver inserts the row. GC skips a
+      // namespace while an inserted row still lacks metadata. Thread admission
+      // is still required: raw writes can create blobs before inserting a row.
+      this.sqlite.prepare(
+        `UPDATE checkpoints SET fg_channel_versions = ?
+         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
+      ).run(JSON.stringify(Object.fromEntries(Object.entries(checkpoint.channel_versions ?? {}).map(([channel, version]) => [channel, String(version)]))), threadId, ns, checkpoint.id);
+    }
     if (deduped && typeof threadId === "string") {
       this.sqlite
         .prepare(
@@ -797,16 +809,17 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     ns: string,
     parentId: string,
   ): Promise<Record<string, unknown> | undefined> {
-    const row = asRow<{ type: string | null; checkpoint: Uint8Array }>(
+    const row = asRow<{ type: string | null; checkpoint: Uint8Array; fg_channel_versions: string | null }>(
       this.sqlite
         .prepare(
-          `SELECT type, checkpoint FROM checkpoints
+          `SELECT type, checkpoint, fg_channel_versions FROM checkpoints
            WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
         )
         .get(threadId, ns, parentId),
     );
     if (!row) return undefined;
     try {
+      if (row.fg_channel_versions !== null) return JSON.parse(row.fg_channel_versions) as Record<string, unknown>;
       const checkpoint = (await this.serde.loadsTyped(row.type ?? "json", row.checkpoint)) as Checkpoint;
       return checkpoint.channel_versions ?? {};
     } catch {
@@ -896,7 +909,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     const drop = ids.filter((id) => !keep.has(id));
     if (drop.length === 0) return 0;
 
-    const referenced = await this.referencedBlobKeys(threadId, ns, [...keep]);
+    await this.backfillVersionMetadata(threadId, ns, [...keep]);
     this.sqlite.transaction(() => {
       for (const chunk of chunks(drop, PRUNE_PAGE)) {
         const marks = chunk.map(() => "?").join(", ");
@@ -914,7 +927,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
           )
           .run(threadId, ns, ...chunk);
       }
-      this.deleteUnreferencedBlobs(threadId, ns, referenced);
+      this.deleteUnreferencedBlobs(threadId, ns);
     })();
     return drop.length;
   }
@@ -948,59 +961,42 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     return listed;
   }
 
-  /** Channel versions still referenced by checkpoints we are keeping. */
-  private async referencedBlobKeys(threadId: string, ns: string, keepIds: string[]): Promise<Set<string>> {
-    const referenced = new Set<string>();
-    const load = (marks: string) =>
-      this.sqlite.prepare(
-        `SELECT type, checkpoint FROM checkpoints
-         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN (${marks})`,
-      );
+  /** Decode legacy rows once; ordinary pruning never loads retained state. */
+  private async backfillVersionMetadata(threadId: string, ns: string, keepIds: string[]): Promise<void> {
+    const save = this.sqlite.prepare(
+      `UPDATE checkpoints SET fg_channel_versions = ?
+       WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? AND fg_channel_versions IS NULL`,
+    );
     for (const chunk of chunks(keepIds, PRUNE_PAGE)) {
-      const rows = asRows<Pick<CpRow, "type" | "checkpoint">>(
-        load(chunk.map(() => "?").join(", ")).all(threadId, ns, ...chunk),
-      );
+      const marks = chunk.map(() => "?").join(", ");
+      const rows = asRows<CpRow>(this.sqlite.prepare(
+        `SELECT checkpoint_id, type, checkpoint FROM checkpoints
+         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN (${marks})
+           AND fg_channel_versions IS NULL`,
+      ).all(threadId, ns, ...chunk));
       for (const row of rows) {
         const checkpoint = (await this.serde.loadsTyped(row.type ?? "json", row.checkpoint)) as Checkpoint;
-        for (const [channel, version] of Object.entries(checkpoint.channel_versions ?? {})) {
-          referenced.add(`${channel}\0${String(version)}`);
-        }
+        save.run(JSON.stringify(Object.fromEntries(Object.entries(checkpoint.channel_versions ?? {}).map(([channel, version]) => [channel, String(version)]))), threadId, ns, row.checkpoint_id);
       }
     }
-    return referenced;
   }
 
-  /** Page blob keys and delete the ones no kept checkpoint references. */
-  private deleteUnreferencedBlobs(threadId: string, ns: string, referenced: Set<string>): void {
-    const first = this.sqlite.prepare(
-      `SELECT channel, version FROM fg_checkpoint_blobs
-       WHERE thread_id = ? AND checkpoint_ns = ?
-       ORDER BY channel, version LIMIT ?`,
-    );
-    const next = this.sqlite.prepare(
-      `SELECT channel, version FROM fg_checkpoint_blobs
-       WHERE thread_id = ? AND checkpoint_ns = ?
-         AND (channel > ? OR (channel = ? AND version > ?))
-       ORDER BY channel, version LIMIT ?`,
-    );
-    const drop = this.sqlite.prepare(
-      `DELETE FROM fg_checkpoint_blobs
-       WHERE thread_id = ? AND checkpoint_ns = ? AND channel = ? AND version = ?`,
-    );
-    let cursor: BlobRow | null = null;
-    for (;;) {
-      const rows: BlobRow[] = asRows(
-        cursor === null
-          ? first.all(threadId, ns, PRUNE_PAGE)
-          : next.all(threadId, ns, cursor.channel, cursor.channel, cursor.version, PRUNE_PAGE),
-      );
-      for (const blob of rows) {
-        if (!referenced.has(`${blob.channel}\0${blob.version}`)) drop.run(threadId, ns, blob.channel, blob.version);
-      }
-      const last = rows[rows.length - 1];
-      if (!last || rows.length < PRUNE_PAGE) break;
-      cursor = last;
-    }
+  /** Resolve references from all current rows in the same deletion transaction. */
+  private deleteUnreferencedBlobs(threadId: string, ns: string): void {
+    this.sqlite.prepare(
+      `WITH live(channel, version) AS MATERIALIZED (
+         SELECT versions.key, CAST(versions.value AS TEXT)
+         FROM checkpoints AS c, json_each(c.fg_channel_versions) AS versions
+         WHERE c.thread_id = ? AND c.checkpoint_ns = ?
+       )
+       DELETE FROM fg_checkpoint_blobs AS b
+       WHERE b.thread_id = ? AND b.checkpoint_ns = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM checkpoints
+           WHERE thread_id = ? AND checkpoint_ns = ? AND fg_channel_versions IS NULL
+         )
+         AND NOT EXISTS (SELECT 1 FROM live WHERE live.channel = b.channel AND live.version = b.version)`,
+    ).run(threadId, ns, threadId, ns, threadId, ns);
   }
 
   private maybeVacuum(deleted: number, policy: ResolvedCheckpointRetention): void {

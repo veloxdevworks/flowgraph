@@ -63,6 +63,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Retest PostgreSQL on the reused database
+        run: pnpm --filter @flowgraph/checkpoint-postgres exec vitest run
+
       - name: Validate examples
         run: |
           for f in examples/**/*.graph.yaml; do
