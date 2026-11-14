@@ -339,6 +339,10 @@ After retries and `node:error` hooks, `on.error: fail` (the default) fails the r
 
 `runtime.recursionLimit` bounds supersteps per invocation, including parallel bookkeeping. Its default is 1,000; choose a smaller positive value for a tighter guard. Resume/continue starts a new invocation and a new counter; this is not a lifetime thread budget. Limit errors use code `RECURSION_LIMIT` and name the graph, pending nodes, and the YAML setting. `retry.retryOn` matches exact error `code`/`status`/`statusCode` values or complete message tokens (`code 7` does not match `code 75`).
 
+Human gates require an explicit `resume` answer; CLI `resume` without `--resume` does not approve a gate. `continueRun`/`step` only continue a graceful pause or breakpoint and reject a pending human decision. `ask_human` choices accept the exact choice value or its one-based numeric index; invalid answers re-prompt with validation feedback. A historical checkpoint that already contains a decision fails with `HISTORICAL_DECISION_REPLAY`; fork before the gate to make a different decision.
+
+Each wait keeps its original deadline across sibling answers and process restarts. Re-entering a completed wait in a new loop round creates a new deadline. `interrupt.raised` has the canonical `{ interrupts: [info] }` payload, one event per newly raised/re-prompted gate; already-pending siblings and replayed answered calls are not announced again.
+
 | Failure | Default behavior | Configurable |
 |---|---|---|
 | Node throws after retries | `run.error`, non-zero exit, last checkpoint retained | `on.error: continue/route/fail` |
