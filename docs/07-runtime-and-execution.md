@@ -353,3 +353,35 @@ Each wait keeps its original deadline across sibling answers and process restart
 | Sink/hook (observe) error | isolated; logged as internal diagnostic | `hooks.onError: isolate/fail` |
 
 Deterministic, documented exit codes (see [09 — CLI](./09-cli.md#5-exit-codes)) make flowgraph safe to gate CI on.
+
+### Thread execution admission
+
+A thread has one execution owner at a time. Concurrent `run`, `resume`,
+`continueRun`, `step`, streamed runs, callbacks and timeout continuations use
+this admission guard. A competitor receives non-retryable `THREAD_BUSY` before
+execution or checkpoint bookkeeping. Independent thread ids can run concurrently;
+compiled-graph streams contain only the selected invocation's thread events.
+
+SQLite and PostgreSQL savers coordinate through checkpoint schema 5's
+`fg_thread_run_claims` table, even with retention disabled. Memory/custom savers
+without `ThreadRunCoordinator.acquireThreadRun` coordinate within one saver
+instance in one process. Custom durable savers should implement that interface
+for coordination across processes. Every writer must use the new runtime;
+already-running older clients do not participate. A database migrated to schema
+5 cannot be reopened by an older runtime.
+
+Claims have a random ownership token and no expiry. Normal completion, errors,
+interrupts and cancellation release the owner's token. A process crash leaves
+the claim in place. Before removing such a claim, stop/reconcile the owning
+worker and any external work it started, inspect the checkpoint and vendor
+outcome, and delete only the inspected `thread_id`/`token` row. A stale timestamp
+alone does not prove the owner stopped. Checkpoint deletion and retention do not
+clear execution claims. This prevents concurrent admission; side effects still
+need idempotency and crash recovery.
+
+Resuming, continuing or stepping an unknown thread raises `THREAD_NOT_FOUND`
+without creating checkpoint or thread metadata rows. Resuming a finished thread
+with no pending work raises `THREAD_NOT_WAITING`. Default retention now records
+active, paused and finished rows in `fg_checkpoint_threads`; finished rows remain
+non-deletable unless a finished-thread deletion policy is configured. With
+retention disabled, that optional metadata remains disabled.

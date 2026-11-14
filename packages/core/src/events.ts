@@ -1,3 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const eventThread = new AsyncLocalStorage<string>();
+
+/** @internal Keep event attribution local to an invocation, including concurrent threads. */
+export function withEventThread<T>(threadId: string, run: () => T): T {
+  return eventThread.run(threadId, run);
+}
+
 /**
  * The event bus and event types for flowgraph.
  * Events are read-only observations; they never block execution.
@@ -73,7 +82,7 @@ export interface EventBus {
   emit(type: EventType, data: unknown, scope?: EventScope): void;
   subscribe(sink: EventSink): () => void;
   /** For streaming: get an async iterable of events */
-  stream(): AsyncIterable<FlowgraphEvent>;
+  stream(opts?: { threadId?: string; includeBuffered?: boolean; signal?: AbortSignal }): AsyncIterable<FlowgraphEvent>;
 }
 
 export interface EventBusOptions {
@@ -98,7 +107,8 @@ export function createEventBus(opts: EventBusOptions): EventBus {
       data,
       seq: _seq++,
     };
-    if (opts.threadId !== undefined) event.threadId = opts.threadId;
+    const threadId = opts.threadId ?? eventThread.getStore();
+    if (threadId !== undefined) event.threadId = threadId;
 
     buffer.push(event);
 
@@ -128,45 +138,28 @@ export function createEventBus(opts: EventBusOptions): EventBus {
     return () => sinks.delete(sink);
   }
 
-  async function* stream(): AsyncIterable<FlowgraphEvent> {
-    // Yield already-buffered events first
-    for (const ev of buffer) yield ev;
-
-    // Then yield new events as they arrive via a push/pull queue
+  async function* stream(options: { threadId?: string; includeBuffered?: boolean; signal?: AbortSignal } = {}): AsyncIterable<FlowgraphEvent> {
+    const matches = (ev: FlowgraphEvent) => options.threadId === undefined || ev.threadId === options.threadId;
+    const history = options.includeBuffered === false ? [] : buffer.filter(matches);
     const queue: FlowgraphEvent[] = [];
-    let resolve: (() => void) | null = null;
-    let done = false;
-
-    const listener = (ev: FlowgraphEvent) => {
-      queue.push(ev);
-      resolve?.();
-      resolve = null;
-    };
+    let resolve: (() => void) | undefined;
+    let done = options.signal?.aborted ?? false;
+    const wake = () => { resolve?.(); resolve = undefined; };
+    const listener = (ev: FlowgraphEvent) => { if (matches(ev)) { queue.push(ev); wake(); } };
+    const abort = () => { done = true; wake(); };
     streamListeners.add(listener);
-
+    options.signal?.addEventListener("abort", abort, { once: true });
     try {
-      while (!done) {
-        if (queue.length > 0) {
-          yield queue.shift()!;
-        } else {
-          await new Promise<void>((r) => { resolve = r; });
-        }
-        // End signal: a run.end or run.error event closes the stream
-        const last = buffer[buffer.length - 1];
-        if (
-          last &&
-          (last.type === "run.end" ||
-            last.type === "run.error" ||
-            last.type === "run.aborted" ||
-            last.type === "run.paused")
-        ) {
-          done = true;
-        }
+      for (const ev of history) yield ev;
+      while (!done || queue.length > 0) {
+        const ev = queue.shift();
+        if (!ev) { await new Promise<void>(r => { resolve = r; }); continue; }
+        yield ev;
+        if (["run.end", "run.error", "run.aborted", "run.paused"].includes(ev.type)) done = true;
       }
-      // Drain remaining
-      while (queue.length > 0) yield queue.shift()!;
     } finally {
       streamListeners.delete(listener);
+      options.signal?.removeEventListener("abort", abort);
     }
   }
 

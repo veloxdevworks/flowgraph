@@ -62,10 +62,10 @@ function checkpointCount(saver: FlowgraphSqliteSaver, threadId: string): number 
 }
 
 describe("sqlite abandoned active threads", () => {
-  it("migrates the checkpoint schema to version 4 with active_ttl_ms", () => {
+  it("migrates the checkpoint schema to version 5 with active_ttl_ms and execution claims", () => {
     const { db } = saverAt({ finishedTtl: "1h" });
     const v = db.prepare(`SELECT MAX(version) AS v FROM fg_schema_migrations WHERE component = 'checkpoint'`).get() as { v: number };
-    expect(v.v).toBe(4);
+    expect(v.v).toBe(5);
     const cols = (db.prepare(`PRAGMA table_info(fg_checkpoint_threads)`).all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols).toContain("active_ttl_ms");
     const index = db

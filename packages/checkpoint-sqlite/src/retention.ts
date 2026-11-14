@@ -79,6 +79,14 @@ CREATE INDEX IF NOT EXISTS fg_checkpoint_threads_active
   ON fg_checkpoint_threads (updated_at) WHERE status = 'active';
 `;
 
+const MIGRATION_V5 = `
+CREATE TABLE fg_thread_run_claims (
+  thread_id TEXT PRIMARY KEY,
+  token TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+`;
+
 interface IdRow {
   checkpoint_id: string;
 }
@@ -145,6 +153,7 @@ export function migrateSqliteCheckpointRetention(db: SqliteDatabase): number {
       { version: 2, sql: MIGRATION_V2 },
       { version: 3, sql: MIGRATION_V3 },
       { version: 4, sql: MIGRATION_V4 },
+      { version: 5, sql: MIGRATION_V5 },
     ];
     const latest = steps[steps.length - 1]?.version ?? 0;
     if (current > latest) {
@@ -245,9 +254,28 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
+  /** Non-expiring execution claims are independent of checkpoint retention. */
+  acquireThreadRun(threadId: string): { release(): void } | null {
+    this.setup();
+    const token = crypto.randomUUID();
+    const inserted = this.sqlite.prepare(
+      `INSERT INTO fg_thread_run_claims (thread_id, token, created_at)
+       VALUES (?, ?, ?) ON CONFLICT (thread_id) DO NOTHING`,
+    ).run(threadId, token, this.clock());
+    if (!inserted.changes) return null;
+    return {
+      release: () => {
+        const removed = this.sqlite.prepare(
+          `DELETE FROM fg_thread_run_claims WHERE thread_id = ? AND token = ?`,
+        ).run(threadId, token);
+        if (!removed.changes) throw new Error(`Thread "${threadId}" execution claim changed before release`);
+      },
+    };
+  }
+
   markThreadActive(threadId: string): ActiveThreadMark | undefined {
     const policy = this.policyFor(threadId);
-    if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
+    if (!policy.enabled) return undefined;
     this.setup();
     const mark = crypto.randomUUID();
     const markedAt = this.clock();
@@ -431,7 +459,6 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     if (!policy.enabled) return;
     this.setup();
     if (status === "paused") this.pinHead(threadId, now);
-    if (!threadDeletionRequested(policy)) return;
     this.touch(threadId, status, now, policy);
     if (status !== "finished") return;
     const cap = policy.maxFinishedThreads;

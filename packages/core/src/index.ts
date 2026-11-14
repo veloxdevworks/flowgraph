@@ -211,6 +211,7 @@ export {
 export type { RunContext, NodeRunContext, RunConfig, Logger, InterruptKind } from "./context.js";
 
 export type { McpHub, McpToolInfo, McpToolAnnotations } from "./mcp/types.js";
+export type { ThreadRunClaim, ThreadRunCoordinator } from "./checkpoint/execution-claim.js";
 export { expandMcpTools, requireMcpHub, mcpToolName, parseMcpToolName, isMcpToolRef } from "./mcp/expand.js";
 export type { McpToolRef } from "./mcp/expand.js";
 export { resolveSkillPath } from "./skill-resolver.js";

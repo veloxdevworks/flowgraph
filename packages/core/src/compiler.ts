@@ -15,7 +15,7 @@ import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
-import { createEventBus, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
+import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { createEnvSecretProvider } from "./secrets.js";
 import {
   createLogger,
@@ -92,6 +92,7 @@ import { planPlacements, type CompilePlacementOptions, type PlacementPlan } from
 import type { PlacementInfo, RemoteNodeExecutor } from "./placement/remote.js";
 import { wrapperSpecForNode } from "./placement/remote.js";
 import { hitlRouteTargets } from "./nodes/hitl-routes.js";
+import { acquireThreadRun, threadAdmissionError, type ThreadRunClaim } from "./checkpoint/execution-claim.js";
 import { exclusiveRouting, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
 
 import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
@@ -326,6 +327,8 @@ type ExecuteMode = "start" | "resume" | "continue";
 
 /** Per-invocation execution options (never written back to the shared spec). */
 interface InvokeOverrides {
+  threadClaim?: ThreadRunClaim;
+  backgroundWaitTimeout?: boolean;
   /** Stop after one superstep (LangGraph invoke-time `interruptAfter: "*"`). */
   singleStep?: boolean;
   /** An HTTP callback targets one interrupt; leave sibling route registrations intact. */
@@ -408,7 +411,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     return { ...snap, tasks: snap.tasks.map((task) => completed.has(task.id) ? { ...task, interrupts: [] } : task) };
   };
 
-  const executeInvoke = async (
+  const invokeOwned = async (
     payload: Record<string, unknown> | Command | null,
     runOpts: RunOptions | ResumeOptions | ContinueOptions,
     mode: ExecuteMode,
@@ -581,7 +584,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
     }
 
-    const runScope: RunScope = { replay, path: [], meta: runMeta, signal: runOpts.signal };
+    const runScope: RunScope = { replay, path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
     const raised = new Set(pendingResumeInterrupts.map(it => interruptFingerprint(toInterruptInfo(it))));
     const emitStopInterrupts = (interrupts: InterruptInfo[]) => {
@@ -785,7 +788,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
               new Command({ resume: Object.fromEntries(overdue.map((it) => [it.id, { timedOut: true }])) }),
               { threadId, resume: { timedOut: true }, onInterrupt: "fail" },
               "resume",
-              { preserveWebhookRoutes: true },
+              { preserveWebhookRoutes: true, backgroundWaitTimeout: true },
             ).then(
               (timedOutResult) => {
                 for (const it of overdue) unregisterWebhookRoute(threadId, undefined, it.id);
@@ -797,6 +800,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
                 }
               },
               (err: unknown) => {
+                if ((err as { code?: string } | undefined)?.code === "THREAD_BUSY") return;
                 // executeInvoke normally returns status "error"; this catches anything that escaped it
                 // so a background timer can never become an unhandled rejection.
                 const m = err instanceof Error ? err.message : String(err);
@@ -898,6 +902,60 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       for (const u of unsubs) u();
     }
+  };
+
+  const executeInvoke = async (
+    payload: Record<string, unknown> | Command | null,
+    runOpts: RunOptions | ResumeOptions | ContinueOptions,
+    mode: ExecuteMode,
+    overrides: InvokeOverrides = {},
+  ): Promise<RunResult> => {
+    const threadId = runOpts.threadId ?? `thread-${runId}`;
+    return withEventThread(threadId, async () => {
+      const checkpointId = (runOpts as ResumeOptions).checkpointId;
+      const config = { configurable: { thread_id: threadId, ...(checkpointId ? { checkpoint_id: checkpointId } : {}) } };
+      if (mode !== "start" && (!checkpointer || (!checkpointId && !await checkpointer.getTuple(config)))) {
+        throw threadAdmissionError("THREAD_NOT_FOUND", threadId, "does not exist; no checkpoint was changed.");
+      }
+      let claim = overrides.threadClaim;
+      if (!claim) {
+        const until = performance.now() + (overrides.backgroundWaitTimeout ? 5000 : 0);
+        for (;;) {
+          try { claim = await acquireThreadRun(checkpointer ?? compiledLg, threadId); break; }
+          catch (err) {
+            if ((err as { code?: unknown }).code !== "THREAD_BUSY" || performance.now() >= until) throw err;
+            await new Promise<void>(resolve => { const timer = setTimeout(resolve, 25); timer.unref(); });
+          }
+        }
+      }
+      try {
+        if (mode !== "start" && checkpointer) {
+          const tuple = await checkpointer.getTuple(config);
+          if (!tuple && !checkpointId) throw threadAdmissionError("THREAD_NOT_FOUND", threadId, "does not exist.");
+          if (tuple) {
+            if (checkpointId && tuple.pendingWrites?.some(([, channel]) => channel === "__resume__")) {
+              throw threadAdmissionError("HISTORICAL_DECISION_REPLAY", threadId, "already has an answer at this checkpoint; fork before the gate for a new decision.");
+            }
+            const snap = await getCheckpointState(config);
+            const pending = (snap.tasks ?? []).flatMap(task => task.interrupts ?? []);
+            if (pending.length) {
+              if (mode === "continue") {
+                if (!isPauseInterrupt(pending.map(toInterruptInfo))) throw resumeValueRequiredError(threadId);
+                payload = new Command({ resume: Object.fromEntries(interruptIds(pending).map(id => [id, true])) });
+              } else {
+                const answer = payload instanceof Command ? payload.resume : (runOpts as ResumeOptions).resume;
+                if (answer === undefined) throw resumeValueRequiredError(threadId);
+                payload = resumeCommand(answer, pending, threadId);
+              }
+            } else if (snap.next.length > 0) payload = null;
+            else throw threadAdmissionError("THREAD_NOT_WAITING", threadId, "has no pending work or decision; no checkpoint was changed.");
+          }
+        }
+        return await invokeOwned(payload, runOpts, mode, overrides);
+      } finally {
+        await claim.release();
+      }
+    });
   };
 
   const toSnapshot = (
@@ -1042,9 +1100,25 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       return continueRun(opts, { singleStep: true });
     },
     stream: async function* (runOpts: RunOptions = {}) {
-      const streamP = events.stream();
-      executeInvoke(runOpts.input ?? {}, runOpts, "start").catch(() => {});
-      yield* streamP;
+      const threadId = runOpts.threadId ?? `thread-${runId}`;
+      const claim = await acquireThreadRun(checkpointer ?? compiledLg, threadId);
+      const stopped = new AbortController();
+      const source = events.stream({ threadId, includeBuffered: false, signal: stopped.signal })[Symbol.asyncIterator]();
+      let next = source.next(); // Subscribe before execution can emit its first event.
+      const running = executeInvoke(runOpts.input ?? {}, { ...runOpts, threadId }, "start", { threadClaim: claim });
+      running.then(() => stopped.abort(), () => stopped.abort());
+      try {
+        for (;;) {
+          const event = await next;
+          if (event.done) break;
+          yield event.value;
+          next = source.next();
+        }
+        await running;
+      } finally {
+        stopped.abort();
+        await source.return?.();
+      }
     },
   };
 }
@@ -1294,7 +1368,7 @@ async function assembleCompiledLangGraph(
       const runMeta = (runScopeOf(lgConfig)?.meta ?? baseCtx.meta ?? { runId, graph: spec.metadata.name, startedAt: "" }) as RunMeta;
 
       // Graceful pause: park before this node so continueRun can resume it.
-      const pauseSignal = (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
+      const pauseSignal = runScopeOf(lgConfig)?.pauseSignal;
       if (pauseSignal?.aborted) {
         const data = withReplayData(undefined, runScopeOf(lgConfig), nodeSpec.id);
         lgInterrupt({ reason: "paused", __flowgraphPause: true, ...(data !== undefined ? { data } : {}) });
@@ -1303,7 +1377,7 @@ async function assembleCompiledLangGraph(
       // `when` guard
       if (nodeSpec.when) {
         const expr = nodeSpec.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
-        const guardScope = { state, config: baseCtx.config ?? {}, run: baseCtx.meta ?? {} };
+        const guardScope = { state, config: baseCtx.config ?? {}, run: runMeta };
         if (!evalGuard(expr, guardScope)) {
           events.emit("node.skipped", { nodeId: nodeSpec.id }, scope);
           return {};

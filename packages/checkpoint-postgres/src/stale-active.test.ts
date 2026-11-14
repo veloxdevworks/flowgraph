@@ -73,13 +73,13 @@ async function checkpointCount(pool: pg.Pool, schema: string, threadId: string):
 }
 
 describe.skipIf(!DB)("postgres abandoned active threads", () => {
-  it("migrates the checkpoint schema to version 4 with active_ttl_ms", async () => {
+  it("migrates the checkpoint schema to version 5 with active_ttl_ms and execution claims", async () => {
     const schema = schemaName();
     const { pool } = await saverAt({ finishedTtl: "1h" }, schema);
     const v = await pool.query<{ v: number }>(
       `SELECT MAX(version) AS v FROM "${schema}".fg_schema_migrations WHERE component = 'checkpoint'`,
     );
-    expect(v.rows[0]?.v).toBe(4);
+    expect(v.rows[0]?.v).toBe(5);
     const col = await pool.query(
       `SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'fg_checkpoint_threads' AND column_name = 'active_ttl_ms'`,
       [schema],

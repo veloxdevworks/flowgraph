@@ -58,7 +58,7 @@ export async function migratePostgresCheckpointRetention(pool: pg.Pool, schema: 
       `SELECT MAX(version) AS v FROM ${s}.fg_schema_migrations WHERE component = 'checkpoint'`,
     );
     const current = currentRow.rows[0]?.v ?? 0;
-    const latest = 4;
+    const latest = 5;
     if (current > latest) {
       throw new Error(
         `postgres schema ${schema}: checkpoint schema version ${current} is newer than this flowgraph supports (${latest}); upgrade flowgraph`,
@@ -124,6 +124,11 @@ export async function migratePostgresCheckpointRetention(pool: pg.Pool, schema: 
         `INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 4, $1)`,
         [Date.now()],
       );
+      applied += 1;
+    }
+    if (current < 5) {
+      await client.query(`CREATE TABLE ${s}.fg_thread_run_claims (thread_id TEXT PRIMARY KEY, token TEXT NOT NULL, created_at BIGINT NOT NULL)`);
+      await client.query(`INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 5, $1)`, [Date.now()]);
       applied += 1;
     }
     await client.query("COMMIT");
@@ -308,9 +313,29 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
+  /** Non-expiring execution claims are independent of checkpoint retention. */
+  async acquireThreadRun(threadId: string): Promise<{ release(): Promise<void> } | null> {
+    const token = crypto.randomUUID();
+    const inserted = await this.db().query(
+      `INSERT INTO ${this.q}.fg_thread_run_claims (thread_id, token, created_at)
+       VALUES ($1, $2, $3) ON CONFLICT (thread_id) DO NOTHING RETURNING token`,
+      [threadId, token, this.clock()],
+    );
+    if (!inserted.rowCount) return null;
+    return {
+      release: async () => {
+        const removed = await this.db().query(
+          `DELETE FROM ${this.q}.fg_thread_run_claims WHERE thread_id = $1 AND token = $2`,
+          [threadId, token],
+        );
+        if (!removed.rowCount) throw new Error(`Thread "${threadId}" execution claim changed before release`);
+      },
+    };
+  }
+
   async markThreadActive(threadId: string): Promise<ActiveThreadMark | undefined> {
     const policy = this.policyFor(threadId);
-    if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
+    if (!policy.enabled) return undefined;
     const mark = crypto.randomUUID();
     const markedAt = this.clock();
     const client = await this.db().connect();
@@ -424,7 +449,6 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     const policy = this.policyFor(threadId);
     if (!policy.enabled) return;
     if (status === "paused") await this.pinHead(threadId, now);
-    if (!threadDeletionRequested(policy)) return;
     await this.touch(threadId, status, now, policy);
     if (status !== "finished") return;
     const cap = policy.maxFinishedThreads;
