@@ -257,8 +257,8 @@ async function main() {
       `expected interrupt.raised, got ${interrupted.map((e) => e.type)}`,
     );
 
-    // Not "interrupt.raised": the gate runs again on resume and emits a node-level
-    // interrupt.raised before it takes the answer, then the run ends.
+    // Answered replay calls do not raise a new notification; this resume
+    // completes the run, so the terminal event is run.end.
     const resumeSse = collectSse(threadId, {
       untilTypes: new Set(["run.end", "run.error"]),
       timeoutMs: 15_000,

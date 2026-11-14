@@ -584,14 +584,17 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const runScope: RunScope = { replay, path: [], meta: runMeta, signal: runOpts.signal };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
     const raised = new Set(pendingResumeInterrupts.map(it => interruptFingerprint(toInterruptInfo(it))));
-    const emitNewInterrupts = (interrupts: InterruptInfo[]) => {
+    const emitStopInterrupts = (interrupts: InterruptInfo[]) => {
+      const newInterruptIds: string[] = [];
       for (const info of interrupts) {
         const fingerprint = interruptFingerprint(info);
         if (raised.has(fingerprint)) continue;
         raised.add(fingerprint);
-        const nodeId = (info.payload as { data?: { __nodeId?: string } } | undefined)?.data?.__nodeId;
-        events.emit("interrupt.raised", { interrupts: [info] }, nodeId ? { nodeId } : {});
+        if (info.id) newInterruptIds.push(info.id);
       }
+      // A stop is a transport boundary even when every remaining gate was
+      // announced earlier. Notification clients can use newInterruptIds.
+      events.emit("interrupt.raised", { interrupts, newInterruptIds });
     };
 
     const startEvent =
@@ -732,7 +735,6 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
         const exhausted = interrupts.filter((i) => i.exhausted);
         if (exhausted.length > 0) {
-          emitNewInterrupts(exhausted);
           // Re-prompt budget spent: fail this run, but leave the interrupt
           // pending in the checkpoint so the thread stays inspectable and a
           // later valid resume can still complete the node.
@@ -768,7 +770,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
         });
 
-        emitNewInterrupts(interrupts);
+        emitStopInterrupts(interrupts);
 
         if (policy === "fail" || policy === "webhook") {
           const onWaitDeadline = () => {
@@ -967,7 +969,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const config = { configurable: { thread_id: resumeOpts.threadId, ...(resumeOpts.checkpointId ? { checkpoint_id: resumeOpts.checkpointId } : {}) } };
       if (resumeOpts.checkpointId) {
         const tuple = await checkpointer.getTuple(config);
-        if (tuple?.pendingWrites?.some(([, channel]) => channel === "__resume__")) {
+        const latest = await checkpointer.getTuple({ configurable: { thread_id: resumeOpts.threadId } });
+        if (resumeOpts.checkpointId !== latest?.checkpoint.id && tuple?.pendingWrites?.some(([, channel]) => channel === "__resume__")) {
           throw Object.assign(new Error(`Historical checkpoint "${resumeOpts.checkpointId}" already contains a decision; fork before the gate to make a new decision.`), { code: "HISTORICAL_DECISION_REPLAY", retryable: false });
         }
       }
@@ -977,8 +980,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       );
       if (hasInterrupt) {
         // A missing answer is not a denial: fail before anything runs and leave the interrupt pending.
-        if (resumeOpts.resume === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
-        payload = resumeCommand(resumeOpts.resume, (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []), resumeOpts.threadId);
+        const pending = (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []);
+        const answer = resumeOpts.resume === undefined && isPauseInterrupt(pending.map(toInterruptInfo)) ? true : resumeOpts.resume;
+        if (answer === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
+        payload = resumeCommand(answer, pending, resumeOpts.threadId);
       }
       // Static breakpoints pause with empty task.interrupts and a non-empty
       // `next`. LangGraph continues those with null input, not Command({ resume }).

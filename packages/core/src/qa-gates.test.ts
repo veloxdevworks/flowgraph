@@ -4,6 +4,7 @@ import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { createScriptedProvider } from "./providers/index.js";
 import { closeWebhookServers } from "./runtime/webhook-server.js";
+import { registerFunction } from "./nodes/function.js";
 import type { FlowgraphEvent } from "./events.js";
 
 afterEach(async () => {
@@ -196,4 +197,22 @@ describe("PLAT-329: ask_human choices", () => {
     expect(result.status).toBe("completed");
     expect(result.state.answer).toEqual({ answer: "blue" });
   });
+});
+
+it("can resume an unanswered parallel sibling at the current head checkpoint", async () => {
+  const g = await compileGraph(graph(["left", "right"].map(id => ({ id, type: "hitl", with: { mode: "approve", message: id } })), [{ from: "START", to: ["left", "right"] }, { from: "left", to: "END" }, { from: "right", to: "END" }]));
+  const first = await g.run({ threadId: "partial-head" });
+  const [left, right] = first.interrupts!;
+  expect((await g.resume({ threadId: "partial-head", resume: { [left!.id!]: true } })).status).toBe("interrupted");
+  const head = (await g.getState("partial-head"))!.checkpointId!;
+  expect((await g.resumeFrom({ threadId: "partial-head", checkpointId: head, resume: { [right!.id!]: true } })).status).toBe("completed");
+});
+
+
+it("continues a graceful pause through resume without supplying a human answer", async () => {
+  registerFunction("qaPauseWork", () => "done");
+  const g = await compileGraph(graph([{ id: "work", type: "function", with: { fn: "qaPauseWork" } }], [{ from: "START", to: "work" }, { from: "work", to: "END" }]));
+  const pause = new AbortController(); pause.abort();
+  expect((await g.run({ threadId: "pause-only", pauseSignal: pause.signal })).status).toBe("paused");
+  expect((await g.resume({ threadId: "pause-only", resume: undefined })).status).toBe("completed");
 });

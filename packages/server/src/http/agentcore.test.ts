@@ -178,3 +178,32 @@ describe("streamEventsUntilTerminal", () => {
     await done;
   });
 });
+
+it("streams every parallel gate and terminates again after a partial sibling answer", async () => {
+  const { base } = await startServer({ FLOWGRAPH_AGENTCORE: "1" });
+  const yaml = JSON.stringify({ apiVersion: "flowgraph/v1", kind: "Graph", metadata: { name: "parallel-stop" }, nodes: ["left", "right"].map(id => ({ id, type: "hitl", with: { mode: "approve", message: id } })), edges: [{ from: "START", to: ["left", "right"] }, { from: "left", to: "END" }, { from: "right", to: "END" }] });
+  const first = await invoke(base, { action: "start", threadId: "parallel-stop", yaml });
+  const events = sseEvents(await first.text()) as Array<{ type: string; data: { interrupts: Array<{ id: string }>; newInterruptIds: string[] } }>;
+  const stop = events.at(-1)!;
+  expect(stop.type).toBe("interrupt.raised"); expect(stop.data.interrupts).toHaveLength(2);
+  expect(events.filter(event => event.type === "interrupt.raised")).toHaveLength(1);
+  await expect.poll(async () => ((await (await fetch(`${base}/ping`)).json()) as { status: string }).status).toBe("Healthy");
+  const resumed = await invoke(base, { action: "resume", threadId: "parallel-stop", resume: { [stop.data.interrupts[0]!.id]: true } });
+  const remaining = sseEvents(await resumed.text()) as typeof events;
+  expect(remaining.at(-1)).toMatchObject({ type: "interrupt.raised", data: { newInterruptIds: [] } });
+  expect(remaining.at(-1)!.data.interrupts).toHaveLength(1);
+  await expect.poll(async () => ((await (await fetch(`${base}/ping`)).json()) as { status: string }).status).toBe("Healthy");
+  const finished = await invoke(base, { action: "resume", threadId: "parallel-stop", resume: { [stop.data.interrupts[1]!.id]: true } });
+  expect(sseEvents(await finished.text()).at(-1)?.type).toBe("run.end");
+}, 20_000);
+
+it("streams run.error rather than an interrupt stop when validation attempts are exhausted", async () => {
+  const { base } = await startServer({ FLOWGRAPH_AGENTCORE: "1" });
+  const yaml = JSON.stringify({ apiVersion: "flowgraph/v1", kind: "Graph", metadata: { name: "exhaust-stop" }, nodes: [{ id: "gate", type: "hitl", with: { mode: "form", message: "fill", schema: { type: "object", required: ["name"], properties: { name: { type: "string" } } }, maxResumeAttempts: 1 } }], edges: [{ from: "START", to: "gate" }, { from: "gate", to: "END" }] });
+  await (await invoke(base, { action: "start", threadId: "exhaust-stop", yaml })).text();
+  await expect.poll(async () => ((await (await fetch(`${base}/ping`)).json()) as { status: string }).status).toBe("Healthy");
+  const response = await invoke(base, { action: "resume", threadId: "exhaust-stop", resume: {} });
+  const events = sseEvents(await response.text());
+  expect(events.at(-1)?.type).toBe("run.error");
+  expect(events.filter(event => event.type === "interrupt.raised")).toHaveLength(0);
+}, 20_000);

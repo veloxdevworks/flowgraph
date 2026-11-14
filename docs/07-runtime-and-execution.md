@@ -341,7 +341,7 @@ After retries and `node:error` hooks, `on.error: fail` (the default) fails the r
 
 Human gates require an explicit `resume` answer; CLI `resume` without `--resume` does not approve a gate. `continueRun`/`step` only continue a graceful pause or breakpoint and reject a pending human decision. `ask_human` choices accept the exact choice value or its one-based numeric index; invalid answers re-prompt with validation feedback. A historical checkpoint that already contains a decision fails with `HISTORICAL_DECISION_REPLAY`; fork before the gate to make a different decision.
 
-Each wait keeps its original deadline across sibling answers and process restarts. Re-entering a completed wait in a new loop round creates a new deadline. `interrupt.raised` has the canonical `{ interrupts: [info] }` payload, one event per newly raised/re-prompted gate; already-pending siblings and replayed answered calls are not announced again.
+Each wait keeps its original deadline across sibling answers and process restarts. Re-entering a completed wait in a new loop round creates a new deadline. `interrupt.raised` is one run-level stop event carrying **all** pending `interrupts`, including already-pending siblings after a partial resume. `newInterruptIds` identifies newly raised/re-prompted gates for notification deduplication. Answered replay calls do not emit a node-level notification. Exhausting validation attempts ends with `run.error`, without an earlier terminal-looking interrupt event.
 
 | Failure | Default behavior | Configurable |
 |---|---|---|
