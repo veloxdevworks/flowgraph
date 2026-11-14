@@ -1,4 +1,4 @@
-import {ServerRequestError} from "../errors.js";
+import { ServerRequestError } from "../errors.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 export class PayloadTooLargeError extends Error {
@@ -37,9 +37,12 @@ export async function readJsonBody(
   }
   const raw = Buffer.concat(chunks).toString("utf-8");
   if (!raw.trim()) return {};
-  let body:unknown;
-  try {body=JSON.parse(raw) as unknown;}
-  catch {throw new ServerRequestError(400,"INVALID_JSON","Malformed JSON request body");}
+  let body: unknown;
+  try {
+    body = JSON.parse(raw) as unknown;
+  } catch {
+    throw new ServerRequestError(400, "INVALID_JSON", "Malformed JSON request body");
+  }
   return body;
 }
 
