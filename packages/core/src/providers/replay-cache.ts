@@ -178,6 +178,8 @@ export interface RunScope {
   readonly meta?: { runId: string; threadId?: string | undefined; startedAt: string; graph: string } | undefined;
   /** Caller cancellation, excluding LangGraph's internal task-abort signal. */
   readonly signal?: AbortSignal | undefined;
+  /** Graceful pause belongs to this invocation, not the compiled graph. */
+  readonly pauseSignal?: AbortSignal | undefined;
 }
 
 /** The run scope in a LangGraph config, if the node runs inside a compiled graph execution. */

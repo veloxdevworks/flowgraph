@@ -17,6 +17,9 @@ import {
   abandonedFallbackCutoff,
   selectRetainedCheckpointIds,
   threadDeletionRequested,
+  defaultThreadRunOwner,
+  type ThreadRunOwner,
+  type ThreadRunInfo,
   type ActiveThreadMark,
   type CheckpointThreadStatus,
   type ResolvedCheckpointRetention,
@@ -78,6 +81,16 @@ ALTER TABLE fg_checkpoint_threads ADD COLUMN active_ttl_ms INTEGER;
 CREATE INDEX IF NOT EXISTS fg_checkpoint_threads_active
   ON fg_checkpoint_threads (updated_at) WHERE status = 'active';
 `;
+
+const MIGRATION_V5 = `
+CREATE TABLE fg_thread_run_claims (
+  thread_id TEXT PRIMARY KEY,
+  token TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+`;
+
+const MIGRATION_V6 = `ALTER TABLE fg_thread_run_claims ADD COLUMN owner TEXT;`;
 
 interface IdRow {
   checkpoint_id: string;
@@ -145,6 +158,8 @@ export function migrateSqliteCheckpointRetention(db: SqliteDatabase): number {
       { version: 2, sql: MIGRATION_V2 },
       { version: 3, sql: MIGRATION_V3 },
       { version: 4, sql: MIGRATION_V4 },
+      { version: 5, sql: MIGRATION_V5 },
+      { version: 6, sql: MIGRATION_V6 },
     ];
     const latest = steps[steps.length - 1]?.version ?? 0;
     if (current > latest) {
@@ -245,9 +260,52 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     this.threadPolicy.set(threadId, policy);
   }
 
+  /** Non-expiring execution claims are independent of checkpoint retention. */
+  acquireThreadRun(threadId: string, owner: ThreadRunOwner = defaultThreadRunOwner()): { release(): void } | null {
+    this.setup();
+    const token = crypto.randomUUID();
+    const inserted = this.sqlite.prepare(
+      `INSERT INTO fg_thread_run_claims (thread_id, token, created_at, owner)
+       VALUES (?, ?, ?, ?) ON CONFLICT (thread_id) DO NOTHING`,
+    ).run(threadId, token, this.clock(), JSON.stringify(owner));
+    if (!inserted.changes) return null;
+    return {
+      release: () => {
+        const removed = this.sqlite.prepare(
+          `DELETE FROM fg_thread_run_claims WHERE thread_id = ? AND token = ?`,
+        ).run(threadId, token);
+        if (!removed.changes) throw new Error(`Thread "${threadId}" execution claim changed before release`);
+        if (this.savedThreadStatus(threadId)?.status === "finished" && threadDeletionRequested(this.policyFor(threadId))) {
+          try { this.sweep(); } catch { /* optional cleanup must not change a finished result */ }
+        }
+      },
+    };
+  }
+
+  inspectThreadRun(threadId: string): ThreadRunInfo | undefined {
+    this.setup();
+    const row = asRow<{ token: string; created_at: number; owner: string | null }>(this.sqlite.prepare(
+      `SELECT token, created_at, owner FROM fg_thread_run_claims WHERE thread_id = ?`,
+    ).get(threadId));
+    return row ? { threadId, token: row.token, createdAt: row.created_at, owner: row.owner ? JSON.parse(row.owner) as ThreadRunOwner : null } : undefined;
+  }
+
+  releaseThreadRun(threadId: string, token: string): boolean {
+    this.setup();
+    return this.sqlite.transaction(() => {
+      const removed = this.sqlite.prepare(`DELETE FROM fg_thread_run_claims WHERE thread_id = ? AND token = ?`).run(threadId, token).changes > 0;
+      if (removed) this.sqlite.prepare(
+        `UPDATE fg_checkpoint_threads SET status = 'paused', updated_at = ?, deletable = 0,
+         finished_ttl_ms = NULL, max_finished = NULL, active_mark = NULL, active_ttl_ms = NULL
+         WHERE thread_id = ? AND status = 'active'`,
+      ).run(this.clock(), threadId);
+      return removed;
+    }).immediate();
+  }
+
   markThreadActive(threadId: string): ActiveThreadMark | undefined {
     const policy = this.policyFor(threadId);
-    if (!policy.enabled || !threadDeletionRequested(policy)) return undefined;
+    if (!policy.enabled) return undefined;
     this.setup();
     const mark = crypto.randomUUID();
     const markedAt = this.clock();
@@ -431,7 +489,6 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     if (!policy.enabled) return;
     this.setup();
     if (status === "paused") this.pinHead(threadId, now);
-    if (!threadDeletionRequested(policy)) return;
     this.touch(threadId, status, now, policy);
     if (status !== "finished") return;
     const cap = policy.maxFinishedThreads;
@@ -518,6 +575,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
           `SELECT thread_id, updated_at, active_mark, active_ttl_ms, finished_ttl_ms, max_finished
            FROM fg_checkpoint_threads
            WHERE status = 'active'
+             AND NOT EXISTS (SELECT 1 FROM fg_thread_run_claims AS claim WHERE claim.thread_id = fg_checkpoint_threads.thread_id)
              AND ((active_ttl_ms > 0 AND updated_at <= ? - active_ttl_ms)
                OR (active_ttl_ms IS NULL AND updated_at <= ?))`,
         )
@@ -527,7 +585,8 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
       `UPDATE fg_checkpoint_threads
        SET status = 'finished', deletable = 1, finished_ttl_ms = ?, max_finished = ?,
            active_mark = NULL, active_ttl_ms = NULL
-       WHERE thread_id = ? AND status = 'active' AND updated_at = ? AND active_mark IS ?`,
+       WHERE thread_id = ? AND status = 'active' AND updated_at = ? AND active_mark IS ?
+         AND NOT EXISTS (SELECT 1 FROM fg_thread_run_claims AS claim WHERE claim.thread_id = fg_checkpoint_threads.thread_id)`,
     );
     for (const row of rows) {
       const policy = abandonedActivePolicy({
@@ -635,6 +694,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
   private deleteFinishedIfUnchanged(threadId: string, updatedAt: number): number {
     if (this.runs.held(threadId)) return 0;
     return this.sqlite.transaction(() => {
+      if (this.sqlite.prepare(`SELECT 1 FROM fg_thread_run_claims WHERE thread_id = ?`).get(threadId)) return 0;
       const row = asRow<{ status: string; updated_at: number; deletable: number }>(
         this.sqlite
           .prepare(`SELECT status, updated_at, deletable FROM fg_checkpoint_threads WHERE thread_id = ?`)
