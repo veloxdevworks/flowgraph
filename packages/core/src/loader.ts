@@ -22,6 +22,7 @@ import { walkNodes } from "./discover-skills.js";
 import { registry } from "./registry.js";
 import { setGraphFile, subgraphAliases } from "./runtime/graph-files.js";
 import "./nodes/index.js";
+import { getMediaVendor } from "./media/registry.js";
 
 export {
   envExpansionCollisionDiagnostics,
@@ -275,6 +276,22 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
     }
   });
   diagnostics.push(...graphLintDiagnostics(spec));
+  walkNodes(spec, node => {
+    if (!["image", "video", "audio", "model3d"].includes(String(node.type))) return;
+    const name = node.provider ?? spec.config?.defaults?.provider;
+    const cfg = typeof name === "string" ? spec.providers?.[name] : undefined;
+    const vendor = getMediaVendor(cfg && "vendor" in cfg ? cfg.vendor : String(name ?? ""));
+    if (!vendor) return;
+    const w = node.with as Record<string, unknown> ?? {};
+    // Dynamic requests are checked after rendering, before submission.
+    if (JSON.stringify([w.size, w.params]).includes("{{")) return;
+    try {
+      vendor.create({ name: String(name), ...(cfg?.kind === "media" ? { model: cfg.model, options: cfg.options } : {}) }).validateRequest?.({
+        modality: node.type as import("./media/types.js").MediaModality, model: typeof node.model === "string" ? node.model : undefined,
+        inputs: [], count: 1, params: w.params as Record<string, unknown> ?? {}, ...(typeof w.size === "string" ? { size: w.size } : {}),
+      });
+    } catch (err) { diagnostics.push({ severity: "error", code: "MEDIA_REQUEST_INVALID", path: `nodes.${node.id}.with`, message: `Media node "${node.id}": ${String(err)}` }); }
+  });
 
   return diagnostics;
 }

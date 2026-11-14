@@ -1,18 +1,15 @@
 /**
  * Write-ahead journal for media jobs.
  *
- * `ctx.once` only persists when a node returns, so a crash halfway through a
- * multi-minute job would resubmit (and pay for) it on resume. The journal is
- * written the moment a vendor accepts a job and read before every submit, so
- * resume, retry and replay all re-attach to the job already in flight.
- *
- * Remaining window: a crash between the vendor accepting the job and the
- * journal write completing (milliseconds). Vendors that support idempotency
- * keys should use `JobHandle`-independent keys derived from the fingerprint.
+ * Submission intent is persisted before entering a vendor call. A missing response
+ * leaves an explicit uncertain intent; retry requires reconciliation rather than
+ * automatically submitting again. Accepted handles and completed results replace
+ * the intent. The vendor may use the submission identity for idempotency only
+ * when its API documents that guarantee.
  */
 
-import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import * as path from "node:path";
 import type { Artifact } from "@flowgraph/spec";
 import { safeSegment } from "./artifacts.js";
@@ -20,7 +17,8 @@ import type { JobHandle, MediaRequest } from "./types.js";
 
 export interface JournalEntry {
   version: 1;
-  state: "submitted" | "done";
+  state: "intent" | "submitted" | "done";
+  submissionId?: string;
   provider: string;
   submittedAt: string;
   handle: JobHandle;
@@ -33,6 +31,7 @@ export interface Journal {
   read(): Promise<JournalEntry | undefined>;
   write(entry: JournalEntry): Promise<void>;
   remove(): Promise<void>;
+  reserve?(entry: JournalEntry): Promise<boolean>;
 }
 
 /**
@@ -98,25 +97,48 @@ export function createFileJournal(opts: {
   fingerprint: string;
 }): Journal {
   const dir = path.join(opts.workspace, ".flowgraph", "jobs", safeSegment(opts.scope));
-  const file = path.join(dir, `${safeSegment(opts.nodeId)}-${opts.fingerprint}.json`);
+  const file = path.join(dir, `${safeSegment(opts.nodeId)}-${safeSegment(opts.fingerprint)}.json`);
 
   return {
     async read() {
       try {
         const parsed = JSON.parse(await readFile(file, "utf8")) as JournalEntry;
-        return parsed?.version === 1 ? parsed : undefined;
-      } catch {
-        return undefined;
+        if (parsed?.version !== 1 || !["intent", "submitted", "done"].includes(parsed.state) || !parsed.provider || !parsed.handle?.id || (parsed.state === "intent" && !parsed.submissionId)) throw new Error("Invalid media journal record");
+        return parsed;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw Object.assign(new Error(`Media journal ${file} cannot be read; inspect/reconcile it before retrying`), { code: "MEDIA_JOURNAL_INVALID", retryable: false, cause });
       }
     },
     async write(entry) {
       await mkdir(dir, { recursive: true });
-      const tmp = `${file}.${process.pid}.tmp`;
-      await writeFile(tmp, JSON.stringify(entry), "utf8");
+      const tmp = `${file}.${randomUUID()}.tmp`;
+      const fd = await open(tmp, "wx", 0o600);
+      try { await fd.writeFile(JSON.stringify(entry), "utf8"); await fd.sync(); }
+      finally { await fd.close(); }
       await rename(tmp, file);
     },
     async remove() {
       await rm(file, { force: true });
     },
+    async reserve(entry) {
+      await mkdir(dir, { recursive: true });
+      let fd;
+      try { fd = await open(file, "wx", 0o600); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; }
+      try { await fd.writeFile(JSON.stringify(entry), "utf8"); await fd.sync(); }
+      finally { await fd.close(); }
+      return true;
+    },
   };
+}
+
+/** Caller must hold thread admission and stop/reconcile any external work first. */
+export async function resolveMediaSubmission(journal: Journal, submissionId: string, resolution: { notSubmitted: true } | { handle: JobHandle }): Promise<void> {
+  const current = await journal.read();
+  if (current?.state !== "intent" || current.submissionId !== submissionId) throw new Error("Submission identity changed or is no longer unresolved; inspect the journal again");
+  if ("notSubmitted" in resolution) { await journal.remove(); return; }
+  const handle = resolution.handle;
+  if (!handle || typeof handle.id !== "string" || !handle.id || (handle.done !== undefined && !Array.isArray(handle.done))) throw new Error("Provide a vendor handle with an id and optional completed artifacts");
+  await journal.write({ ...current, state: handle.done ? "done" : "submitted", handle, ...(handle.done ? { artifacts: handle.done } : {}), ...(handle.costUSD === undefined ? {} : { costUSD: handle.costUSD }) });
 }

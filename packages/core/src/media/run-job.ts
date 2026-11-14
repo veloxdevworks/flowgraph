@@ -4,6 +4,7 @@
  */
 
 import type { Artifact } from "@flowgraph/spec";
+import { randomUUID } from "node:crypto";
 import { parseDuration, sleep } from "../runtime/duration.js";
 import { artifactsExist } from "./artifacts.js";
 import type { Journal, JournalEntry } from "./journal.js";
@@ -38,11 +39,14 @@ const DEFAULT_POLL_MAX_MS = 10_000;
 export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobResult> {
   const { provider, req, journal } = opts;
   const existing = await journal.read();
+  if (existing?.state === "intent") throw Object.assign(new Error(`Media submission ${existing.submissionId} has an uncertain outcome. Stop/reconcile its owner and vendor work, then use 'flowgraph media inspect/resolve' before retrying.`), { code: "MEDIA_SUBMISSION_UNCERTAIN", retryable: false });
   if (existing?.state === "done" && existing.artifacts && (await artifactsExist(opts.workspace, existing.artifacts))) {
     opts.emit("reused", { provider: provider.name, jobId: existing.handle.id });
     return { artifacts: existing.artifacts, costUSD: 0, costKnown: true, reused: true };
   }
+  if (existing?.state === "done") throw Object.assign(new Error("Completed media artifacts are missing. Restore them or explicitly change with.variant to request new generation."), { code: "MEDIA_ARTIFACTS_MISSING", retryable: false });
 
+  provider.validateRequest?.(req);
   const invoke = () => runActiveJob(opts, existing);
   return opts.meter ? opts.meter(invoke, provider.estimateCostUSD?.(req)) : invoke();
 }
@@ -56,7 +60,13 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
     handle = existing.handle;
     opts.emit("resumed", { provider: provider.name, jobId: handle.id });
   } else {
-    handle = await provider.start(req, mctx);
+    const submissionId = randomUUID();
+    const intent: JournalEntry = { version: 1, state: "intent", provider: provider.name, submittedAt, submissionId, handle: { id: submissionId } };
+    if (journal.reserve) {
+      if (!await journal.reserve(intent)) throw Object.assign(new Error("Media journal changed before submission; inspect/retry without submitting another request"), { code: "MEDIA_SUBMISSION_UNCERTAIN", retryable: false });
+    } else await journal.write(intent);
+    opts.emit("intent", { provider: provider.name, submissionId });
+    handle = await provider.start(req, { ...mctx, submissionId });
     submittedAt = new Date().toISOString();
     await journal.write({
       version: 1,
@@ -120,7 +130,8 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
   } catch (err) {
     if (mctx.signal?.aborted) {
       await provider.cancel?.(handle, mctx).catch(() => undefined);
-      await journal.remove().catch(() => undefined);
+      // Cancellation is best-effort; retain the handle until the vendor confirms
+      // a terminal state, so a later resume cannot silently purchase again.
     }
     throw err;
   }

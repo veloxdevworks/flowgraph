@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { graphEdges, loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
+import { buildMediaCommand } from "./media-command.js";
 import { buildUsageCommand } from "./usage-command.js";
 import { buildThreadCommand } from "./thread-command.js";
 import { buildSkillsCommand } from "./skills-command.js";
@@ -146,6 +147,7 @@ const program = new Command()
 program.addCommand(buildSkillsCommand());
 program.addCommand(buildThreadCommand());
 program.addCommand(buildUsageCommand());
+program.addCommand(buildMediaCommand());
 
 // ---------------------------------------------------------------------------
 // tui — interactive terminal UI (optional @flowgraph/tui package)
