@@ -1,3 +1,4 @@
+import { invokeWithProgress } from "../runtime/progress-events.js";
 /**
  * Built-in node type: `subgraph`
  *
@@ -264,7 +265,7 @@ async function loadChild(
     });
   };
 
-  const { compiledLg } = await compileGraphForEmbedding(spec, {
+  const { compiledLg, events } = await compileGraphForEmbedding(spec, {
     cwd: ctx.workspace,
     sinks: [forwardSink],
     store: childStore(spec, ctx),
@@ -277,10 +278,10 @@ async function loadChild(
 
   return {
     async invoke(input, lgConfig) {
-      const result = ((await compiledLg.invoke(
-        input as Parameters<typeof compiledLg.invoke>[0],
-        lgConfig as Parameters<typeof compiledLg.invoke>[1],
-      )) ?? {}) as Record<string, unknown>;
+      const result = await invokeWithProgress(async () => await compiledLg.stream(
+        input as Parameters<typeof compiledLg.stream>[0],
+        { ...lgConfig, streamMode: "values" } as Parameters<typeof compiledLg.stream>[1],
+      ) as AsyncIterable<Record<string, unknown>>, events);
       return result;
     },
     channels,

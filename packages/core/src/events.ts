@@ -1,3 +1,8 @@
+/**
+ * The event bus and event types for flowgraph.
+ * Events are read-only observations; they never block execution.
+ */
+
 import { AsyncLocalStorage } from "node:async_hooks";
 
 const eventThread = new AsyncLocalStorage<string>();
@@ -7,10 +12,18 @@ export function withEventThread<T>(threadId: string, run: () => T): T {
   return eventThread.run(threadId, run);
 }
 
-/**
- * The event bus and event types for flowgraph.
- * Events are read-only observations; they never block execution.
- */
+/** Post-reducer replacement values for public channels changed in one superstep. */
+export interface StateUpdateData {
+  channels: string[];
+  update: Record<string, unknown>;
+}
+
+/** A selected transition; dispatch does not promise the destination will succeed. */
+export interface EdgeTakenData {
+  from: string;
+  to: string;
+  kind: "static" | "branch" | "command";
+}
 
 export type EventType =
   | "run.start"
@@ -78,11 +91,18 @@ export interface FlowgraphEvent<T = unknown> {
 
 export type EventSink = (event: FlowgraphEvent) => void | Promise<void>;
 
+export interface EventStreamOptions {
+  /** Replay the existing buffer before live events. Default true. */
+  replay?: boolean;
+  /** Restrict replay and live delivery to one execution thread. */
+  threadId?: string;
+}
+
 export interface EventBus {
   emit(type: EventType, data: unknown, scope?: EventScope): void;
   subscribe(sink: EventSink): () => void;
   /** For streaming: get an async iterable of events */
-  stream(): AsyncIterable<FlowgraphEvent>;
+  stream(opts?: EventStreamOptions): AsyncIterable<FlowgraphEvent>;
 }
 
 export interface EventBusOptions {
@@ -138,45 +158,41 @@ export function createEventBus(opts: EventBusOptions): EventBus {
     return () => sinks.delete(sink);
   }
 
-  async function* stream(): AsyncIterable<FlowgraphEvent> {
-    // Yield already-buffered events first
-    for (const ev of buffer) yield ev;
-
-    // Then yield new events as they arrive via a push/pull queue
+  async function* stream(opts: EventStreamOptions = {}): AsyncIterable<FlowgraphEvent> {
+    const accepts = (event: FlowgraphEvent) => opts.threadId === undefined || event.threadId === opts.threadId;
+    const replay = opts.replay === false ? [] : buffer.filter(accepts);
     const queue: FlowgraphEvent[] = [];
     let resolve: (() => void) | null = null;
-    let done = false;
-
-    const listener = (ev: FlowgraphEvent) => {
-      queue.push(ev);
+    const listener = (event: FlowgraphEvent) => {
+      if (!accepts(event)) return;
+      queue.push(event);
       resolve?.();
       resolve = null;
     };
+    // Subscribe before the first yield. Execution can finish while a slow
+    // consumer is reading the replay; every live event must already be queued.
     streamListeners.add(listener);
-
+    const terminal = (event: FlowgraphEvent | undefined) => event !== undefined &&
+      ["run.end", "run.error", "run.aborted", "run.paused"].includes(event.type);
+    let replayEnded = false;
+    for (let index = replay.length - 1; index >= 0; index--) {
+      const event = replay[index]!;
+      if (terminal(event)) { replayEnded = true; break; }
+      if (["run.start", "interrupt.resumed", "run.continued"].includes(event.type)) break;
+    }
     try {
-      while (!done) {
-        if (queue.length > 0) {
-          yield queue.shift()!;
-        } else {
-          await new Promise<void>((r) => {
-            resolve = r;
-          });
-        }
-        // End signal: a run.end or run.error event closes the stream
-        const last = buffer[buffer.length - 1];
-        if (
-          last &&
-          (last.type === "run.end" ||
-            last.type === "run.error" ||
-            last.type === "run.aborted" ||
-            last.type === "run.paused")
-        ) {
-          done = true;
+      for (const event of replay) yield event;
+      if (replayEnded) return;
+      for (;;) {
+        if (queue.length === 0) await new Promise<void>((resume) => { resolve = resume; });
+        while (queue.length > 0) {
+          const event = queue.shift()!;
+          yield event;
+          // Inspect the event actually delivered, not the latest global
+          // buffer item: slow readers must receive all progress before end.
+          if (terminal(event)) return;
         }
       }
-      // Drain remaining
-      while (queue.length > 0) yield queue.shift()!;
     } finally {
       streamListeners.delete(listener);
     }

@@ -2,7 +2,7 @@
 
 This document tracks what is **shipped** in the monorepo today versus what the numbered design docs describe as the **target**. When in doubt, trust `packages/` and `examples/` over aspirational spec text.
 
-Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint A+B core hardening.
+Last reviewed: PLAT-281 committed state and selected transition progress events.
 
 ## Summary
 
@@ -15,7 +15,7 @@ Last reviewed: Nested subgraph event forwarding (`scope.parentSpanId`) + Sprint 
 | Media vendors (`@flowgraph/media`): xAI, OpenAI images, Tripo, Meshy, ElevenLabs | **Shipped, unit/e2e-tested with stubbed network; not yet run against live APIs** |
 | Skills loader, contracts, preflight | **Shipped** |
 | Expression language (`@flowgraph/expr`) | **Shipped** |
-| Events + console/jsonl sinks | **Shipped** (nested subgraph events forward with `parentSpanId`) |
+| Events + console/jsonl sinks | **Shipped** (`state.update` reports post-reducer superstep changes; `edge.taken` reports selected transitions; nested events forward with `parentSpanId`) |
 | Hooks (YAML subset + guardrails) | **Shipped** (partial defaults) |
 | HITL + in-memory checkpointing | **Shipped** |
 | Signed correlation webhooks | **Shipped** | Opaque run/gate keys, HMAC ingress, durable local-filesystem delivery receipts, and CLI listener recovery. Unknown crash outcomes fail closed for operator reconciliation; no distributed database ingress. |

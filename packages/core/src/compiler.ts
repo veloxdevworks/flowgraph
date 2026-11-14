@@ -15,6 +15,7 @@ import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
+import { captureProgressBaseline, invokeWithProgress } from "./runtime/progress-events.js";
 import { createEnvSecretProvider } from "./secrets.js";
 import {
   createLogger,
@@ -346,19 +347,20 @@ interface InvokeOverrides {
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
 export interface EmbeddedCompiledGraph {
   compiledLg: ReturnType<StateGraph<unknown>["compile"]>;
+  events: EventBus;
 }
 
 export async function compileGraphForEmbedding(
   spec: GraphSpec,
   opts: CompileOptions = {},
 ): Promise<EmbeddedCompiledGraph> {
-  const { compiledLg } = await assembleCompiledLangGraph(spec, {
+  const { compiledLg, events } = await assembleCompiledLangGraph(spec, {
     ...opts,
     checkpointer: "none",
     // Preserve caller sinks (e.g. parent-bus forwarding from the subgraph node).
     // Do not force sinks: [] — nested events would otherwise be invisible.
   });
-  return { compiledLg };
+  return { compiledLg, events };
 }
 
 interface AssembledGraph {
@@ -471,7 +473,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     runOpts: RunOptions | ResumeOptions | ContinueOptions,
     mode: ExecuteMode,
     overrides: InvokeOverrides = {},
-  ): Promise<RunResult> => {
+  ): Promise<RunResult> => withEventThread(runOpts.threadId ?? `thread-${runId}`, async () => {
     const startMs = Date.now();
     const threadId = runOpts.threadId ?? `thread-${runId}`;
     const graphRetention = graphSpec.runtime?.checkpoint?.retention;
@@ -751,10 +753,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const result = ((await compiledLg.invoke(
-          current as Parameters<typeof compiledLg.invoke>[0],
-          { ...cfg, signal: runOpts.signal } as Parameters<typeof compiledLg.invoke>[1],
-        )) ?? {}) as Record<string, unknown>;
+        const progressSnapshot = checkpointer && (current === null || current instanceof Command)
+          ? await compiledLg.getState(cfg)
+          : undefined;
+        const progressBaseline = progressSnapshot?.createdAt ? progressSnapshot.values as Record<string, unknown> : undefined;
+        const result = await invokeWithProgress(async () => await compiledLg.stream(
+          current as Parameters<typeof compiledLg.stream>[0],
+          { ...cfg, signal: runOpts.signal, streamMode: "values" } as Parameters<typeof compiledLg.stream>[1],
+        ) as AsyncIterable<Record<string, unknown>>, events, progressBaseline);
         // Time-travel checkpoint_id applies only to the first superstep.
         if (cfg.configurable && typeof cfg.configurable === "object") {
           delete (cfg.configurable as Record<string, unknown>)["checkpoint_id"];
@@ -941,7 +947,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       delete (baseCtx as RunContext & { pauseSignal?: AbortSignal }).pauseSignal;
       for (const u of unsubs) u();
     }
-  };
+  });
 
   // All execution surfaces for a signed graph share the delivery journal lock,
   // including manual resumes and deadline timers. A process-local HTTP queue
@@ -1403,7 +1409,15 @@ async function assembleCompiledLangGraph(
     const routeEnds = collectRouteEnds(nodeSpec);
     const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
 
+    const routeCommand = (to: string | string[], update?: Record<string, unknown>): Record<string, unknown> => {
+      for (const target of new Set(Array.isArray(to) ? to : [to])) {
+        events.emit("edge.taken", { from: nodeSpec.id, to: target === END ? "END" : target, kind: "command" }, scope);
+      }
+      return new Command({ goto: to, ...(update ? { update } : {}) }) as unknown as Record<string, unknown>;
+    };
+
     graph.addNode(nodeSpec.id, async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
+      captureProgressBaseline(state);
       const runMeta = (runScopeOf(lgConfig)?.meta ?? baseCtx.meta ?? { runId, graph: spec.metadata.name, startedAt: "" }) as RunMeta;
 
       // Graceful pause: park before this node so continueRun can resume it.
@@ -1435,7 +1449,7 @@ async function assembleCompiledLangGraph(
           events.emit("node.skipped", { nodeId: nodeSpec.id, reason: c.reason }, scope);
           return {};
         }
-        if (c?.kind === "route") return new Command({ goto: c.to }) as unknown as Record<string, unknown>;
+        if (c?.kind === "route") return routeCommand(c.to);
         if (c?.kind === "interrupt") {
           // Interrupt data carries the engine's `__nodeId` / `__agentReplay`; a hook supplies none.
           const data = c.payload && typeof c.payload === "object" && !Array.isArray(c.payload)
@@ -1473,7 +1487,7 @@ async function assembleCompiledLangGraph(
           const c = r.control;
           if (c?.kind === "route") {
             events.emit("node.end", { nodeId: nodeSpec.id, update, routed: c.to }, placedScope(run.ctx));
-            return new Command({ goto: c.to, update }) as unknown as Record<string, unknown>;
+            return routeCommand(c.to, update);
           }
           update = sealUpdate((r.payload.update as Record<string, unknown> | undefined) ?? update, run);
         }
@@ -1486,7 +1500,7 @@ async function assembleCompiledLangGraph(
 
         if (nodeGoto != null) {
           events.emit("node.end", { nodeId: nodeSpec.id, update, routed: nodeGoto }, placedScope(run.ctx));
-          return new Command({ goto: nodeGoto, update }) as unknown as Record<string, unknown>;
+          return routeCommand(nodeGoto, update);
         }
 
         events.emit("node.end", { nodeId: nodeSpec.id, update }, placedScope(run.ctx));
@@ -1522,7 +1536,7 @@ async function assembleCompiledLangGraph(
           }
           if (c?.kind === "route") {
             events.emit("node.error", { nodeId: nodeSpec.id, error: error.message, routed: c.to }, scope);
-            return new Command({ goto: c.to }) as unknown as Record<string, unknown>;
+            return routeCommand(c.to);
           }
           if (c?.kind === "retry") {
             events.emit("node.retry", { nodeId: nodeSpec.id, reason: "hook" }, scope);
@@ -1601,26 +1615,48 @@ async function assembleCompiledLangGraph(
   // declared from with.routes — skip their static/branch edges so a UI fan-out
   // (`to: [a, b]`) cannot race with the router's decision and run both branches.
   const routerIds = new Set(spec.nodes.filter(declaresRoutes).map((n) => n.id));
+  // One dispatch function per source preserves fan-out and branch selection,
+  // while observing the exact destinations selected by the runtime. No extra
+  // telemetry nodes or checkpoint state are added to the user's graph.
+  const outgoing = new Map<string, GraphSpec["edges"]>();
   for (const edge of spec.edges) {
     if (routerIds.has(edge.from)) continue;
-    let from = edge.from === "START" ? START : edge.from;
-    if (typeof from === "string" && mapJoinById.has(from)) from = mapJoinById.get(from)!;
-    if ("to" in edge) {
-      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      for (const t of tos) graph.addEdge(from as typeof START, (t === "END" ? END : t) as typeof END);
-    } else if ("branch" in edge) {
-      const branches = edge.branch;
-      graph.addConditionalEdges(from as typeof START, (state: Record<string, unknown>) => {
-        for (const b of branches) {
-          if (b.default) continue;
-          if (b.when) {
-            const expr = b.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
-            try { if (evalGuard(expr, { state })) return b.to; } catch { continue; }
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge]);
+  }
+  for (const [source, edges] of outgoing) {
+    const from = source === "START" ? START : mapJoinById.get(source) ?? source;
+    const possibleTargets = [...new Set(edges.flatMap((edge) => "to" in edge
+      ? Array.isArray(edge.to) ? edge.to : [edge.to]
+      : [...edge.branch.map((branch) => branch.to), ...(edge.branch.some((branch) => branch.default) ? [] : ["END"])]
+    ))].map((target) => target === "END" ? END : target);
+    graph.addConditionalEdges(from as typeof START, (state: Record<string, unknown>) => {
+      const destinations = new Set<string>();
+      for (const edge of edges) {
+        let chosen: string[];
+        let kind: "static" | "branch";
+        if ("to" in edge) {
+          chosen = Array.isArray(edge.to) ? edge.to : [edge.to];
+          kind = "static";
+        } else {
+          kind = "branch";
+          let selected: string | undefined;
+          for (const branch of edge.branch) {
+            if (branch.default || !branch.when) continue;
+            const expr = branch.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
+            try { if (evalGuard(expr, { state })) { selected = branch.to; break; } } catch { /* try the next branch */ }
+          }
+          chosen = [selected ?? edge.branch.find((branch) => branch.default)?.to ?? "END"];
+        }
+        for (const to of chosen) {
+          const target = to === "END" ? END : to;
+          if (!destinations.has(target)) {
+            events.emit("edge.taken", { from: source, to: to === END ? "END" : to, kind }, source === "START" ? {} : { nodeId: source });
+            destinations.add(target);
           }
         }
-        return branches.find((b) => b.default)?.to ?? "END";
-      });
-    }
+      }
+      return [...destinations];
+    }, possibleTargets as (typeof END)[]);
   }
 
   // Warn when parallel fan-out branches target the same lastWrite channel.
@@ -2682,6 +2718,7 @@ function addCheckpointedMap(
   graph.addNode(
     mapId,
     async (state: Record<string, unknown>) => {
+      captureProgressBaseline(state);
       const scope = { state, config: ctx.baseCtx.config ?? {}, run: ctx.baseCtx.meta ?? {} };
       const collection = renderDeep(config.over, scope);
       if (!Array.isArray(collection)) {
