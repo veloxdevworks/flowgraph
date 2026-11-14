@@ -126,6 +126,12 @@ async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): 
         ...(configuration && typeof configuration === "object" ? configuration : {}),
         baseURL: cfg.baseUrl,
       };
+    } else if (vendor === "xai") {
+      // ChatXAI reads `baseURL`; any other spelling silently falls back to api.x.ai.
+      modelOpts["baseURL"] = cfg.baseUrl;
+    } else if (vendor === "anthropic") {
+      // ChatAnthropic reads `anthropicApiUrl`; any other spelling silently falls back to api.anthropic.com.
+      modelOpts["anthropicApiUrl"] = cfg.baseUrl;
     } else {
       modelOpts["baseUrl"] = cfg.baseUrl;
     }

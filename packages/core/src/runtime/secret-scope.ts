@@ -9,9 +9,8 @@ export function secretScope(ctx: NodeRunContext): Record<string, string> {
     getOwnPropertyDescriptor: (_target, name) => {
       if (typeof name !== "string") return undefined;
       check(name);
-      return Object.hasOwn(process.env, name)
-        ? { configurable: true, enumerable: false }
-        : undefined;
+      // Every name resolves (unset -> ""), so a missing secret never renders as null.
+      return { configurable: true, enumerable: false };
     },
     get: (_target, name) => {
       if (typeof name !== "string") return undefined;

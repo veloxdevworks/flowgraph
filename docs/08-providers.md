@@ -170,7 +170,7 @@ Suno has no public API today (invite-only partner beta), so there is no Suno ada
 
 ### Local CLI providers (`kind: cli`)
 
-SDK providers keep their declared backend: a missing key fails with the configured environment-variable name, even when a local agent CLI is installed. To use a local agent and its login/billing, declare `kind: cli` explicitly. For OpenAI, the top-level `baseUrl` overrides `options.configuration.baseURL`; other client configuration fields are retained. Generated agent templates require choosing a model before running them.
+SDK providers keep their declared backend: a missing key fails with the configured environment-variable name, even when a local agent CLI is installed. To use a local agent and its login/billing, declare `kind: cli` explicitly. For OpenAI, the top-level `baseUrl` overrides `options.configuration.baseURL`; other client configuration fields are retained. For Anthropic and xAI it is passed as the client's own endpoint option (`anthropicApiUrl`, `baseURL`). Generated agent templates require choosing a model before running them.
 
 When Claude Code, Cursor CLI, Codex, or Grok Build is installed on `PATH`, you can run agent nodes against that local CLI instead of an API key:
 
