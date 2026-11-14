@@ -11,7 +11,10 @@ const loadMcp = lazyOptionalImport<typeof import("@flowgraph/mcp")>(
 );
 
 function buildRenderScope(spec: GraphSpec): Record<string, unknown> {
+  // Expressions read own properties only; every name resolves (unset -> "").
   const secret = new Proxy({} as Record<string, string>, {
+    getOwnPropertyDescriptor: (_t, prop) =>
+      typeof prop === "string" ? { configurable: true, enumerable: false } : undefined,
     get(_t, prop) {
       const v = process.env[String(prop)];
       return v ?? "";
