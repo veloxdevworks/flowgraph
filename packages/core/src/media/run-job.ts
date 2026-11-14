@@ -69,13 +69,14 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
     opts.emit("intent", { provider: provider.name, submissionId });
     handle = await provider.start(req, { ...mctx, submissionId });
     submittedAt = new Date().toISOString();
+    const immediateCost = handle.costUSD ?? estimate;
     await journal.write({
       version: 1,
       state: handle.done ? "done" : "submitted",
       provider: provider.name,
       submittedAt,
       handle,
-      ...(handle.done ? { artifacts: handle.done, ...((handle.costUSD ?? estimate) === undefined ? {} : {costUSD: handle.costUSD ?? estimate}) } : {}),
+      ...(handle.done ? { artifacts: handle.done, ...(immediateCost === undefined ? {} : {costUSD: immediateCost}) } : {}),
     });
     opts.emit("submitted", { provider: provider.name, jobId: handle.id });
   }
