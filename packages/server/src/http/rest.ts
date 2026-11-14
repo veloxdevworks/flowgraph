@@ -114,7 +114,12 @@ export async function handleRest(
 
   if (method === "GET" && pathname === "/runs") {
     try {
-      sendJson(res, 200, { runs: await service.listRuns(principal) });
+      const active = url.searchParams.get("active");
+      if (active !== null && active !== "true" && active !== "false") {
+        sendJson(res, 400, { error: "active must be true or false" });
+        return true;
+      }
+      sendJson(res, 200, { runs: await service.listRuns(principal, { activeOnly: active === "true" }) });
     } catch (err) {
       sendError(res, err);
     }

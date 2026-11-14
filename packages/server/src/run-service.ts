@@ -6,6 +6,11 @@ import { assertSha256, DEFAULT_ARTIFACT_MAX_BYTES, hasBlob, materializeStaged, p
 import {
   compileGraph,
   assertResumeValue,
+  initialRunActivity,
+  updateRunActivity,
+  settleRunActivity,
+  resolveRunLabels,
+  isActiveRun,
   createInMemoryMemoryBackend,
   startMemorySweeper,
   resolveAndValidateInput,
@@ -22,6 +27,7 @@ import {
   type MemorySweeper,
   type RunIssue,
   type RunResult,
+  type RunActivity,
   MEMORY_SWEEP_MAX_INTERVAL_MS,
   assertNoReservedInput,
   preflightGraphAgents,
@@ -106,6 +112,15 @@ export interface RunServiceOptions {
   graphStoreHooks?: GraphStoreHooks;
 }
 
+function activityStatus(activity: RunActivity | undefined, fallback: RunStatus): RunStatus {
+  // Control clients must not observe a terminal status before applyResult has
+  // persisted it and released the running session. Activity also follows late
+  // webhook execution whose original session is still parked at an interrupt.
+  if (!activity || fallback !== "interrupted" && fallback !== "paused") return fallback;
+  return activity.phase === "failed" ? "error" : activity.phase === "aborted" ? "cancelled" :
+    activity.phase === "ready" ? "started" : activity.phase;
+}
+
 export class RunService {
   readonly registry: SessionRegistry;
   readonly metrics = createMetrics();
@@ -153,6 +168,8 @@ export class RunService {
    * write to the graph store.
    */
   private readonly pendingMetaWrites = new Map<Promise<void>, string>();
+  private readonly activityWrittenAt = new Map<string, number>();
+  private readonly pendingTerminalEvents = new Map<string, ServerEvent[]>();
 
   private get now(): () => number {
     return this.options.now ?? Date.now;
@@ -796,7 +813,7 @@ export class RunService {
         req.input,
       );
     } catch (err) {
-      await this.patchMeta(req.threadId, { status: "error" });
+      await this.patchMeta(req.threadId, { status: "error", activity: initialRunActivity("failed", new Date().toISOString()) });
       throw err;
     }
 
@@ -819,7 +836,7 @@ export class RunService {
     } catch (err) {
       // Don't leave a "running" placeholder behind for a run that never started.
       if (this.registry.get(req.threadId) === placeholder) this.registry.remove(req.threadId);
-      await this.patchMeta(req.threadId, { status: "error" });
+      await this.patchMeta(req.threadId, { status: "error", activity: initialRunActivity("failed", new Date().toISOString()) });
       throw err;
     }
 
@@ -831,6 +848,7 @@ export class RunService {
       });
     } catch (err) {
       this.registry.remove(req.threadId);
+      await this.patchMeta(req.threadId, { status: "error", activity: initialRunActivity("failed", new Date().toISOString()) });
       if (isInputValidationError(err)) {
         throw new Error(err.message);
       }
@@ -838,6 +856,9 @@ export class RunService {
     }
 
     placeholder.runId = compiled.runId;
+    placeholder.nodeIds = spec.nodes.map(node => node.id);
+    placeholder.labels = resolveRunLabels(spec.metadata.labels, resolvedInput, req.threadId);
+    await this.patchMeta(req.threadId, { labels: placeholder.labels, activity: placeholder.activity! });
     this.registry.setStatus(req.threadId, "running");
     this.metrics.recordStart();
 
@@ -856,12 +877,14 @@ export class RunService {
           signal: placeholder.abort.signal,
           pauseSignal: placeholder.pause.signal,
         });
-        await this.applyResult(req.threadId, result);
+        await this.applyResult(req.threadId, result, compiled);
       } catch (err) {
         const errorId = newErrorId();
         log("error", "run.error", { threadId: req.threadId, errorId, ...errorFields(err) });
-        await this.patchMeta(req.threadId, { status: "error" });
+        await this.patchMeta(req.threadId, { status: "error", activity: initialRunActivity("failed", new Date().toISOString()) });
+        this.flushTerminalEvents(req.threadId);
         this.registry.setStatus(req.threadId, "error");
+        if (this.registry.get(req.threadId)) this.registry.get(req.threadId)!.activity = initialRunActivity("failed", new Date().toISOString());
         this.metrics.recordResult("error");
         const { message, redacted } = runErrorMessage(err, errorId);
         this.registry.pushEvent(req.threadId, {
@@ -895,7 +918,34 @@ export class RunService {
 
   /** Record an engine event for the thread, with system error text replaced (see {@link ErrorMasker.redactEvent}). */
   private pushEvent(threadId: string, event: ServerEvent): void {
-    this.registry.pushEvent(threadId, this.errors.redactEvent(threadId, event));
+    const session = this.registry.get(threadId);
+    if (!session) return;
+    const aggregateInterrupt = event.type === "interrupt.raised" && Array.isArray((event.data as { interrupts?: unknown[] })?.interrupts);
+    const terminal = !event.scope?.parentSpanId &&
+      (["run.end", "run.error", "run.aborted", "run.paused"].includes(event.type) || aggregateInterrupt);
+    const defer = terminal && (session.status === "running" || session.status === "started");
+    const safeEvent = this.errors.redactEvent(threadId, event);
+    if (defer) {
+      this.pendingTerminalEvents.set(threadId, [...(this.pendingTerminalEvents.get(threadId) ?? []), safeEvent]);
+    } else this.registry.pushEvent(threadId, safeEvent);
+    const before = session.activity ?? initialRunActivity(session.status, session.startedAt);
+    const activity = updateRunActivity(before, event, session.nodeIds);
+    if (activity === before) return;
+    session.activity = activity;
+    const boundary = event.type.startsWith("run.") || event.type === "interrupt.raised";
+    // Keep the live summary exact; limit checkpoint-adjacent metadata I/O while
+    // fast nodes run. Every interrupt/terminal boundary is persisted immediately.
+    if (!defer && (boundary || this.now() - (this.activityWrittenAt.get(threadId) ?? 0) >= 1000)) {
+      this.activityWrittenAt.set(threadId, this.now());
+      void this.patchMeta(threadId, { activity });
+    }
+  }
+
+  /** Publish a parked/terminal boundary only once its durable control status is ready. */
+  private flushTerminalEvents(threadId: string): void {
+    const events = this.pendingTerminalEvents.get(threadId) ?? [];
+    this.pendingTerminalEvents.delete(threadId);
+    for (const event of events) this.registry.pushEvent(threadId, event);
   }
 
   /** Content-store scope: one per principal on multi-user servers, shared otherwise. */
@@ -1031,7 +1081,7 @@ export class RunService {
     return done();
   }
 
-  private async applyResult(threadId: string, result: RunResult): Promise<void> {
+  private async applyResult(threadId: string, result: RunResult, compiled?: CompiledGraph): Promise<void> {
     const status =
       result.status === "interrupted"
         ? "interrupted"
@@ -1046,7 +1096,14 @@ export class RunService {
     // that share a filename apart. Publish the status only after that write
     // finishes, so a waiter that sees "interrupted" does not read a file
     // that is still being replaced.
-    await this.patchMeta(threadId, { status });
+    const session = this.registry.get(threadId);
+    const snapshot = compiled && (status === "interrupted" || status === "paused")
+      ? await compiled.getState(threadId, { applyWaitTimeouts: false }) : undefined;
+    const activity = settleRunActivity(session?.activity ?? initialRunActivity(status, new Date().toISOString()),
+      status, new Date().toISOString(), snapshot ?? { interrupts: result.interrupts ?? [] });
+    if (session) session.activity = activity;
+    await this.patchMeta(threadId, { status, activity });
+    this.flushTerminalEvents(threadId);
     this.registry.setStatus(threadId, status);
     this.metrics.recordResult(result.status);
     log("info", "run.end", { threadId, status: result.status, runId: result.runId });
@@ -1117,6 +1174,7 @@ export class RunService {
       session.yaml = resolvedYaml;
     }
 
+    session.nodeIds = spec.nodes.map(node => node.id);
     session.runId = compiled.runId;
     session.dryRun = dryRun;
     this.registry.setStatus(req.threadId, "running");
@@ -1134,12 +1192,14 @@ export class RunService {
           signal: abort.signal,
           pauseSignal: pause.signal,
         });
-        await this.applyResult(req.threadId, result);
+        await this.applyResult(req.threadId, result, compiled);
       } catch (err) {
         const errorId = newErrorId();
         log("error", "resume.error", { threadId: req.threadId, errorId, ...errorFields(err) });
-        await this.patchMeta(req.threadId, { status: "error" });
+        await this.patchMeta(req.threadId, { status: "error", activity: initialRunActivity("failed", new Date().toISOString()) });
+        this.flushTerminalEvents(req.threadId);
         this.registry.setStatus(req.threadId, "error");
+        if (this.registry.get(req.threadId)) this.registry.get(req.threadId)!.activity = initialRunActivity("failed", new Date().toISOString());
         this.metrics.recordResult("error");
         const { message, redacted } = runErrorMessage(err, errorId);
         this.registry.pushEvent(req.threadId, {
@@ -1184,7 +1244,8 @@ export class RunService {
     if (!session) throw new Error(`No active session for thread "${threadId}"`);
     if (session.status === "completed") return { threadId, runId: session.runId, status: "completed" };
     session.abort.abort();
-    await this.patchMeta(threadId, { status: "cancelled" });
+    session.activity = initialRunActivity("aborted", new Date().toISOString());
+    await this.patchMeta(threadId, { status: "cancelled", activity: session.activity });
     this.registry.setStatus(threadId, "cancelled");
     this.metrics.recordResult("cancelled");
     return { threadId, runId: session.runId, status: "cancelled" };
@@ -1252,6 +1313,7 @@ export class RunService {
       principal,
       dryRun,
     );
+    session.nodeIds = spec.nodes.map(node => node.id);
     session.runId = compiled.runId;
     session.dryRun = dryRun;
     this.registry.setStatus(threadId, "running");
@@ -1268,11 +1330,13 @@ export class RunService {
           signal: abort.signal,
           pauseSignal: pause.signal,
         });
-        await this.applyResult(threadId, result);
+        await this.applyResult(threadId, result, compiled);
       } catch (err) {
         log("error", "continue.error", { threadId, ...errorFields(err) });
-        await this.patchMeta(threadId, { status: "error" });
+        await this.patchMeta(threadId, { status: "error", activity: initialRunActivity("failed", new Date().toISOString()) });
+        this.flushTerminalEvents(threadId);
         this.registry.setStatus(threadId, "error");
+        if (this.registry.get(threadId)) this.registry.get(threadId)!.activity = initialRunActivity("failed", new Date().toISOString());
         this.metrics.recordResult("error");
       }
     })());
@@ -1319,7 +1383,7 @@ export class RunService {
     return { history: this.errors.maskIssues(threadId, history, "state history").value };
   }
 
-  async listRuns(caller?: Principal): Promise<RunListItem[]> {
+  async listRuns(caller?: Principal, options: { activeOnly?: boolean } = {}): Promise<RunListItem[]> {
     const principal = this.principalFor(caller);
     // Multi-user servers list only the caller's threads.
     const mine = (owner: ThreadOwner | undefined) => !this.multiUser || owner?.id === principal.id;
@@ -1332,13 +1396,18 @@ export class RunService {
     for (const meta of persisted) {
       if (!mine(meta.owner)) continue;
       const live = this.registry.get(meta.threadId);
+      const activity = live?.activity ?? meta.activity;
+      const status = activityStatus(activity, live?.status ?? meta.status ?? "completed");
+      if (options.activeOnly && !isActiveRun(status)) continue;
       byId.set(meta.threadId, {
         threadId: meta.threadId,
         graphName: live?.graphName || meta.graphName || "graph",
         ...(meta.label || live?.label ? { label: live?.label ?? meta.label } : {}),
-        status: live?.status ?? meta.status ?? "completed",
+        status,
+        labels: live?.labels ?? meta.labels ?? {},
+        ...(activity ? { activity } : {}),
         updatedAt: meta.updatedAt,
-        ...(live?.startedAt ? { startedAt: live.startedAt } : {}),
+        startedAt: meta.startedAt ?? meta.storedAt ?? live?.startedAt,
         active: Boolean(
           live && (live.status === "running" || live.status === "started"),
         ),
@@ -1348,11 +1417,16 @@ export class RunService {
       if (byId.has(live.threadId)) continue;
       if (!live.runId) continue;
       if (!mine(live.owner)) continue;
+      const activity = live.activity;
+      const status = activityStatus(activity, live.status);
+      if (options.activeOnly && !isActiveRun(status)) continue;
       byId.set(live.threadId, {
         threadId: live.threadId,
         graphName: live.graphName,
         ...(live.label ? { label: live.label } : {}),
-        status: live.status,
+        status,
+        labels: live.labels ?? {},
+        ...(activity ? { activity } : {}),
         updatedAt: live.startedAt,
         startedAt: live.startedAt,
         active: live.status === "running" || live.status === "started",
@@ -1369,11 +1443,14 @@ export class RunService {
     const live = this.registry.get(threadId);
     if (!persisted && !live) return null;
     const meta = persisted?.meta;
+    const activity = live?.activity ?? meta?.activity;
     return {
       threadId,
       graphName: live?.graphName || meta?.graphName || "graph",
       ...(live?.label || meta?.label ? { label: (live?.label || meta?.label) as string } : {}),
-      status: live?.status ?? meta?.status ?? "completed",
+      status: activityStatus(live?.activity ?? meta?.activity, live?.status ?? meta?.status ?? "completed"),
+      labels: live?.labels ?? meta?.labels ?? {},
+      ...(activity ? { activity } : {}),
       updatedAt: meta?.updatedAt ?? live?.startedAt ?? new Date().toISOString(),
       ...(live?.startedAt ? { startedAt: live.startedAt } : {}),
       active: Boolean(live && (live.status === "running" || live.status === "started")),

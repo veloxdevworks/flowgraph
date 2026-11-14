@@ -145,6 +145,8 @@ describe("RunService with OIDC principals", () => {
     await expect(s.continueRun(t, undefined, carol)).rejects.toEqual(notOwned);
     expect((await s.listRuns(bob)).map((r) => r.threadId)).not.toContain(t);
     expect((await s.listRuns(alice)).map((r) => r.threadId)).toContain(t);
+    expect((await s.listRuns(bob, { activeOnly: true })).map(r => r.threadId)).not.toContain(t);
+    expect((await s.listRuns(alice, { activeOnly: true })).map(r => r.threadId)).toContain(t);
     await expect(s.authorizeEvents(`missing-${randomUUID()}`, bob)).rejects.toEqual(refused("THREAD_NOT_FOUND", 404));
     await expect(s.resumeRun({ threadId: `missing-${randomUUID()}`, resume: {} }, bob)).rejects.toEqual(refused("THREAD_NOT_FOUND", 404));
 

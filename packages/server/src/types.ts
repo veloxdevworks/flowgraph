@@ -74,6 +74,9 @@ export interface RunListItem {
   updatedAt: string;
   startedAt?: string;
   active: boolean;
+  /** Graph-declared labels, resolved once against the run's public input. */
+  labels?: Record<string, string>;
+  activity?: import("@flowgraph/core").RunActivity;
 }
 
 export interface RunDetail extends RunListItem {
@@ -140,6 +143,9 @@ export interface GraphMeta {
   label?: string;
   graphName?: string;
   status?: RunStatus;
+  startedAt?: string;
+  labels?: Record<string, string>;
+  activity?: import("@flowgraph/core").RunActivity;
   owner?: ThreadOwner;
   /**
    * `raw`: the stored file is the YAML as uploaded, with any `${VAR}`

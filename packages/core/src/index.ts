@@ -141,6 +141,8 @@ export {
 } from "./runtime/state-annotation.js";
 export { ReplayMismatchError, ReplayStore, replayNodeKey, runScopeOf, type RunScope } from "./providers/replay-cache.js";
 export { parseDuration, sleep } from "./runtime/duration.js";
+export { initialRunActivity, updateRunActivity, settleRunActivity, parseRunActivity, resolveRunLabels, runPhase, isActiveRun } from "./runtime/run-activity.js";
+export type { RunActivity, RunPhase, RunWaitingOn } from "./runtime/run-activity.js";
 export { runWithPolicy, isTimeoutError } from "./runtime/retry.js";
 export type { RetryConfig } from "./runtime/retry.js";
 export {
