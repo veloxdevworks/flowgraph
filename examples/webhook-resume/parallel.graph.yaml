@@ -1,0 +1,42 @@
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: parallel-webhook-resume
+  description: Answer two independent external gates in either order.
+state:
+  channels:
+    first: { type: object }
+    second: { type: object }
+nodes:
+  - id: await-first
+    type: wait
+    with:
+      webhook:
+        schema:
+          required: [answer]
+          properties:
+            answer: { type: string }
+      output: { to: first }
+  - id: await-second
+    type: wait
+    with:
+      webhook:
+        schema:
+          required: [answer]
+          properties:
+            answer: { type: string }
+      output: { to: second }
+edges:
+  - { from: START, to: [await-first, await-second] }
+  - { from: await-first, to: END }
+  - { from: await-second, to: END }
+runtime:
+  checkpoint:
+    enabled: true
+    backend: sqlite
+    path: .flowgraph/parallel-webhook-resume.db
+  webhookServer:
+    host: 127.0.0.1
+    port: 0
+  hitl:
+    onInterrupt: webhook

@@ -374,7 +374,7 @@ if (process.argv[2] === "--worker") {
     const nextWait = await request(await start(sequential, "two-waits"), "{}");
     assert.equal(nextWait.body.status, "interrupted");
     const nextUrl = urlOf(await sequential.rpc("state", "two-waits"));
-    assert(nextUrl.endsWith("/await-second"));
+    assert(new URL(nextUrl).pathname.includes("/await-second/"));
     assert.equal((await request(nextUrl, "{}")).body.status, "completed");
     record("two sequential webhook waits", {
       firstStatus: "interrupted",
@@ -382,19 +382,114 @@ if (process.argv[2] === "--worker") {
     });
     await sequential.stop();
 
-    const parallel = await worker({ parallel: true });
-    const parallelResult = await parallel.rpc("start", "two-gates");
-    const registered = await parallel.rpc("inspect", "two-gates");
-    const gatePosts = [];
-    for (const interrupt of parallelResult.interrupts)
-      gatePosts.push(await request(interrupt.payload.data.webhookUrl, '{"value":1}'));
-    record("two parallel webhook waits in one thread", {
-      interrupts: parallelResult.interrupts.length,
-      registered: registered.route,
-      gatePosts,
-      state: await parallel.rpc("state", "two-gates"),
+    const channelOf = (gate) =>
+      gate.payload.data.__nodeId === "await-event" ? "received" : "second";
+    for (const reverse of [false, true]) {
+      const parallel = await worker({ parallel: true });
+      const initial = await parallel.rpc("start", "two-gates");
+      assert.equal(initial.interrupts.length, 2);
+      const [firstGate, secondGate] = reverse
+        ? [...initial.interrupts].reverse()
+        : initial.interrupts;
+      const firstUrl = firstGate.payload.data.webhookUrl;
+      const secondUrl = secondGate.payload.data.webhookUrl;
+      assert.notEqual(firstUrl, secondUrl);
+      assert.equal((await request(firstUrl, undefined, {}, "GET")).http, 200);
+      assert.equal((await request(secondUrl, undefined, {}, "GET")).http, 200);
+      const firstPost = await request(firstUrl, '{"value":"first-answer"}');
+      assert.deepEqual(firstPost, { http: 200, body: { status: "interrupted" } });
+      const partial = await parallel.rpc("state", "two-gates");
+      assert.deepEqual(
+        partial.interrupts.map((gate) => gate.id),
+        [secondGate.id],
+      );
+      assert.equal(urlOf(partial), secondUrl);
+      assert.deepEqual(partial.values[channelOf(firstGate)], { value: "first-answer" });
+      assert.equal(partial.values[channelOf(secondGate)], null);
+      assert.equal((await request(firstUrl, "{}")).http, 404);
+      const secondPost = await request(secondUrl, '{"value":"second-answer"}');
+      assert.deepEqual(secondPost, { http: 200, body: { status: "completed" } });
+      const completed = await parallel.rpc("state", "two-gates");
+      assert.equal(completed.interrupts.length, 0);
+      assert.deepEqual(completed.values[channelOf(firstGate)], { value: "first-answer" });
+      assert.deepEqual(completed.values[channelOf(secondGate)], { value: "second-answer" });
+      record(`isolated parallel gates, reverse order ${reverse}`, {
+        firstPost,
+        secondPost,
+        waitingAfterFirst: partial.interrupts.length,
+        completed: completed.values,
+      });
+      await parallel.stop();
+    }
+
+    const simultaneous = await worker({ parallel: true });
+    const concurrentGates = (await simultaneous.rpc("start", "same-thread-posts")).interrupts;
+    const concurrentReplies = await Promise.all(
+      concurrentGates.map((gate, i) =>
+        request(gate.payload.data.webhookUrl, JSON.stringify({ value: i })),
+      ),
+    );
+    assert(concurrentReplies.every((reply) => reply.http === 200));
+    assert.deepEqual(concurrentReplies.map((reply) => reply.body.status).sort(), [
+      "completed",
+      "interrupted",
+    ]);
+    const concurrentState = await simultaneous.rpc("state", "same-thread-posts");
+    concurrentGates.forEach((gate, i) =>
+      assert.deepEqual(concurrentState.values[channelOf(gate)], { value: i }),
+    );
+    record("simultaneous callbacks target different gates", {
+      replies: concurrentReplies,
+      state: concurrentState.values,
     });
-    await parallel.stop();
+    await simultaneous.stop();
+
+    const parallelConfig = {
+      parallel: true,
+      db: path.join(temp, "parallel.db"),
+      token: "parallel-local-token",
+    };
+    const parallelAuth = { Authorization: "Bearer parallel-local-token" };
+    const originalParallel = await worker(parallelConfig);
+    const beforeRestart = await originalParallel.rpc("start", "durable-parallel");
+    const [firstGate, secondGate] = beforeRestart.interrupts;
+    const firstUrl = firstGate.payload.data.webhookUrl;
+    const secondUrl = secondGate.payload.data.webhookUrl;
+    const parallelPort = Number(new URL(firstUrl).port);
+    await originalParallel.stop();
+    const reloadedParallel = await worker({ ...parallelConfig, port: parallelPort });
+    const reloaded = await reloadedParallel.rpc("state", "durable-parallel");
+    assert.deepEqual(
+      reloaded.interrupts.map((gate) => gate.payload.data.webhookUrl).sort(),
+      [firstUrl, secondUrl].sort(),
+    );
+    assert.deepEqual(await request(firstUrl, '{"value":"before-second-restart"}', parallelAuth), {
+      http: 200,
+      body: { status: "interrupted" },
+    });
+    await reloadedParallel.stop();
+    const lastParallel = await worker({ ...parallelConfig, port: parallelPort });
+    const stillWaiting = await lastParallel.rpc("state", "durable-parallel");
+    assert.deepEqual(
+      stillWaiting.interrupts.map((gate) => gate.id),
+      [secondGate.id],
+    );
+    assert.equal(urlOf(stillWaiting), secondUrl);
+    assert.equal((await request(firstUrl, "{}", parallelAuth)).http, 404);
+    assert.deepEqual(await request(secondUrl, '{"value":"after-second-restart"}', parallelAuth), {
+      http: 200,
+      body: { status: "completed" },
+    });
+    const durableState = await lastParallel.rpc("state", "durable-parallel");
+    assert.deepEqual(durableState.values[channelOf(firstGate)], { value: "before-second-restart" });
+    assert.deepEqual(durableState.values[channelOf(secondGate)], { value: "after-second-restart" });
+    record("parallel routes survive restarts before and after a partial reply", {
+      restoredInitially: 2,
+      remainingAfterPartialReply: 1,
+      answeredRouteRestored: false,
+      state: durableState.values,
+    });
+    await lastParallel.stop();
 
     const human = await worker({ human: true });
     const humanResult = await human.rpc("start", "human-policy");
@@ -406,61 +501,77 @@ if (process.argv[2] === "--worker") {
     });
     await human.stop();
 
-    const cli = spawn(
-      process.execPath,
-      [
-        path.join(here, "../packages/cli/dist/bin.js"),
-        "run",
-        graphPath,
-        "--thread",
-        "cli-spike",
-        "--on-interrupt",
-        "webhook",
-        "--stream",
-      ],
-      {
-        cwd: temp,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, FLOWGRAPH_LOG_LEVEL: "silent" },
-      },
-    );
-    children.add(cli);
-    let cliOutput = "";
-    cli.stdout.on("data", (chunk) => {
-      cliOutput += chunk;
-    });
-    cli.stderr.on("data", (chunk) => {
-      cliOutput += chunk;
-    });
-    async function waitForCli(predicate) {
-      const deadline = Date.now() + 10_000;
-      while (!predicate(cliOutput)) {
-        assert.equal(cli.exitCode, null, cliOutput);
-        assert(Date.now() < deadline, `CLI timed out: ${cliOutput}`);
-        await new Promise((resolve) => setTimeout(resolve, 25));
+    for (const [cliGraph, threadId, gateCount] of [
+      [graphPath, "cli-spike", 1],
+      [path.join(here, "../examples/webhook-resume/parallel.graph.yaml"), "cli-parallel", 2],
+    ]) {
+      const cli = spawn(
+        process.execPath,
+        [
+          path.join(here, "../packages/cli/dist/bin.js"),
+          "run",
+          cliGraph,
+          "--thread",
+          threadId,
+          "--on-interrupt",
+          "webhook",
+          "--stream",
+        ],
+        {
+          cwd: temp,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env, FLOWGRAPH_LOG_LEVEL: "silent" },
+        },
+      );
+      children.add(cli);
+      let cliOutput = "";
+      cli.stdout.on("data", (chunk) => {
+        cliOutput += chunk;
+      });
+      cli.stderr.on("data", (chunk) => {
+        cliOutput += chunk;
+      });
+      async function waitForCli(predicate) {
+        const deadline = Date.now() + 10_000;
+        while (!predicate(cliOutput)) {
+          assert.equal(cli.exitCode, null, cliOutput);
+          assert(Date.now() < deadline, `CLI timed out: ${cliOutput}`);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
       }
+      const urlPattern = new RegExp(
+        `http://127\\.0\\.0\\.1:\\d+/webhooks/${threadId}/[^\\s/]+/[0-9a-f]{32}`,
+        "g",
+      );
+      const cliUrls = (output) => [...new Set(output.match(urlPattern) ?? [])];
+      await waitForCli((output) => cliUrls(output).length === gateCount);
+      const urls = cliUrls(cliOutput);
+      const cliPosts = [];
+      for (const [i, url] of urls.entries()) {
+        const reply = await request(url, JSON.stringify({ answer: `cli-answer-${i}`, value: i }));
+        cliPosts.push(reply);
+        assert.equal(reply.http, 200);
+        assert.equal(reply.body.status, i === gateCount - 1 ? "completed" : "interrupted");
+        if (i < gateCount - 1) {
+          await waitForCli((output) => (output.match(/Listening for webhook/g) ?? []).length >= 2);
+          assert.equal(cli.exitCode, null);
+          assert.equal((await request(urls[i + 1], undefined, {}, "GET")).http, 200);
+        }
+      }
+      await waitForCli((output) => output.includes("Completed after webhook resume."));
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      record(`CLI YAML run with ${gateCount} webhook gate(s)`, {
+        cliPosts,
+        completionPrinted: true,
+        aliveAfterCompletion: cli.exitCode === null && cli.signalCode === null,
+      });
+      if (cli.exitCode === null && cli.signalCode === null) {
+        const exited = once(cli, "exit");
+        cli.kill("SIGKILL");
+        await exited;
+      }
+      children.delete(cli);
     }
-    await waitForCli((output) =>
-      /http:\/\/127\.0\.0\.1:\d+\/webhooks\/cli-spike\/await-event/.test(output),
-    );
-    const cliUrl = cliOutput.match(
-      /http:\/\/127\.0\.0\.1:\d+\/webhooks\/cli-spike\/await-event/,
-    )[0];
-    const cliPost = await request(cliUrl, '{"value":"from-cli"}');
-    assert.equal(cliPost.body.status, "completed");
-    await waitForCli((output) => output.includes("Completed after webhook resume."));
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    record("CLI YAML run and real POST", {
-      cliPost,
-      completionPrinted: true,
-      aliveAfterCompletion: cli.exitCode === null && cli.signalCode === null,
-    });
-    if (cli.exitCode === null && cli.signalCode === null) {
-      const exited = once(cli, "exit");
-      cli.kill("SIGKILL");
-      await exited;
-    }
-    children.delete(cli);
 
     const malformedPath = await worker();
     const pathUrl = await start(malformedPath, "path");

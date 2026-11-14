@@ -49,7 +49,10 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
   const webhookUrl = webhookUrlFromInterrupts(interrupts);
   if (webhookUrl) {
     printWarning("Run interrupted — waiting for inbound webhook.");
-    printInfo(`  POST ${webhookUrl}`);
+    for (const interrupt of interrupts ?? []) {
+      const url = webhookUrlFromInterrupts([interrupt]);
+      if (url) printInfo(`  POST ${url}`);
+    }
     printInfo("  (GET the same URL to verify the listener is up)");
     return;
   }
@@ -58,7 +61,10 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
     printInfo(`  • ${it.reason ?? it.id}`);
   }
   if (threadId) {
-    printInfo(`Resume with: flowgraph resume <graph> --thread ${threadId} --resume '{"approved":true}'`);
+    const example = (interrupts ?? []).length > 1
+      ? `'{"<interrupt-id>":{"approved":true}}'`
+      : `'{"approved":true}'`;
+    printInfo(`Resume with: flowgraph resume <graph> --thread ${threadId} --resume ${example}`);
   } else {
     printInfo("Tip: pass --thread <id> so the run is resumable.");
   }
@@ -74,23 +80,27 @@ async function awaitWebhookIfNeeded(result: RunResult): Promise<RunResult> {
   const webhookUrl = webhookUrlFromInterrupts(result.interrupts);
   if (!webhookUrl || !result.threadId) return result;
 
-  const waiter = waitForWebhookResume(result.threadId);
-  if (!waiter) return result;
+  let done: { status: string; error?: string };
+  for (;;) {
+    const waiter = waitForWebhookResume(result.threadId);
+    if (!waiter) return result;
 
-  printInfo("Listening for webhook… (Ctrl-C to exit)");
-  const done = await new Promise<{ status: string; error?: string }>((resolve) => {
-    const onSig = () => {
-      printWarning("Interrupted by user.");
-      resolve({ status: "cancelled" });
-    };
-    process.once("SIGINT", onSig);
-    process.once("SIGTERM", onSig);
-    void waiter.then((r) => {
-      process.off("SIGINT", onSig);
-      process.off("SIGTERM", onSig);
-      resolve(r);
+    printInfo("Listening for webhook… (Ctrl-C to exit)");
+    done = await new Promise<{ status: string; error?: string }>((resolve) => {
+      const onSig = () => {
+        printWarning("Interrupted by user.");
+        resolve({ status: "cancelled" });
+      };
+      process.once("SIGINT", onSig);
+      process.once("SIGTERM", onSig);
+      void waiter.then((r) => {
+        process.off("SIGINT", onSig);
+        process.off("SIGTERM", onSig);
+        resolve(r);
+      });
     });
-  });
+    if (done.status !== "interrupted") break;
+  }
 
   if (done.status === "completed") {
     printSuccess("Webhook received — run completed.");
@@ -103,7 +113,6 @@ async function awaitWebhookIfNeeded(result: RunResult): Promise<RunResult> {
     printError(`Webhook resume failed: ${done.error ?? "unknown error"}`);
     return { ...result, status: "error", error: new Error(done.error ?? "resume failed") };
   }
-  // Another interrupt after resume, etc.
   return { ...result, status: done.status as RunResult["status"] };
 }
 
@@ -424,7 +433,7 @@ program
   .description("Resume an interrupted run on a given thread")
   .requiredOption("--thread <id>", "Thread ID to resume")
   .option("--list", "List pending interrupts for the thread and exit")
-  .option("--resume <json>", "Resume value passed to the interrupt (JSON)")
+  .option("--resume <json>", "Resume value passed to the interrupt (JSON). When several interrupts are pending, a map keyed by interrupt id")
   .option("--from <checkpointId>", "Resume from a historical checkpoint id")
   .option("--stream", "Stream events to stdout")
   .option("--json", "Emit events as JSONL on stdout")

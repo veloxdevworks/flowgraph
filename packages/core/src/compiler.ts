@@ -187,6 +187,10 @@ export interface CompileOptions {
    * (onInterrupt "fail"/"webhook" runs). Errors are also emitted as `run.error`.
    */
   onWaitTimeout?: (result: RunResult) => void;
+  /** Clock used for wait-deadline timers. Tests inject this so a deadline can fire without waiting. */
+  now?: () => number;
+  /** Timer scheduler for wait deadlines. Tests inject this instead of mocking global setTimeout. */
+  scheduleTimeout?: (fn: () => void, delayMs: number) => unknown;
 }
 
 export interface InterruptInfo {
@@ -294,7 +298,7 @@ export interface CompiledGraph {
   resume(opts: ResumeOptions): Promise<RunResult>;
   /** Resume a paused/checkpointed thread from `next` (not HITL). */
   continueRun(opts: ContinueOptions): Promise<RunResult>;
-  getState(threadId: string): Promise<StateSnapshot | null>;
+  getState(threadId: string, opts?: { applyWaitTimeouts?: boolean }): Promise<StateSnapshot | null>;
   getStateHistory(threadId: string): Promise<StateSnapshot[]>;
   /** Continue from a historical checkpoint id (thin wrapper on getStateHistory). */
   resumeFrom(opts: ResumeOptions & { checkpointId: string }): Promise<RunResult>;
@@ -315,6 +319,8 @@ type ExecuteMode = "start" | "resume" | "continue";
 interface InvokeOverrides {
   /** Stop after one superstep (LangGraph invoke-time `interruptAfter: "*"`). */
   singleStep?: boolean;
+  /** An HTTP callback targets one interrupt; leave sibling route registrations intact. */
+  preserveWebhookRoutes?: boolean;
 }
 
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
@@ -367,6 +373,22 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
   // Per compiled graph: two graphs that reuse a thread id must not cancel each other's timers.
   const waitTimers: WaitTimerMap = new Map();
+  const clock = () => (opts.now ?? Date.now)();
+  const scheduleTimeout = opts.scheduleTimeout ?? ((fn: () => void, delayMs: number) => setTimeout(fn, delayMs));
+
+  const getCheckpointState = async (config: LangGraphRunnableConfig) => {
+    const snap = await compiledLg.getState(config);
+    if (!checkpointer || !snap.tasks.some((task) => task.interrupts.length > 0)) return snap;
+    const saved = await checkpointer.getTuple(snap.config);
+    // LangGraph can retain old interrupt writes after a task finishes in a
+    // partially answered superstep. Real channel/result writes mark it done;
+    // resume writes alone do not (a re-prompt can still be pending).
+    const completed = new Set((saved?.pendingWrites ?? []).filter(([, channel]) =>
+      Object.prototype.hasOwnProperty.call(snap.values, channel) ||
+      channel === "__no_writes__" || channel === "__return__" || channel.startsWith("branch:to:"),
+    ).map(([taskId]) => taskId));
+    return { ...snap, tasks: snap.tasks.map((task) => completed.has(task.id) ? { ...task, interrupts: [] } : task) };
+  };
 
   const executeInvoke = async (
     payload: Record<string, unknown> | Command | null,
@@ -407,6 +429,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const retention = checkpointer && isRetentionSaver(checkpointer) ? checkpointer : undefined;
     let retentionOpen = false;
     let runToken = 0;
+    let answeredResumeIds: string[] = [];
     const resumedRun = () => mode === "resume" || mode === "continue";
     const finish = async (r: RunResult, bookkeeping = true, resumed?: boolean): Promise<RunResult> => {
       try {
@@ -438,11 +461,6 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
       return r;
     };
-
-    // CLI/IPC resume should drop any in-process HTTP listener for this thread.
-    if (mode === "resume") {
-      unregisterWebhookRoute(threadId);
-    }
 
     // Reserved channels are the engine's own bookkeeping; callers never set them.
     if (mode === "start" && payload != null && !(payload instanceof Command)) {
@@ -514,8 +532,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // thread's pending interrupts. Nodes (and embedded subgraphs) reach the
     // store through the invoke config, never through a process-wide cache.
     let replay = new ReplayStore();
+    let pendingResumeInterrupts: Array<{ id?: string }> = [];
     if (mode !== "start" && checkpointer) {
-      const snap = await compiledLg.getState(cfg);
+      const snap = await getCheckpointState(cfg);
+      pendingResumeInterrupts = (snap.tasks ?? []).flatMap((task) => task.interrupts ?? []);
       // `threadId` lets interrupts saved by earlier releases (keyed
       // `<threadId>:<nodeId>`) resume without re-running approved tools.
       const pending = pendingInterrupts(snap);
@@ -527,10 +547,18 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         ...(runOpts.signal ? { signal: runOpts.signal } : {}),
         ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
       });
-      const expired = expiredWaitResume(snap);
+      const expired = timeoutResumeCommand(snap, clock());
       if (expired) {
-        payload = new Command({ resume: expired });
+        // Keep the caller's answers for gates that are not overdue; only the
+        // overdue interrupt(s) are replaced with the timeout command.
+        payload = mergeTimeoutResume(payload, expired);
         mode = "resume";
+      }
+    }
+    if (mode === "resume") {
+      answeredResumeIds = resumeAnswerIds(payload, pendingResumeInterrupts);
+      if (!overrides.preserveWebhookRoutes) {
+        for (const id of answeredResumeIds) unregisterWebhookRoute(threadId, undefined, id);
       }
     }
 
@@ -712,13 +740,22 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         events.emit("interrupt.raised", { interrupts });
 
         if (policy === "fail" || policy === "webhook") {
-          scheduleWaitTimeoutTimer(waitTimers, threadId, interrupts, () => {
+          const onWaitDeadline = () => {
+            const at = clock();
+            const overdue = interrupts.filter((it) => it.deadlineAt !== undefined && Date.parse(it.deadlineAt) <= at);
+            if (overdue.length === 0) {
+              // An early fire (clock skew, a short delay) should re-arm, not drop the timer.
+              scheduleWaitTimeoutTimer(waitTimers, threadId, interrupts, onWaitDeadline, clock, scheduleTimeout);
+              return;
+            }
             executeInvoke(
-              new Command({ resume: { timedOut: true } }),
+              new Command({ resume: Object.fromEntries(overdue.map((it) => [it.id, { timedOut: true }])) }),
               { threadId, resume: { timedOut: true }, onInterrupt: "fail" },
               "resume",
+              { preserveWebhookRoutes: true },
             ).then(
               (timedOutResult) => {
+                for (const it of overdue) unregisterWebhookRoute(threadId, undefined, it.id);
                 try {
                   opts.onWaitTimeout?.(timedOutResult);
                 } catch (cbErr) {
@@ -745,7 +782,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
                 }
               },
             );
-          });
+          };
+          scheduleWaitTimeoutTimer(waitTimers, threadId, interrupts, onWaitDeadline, clock, scheduleTimeout);
           const clean = stripReserved(result);
           return finish({
             status: "interrupted",
@@ -765,7 +803,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           const resolve = runOpts.resolveInterrupt;
           resumeValue = await awaitAnswer(() => resolve(interrupts));
         } else if (policy === "approve") {
-          resumeValue = true;
+          resumeValue = Object.fromEntries(interruptIds(interrupts).map((id) => [id, true]));
         } else {
           const clean = stripReserved(result);
           return finish({
@@ -779,7 +817,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         }
 
         events.emit("interrupt.resumed", { resume: resumeValue });
-        current = resumeCommand(resumeValue, interrupts);
+        current = resumeCommand(resumeValue, interrupts, threadId);
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -867,13 +905,18 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   ): Promise<RunResult> => {
     let payload: Record<string, unknown> | Command | null = null;
     if (checkpointer) {
-      const snap = await compiledLg.getState({ configurable: { thread_id: continueOpts.threadId } });
+      const snap = await getCheckpointState({ configurable: { thread_id: continueOpts.threadId } });
       const hasInterrupt = (snap?.tasks ?? []).some(
         (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
       );
       if (hasInterrupt) {
         // LangGraph rejects Command({ resume: null }) as empty input.
-        payload = new Command({ resume: true });
+        // Key the continue over every pending id so a truthy unkeyed
+        // value is not refused when several interrupts are waiting.
+        const pending = (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []);
+        payload = new Command({
+          resume: Object.fromEntries(interruptIds(pending).map((id) => [id, true])),
+        });
       }
     }
     return executeInvoke(payload, continueOpts, "continue", overrides);
@@ -884,14 +927,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       resume: resumeOpts.resume,
     });
     if (checkpointer) {
-      const snap = await compiledLg.getState({ configurable: { thread_id: resumeOpts.threadId } });
+      const snap = await getCheckpointState({ configurable: { thread_id: resumeOpts.threadId } });
       const hasInterrupt = (snap?.tasks ?? []).some(
         (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
       );
       if (hasInterrupt) {
         // A missing answer is not a denial: fail before anything runs and leave the interrupt pending.
         if (resumeOpts.resume === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
-        payload = resumeCommand(resumeOpts.resume, (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []));
+        payload = resumeCommand(resumeOpts.resume, (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []), resumeOpts.threadId);
       }
       // Static breakpoints pause with empty task.interrupts and a non-empty
       // `next`. LangGraph continues those with null input, not Command({ resume }).
@@ -910,14 +953,21 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, "start"),
     resume,
     continueRun: (opts: ContinueOptions) => continueRun(opts),
-    getState: async (threadId: string) => {
+    getState: async (threadId: string, stateOpts?: { applyWaitTimeouts?: boolean }) => {
       if (!checkpointer) return null;
-      let snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
+      let snap = await getCheckpointState({ configurable: { thread_id: threadId } });
+      if (stateOpts?.applyWaitTimeouts === false) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return toSnapshot(snap as any, threadId);
+      }
       await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, nodePolicy: opts.nodePolicy, rehydrateWebhooks: true });
-      const expired = expiredWaitResume(snap);
+      const expired = timeoutResumeCommand(snap, clock());
       if (expired) {
-        await executeInvoke(new Command({ resume: expired }), { threadId, resume: expired, onInterrupt: "fail" }, "resume");
-        snap = await compiledLg.getState({ configurable: { thread_id: threadId } });
+        await executeInvoke(expired, { threadId, resume: { timedOut: true }, onInterrupt: "fail" }, "resume", { preserveWebhookRoutes: true });
+        for (const id of Object.keys(expired.resume as Record<string, unknown>)) {
+          unregisterWebhookRoute(threadId, undefined, id);
+        }
+        snap = await getCheckpointState({ configurable: { thread_id: threadId } });
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return toSnapshot(snap as any, threadId);
@@ -1471,17 +1521,19 @@ function scheduleWaitTimeoutTimer(
   threadId: string,
   interrupts: InterruptInfo[],
   onFire: () => void,
+  now: () => number = Date.now,
+  schedule: (fn: () => void, delayMs: number) => unknown = (fn, delayMs) => setTimeout(fn, delayMs),
 ): void {
   clearWaitTimeoutTimer(waitTimeoutTimers, threadId);
   const deadline = earliestDeadlineMs(interrupts);
   if (deadline === undefined) return;
-  const delay = Math.max(0, deadline - Date.now());
-  const timer = setTimeout(() => {
+  const delay = Math.max(0, deadline - now());
+  const timer = schedule(() => {
     waitTimeoutTimers.delete(threadId);
     onFire();
   }, delay);
-  timer.unref?.();
-  waitTimeoutTimers.set(threadId, timer);
+  (timer as { unref?: () => void } | undefined)?.unref?.();
+  waitTimeoutTimers.set(threadId, timer as ReturnType<typeof setTimeout>);
 }
 
 function namespacedRunnableConfig(
@@ -1787,6 +1839,21 @@ function isAbortFailure(err: unknown, signal?: AbortSignal): boolean {
   return false;
 }
 
+const INTERRUPT_ID = /^[0-9a-f]{32}$/;
+
+function interruptIds(pending: ReadonlyArray<{ id?: string }>): string[] {
+  return pending.map((it) => it.id ?? "").filter((id) => INTERRUPT_ID.test(id));
+}
+
+/** True when every key is a pending 32-hex interrupt id. */
+function isKeyedResumeMap(value: unknown, pending: ReadonlyArray<{ id?: string }>): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value as object);
+  if (keys.length === 0) return false;
+  const ids = new Set(interruptIds(pending));
+  return keys.every((key) => ids.has(key));
+}
+
 function resumeValueRequiredError(threadId: string): Error & { code: "RESUME_VALUE_REQUIRED" } {
   const err = new Error(
     `resume() on thread "${threadId}" needs a value for its pending interrupt; pass resume: false or null to deny.`,
@@ -1795,15 +1862,89 @@ function resumeValueRequiredError(threadId: string): Error & { code: "RESUME_VAL
   return err;
 }
 
+function resumeMapRequiredError(threadId: string, count: number): Error & { code: "RESUME_MAP_REQUIRED" } {
+  const err = new Error(
+    `resume() on thread "${threadId}" has ${count} pending interrupts; pass a map keyed by interrupt id, for example { "<id>": value }.`,
+  ) as Error & { code: "RESUME_MAP_REQUIRED" };
+  err.code = "RESUME_MAP_REQUIRED";
+  return err;
+}
+
+function resumeUnknownKeysError(threadId: string, keys: string[]): Error & { code: "RESUME_MAP_REQUIRED" } {
+  const listed = keys.map((key) => JSON.stringify(key)).join(", ");
+  const err = new Error(
+    `resume() on thread "${threadId}" has unknown or extra interrupt id(s): ${listed}.`,
+  ) as Error & { code: "RESUME_MAP_REQUIRED" };
+  err.code = "RESUME_MAP_REQUIRED";
+  return err;
+}
+
+/** Keys of a resume map that are not pending interrupt ids, when the value looks keyed. */
+function unknownResumeKeys(value: unknown, pending: ReadonlyArray<{ id?: string }>): string[] | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value as object);
+  if (!keys.some((key) => INTERRUPT_ID.test(key))) return undefined;
+  const ids = new Set(interruptIds(pending));
+  return keys.filter((key) => !ids.has(key));
+}
+
+/**
+ * Throw when `value` cannot resume the pending interrupts (a missing value,
+ * a truthy unkeyed answer with several gates, or unknown / extra keys).
+ */
+export function assertResumeValue(
+  value: unknown,
+  pending: ReadonlyArray<{ id?: string }>,
+  threadId: string,
+): void {
+  if (value === undefined && interruptIds(pending).length > 0) throw resumeValueRequiredError(threadId);
+  resumeCommand(value, pending, threadId);
+}
+
+/** Overdue interrupts take the timeout; the caller's answers for the rest are kept. */
+function mergeTimeoutResume(
+  payload: Record<string, unknown> | Command | null,
+  expired: Command,
+): Command {
+  const overdue = (expired.resume && typeof expired.resume === "object" && !Array.isArray(expired.resume)
+    ? (expired.resume as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const caller =
+    payload instanceof Command && payload.resume && typeof payload.resume === "object" && !Array.isArray(payload.resume)
+      ? (payload.resume as Record<string, unknown>)
+      : {};
+  return new Command({ resume: { ...caller, ...overdue } });
+}
+
+/**
+ * The interrupt ids a resume Command will answer: the keys of a keyed map, or
+ * every pending id when the value is a single unkeyed answer.
+ */
+function resumeAnswerIds(
+  payload: Record<string, unknown> | Command | null,
+  pending: ReadonlyArray<{ id?: string }>,
+): string[] {
+  if (!(payload instanceof Command)) return [];
+  const value = payload.resume;
+  if (isKeyedResumeMap(value, pending)) return Object.keys(value);
+  return interruptIds(pending);
+}
+
 /**
  * Resume the pending interrupts with one answer. LangGraph drops a falsy
  * `resume` (`false`, `0`, `""`, `null`, `undefined`) as empty input, so a
  * falsy answer is sent per interrupt id instead, which it applies as given.
+ * A truthy unkeyed value with several interrupts pending is refused so it
+ * cannot be applied to every gate.
  */
-function resumeCommand(value: unknown, pending: ReadonlyArray<{ id?: string }>): Command {
+function resumeCommand(value: unknown, pending: ReadonlyArray<{ id?: string }>, threadId: string): Command {
+  const unknown = unknownResumeKeys(value, pending);
+  if (unknown && unknown.length > 0) throw resumeUnknownKeysError(threadId, unknown);
+  if (isKeyedResumeMap(value, pending)) return new Command({ resume: value });
+  const ids = interruptIds(pending);
+  if (ids.length > 1 && value) throw resumeMapRequiredError(threadId, ids.length);
   if (value) return new Command({ resume: value });
-  const ids = pending.map((it) => it.id ?? "");
-  if (ids.length > 0 && ids.every((id) => /^[0-9a-f]{32}$/.test(id))) {
+  if (ids.length > 0) {
     return new Command({ resume: Object.fromEntries(ids.map((id) => [id, value])) });
   }
   return new Command({ resume: value });
@@ -1872,11 +2013,10 @@ function setWebhookUrlOnInterrupt(info: InterruptInfo, url: string): void {
 
 /** Reattach listening URLs from the in-process route registry (e.g. getState). */
 function enrichInterruptsWithWebhookUrls(interrupts: InterruptInfo[], threadId: string): void {
-  const route = getWebhookRoute(threadId);
-  if (!route?.url) return;
   for (const info of interrupts) {
     if (!isWebhookInterrupt(info)) continue;
-    setWebhookUrlOnInterrupt(info, route.url);
+    const route = getWebhookRoute(threadId, webhookNodeIdFromInterrupt(info), info.id);
+    if (route?.url) setWebhookUrlOnInterrupt(info, route.url);
   }
 }
 
@@ -1889,6 +2029,7 @@ async function attachWebhookUrls(
       payload: Record<string, unknown> | Command | null,
       runOpts: RunOptions | ResumeOptions | ContinueOptions,
       mode: ExecuteMode,
+      overrides?: InvokeOverrides,
     ) => Promise<RunResult>;
     signal?: AbortSignal;
     sinks?: EventSink[];
@@ -1908,8 +2049,10 @@ async function attachWebhookUrls(
     const nodeId = webhookNodeIdFromInterrupt(interrupt) ?? "unknown";
     const payload = interrupt.payload as { data?: { schema?: Record<string, unknown> } } | undefined;
     const schema = payload?.data?.schema;
-    const url = buildWebhookUrl(info.host, info.port, opts.threadId, nodeId);
+    const existing = getWebhookRoute(opts.threadId, nodeId, interrupt.id);
+    const url = existing?.url ?? buildWebhookUrl(info.host, info.port, opts.threadId, nodeId, interrupt.id);
     setWebhookUrlOnInterrupt(interrupt, url);
+    if (existing) continue;
 
     const onAbort = () => unregisterWebhookRoute(opts.threadId);
     if (opts.signal) {
@@ -1923,13 +2066,14 @@ async function attachWebhookUrls(
     void registerWebhookRoute({
       threadId: opts.threadId,
       nodeId,
+      interruptId: interrupt.id,
       url,
       ...(schema ? { schema } : {}),
       ...(serverCfg?.token ? { token: serverCfg.token } : {}),
       resume: async (body) => {
         if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
         const result = await opts.executeInvoke(
-          resumeCommand(body, [interrupt]),
+          new Command({ resume: { [interrupt.id]: body } }),
           {
             threadId: opts.threadId,
             resume: body,
@@ -1937,6 +2081,7 @@ async function attachWebhookUrls(
             ...(opts.sinks ? { sinks: opts.sinks } : {}),
           },
           "resume",
+          { preserveWebhookRoutes: true },
         );
         return {
           status: result.status,
@@ -2110,20 +2255,26 @@ export function resolveGraphWorkspace(spec: GraphSpec, graphDir: string): string
   return path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(graphDir, raw);
 }
 
-function expiredWaitResume(snap: {
+function overdueInterruptIds(snap: {
   tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }>;
-} | null | undefined): { timedOut: true } | undefined {
-  if (!snap) return undefined;
-  const now = Date.now();
-  for (const task of snap.tasks ?? []) {
-    for (const it of task.interrupts ?? []) {
-      const info = toInterruptInfo(it);
-      if (info.deadlineAt && Date.parse(info.deadlineAt) <= now) {
-        return { timedOut: true };
-      }
-    }
-  }
-  return undefined;
+} | null | undefined, now = Date.now()): string[] {
+  if (!snap) return [];
+  return (snap.tasks ?? []).flatMap((task) => task.interrupts ?? [])
+    .filter((it) => {
+      const deadline = toInterruptInfo(it).deadlineAt;
+      return deadline !== undefined && Date.parse(deadline) <= now;
+    })
+    .map((it) => it.id)
+    .filter((id): id is string => typeof id === "string" && INTERRUPT_ID.test(id));
+}
+
+/** A Command that times out only the interrupts whose deadline has passed. */
+function timeoutResumeCommand(snap: {
+  tasks?: ReadonlyArray<{ interrupts?: ReadonlyArray<{ id?: string; value?: unknown }> }>;
+} | null | undefined, now = Date.now()): Command | undefined {
+  const overdue = overdueInterruptIds(snap, now);
+  if (overdue.length === 0) return undefined;
+  return new Command({ resume: Object.fromEntries(overdue.map((id) => [id, { timedOut: true }])) });
 }
 
 /** Values of the pending interrupts in a thread snapshot (engine-written payloads). */
@@ -2245,6 +2396,7 @@ export async function hydrateDurableRuntime(
       payload: Record<string, unknown> | Command | null,
       runOpts: RunOptions | ResumeOptions | ContinueOptions,
       mode: ExecuteMode,
+      overrides?: InvokeOverrides,
     ) => Promise<RunResult>;
     signal?: AbortSignal;
     sinks?: EventSink[];
@@ -2257,7 +2409,7 @@ export async function hydrateDurableRuntime(
   for (const task of snap.tasks ?? []) {
     for (const it of task.interrupts ?? []) interrupts.push(toInterruptInfo(it));
   }
-  if (opts.rehydrateWebhooks !== false && interrupts.some(isWebhookInterrupt) && !getWebhookRoute(threadId)) {
+  if (opts.rehydrateWebhooks !== false && interrupts.some(isWebhookInterrupt)) {
     await attachWebhookUrls(interrupts, {
       threadId,
       graphSpec,

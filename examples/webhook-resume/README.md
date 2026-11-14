@@ -25,10 +25,35 @@ Expected response: HTTP 200, `{"status":"completed"}`. The first terminal prints
 `Completed after webhook resume.` The current CLI retains its HTTP listener after
 completion; use Ctrl-C to stop it. Use a new thread id for another independent run.
 
+New callback URLs include the interrupt id after the node id. Prefer the exact
+printed URL. The shorter URL shown above remains supported when it identifies
+one registration; an ambiguous URL returns HTTP 409.
+
 The example binds to loopback and has no token. A host can set
 `runtime.webhookServer.token` and send `Authorization: Bearer <token>` or
 `x-flowgraph-token: <token>`. This shared secret is optional and is not webhook
 signature verification. Read the findings before exposing ingress to other hosts.
+
+## Parallel gates
+
+From this example directory, run:
+
+```sh
+node ../../packages/cli/dist/bin.js run parallel.graph.yaml \
+  --thread parallel-demo --on-interrupt webhook --stream
+```
+
+The CLI prints two callback URLs, one for each gate. POST `{"answer":"first"}` to
+one exact URL: HTTP 200 reports `status: interrupted`, while the other gate remains
+waiting. POST `{"answer":"second"}` to the other URL to complete the run. Either
+order works, and each answer is stored separately. The CLI keeps listening after
+the first reply. Reposting to an answered interrupt returns HTTP 404.
+
+After a restart with the same SQLite checkpoint, `compiled.getState(threadId)`
+restores only unanswered gates and returns their current URLs. Each URL identifies
+the thread, node, and durable interrupt id, so equally named gates in separate
+subgraphs are isolated too. These guarantees apply within one host process;
+distributed coordination and durable delivery deduplication are separate work.
 
 ## Repeat the spike
 
