@@ -172,6 +172,8 @@ runtime:
 - **Function calls:** a curated, side-effect-free standard library (§5). No access to `process`, `require`, prototypes, or the host.
 - **Templates:** a string with embedded `{{ }}` is interpolated; a lone `{{ expr }}` returns the typed value (not stringified) so `output.map` can preserve objects/numbers.
 
+Subtraction needs no spaces (`state.n-1`). Dotted output IDs may include numeric suffixes (`state.outputs.generate-topics-2`); use brackets for ambiguous data keys (`state['step-1']`) and spaces to subtract from an output (`state.outputs.total - 1`). Member/index access and object helpers read own properties only, including own JSON keys named `constructor`; inherited properties and getters are unavailable. Numeric literals are decimal; unsupported scientific or hexadecimal notation and trailing tokens produce parse errors.
+
 ```yaml
 when: "{{ state.testResults.failed > 0 && !state.override }}"
 url:  "{{ config.vars.base }}/repos/{{ state.repo }}/pulls"
