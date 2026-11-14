@@ -1,3 +1,4 @@
+import { usageLedgerOf } from "./usage/ledger.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 const eventThread = new AsyncLocalStorage<string>();
@@ -97,6 +98,10 @@ export function createEventBus(opts: EventBusOptions): EventBus {
   const streamListeners = new Set<(ev: FlowgraphEvent) => void>();
 
   function emit(type: EventType, data: unknown, scope: EventScope = {}): void {
+    const accounting = usageLedgerOf();
+    if (accounting && ["run.end", "run.error", "run.aborted", "run.paused"].includes(type)) {
+      data = { ...(data as Record<string, unknown>), usage: accounting.snapshot() };
+    }
     const event: FlowgraphEvent = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       type,

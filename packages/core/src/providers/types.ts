@@ -6,10 +6,13 @@
  * can invoke those tools back through the runtime (events/contracts/HITL).
  */
 
+import type { MeteredCallOptions } from "../usage/ledger.js";
 import type { NodeRunContext } from "../context.js";
 import type { ProviderContextManager } from "../context/types.js";
 
 export interface ProviderCapabilities {
+  /** Provider wraps every actual paid call with ctx.meterCall (replays are excluded). */
+  callAccounting?: boolean;
   toolCalling: boolean;
   /**
    * The provider sends `AgentRequest.messages` as real chat turns. Otherwise
@@ -74,6 +77,7 @@ export interface AgentRequest {
   maxSteps?: number | undefined;
   maxTokens?: number | undefined;
   permission: "auto" | "ask" | "deny";
+  streaming?: boolean | undefined;
 }
 
 export interface AgentResult {
@@ -93,6 +97,8 @@ export interface AgentEvent {
 
 /** Context handed to a provider's run/stream. */
 export interface ProviderRunContext {
+  /** Persist admission and usage for an actual paid call; never wrap a replay. */
+  meterCall?<T>(invoke: () => Promise<T>, options: MeteredCallOptions<T>): Promise<T>;
   node: NodeRunContext;
   /** Invoke a normalized tool by name; routes through the flowgraph runtime. */
   invokeTool(name: string, args: unknown): Promise<unknown>;

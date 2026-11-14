@@ -418,3 +418,5 @@ export type {
 export * from "./placement/index.js";
 export { CORE_VERSION } from "./version.js";
 export { CORE_BUILTIN_NODE_TYPES } from "./nodes/index.js";
+
+export type { RunUsage, UsageRecord, UsageCheckpointStore, MeteredCallOptions } from "./usage/ledger.js";

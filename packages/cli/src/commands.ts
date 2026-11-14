@@ -17,6 +17,12 @@ import { templateFor, listTemplates } from "./templates.js";
 import { migrateSpec } from "./migrate.js";
 import { printDiagnostics, printBanner, printSuccess, printError, printInfo, printWarning, formatDuration } from "./ui.js";
 
+function printFailedUsage(result: RunResult): void {
+  if (!["error", "aborted"].includes(result.status)) return;
+  console.error(`Thread: ${result.threadId ?? "unknown"}`);
+  if (result.usage) console.error(`Usage (known): tokens=${result.usage.totalTokens}, usd=${result.usage.costUSD}; pending=${result.usage.pendingCalls}, unknown=${result.usage.unknownCalls}, unpriced=${result.usage.unpricedCalls}, unreportedTokens=${result.usage.unreportedTokenCalls}`);
+}
+
 function printIssues(result: RunResult): void {
   const issues = result.issues ?? [];
   if (issues.length === 0) return;
@@ -388,6 +394,7 @@ program
     let result;
     try {
       result = await withCtrlC(opts.json, (signal) => compiled.run({ ...runOpts, signal }));
+      printFailedUsage(result);
 
       if (!opts.json) {
         if (result.status === "completed") {
@@ -569,6 +576,7 @@ program
           ? compiled.resumeFrom({ ...resumeOpts, signal, checkpointId: opts.from })
           : compiled.resume({ ...resumeOpts, signal }),
       );
+      printFailedUsage(result);
 
       if (!opts.json) {
         if (result.status === "completed") {

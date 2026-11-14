@@ -252,3 +252,15 @@ Developer loop: watch graph + skills, re-validate on change, pretty streaming, `
 ```
 
 The **same** graph file a developer runs locally with `--on-interrupt prompt --stream` runs here headless with `--on-interrupt fail` — one spec, two runtimes ([Architecture §8](./01-architecture.md#8-ci-vs-desktop-one-spec-two-runtimes)).
+
+
+### JSONL and logging
+
+`run --json` and `resume --json` keep stdout as JSONL events. Runtime logger
+messages go to stderr, including debug/info messages. `FLOWGRAPH_LOG_LEVEL=warn`
+limits console logs to warnings/errors; `FLOWGRAPH_LOG_LEVEL=silent` suppresses
+console logging while structured log events remain available. Failed runs print
+the thread id and known usage with pending/unknown/unpriced counts on stderr.
+Use terminal run event `data.usage` for machine-readable cumulative totals.
+Custom imported code must likewise keep arbitrary console output off stdout
+when it participates in a JSONL CLI run.

@@ -185,7 +185,7 @@ Other sinks (`console`, `jsonl`) ship in `@flowgraph/core` for zero-dependency l
 
 ## 6. Cost & token accounting
 
-Agent nodes emit `agent.usage` events (prompt/completion tokens, cost estimate per provider pricing table). The runtime aggregates per-node and per-run totals, surfaces them on `run.end`, exports them as OTel metrics, and can enforce a **budget** via a default hook:
+Agent nodes emit one `agent.usage` event per actual metered call. Replayed responses are not charged again. The runtime persists cumulative thread totals, includes them in `RunResult.usage` and terminal run events, and checks configured budgets before admitting more paid work. See [usage and budget boundaries](./07-runtime-and-execution.md#usage-and-budget-boundaries) for persistence, incomplete usage and provider limits.
 
 ```yaml
 runtime:

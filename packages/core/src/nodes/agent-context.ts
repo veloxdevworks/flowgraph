@@ -189,7 +189,7 @@ export function startAgentContext(args: {
               if (res.usage) args.onUsage(res.usage);
               return res.text;
             } catch (err) {
-              if (isGraphInterrupt(err)) throw err;
+              if (isGraphInterrupt(err) || ["BUDGET_EXCEEDED", "USAGE_UNRESOLVED"].includes(String((err as { code?: string }).code))) throw err;
               ctx.issue({
                 code: ISSUE_CODE.CONTEXT_SUMMARY_FAILED,
                 severity: "warning",

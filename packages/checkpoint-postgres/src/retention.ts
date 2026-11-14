@@ -20,6 +20,8 @@ import {
   defaultThreadRunOwner,
   type ThreadRunOwner,
   type ThreadRunInfo,
+
+  type UsageRecord,
   type ActiveThreadMark,
   type CheckpointThreadStatus,
   type ResolvedCheckpointRetention,
@@ -138,6 +140,14 @@ export async function migratePostgresCheckpointRetention(pool: pg.Pool, schema: 
       await client.query(`ALTER TABLE ${s}.fg_thread_run_claims ADD COLUMN owner JSONB`);
       await client.query(`INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('checkpoint', 6, $1)`, [Date.now()]);
       applied += 1;
+    }
+    const usageVersion = Number((await client.query<{ v: number | null }>(
+      `SELECT MAX(version) AS v FROM ${s}.fg_schema_migrations WHERE component = 'usage'`,
+    )).rows[0]?.v ?? 0);
+    if (usageVersion > 1) throw new Error("Usage schema is newer than this flowgraph supports");
+    if (usageVersion < 1) {
+      await client.query(`CREATE TABLE ${s}.fg_run_usage (thread_id TEXT PRIMARY KEY, record JSONB NOT NULL)`);
+      await client.query(`INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('usage', 1, $1)`, [Date.now()]);
     }
     await client.query("COMMIT");
     return applied;
@@ -323,6 +333,20 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
 
   noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
     this.threadPolicy.set(threadId, policy);
+  }
+
+  async readThreadUsage(threadId: string): Promise<UsageRecord | undefined> {
+    return (await this.db().query<{ record: UsageRecord }>(
+      `SELECT record FROM ${this.q}.fg_run_usage WHERE thread_id = $1`, [threadId],
+    )).rows[0]?.record;
+  }
+
+  async writeThreadUsage(threadId: string, record: UsageRecord): Promise<void> {
+    await this.db().query(
+      `INSERT INTO ${this.q}.fg_run_usage (thread_id, record) VALUES ($1, $2::jsonb)
+       ON CONFLICT (thread_id) DO UPDATE SET record = excluded.record`,
+      [threadId, JSON.stringify(record)],
+    );
   }
 
   /** Non-expiring execution claims are independent of checkpoint retention. */

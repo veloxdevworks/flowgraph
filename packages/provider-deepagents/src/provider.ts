@@ -13,6 +13,7 @@ import {
   type ChatModelLike,
   type ProviderAdapter,
   type ProviderRunContext,
+  type TokenUsage,
 } from "@flowgraph/core";
 
 export interface DeepAgentsProviderOptions {
@@ -59,9 +60,11 @@ async function tryCreateDeepAgent(
     ...extra,
   });
 
-  const result = await agent.invoke({
-    messages: [{ role: "user", content: req.prompt }],
-  });
+  const invoke = () => agent.invoke({ messages: [{ role: "user", content: req.prompt }] });
+  // The native SDK owns its internal model loop. Account for that operation
+  // explicitly rather than inheriting the fallback's per-model capability
+  // while silently bypassing metering. Internal call granularity needs SDK support.
+  const result = ctx.meterCall ? await ctx.meterCall(invoke, { usage: nativeUsage }) : await invoke();
   const rec = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
   const messages = rec["messages"];
   let text = "";
@@ -99,7 +102,7 @@ export function createDeepAgentsProvider(options: DeepAgentsProviderOptions): Pr
           return da;
         }
       } catch (err) {
-        if (isGraphInterrupt(err)) throw err;
+        if (isGraphInterrupt(err) || (err as { retryable?: boolean })?.retryable === false) throw err;
         ctx.node.logger.warn(
           `deepagents hub failed (${err instanceof Error ? err.message : String(err)}); falling back to LangChain loop.`,
         );
@@ -107,4 +110,19 @@ export function createDeepAgentsProvider(options: DeepAgentsProviderOptions): Pr
       return fallback.run(req, ctx);
     },
   };
+}
+
+function nativeUsage(result: unknown): TokenUsage | undefined {
+  const messages = (result as { messages?: unknown[] } | null)?.messages;
+  if (!Array.isArray(messages)) return undefined;
+  let usage: TokenUsage | undefined;
+  for (const message of messages) {
+    const meta = (message as { usage_metadata?: { input_tokens?: number; output_tokens?: number; total_tokens?: number } } | null)?.usage_metadata;
+    if (!meta) continue;
+    usage ??= { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    usage.inputTokens! += meta.input_tokens ?? 0;
+    usage.outputTokens! += meta.output_tokens ?? 0;
+    usage.totalTokens! += meta.total_tokens ?? (meta.input_tokens ?? 0) + (meta.output_tokens ?? 0);
+  }
+  return usage;
 }

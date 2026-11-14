@@ -442,3 +442,52 @@ To measure retention overhead locally, build the repository and run
 Unit regressions count state deserializations rather than imposing a noisy
 wall-clock threshold. PostgreSQL CI reruns its integration suite against the
 same database after the full test run, guarding fixture reuse and cleanup.
+
+### Usage and budget boundaries
+
+`RunResult.usage`, `run.end`, `run.error`, `run.aborted` and `run.paused` carry
+cumulative thread totals: `inputTokens`, `outputTokens`, `totalTokens`, `costUSD`,
+`calls`, `unpricedCalls`, `unreportedTokenCalls`, `unknownCalls` and `pendingCalls`. USD totals include
+reported prices or media estimates. `unreportedTokenCalls` counts model/provider
+operations without reported tokens. A total of zero with pending, unknown or
+unpriced calls does not mean the provider charged nothing. Synchronous media
+jobs emit `custom.media.job` phase `done` with cost information; media output and
+completion events distinguish known/estimated prices.
+
+Graph templates can read current totals as `run.usage`. For example, declare a
+`bill` object channel and use `with.output.map.bill: "{{ run.usage }}"` on an
+agent to copy usage into graph state. This preserves the provider's original
+output shape and avoids parsing events. Ordinary output mappings and later nodes
+see usage already recorded for completed calls.
+
+SQLite/PostgreSQL savers persist the ledger in `fg_run_usage` (component schema
+`usage: 1`), independently of checkpoint retention. Spending survives an approval
+and a new process, retries, errors and finished-thread pruning. All writers must
+use the accounting-aware runtime. Memory savers persist for the lifetime of that
+saver instance. A custom durable saver needs both `UsageCheckpointStore` and
+`ThreadRunCoordinator`; otherwise accounting is process-local to that saver.
+Totals belong to the thread id; use a new id for a separate budget.
+
+The meter writes a pending receipt before a paid call and durable totals before
+a tool can pause execution. A crash leaves the unfinished receipt and the
+execution claim for reconciliation. A timeout can return with `pendingCalls > 0`
+while an uncooperative vendor call is still running; if it later reports usage,
+the ledger is updated. A failed usage write leaves its pending receipt intact.
+The runtime refuses another call when an inherited receipt is unresolved. Hard
+budgets also refuse further calls with unknown completed outcomes. Quiesce the
+owner and reconcile provider outcomes before updating that thread's usage record
+through `UsageCheckpointStore` and clearing any inspected execution claim. No
+automatic timeout-based reset, vendor cancellation guarantee or exactly-once
+billing guarantee is implied.
+
+With `onExceed: fail|interrupt`, paid calls within a thread are admitted serially.
+Known media estimates that exceed remaining USD are rejected before purchase.
+Built-in LangChain loops check actual spend between calls, including summary and
+structured-finalization calls, so fanout cannot multiply the number of admitted
+unknown-price calls. A first call with unknown final usage may exceed a cap by
+that call's response; configure provider/context limits too. Opaque SDK/legacy
+providers have one admission boundary per provider operation, which may contain
+multiple internal model calls. `warn` deliberately permits continued work and
+concurrency. Exceeded-budget messages preserve small cost differences instead of
+rounding to four decimal places. LangChain has no USD price table; validation
+warns that `maxUSD` cannot cap its unpriced calls.

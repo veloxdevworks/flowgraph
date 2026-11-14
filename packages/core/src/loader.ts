@@ -18,6 +18,7 @@ import {
   subgraphOutputSites,
   unknownSubgraphOutputDiagnostics,
 } from "./runtime/validate-graph.js";
+import { walkNodes } from "./discover-skills.js";
 import { registry } from "./registry.js";
 import { setGraphFile, subgraphAliases } from "./runtime/graph-files.js";
 import "./nodes/index.js";
@@ -265,6 +266,14 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
     }
   }
 
+  if (spec.runtime?.budget?.maxUSD !== undefined) walkNodes(spec, node => {
+    const provider = typeof node.provider === "string" ? node.provider : spec.config?.defaults?.provider;
+    const modelNode = ["agent", "intelligent"].includes(String(node.type)) || node.type === "router" && (node.with as { mode?: string } | undefined)?.mode === "model";
+    if (modelNode && (!provider || provider === "langchain" || spec.providers?.[provider]?.kind === "langchain")) {
+      diagnostics.push({ severity: "warning", code: "BUDGET_USD_UNPRICED", path: `nodes.${node.id}`,
+        message: "LangChain reports tokens without model pricing; maxUSD cannot cap those calls. Use maxTokens or a provider that reports costUSD." });
+    }
+  });
   diagnostics.push(...graphLintDiagnostics(spec));
 
   return diagnostics;
