@@ -27,6 +27,7 @@ import type { NodeRunContext } from "../context.js";
 import { assertHostProbeAllowed, nodePolicyOf } from "../node-policy.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
+import { secretScope } from "../runtime/secret-scope.js";
 import { findMissingBins, missingToolIssue } from "../runtime/requires.js";
 
 const configSchema = ScriptWithSchema;
@@ -292,6 +293,7 @@ export const scriptNode = defineNode<Config>({
           input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
           config: ctx.config,
           run: ctx.meta,
+          secret: secretScope(ctx),
         };
 
         const input = config.input

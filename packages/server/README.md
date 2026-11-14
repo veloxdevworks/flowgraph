@@ -186,9 +186,12 @@ Errors are generic to callers; upstream vendor detail is only logged server-side
 
 ## Limits
 
+The server binds to `127.0.0.1` by default. Set `FLOWGRAPH_HOST=0.0.0.0` explicitly for containers or remote clients, and configure authentication before exposing the listener.
+
 | Env | Default | Purpose |
 |---|---|---|
 | `FLOWGRAPH_MAX_BODY_BYTES` | `2000000` | JSON body cap for `POST /runs` and control endpoints (`0` = unlimited) |
+| `FLOWGRAPH_HOST` | `127.0.0.1` | Listener address; set `0.0.0.0` explicitly for remote access. |
 | `FLOWGRAPH_ARTIFACT_MAX_BYTES` | `4294967296` (4 GiB) | Largest artifact `PUT /worker/artifacts/:sha256` accepts (`0` = unlimited). Over the limit: 413 `ARTIFACT_TOO_LARGE`. |
 | `FLOWGRAPH_ERROR_ID_KEY` | _(unset)_ | Key (at least 16 characters) for the error ids that replace system error text in run events, issues and state. Unset: random per process, so ids change on restart; set the same key on every replica to keep ids stable across them. Never logged or returned |
 | `FLOWGRAPH_MAX_CONCURRENT_RUNS` | `16` | In-flight `running`/`started` threads per process (`0` = unlimited) |

@@ -120,7 +120,15 @@ async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): 
   }
 
   if (cfg.baseUrl) {
-    modelOpts["baseUrl"] = cfg.baseUrl;
+    if (vendor === "openai") {
+      const configuration = modelOpts["configuration"];
+      modelOpts["configuration"] = {
+        ...(configuration && typeof configuration === "object" ? configuration : {}),
+        baseURL: cfg.baseUrl,
+      };
+    } else {
+      modelOpts["baseUrl"] = cfg.baseUrl;
+    }
   }
 
   // Bedrock authenticates through the AWS SDK, not a single API key string.

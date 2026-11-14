@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerFunction } from "@flowgraph/core";
 import { RunService } from "./run-service.js";
 import type { ServerConfig } from "./types.js";
@@ -50,10 +50,29 @@ describe("RunService", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     // The run writes its meta file after startRun returns. close() waits for
     // every pending meta write, so the directory is empty of writers here.
     await service?.close();
     await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("does not expose the server environment to a hosted shell graph", async () => {
+    vi.stubEnv("FGQA_SERVER_DECOY", "decoy-only");
+    const threadId = "qa-server-env";
+    await service.startRun({ threadId, yaml: JSON.stringify({
+      apiVersion: "flowgraph/v1", kind: "Graph", metadata: { name: "hosted-shell" },
+      state: { channels: { answer: { type: "object" } } },
+      nodes: [{ id: "execute", type: "shell", with: {
+        command: process.execPath,
+        args: ["-e", "process.stdout.write(process.env.FGQA_SERVER_DECOY ?? 'absent')"],
+        output: { to: "answer" },
+      } }],
+      edges: [{ from: "START", to: "execute" }, { from: "execute", to: "END" }],
+    }) });
+    await vi.waitFor(() => expect(service.registry.get(threadId)?.status).toBe("completed"), { timeout: 5_000 });
+    const snapshot = (await service.getState(threadId)).state;
+    expect(snapshot?.values["answer"]).toMatchObject({ stdout: "absent" });
   });
 
   it("rejects client secrets", async () => {

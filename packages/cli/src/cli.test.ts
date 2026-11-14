@@ -77,6 +77,7 @@ describe("templates", () => {
 
   it("agent template declares a langchain provider block", () => {
     const result = templateFor("agent", "demo");
+    expect(result?.files[0]?.content).toContain("model: CHOOSE_A_MODEL");
     const graph = result!.files[0]!.content;
     expect(graph).toContain("providers:");
     expect(graph).toContain("vendor: openai");

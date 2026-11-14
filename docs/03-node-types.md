@@ -276,6 +276,8 @@ The primary escape hatch for custom logic: run any CLI, script, or shell pipelin
 
 **Input:** optional `with.input` is rendered, JSON-stringified into the `FLOWGRAPH_INPUT` env var, and also written to the child's stdin — same convention as skill `kind_of: command` handlers.
 
+**Environment:** shell children receive `PATH` and, on Windows, `SystemRoot`/`WINDIR`. Pass other host variables by name with `with.inheritEnv: [HOME, CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"`. Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
+
 **Defaults:** timeout `30s`, `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
 
 Declare toolchains with `requires` so missing binaries are caught at preflight and (optionally) skipped instead of failing the run:

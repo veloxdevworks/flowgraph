@@ -31,6 +31,7 @@ import type {
 } from "../types.js";
 import type { ContextMessage, ProviderContextManager } from "../../context/types.js";
 import { toLangChainMessage } from "../../context/messages.js";
+import { redactProviderErrors } from "../redact-errors.js";
 
 // Minimal structural type for a LangChain chat model (avoids a hard type dep
 // on a specific @langchain/core version's class shape).
@@ -52,7 +53,7 @@ export function createLangChainProvider(
 ): ProviderAdapter {
   const name = options.name ?? "langchain";
 
-  return {
+  return redactProviderErrors({
     name,
     capabilities: {
       toolCalling: typeof model.bindTools === "function",
@@ -145,7 +146,7 @@ export function createLangChainProvider(
 
       return { output, steps, usage, stopReason };
     },
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------

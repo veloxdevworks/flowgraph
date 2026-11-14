@@ -229,12 +229,12 @@ metadata:
   name: ${name}
   description: An agent (LLM) node that can call tools.
 
-# Requires OPENAI_API_KEY and: pnpm add @langchain/openai
+# Set your chosen model below. Requires OPENAI_API_KEY and: pnpm add @langchain/openai
 providers:
   openai:
     kind: langchain
     vendor: openai
-    model: gpt-4o
+    model: CHOOSE_A_MODEL
 
 config:
   defaults:

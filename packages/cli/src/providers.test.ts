@@ -14,6 +14,20 @@ describe("buildProviders", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("never detects or substitutes a local CLI for a declared SDK provider", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "");
+    vi.stubEnv("FGQA_EXPLICIT_KEY", "decoy-only");
+    const detect = vi.spyOn(core, "detectLocalCli").mockResolvedValue({ ok: true, binary: "codex" });
+    const local = vi.spyOn(core, "createCliProvider");
+    const cfg = { kind: "langchain", vendor: "openai", model: "test-model", apiKeyEnv: "FGQA_EXPLICIT_KEY", baseUrl: "http://127.0.0.1:1/v1" };
+    const providers = await buildProviders({ metadata: { name: "explicit-provider" }, nodes: [], edges: [], providers: { main: cfg } } as unknown as GraphSpec);
+    expect(detect).not.toHaveBeenCalled();
+    expect(local).not.toHaveBeenCalled();
+    expect(core.createLangChainProviderFromConfig).toHaveBeenCalledWith("main", cfg, expect.any(Object));
+    expect(providers[0]?.name).toBe("main");
   });
 
   it("builds named providers from spec.providers", async () => {

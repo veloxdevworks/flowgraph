@@ -11,7 +11,8 @@ import { ShellWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import { assertHostProbeAllowed, nodePolicyOf } from "../node-policy.js";
+import { assertHostProbeAllowed, assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
+import { secretScope } from "../runtime/secret-scope.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import {
@@ -54,6 +55,7 @@ export const shellNode = defineNode<Config>({
           input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
           config: ctx.config,
           run: ctx.meta,
+          secret: secretScope(ctx),
         };
 
         const command = normalizeShellText(String(renderDeep(config.command, scope)));
@@ -103,10 +105,12 @@ export const shellNode = defineNode<Config>({
           throw new Error(missingToolIssue(missing, { command, skipped: false }).message);
         }
 
-        const env: NodeJS.ProcessEnv = {
-          ...process.env,
-          ...renderedEnv,
-        };
+        const env: NodeJS.ProcessEnv = {};
+        for (const name of ["PATH", "SystemRoot", "WINDIR", ...(config.inheritEnv ?? [])]) {
+          if (config.inheritEnv?.includes(name)) assertSecretAllowed(nodePolicyOf(ctx), name, `shell node "${ctx.nodeId}"`);
+          if (Object.hasOwn(process.env, name)) env[name] = process.env[name];
+        }
+        Object.assign(env, renderedEnv);
         let stdinData: string | undefined;
         if (input !== undefined) {
           const payload = JSON.stringify(input);
