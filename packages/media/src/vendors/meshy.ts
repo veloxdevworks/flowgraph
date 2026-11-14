@@ -300,6 +300,7 @@ export const meshyVendor: MediaVendor = {
     return {
       name: opts.name,
       vendor: VENDOR,
+      submissionTransport: "fetch",
       modalities: ["model3d"],
       models: { model3d: ["latest", "meshy-7.1", "meshy-6", "meshy-6-lite", "meshy-t2.5", "meshy-t2"] },
       maxPerJob: { model3d: 1 },

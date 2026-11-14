@@ -110,3 +110,94 @@ it("allows only one submission for concurrent callers sharing a file journal", a
   ]);
   expect(start).toHaveBeenCalledTimes(1);
 });
+
+it("persists an immediate completion's estimated cost before reuse", async () => {
+  const opts = await fixture();
+  await writeFile(join(opts.workspace, "output.png"), "image");
+  const start = vi.fn(async () => ({
+    id: "sync",
+    done: [{ kind: "artifact" as const, path: "output.png", mimeType: "image/png", sizeBytes: 5 }],
+  }));
+  const provider: MediaProvider = {
+    name: "fake",
+    vendor: "fake",
+    modalities: ["image"],
+    start,
+    estimateCostUSD: () => 0.04,
+  };
+  expect(await runMediaJob({ ...opts, provider })).toMatchObject({ costUSD: 0.04 });
+  expect(await opts.journal.read()).toMatchObject({ state: "done", costUSD: 0.04 });
+  expect(await runMediaJob({ ...opts, provider })).toMatchObject({ costUSD: 0, reused: true });
+  expect(start).toHaveBeenCalledTimes(1);
+});
+
+it("waits for admitted fanout siblings to journal completion before returning failure", async () => {
+  const { compileGraph } = await import("../compiler.js");
+  const { GraphSpecSchema } = await import("@flowgraph/spec");
+  const opts = await fixture();
+  await writeFile(join(opts.workspace, "sibling.png"), "image");
+  let release!: () => void,
+    both!: () => void,
+    calls = 0,
+    settled = false;
+  const hold = new Promise<void>((r) => {
+      release = r;
+    }),
+    started = new Promise<void>((r) => {
+      both = r;
+    });
+  const provider: MediaProvider = {
+    name: "fake",
+    vendor: "fake",
+    modalities: ["image"],
+    maxPerJob: { image: 1 },
+    async start() {
+      if (calls++ === 0) throw new Error("sibling failed");
+      both();
+      await hold;
+      return {
+        id: "saved",
+        costUSD: 0.02,
+        done: [{ kind: "artifact", path: "sibling.png", mimeType: "image/png", sizeBytes: 5 }],
+      };
+    },
+  };
+  const spec = GraphSpecSchema.parse({
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: "fanout" },
+    nodes: [{ id: "img", type: "image", provider: "fake", with: { prompt: "test", count: 2 } }],
+    edges: [
+      { from: "START", to: "img" },
+      { from: "img", to: "END" },
+    ],
+  });
+  const run = (await compileGraph(spec, { cwd: opts.workspace, mediaProviders: [provider] }))
+    .run({ threadId: "fanout" })
+    .then((result) => {
+      settled = true;
+      return result;
+    });
+  try {
+    await started;
+    await new Promise<void>((r) => setImmediate(r));
+    expect(settled).toBe(false);
+  } finally {
+    release();
+  }
+  expect(await run).toMatchObject({
+    status: "error",
+    usage: { costUSD: 0.02, calls: 2, unknownCalls: 1 },
+  });
+  const rows = await readdir(join(opts.workspace, ".flowgraph/jobs/fanout"));
+  let completed = false;
+  for (const file of rows) {
+    const { readFile } = await import("node:fs/promises");
+    if (
+      JSON.parse(await readFile(join(opts.workspace, ".flowgraph/jobs/fanout", file), "utf8"))
+        .state === "done"
+    )
+      completed = true;
+  }
+  expect(completed).toBe(true);
+});

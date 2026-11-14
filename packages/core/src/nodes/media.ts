@@ -219,7 +219,7 @@ function buildMediaNode(spec: ModalitySpec) {
           const counts = splitCounts(total, perJob);
           const jobScope = ctx.meta.threadId ?? ctx.meta.runId;
 
-          const results = await Promise.all(
+          const settled = await Promise.allSettled(
             counts.map(async (count, jobIndex) => {
               const req: MediaRequest = { ...base, count };
               const fingerprint = fingerprintRequest(provider.name, req, jobIndex, variant);
@@ -250,12 +250,15 @@ function buildMediaNode(spec: ModalitySpec) {
                 journal: createFileJournal({ workspace: ctx.workspace, scope: jobScope, nodeId, fingerprint }),
                 workspace: ctx.workspace,
                 timeout: config.timeout ?? spec.defaultTimeout,
-                ...(ctx.accounting ? { meter: (invoke: () => Promise<import("../media/run-job.js").MediaJobResult>, estimateUSD: number | undefined) => ctx.accounting!.call(ctx, invoke, { kind: "media", estimateUSD, usage: result => result.costKnown ? { costUSD: result.costUSD } : undefined }) } : {}),
+                ...(ctx.accounting ? { meter: (invoke: () => Promise<import("../media/run-job.js").MediaJobResult>, estimateUSD: number | undefined) => ctx.accounting!.call(ctx, invoke, { kind: "media", estimateUSD, usage: result => result.costKnown ? { costUSD: result.costUSD } : undefined, errorUsage: error => (error as {mediaNotBilled?:boolean}|null)?.mediaNotBilled ? {costUSD:0,totalTokens:0,inputTokens:0,outputTokens:0} : undefined }) } : {}),
                 emit: (phase, data) => ctx.emit("custom.media.job", { nodeId, modality, fingerprint, phase, ...data }),
               });
             }),
           );
 
+          const failed=settled.find(result=>result.status==="rejected");
+          if(failed?.status==="rejected")throw failed.reason;
+          const results=settled.flatMap(result=>result.status==="fulfilled"?[result.value]:[]);
           const artifacts: Artifact[] = results.flatMap((r) => r.artifacts);
           const costUSD = results.reduce((sum, r) => sum + r.costUSD, 0);
           if (ctx.accounting) ctx.accounting.enforce(ctx);

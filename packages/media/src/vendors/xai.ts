@@ -295,6 +295,7 @@ export const xaiVendor: MediaVendor = {
     return {
       name: opts.name,
       vendor: VENDOR,
+      submissionTransport: "fetch",
       modalities: ["image", "video"],
       models: {
         image: ["grok-imagine-image-2.0", "grok-imagine-image"],

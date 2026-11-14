@@ -379,6 +379,7 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
   return {
     name: opts.name,
     vendor: VENDOR,
+    submissionTransport: "fetch",
     modalities: ["image"],
     models: { image: MODELS },
     maxPerJob: { image: MAX_PER_JOB },

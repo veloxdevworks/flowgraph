@@ -67,7 +67,23 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
       if (!await journal.reserve(intent)) throw Object.assign(new Error("Media journal changed before submission; inspect/retry without submitting another request"), { code: "MEDIA_SUBMISSION_UNCERTAIN", retryable: false });
     } else await journal.write(intent);
     opts.emit("intent", { provider: provider.name, submissionId });
-    handle = await provider.start(req, { ...mctx, submissionId });
+    let attempted=false,accepted=false;
+    const trackedFetch:typeof fetch=async(input,init)=>{
+      attempted=true;
+      const response=await mctx.fetch(input,init);
+      const method=(init?.method??(typeof input==="object"&&"method" in input?input.method:"GET")).toUpperCase();
+      if(response.ok&&method!=="GET"&&method!=="HEAD")accepted=true;
+      return response;
+    };
+    try {handle = await provider.start(req, { ...mctx, submissionId,fetch:trackedFetch });}
+    catch(error){
+      const explicit=(error as {mediaSubmissionRejected?:boolean}|null)?.mediaSubmissionRejected===true;
+      if(explicit||provider.submissionTransport==="fetch"&&!accepted&&(!attempted||unacceptedRequest(error))){
+        await journal.remove();
+        throw Object.assign(error instanceof Error?error:new Error(String(error)),{mediaNotBilled:true});
+      }
+      throw error;
+    }
     submittedAt = new Date().toISOString();
     const immediateCost = handle.costUSD ?? estimate;
     await journal.write({
@@ -150,4 +166,16 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
   });
   opts.emit("done", { provider: provider.name, jobId: handle.id, artifacts: artifacts.length, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, ...(reportedCost === undefined ? {} : { costUSD }) });
   return { artifacts, costUSD, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, reused: false };
+}
+
+/** Rejected HTTP requests and failures before a connection; never resets/timeouts/5xx. */
+function unacceptedRequest(error:unknown):boolean {
+  let current=error;
+  for(let i=0;i<5&&current&&typeof current==="object";i++){
+    const e=current as {status?:unknown;statusCode?:unknown;code?:unknown;cause?:unknown};
+    if([400,401,403,404,405,413,415,422,429].includes(Number(e.status??e.statusCode)))return true;
+    if(["ECONNREFUSED","ENOTFOUND","EAI_AGAIN"].includes(String(e.code)))return true;
+    current=e.cause;
+  }
+  return false;
 }

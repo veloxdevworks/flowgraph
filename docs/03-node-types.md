@@ -1332,3 +1332,13 @@ export default [s3Put];   // registered when the package is imported
 ```
 
 Custom nodes get the full runtime treatment (events, hooks, tracing, retries) automatically. They should declare accurate `capabilities` (especially `sideEffecting`) so replay/retry stays safe. Where a node depends on environment/tools, prefer expressing those as a **skill** or documenting them so preflight can warn.
+
+Media adapter recovery distinguishes rejected submissions from uncertain outcomes.
+Built-in adapters declare `submissionTransport: "fetch"`: all paid submissions use
+`ctx.fetch`, allowing a missing key, validation failure, rejected request or
+connection refusal before acceptance to clear intent and record zero usage.
+Timeouts, resets, 5xx failures and errors after an accepted mutation stay uncertain.
+Custom adapters can throw `MediaSubmissionRejectedError` only when the entire
+submission was definitely unaccepted; opaque SDK failures remain uncertain by
+default. Fanout waits for admitted jobs to settle and persist results/cost before
+reporting a sibling failure.

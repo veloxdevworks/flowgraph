@@ -474,6 +474,7 @@ export const elevenlabsVendor: MediaVendor = {
     return {
       name: opts.name,
       vendor: VENDOR,
+      submissionTransport: "fetch",
       modalities: ["audio"],
       audioKinds: ["speech", "sfx", "music"],
       models: {
