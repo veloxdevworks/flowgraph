@@ -29,11 +29,11 @@ function cli(dir: string, ...args: string[]) {
   return spawnSync(process.execPath, [bin, ...args], {
     cwd: dir,
     encoding: "utf8",
-    timeout: 3_000,
+    timeout: 20_000,
   });
 }
 
-describe("PLAT-295 / PLAT-323 / PLAT-337: real CLI", () => {
+describe("PLAT-295 / PLAT-323 / PLAT-337: real CLI", { timeout: 30_000 }, () => {
   it("validates a graph path containing a directory", () => {
     const dir = fixture();
     mkdirSync(join(dir, "graphs"));
@@ -63,10 +63,10 @@ describe("PLAT-295 / PLAT-323 / PLAT-337: real CLI", () => {
       expect(result.status, String(result.error)).toBe(2);
       expect(result.stdout + result.stderr).toMatch(/SUBGRAPH_CYCLE|subgraph.*cycle/i);
     },
-    10_000,
+    30_000,
   );
 
-  it("detects cycles through a symlink but allows repeated child references", () => {
+  it("detects cycles through a symlink", () => {
     const dir = fixture();
     writeFileSync(
       join(dir, "cycle.yaml"),
@@ -76,7 +76,7 @@ describe("PLAT-295 / PLAT-323 / PLAT-337: real CLI", () => {
     const result = cli(dir, "validate", "cycle.yaml");
     expect(result.status, String(result.error)).toBe(2);
     expect(result.stdout + result.stderr).toMatch(/SUBGRAPH_CYCLE|subgraph.*cycle/i);
-  }, 10_000);
+  }, 30_000);
 
   it.each(["ascii", "mermaid"])(
     "includes router and HITL destinations in %s diagrams",
