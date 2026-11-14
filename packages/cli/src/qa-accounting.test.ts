@@ -69,4 +69,45 @@ it("retains completed usage and an unresolved receipt when a paid-call process i
     expect(Object.keys(record?.pending ?? {})).toHaveLength(1);
     expect(backend.db.prepare("SELECT COUNT(*) AS n FROM fg_thread_run_claims WHERE thread_id='crash'").get()).toEqual({ n: 1 });
   } finally { backend.close(); }
+  const cli = (...args: string[]) => spawnSync(process.execPath, [resolve(import.meta.dirname, "../dist/bin.js"), ...args], { cwd: dir, encoding: "utf8", timeout: 25_000 });
+  const inspected = JSON.parse(cli("thread", "inspect", "flow.yaml", "--thread", "crash").stdout).claim;
+  expect(cli("thread", "release", "flow.yaml", "--thread", "crash", "--token", inspected.token, "--owner-stopped").status).toBe(0);
+  const usage = JSON.parse(cli("usage", "inspect", "flow.yaml", "--thread", "crash").stdout).usage;
+  const receipt = Object.keys(usage.pending)[0]!;
+  const resolved = cli("usage", "resolve", "flow.yaml", "--thread", "crash", "--receipt", receipt, "--not-billed", "--owner-stopped");
+  expect(resolved.status, resolved.stderr).toBe(0);
+  expect(JSON.parse(resolved.stdout).usage.totals).toMatchObject({ calls: 2, totalTokens: 7, costUSD: 0.002, unknownCalls: 0 });
+  expect(JSON.parse(resolved.stdout).usage.pending).toEqual({});
+
 }, 30_000);
+
+it("reconciles an ambiguous receipt through the CLI and resumes under the original hard cap", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fg-usage-resolve-")); dirs.push(dir);
+  writeFileSync(join(dir, "provider.mjs"), `
+    import { existsSync, writeFileSync } from 'node:fs';
+    export default [{ name:'usage-qa', capabilities:{toolCalling:true,structuredOutput:false,streaming:false,callAccounting:true}, async run(req,ctx) {
+      const usage = await ctx.meterCall(async () => {
+        if (!existsSync('attempted')) { writeFileSync('attempted','yes'); throw Object.assign(new Error('connection reset'),{code:'ECONNRESET'}); }
+        return {totalTokens:7,costUSD:0.002};
+      }, {usage:value=>value});
+      return {output:'done',usage,stopReason:'done'};
+    }}];
+  `);
+  writeFileSync(join(dir, "flow.yaml"), JSON.stringify({ apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"usage-resolve"},imports:[{providers:"./provider.mjs"}],nodes:[{id:"a",type:"agent",provider:"usage-qa",with:{prompt:"answer"}}],edges:[{from:"START",to:"a"},{from:"a",to:"END"}],runtime:{checkpoint:{backend:"sqlite",path:"cp.db"},budget:{maxTokens:10,onExceed:"fail"}} }));
+  const cli = (...args: string[]) => spawnSync(process.execPath, [resolve(import.meta.dirname, "../dist/bin.js"), ...args], {cwd:dir,encoding:"utf8",timeout:25_000});
+  expect(cli("run","flow.yaml","--thread","resolve","--json").status).toBe(1);
+  const blocked = cli("resume","flow.yaml","--thread","resolve","--resume","true","--json");
+  expect(blocked.status).toBe(1); expect(blocked.stdout+blocked.stderr).toContain("USAGE_UNRESOLVED");
+  const inspected = cli("usage","inspect","--backend","sqlite","--path",join(dir,"cp.db"),"--thread","resolve");
+  expect(inspected.status,inspected.stderr).toBe(0);
+  const receipt = Object.keys(JSON.parse(inspected.stdout).usage.unresolved)[0]!;
+  const args = ["usage","resolve","flow.yaml","--thread","resolve","--receipt",receipt,"--tokens","3","--cost-usd","0.002"];
+  expect(cli(...args).status).toBe(1);
+  const resolved = cli(...args,"--owner-stopped"); expect(resolved.status,resolved.stderr).toBe(0);
+  expect(JSON.parse(resolved.stdout).usage.totals).toMatchObject({totalTokens:3,costUSD:0.002,unknownCalls:0});
+  expect(cli(...args,"--owner-stopped").status).toBe(1);
+  const resumed = cli("resume","flow.yaml","--thread","resolve","--resume","true","--json");
+  expect(resumed.status,resumed.stdout+resumed.stderr).toBe(0);
+  const end = resumed.stdout.trim().split("\n").map(line=>JSON.parse(line)).find(event=>event.type==="run.end");
+  expect(end.data.usage).toMatchObject({totalTokens:10,costUSD:0.004,calls:2,unknownCalls:0,pendingCalls:0});
+},85_000);

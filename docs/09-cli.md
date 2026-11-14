@@ -264,3 +264,36 @@ the thread id and known usage with pending/unknown/unpriced counts on stderr.
 Use terminal run event `data.usage` for machine-readable cumulative totals.
 Custom imported code must likewise keep arbitrary console output off stdout
 when it participates in a JSONL CLI run.
+
+### Inspecting and reconciling usage
+
+`flowgraph usage inspect [graph] --thread <id>` prints the persisted ledger,
+including pending and unresolved receipt ids. After stopping/reconciling the old
+owner and provider outcome, resolve an exact receipt:
+
+```bash
+flowgraph usage resolve graph.yaml --thread issue-123 --receipt <id> --tokens 120 --cost-usd 0.002 --owner-stopped
+flowgraph usage resolve graph.yaml --thread issue-123 --receipt <id> --not-billed --owner-stopped
+```
+
+Supply actual usage for the receipt, or `--not-billed` only for confirmed zero
+usage. Negative/non-finite values, conflicting options and duplicate resolution
+are refused. Under a token cap, resolving only USD leaves token uncertainty to
+reconcile before another paid call. Completed charges survive recovery.
+
+A crashed execution can also leave an ownership claim. Use `flowgraph thread
+inspect graph.yaml --thread <id>`, stop/reconcile the recorded owner and external
+work, then `flowgraph thread release graph.yaml --thread <id> --token <exact-token>
+--owner-stopped` before resolving usage. Release refuses a live local owner or a
+stale token. Neither claims nor usage receipts expire automatically.
+
+For a database configured by a server/host rather than the graph, both command
+groups accept `--backend sqlite|postgres --path <database>` and an optional graph:
+
+```bash
+flowgraph usage inspect --backend sqlite --path /data/checkpoints.db --thread issue-123
+flowgraph thread inspect --backend postgres --path "$DATABASE_URL" --thread issue-123
+```
+
+See [usage and budget boundaries](./07-runtime-and-execution.md#usage-and-budget-boundaries)
+for late results, legacy receipts and pricing limitations.

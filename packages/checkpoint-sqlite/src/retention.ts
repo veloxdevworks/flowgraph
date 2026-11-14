@@ -289,6 +289,15 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     ).run(threadId, JSON.stringify(record));
   }
 
+  compareThreadUsage(threadId: string, revision: number, record: UsageRecord): boolean {
+    this.setup();
+    return this.sqlite.transaction(() => {
+      const current = this.readThreadUsage(threadId);
+      if ((current?.revision ?? 0) !== revision) return false;
+      this.writeThreadUsage(threadId, record); return true;
+    }).immediate();
+  }
+
   /** Non-expiring execution claims are independent of checkpoint retention. */
   acquireThreadRun(threadId: string, owner: ThreadRunOwner = defaultThreadRunOwner()): { release(): void } | null {
     this.setup();

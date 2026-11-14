@@ -466,6 +466,7 @@ and a new process, retries, errors and finished-thread pruning. All writers must
 use the accounting-aware runtime. Memory savers persist for the lifetime of that
 saver instance. A custom durable saver needs both `UsageCheckpointStore` and
 `ThreadRunCoordinator`; otherwise accounting is process-local to that saver.
+Implement `compareThreadUsage` to atomically merge late results across processes.
 Totals belong to the thread id; use a new id for a separate budget.
 
 The meter writes a pending receipt before a paid call and durable totals before
@@ -473,12 +474,35 @@ a tool can pause execution. A crash leaves the unfinished receipt and the
 execution claim for reconciliation. A timeout can return with `pendingCalls > 0`
 while an uncooperative vendor call is still running; if it later reports usage,
 the ledger is updated. A failed usage write leaves its pending receipt intact.
-The runtime refuses another call when an inherited receipt is unresolved. Hard
-budgets also refuse further calls with unknown completed outcomes. Quiesce the
-owner and reconcile provider outcomes before updating that thread's usage record
-through `UsageCheckpointStore` and clearing any inspected execution claim. No
-automatic timeout-based reset, vendor cancellation guarantee or exactly-once
-billing guarantee is implied.
+Without a hard cap, uncertain outcomes produce a warning and visible counts;
+new calls can proceed and late results merge without overwriting newer charges.
+A custom durable saver without atomic comparison must first reconcile inherited
+pending receipts. Hard budgets refuse new calls while earlier usage is uncertain.
+Built-in LangChain requests rejected before a response with 401/403/429 or a
+connection-refused/DNS error record known zero usage, so node retries still work.
+Resets, timeouts, server errors and failures after streaming starts remain uncertain.
+
+Recovery is explicit. Stop the recorded owner and reconcile its external work.
+After a crash, inspect and release its execution claim as described above. Then:
+
+```bash
+flowgraph usage inspect graph.yaml --thread issue-123
+flowgraph usage resolve graph.yaml --thread issue-123 --receipt <inspected-id> --tokens 120 --cost-usd 0.002 --owner-stopped
+# Or, only when the provider confirms it was not billed:
+flowgraph usage resolve graph.yaml --thread issue-123 --receipt <inspected-id> --not-billed --owner-stopped
+```
+
+Report the receipt's full actual usage; any already recorded partial usage is
+adjusted rather than charged twice. Reconciliation retains an audit record and
+ignores a later response for the same resolved receipt. A legacy ledger without
+receipt ids exposes `legacy-unreported`: report only the additional previously
+unreported usage for that group, preserving its existing known totals. Partial
+reconciliation leaves missing token dimensions visible. The API equivalents are
+`inspectThreadUsage` and `resolveThreadUsage`; resolving acquires the thread claim
+and refuses a live owner. For host-configured databases, omit the graph and use
+`--backend sqlite --path /path/to/checkpoints.db` (or `--backend postgres --path
+<connection-string>`) on both `thread` and `usage` commands. No receipt expires
+automatically, and no vendor cancellation or exactly-once billing is guaranteed.
 
 With `onExceed: fail|interrupt`, paid calls within a thread are admitted serially.
 Known media estimates that exceed remaining USD are rejected before purchase.

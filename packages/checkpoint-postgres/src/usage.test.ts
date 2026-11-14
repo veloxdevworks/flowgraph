@@ -28,3 +28,23 @@ describe.skipIf(!DB)("durable PostgreSQL usage", () => {
     expect((await (third.checkpointer as unknown as UsageCheckpointStore).readThreadUsage("t"))?.totals).toMatchObject({ totalTokens: 14, costUSD: 0.004 });
   });
 });
+
+it.skipIf(!DB)("merges a late timeout receipt from another host without overwriting a newer charge", async () => {
+  const schema = `fg_late_${randomUUID().replaceAll("-", "")}`; schemas.push(schema);
+  const a = await openPostgresBackend({ connectionString: DB!, schema, poolConfig: { max: 1 } });
+  const b = await openPostgresBackend({ connectionString: DB!, schema, poolConfig: { max: 1 } }); opened.push(a, b);
+  let release!: () => void, charged!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; }), done = new Promise<void>(resolve => { charged = resolve; });
+  const graph = (timeout?: string) => ({ metadata: { name: "late" }, nodes: [{ id: "a", type: "agent", provider: "usage-qa", ...(timeout ? { timeout } : {}), with: { prompt: "answer" } }], edges: [{ from: "START", to: "a" }, { from: "a", to: "END" }] }) as unknown as GraphSpec;
+  const first = await compileGraph(graph("100ms"), { checkpointer: a.checkpointer, providers: [createScriptedProvider("usage-qa", async () => { await hold; return { output: "done", stopReason: "done", usage: { totalTokens: 4, costUSD: 0.001 } }; })] });
+  first.events.subscribe(event => { if (event.type === "agent.usage") charged(); });
+  try {
+    expect(await first.run({ threadId: "late" })).toMatchObject({ status: "error", usage: { pendingCalls: 1 } });
+    const second = await compileGraph(graph(), { checkpointer: b.checkpointer, providers: [createScriptedProvider("usage-qa", () => ({ output: "done", stopReason: "done", usage: { totalTokens: 5, costUSD: 0.002 } }))] });
+    expect(await second.resume({ threadId: "late", resume: true })).toMatchObject({ status: "completed", usage: { totalTokens: 5, pendingCalls: 1 } });
+  } finally { release(); }
+  await done;
+  const stored = await (b.checkpointer as unknown as UsageCheckpointStore).readThreadUsage("late");
+  expect(stored?.totals).toMatchObject({ calls: 2, totalTokens: 9, costUSD: 0.003 }); expect(stored?.pending).toEqual({});
+  expect(await (b.checkpointer as unknown as UsageCheckpointStore).compareThreadUsage!("late", stored!.revision! - 1, stored!)).toBe(false);
+});

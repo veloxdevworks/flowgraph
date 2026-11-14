@@ -333,6 +333,12 @@ Call the meter only for real calls; reuse cached responses without metering.
 The meter persists an admission receipt before invoking the vendor and records
 usage before control can reach a tool/HITL interrupt. It emits the usage event;
 do not emit the same usage again or charge an aggregate `AgentResult.usage`.
+Use `errorUsage(error)` for usage reported by a failed call, and
+`errorOutcomeUnknown(error)` when reported partial usage does not establish its
+final outcome. Classify a failure as known zero only when the individual request
+was rejected before a response; a timeout or a failed multi-call SDK operation
+does not establish that nothing was billed. Uncertain receipts remain inspectable
+and can be explicitly reconciled using the usage CLI/API.
 
 Legacy adapters remain supported: the runtime meters one provider operation,
 deduplicating emitted usage against `result.usage`. Their internal calls cannot

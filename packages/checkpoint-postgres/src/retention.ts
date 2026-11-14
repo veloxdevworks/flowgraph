@@ -349,6 +349,17 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     );
   }
 
+  async compareThreadUsage(threadId: string, revision: number, record: UsageRecord): Promise<boolean> {
+    const result = await this.db().query(
+      `INSERT INTO ${this.q}.fg_run_usage AS current (thread_id, record)
+       SELECT $1, $2::jsonb WHERE $3::bigint = 0 OR EXISTS (SELECT 1 FROM ${this.q}.fg_run_usage WHERE thread_id = $1)
+       ON CONFLICT (thread_id) DO UPDATE SET record = excluded.record
+       WHERE COALESCE((current.record->>'revision')::bigint, 0) = $3::bigint
+       RETURNING thread_id`, [threadId, JSON.stringify(record), revision],
+    );
+    return !!result.rowCount;
+  }
+
   /** Non-expiring execution claims are independent of checkpoint retention. */
   async acquireThreadRun(threadId: string, owner: ThreadRunOwner = defaultThreadRunOwner()): Promise<{ release(): Promise<void> } | null> {
     const token = crypto.randomUUID();

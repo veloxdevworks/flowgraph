@@ -33,6 +33,7 @@ import type {
 import type { ContextMessage, ProviderContextManager } from "../../context/types.js";
 import { toLangChainMessage } from "../../context/messages.js";
 import { redactProviderErrors } from "../redact-errors.js";
+import { rejectedRequestUsage } from "../../usage/rejected-request.js";
 import { validateAgentOutput } from "../../runtime/agent-output.js";
 
 // Minimal structural type for a LangChain chat model (avoids a hard type dep
@@ -331,7 +332,7 @@ async function constrainedOutput(model: ChatModelLike, req: AgentRequest, ctx: P
     return { output: wrapped ? wrapped.parsed : result, usage: wrapped?.raw ? modelUsage(wrapped.raw) : undefined };
   };
   const result = ctx.meterCall
-    ? await ctx.meterCall(invoke, { usage: value => value.usage })
+    ? await ctx.meterCall(invoke, { usage: value => value.usage, errorUsage: rejectedRequestUsage })
     : await invoke();
   if (!ctx.meterCall && result.usage) ctx.emit("usage", result.usage);
   const saved = { output: result.output, usage: result.usage ?? {} };
@@ -349,19 +350,23 @@ function modelUsage(ai: AIMessage): TokenUsage | undefined {
   } : undefined;
 }
 async function invokeModel(model: ChatModelLike, input: BaseMessage[], req: AgentRequest, ctx: ProviderRunContext): Promise<AIMessage> {
+  let responseStarted = false;
+  let partialUsage: TokenUsage | undefined;
   const invoke = async () => {
     if (!req.streaming || !model.stream) return model.invoke(input, { signal: ctx.signal });
     let combined: AIMessageChunk | undefined;
     for await (const chunk of await model.stream(input, { signal: ctx.signal })) {
+      responseStarted = true;
       const text = extractText(chunk);
       if (text) ctx.emit("token", { text });
       combined = combined ? combined.concat(chunk) : chunk;
+      partialUsage = modelUsage(combined as unknown as AIMessage);
     }
     if (!combined) throw new Error("Model stream ended without a response");
     return new AIMessage({ content: combined.content, tool_calls: combined.tool_calls ?? [],
       ...(combined.usage_metadata ? { usage_metadata: combined.usage_metadata } : {}) });
   };
-  const ai = ctx.meterCall ? await ctx.meterCall(invoke, { usage: modelUsage }) : await invoke();
+  const ai = ctx.meterCall ? await ctx.meterCall(invoke, { usage: modelUsage, errorUsage: error => responseStarted ? partialUsage : rejectedRequestUsage(error), errorOutcomeUnknown: () => responseStarted }) : await invoke();
   if (!ctx.meterCall) { const usage = modelUsage(ai); if (usage) ctx.emit("usage", usage); }
   return ai;
 }

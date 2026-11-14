@@ -170,3 +170,92 @@ it("does not treat a cost-only provider response as known zero tokens under a ha
   const g = await compileGraph(spec([agent()], { budget: { maxTokens: 100, onExceed: "fail" } }), { providers: [provider] });
   expect(await g.run()).toMatchObject({ status: "error", error: { code: "USAGE_UNRESOLVED" }, usage: { costUSD: 0.002, unreportedTokenCalls: 1 } });
 });
+
+it("allows no-budget continuation and atomically merges a timed-out call's late usage", async () => {
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const saver = new MemorySaver();
+  const first = await compileGraph(spec([{ ...agent(), timeout: "10ms" }]), { checkpointer: saver, providers: [createLangChainProvider({ invoke: async () => { await hold; return message(4); } }, { name: "usage-qa" })] });
+  let reported!: () => void; const charged = new Promise<void>(resolve => { reported = resolve; });
+  first.events.subscribe(event => { if (event.type === "agent.usage") reported(); });
+  try {
+    expect(await first.run({ threadId: "late" })).toMatchObject({ status: "error", usage: { pendingCalls: 1 } });
+    const next = await compileGraph(spec([agent()]), { checkpointer: saver, providers: [createLangChainProvider(fake([message(5)]), { name: "usage-qa" })] });
+    expect(await next.resume({ threadId: "late", resume: true })).toMatchObject({ status: "completed", usage: { totalTokens: 5, pendingCalls: 1 } });
+  } finally { release(); }
+  await charged;
+  const { inspectThreadUsage } = await import("./usage/ledger.js");
+  expect((await inspectThreadUsage(saver, "late")).totals).toMatchObject({ totalTokens: 9, calls: 2 });
+  expect((await inspectThreadUsage(saver, "late")).pending).toEqual({});
+});
+
+it.each([401, 403, 429, "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"])("retries known-zero rejected requests under a hard budget (%s)", async rejection => {
+  const invoke = vi.fn().mockRejectedValueOnce(Object.assign(new Error("request rejected"), typeof rejection === "number" ? { status: rejection } : { code: rejection })).mockResolvedValue(message(4));
+  const g = await compileGraph(spec([{ ...agent(), retry: { maxAttempts: 2, baseMs: 1, jitter: false } }], { budget: { maxTokens: 5, onExceed: "fail" } }), { providers: [createLangChainProvider({ invoke }, { name: "usage-qa" })] });
+  expect(await g.run()).toMatchObject({ status: "completed", usage: { totalTokens: 4, calls: 2, unknownCalls: 0, pendingCalls: 0 } });
+  expect(invoke).toHaveBeenCalledTimes(2);
+});
+
+it("can reconcile an ambiguous failure and resume a hard-budget thread without double charging", async () => {
+  const { inspectThreadUsage, resolveThreadUsage } = await import("./usage/ledger.js");
+  const saver = new MemorySaver();
+  const invoke = vi.fn().mockRejectedValueOnce(Object.assign(new Error("socket lost"), { code: "ECONNRESET" })).mockResolvedValue(message(4));
+  const s = spec([agent()], { budget: { maxTokens: 10, onExceed: "fail" } });
+  const provider = createLangChainProvider({ invoke }, { name: "usage-qa" });
+  const g = await compileGraph(s, { checkpointer: saver, providers: [provider] });
+  expect((await g.run({ threadId: "resolve" })).status).toBe("error");
+  const id = Object.keys((await inspectThreadUsage(saver, "resolve")).unresolved!)[0]!;
+  await resolveThreadUsage(saver, "resolve", id, { totalTokens: 3, costUSD: 0.002 });
+  await expect(resolveThreadUsage(saver, "resolve", id, { totalTokens: 3, costUSD: 0.002 })).rejects.toMatchObject({ code: "USAGE_RECEIPT_RESOLVED" });
+  expect(await g.resume({ threadId: "resolve", resume: true })).toMatchObject({ status: "completed", usage: { totalTokens: 7, calls: 2, unknownCalls: 0 } });
+});
+
+it.each([false, null, { approved: false }])("does not purchase after a denied budget interrupt (%j)", async answer => {
+  const dir = await mkdtemp(join(tmpdir(), "fg-budget-deny-")); dirs.push(dir);
+  const start = vi.fn(async () => ({ id: "job", done: [], costUSD: 0.02 }));
+  const g = await compileGraph(spec([{ id: "image", type: "image", provider: "media-qa", with: { prompt: "cat" } }], { budget: { maxUSD: 0.01, onExceed: "interrupt" } }), { cwd: dir, mediaProviders: [{ name: "media-qa", vendor: "qa", modalities: ["image"], estimateCostUSD: () => 0.02, start }] });
+  expect((await g.run({ threadId: "denied" })).status).toBe("interrupted");
+  expect(await g.resume({ threadId: "denied", resume: answer })).toMatchObject({ status: "error", error: { code: "BUDGET_DENIED" }, usage: { calls: 0 } });
+  expect(start).not.toHaveBeenCalled();
+});
+
+
+it("does not charge a late response twice after the pending receipt was explicitly reconciled", async () => {
+  const { inspectThreadUsage, resolveThreadUsage } = await import("./usage/ledger.js");
+  let release!: () => void, finished!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; }), done = new Promise<void>(resolve => { finished = resolve; });
+  const provider = createScriptedProvider("usage-qa", async (_req, ctx) => {
+    const usage = await ctx.meterCall!(async () => { await hold; return { totalTokens: 4, costUSD: 0 }; }, { usage: value => value });
+    finished(); return { output: "done", stopReason: "done", usage };
+  });
+  provider.capabilities.callAccounting = true;
+  const saver = new MemorySaver(), g = await compileGraph(spec([{ ...agent(), timeout: "10ms" }]), { checkpointer: saver, providers: [provider] });
+  expect((await g.run({ threadId: "reconciled-late" })).status).toBe("error");
+  const receipt = Object.keys((await inspectThreadUsage(saver, "reconciled-late")).pending)[0]!;
+  try { await resolveThreadUsage(saver, "reconciled-late", receipt, { totalTokens: 4, costUSD: 0 }); }
+  finally { release(); }
+  await done;
+  expect((await inspectThreadUsage(saver, "reconciled-late")).totals).toMatchObject({ calls: 1, totalTokens: 4 });
+});
+
+it("can reconcile an older ledger that retained only uncertainty counters", async () => {
+  const { emptyUsage, inspectThreadUsage, resolveThreadUsage } = await import("./usage/ledger.js");
+  const { pendingCalls: _, ...totals } = emptyUsage();
+  let stored: import("./usage/ledger.js").UsageRecord = { version: 1, totals: { ...totals, calls: 2, totalTokens: 7, costUSD: 0.002, unknownCalls: 1, unreportedTokenCalls: 1, unpricedCalls: 1 }, pending: {} };
+  const saver = { readThreadUsage: () => stored, writeThreadUsage: (_thread: string, record: typeof stored) => { stored = JSON.parse(JSON.stringify(record)); } };
+  expect((await inspectThreadUsage(saver, "legacy")).unresolved).toHaveProperty("legacy-unreported");
+  const resolved = await resolveThreadUsage(saver, "legacy", "legacy-unreported", { totalTokens: 3, costUSD: 0.001 });
+  expect(resolved.totals).toMatchObject({ calls: 2, totalTokens: 10, costUSD: 0.003, unknownCalls: 0, unpricedCalls: 0, unreportedTokenCalls: 0 });
+  await expect(resolveThreadUsage(saver, "legacy", "legacy-unreported", { totalTokens: 3, costUSD: 0.001 })).rejects.toMatchObject({ code: "USAGE_RECEIPT_RESOLVED" });
+});
+
+it("retains partial streamed usage and never classifies a post-response 429 as known zero", async () => {
+  const stream = vi.fn(async function* () {
+    yield new AIMessageChunk({ content: "part", usage_metadata: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } as ConstructorParameters<typeof AIMessageChunk>[0]);
+    throw Object.assign(new Error("late stream failure"), { status: 429 });
+  });
+  const model: ChatModelLike = { invoke: vi.fn(async () => message(4)), stream };
+  const g = await compileGraph(spec([{ ...agent("a", { streaming: true }), retry: { maxAttempts: 2, baseMs: 1, jitter: false } }], { budget: { maxTokens: 10, onExceed: "fail" } }), { providers: [createLangChainProvider(model, { name: "usage-qa" })] });
+  expect(await g.run()).toMatchObject({ status: "error", usage: { calls: 1, totalTokens: 4, unknownCalls: 1 } });
+  expect(stream).toHaveBeenCalledTimes(1);
+});

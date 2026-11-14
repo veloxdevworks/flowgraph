@@ -276,7 +276,7 @@ export const agentNode = defineNode<Config>({
 
           const result = ctx.accounting && !provider.capabilities.callAccounting
             ? await ctx.accounting.call(ctx, () => provider.run(req, providerCtx), {
-                kind: "provider", usage: r => maxUsage(r.usage, reportedUsage), errorUsage: () => reportedUsage,
+                kind: "provider", usage: r => maxUsage(r.usage, reportedUsage), errorUsage: () => reportedUsage, errorOutcomeUnknown: err => !isGraphInterrupt(err),
               })
             : await provider.run(req, providerCtx);
           if (ctx.accounting) ctx.accounting.enforce(ctx);

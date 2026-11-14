@@ -12,3 +12,6 @@ before tools/HITL, enforce budgets between model/media calls, and expose cumulat
 usage to results, terminal events and graph output mappings. Deduplicate provider
 usage, add real model chunk events, report synchronous media completion/cost,
 warn about unpriced LangChain USD caps, and keep CLI logs on stderr for pure JSONL.
+Add supported receipt inspection/reconciliation, classify unaccepted LangChain
+requests as known zero usage, and atomically merge late receipts across processes.
+Without hard caps, uncertain outcomes warn and keep visible counts while work continues.
