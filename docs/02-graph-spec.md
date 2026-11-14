@@ -453,7 +453,7 @@ runtime:
 | Severity | Examples |
 |---|---|
 | **error** (blocks) | unknown `apiVersion`/`type`; duplicate node `id`; edge references missing node; unreachable node; contract/type mismatch between mapped output and channel; skill missing required env var declaration; cyclic `imports` |
-| **warning** | node with no inbound edge except `START` paths; deprecated field; unused channel; missing `description` on a published skill |
+| **warning** | reachable node with no path to `END`; deprecated field; unused channel; missing `description` on a published skill |
 | **info** | suggestions (e.g. "consider a `router` node instead of N conditional branches") |
 
 Unknown keys are an error. The graph root, every node, and every inline subgraph `spec:` accept only the fields defined in this document; anything else is reported as `UNKNOWN_FIELD`, one diagnostic per key, with a path such as `nodes.character.runOn`. When the key is within two edits of a real one the message adds `Did you mean "runsOn"?`. Free-form blocks (`metadata`, `with`, `config`, `runtime`) are not affected. The check exists so an engine never silently drops a field it does not understand: a graph that uses a newer field (for example `runsOn`) must fail on an older engine instead of running without it.
@@ -465,3 +465,9 @@ The same diagnostics power editor squiggles via the JSON Schema + a future Langu
 - `apiVersion: flowgraph/v1` is the stable contract. Breaking changes ⇒ `flowgraph/v2` with a documented migration and an optional `flowgraph migrate` codemod.
 - Additive fields ship within `v1` and are reflected in the JSON Schema. Because the graph root and nodes reject unknown keys (§11), a graph that uses a new field requires an engine that knows it; older engines report `UNKNOWN_FIELD` rather than ignoring the field.
 - `@flowgraph/spec` is independently versioned; the `apiVersion` token is decoupled from the package's semver.
+
+## File resolution and static validation
+
+Relative graph references and each child graph's module imports resolve against the YAML file that declares them, independently of the working directory and `runtime.workspace`. Child execution inherits the parent's workspace; a child's explicit `runtime.workspace` resolves relative to that inherited workspace. Subgraph aliases declared in `imports` are honored by load, preflight, and execution. Import cycles (including symlink cycles) are rejected with `SUBGRAPH_CYCLE`; sharing a child between DAG branches is supported. Missing relative imports are reported even when their aliases are unused.
+
+Validation checks router and hook route targets, unreachable nodes, channel default types, and expression builtin names. Nodes referenced as agent tools or declared hook targets need no dummy inbound edges. Expression validation is bounded at 256 nesting levels and 2,048 tokens per expression and reports the field path; repeated invalid templates produce at most 50 expression diagnostics per graph. The CLI's ASCII and Mermaid topology includes declared router and HITL routes.

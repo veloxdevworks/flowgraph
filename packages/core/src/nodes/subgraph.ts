@@ -201,7 +201,7 @@ async function loadChildSpec(
   ctx: NodeRunContext,
 ): Promise<ChildSpecInfo> {
   let spec: GraphSpec;
-  let cwd = ctx.workspace;
+  let cwd = ctx.config.graphDir ?? ctx.workspace;
   if (inlineSpec) {
     spec = inlineSpec;
   } else {
@@ -211,14 +211,14 @@ async function loadChildSpec(
       (ctx.config as { subgraphs?: Record<string, string> }).subgraphs ?? {};
     const ref = aliases[uses] ?? uses;
 
-    const loaded = await loadGraph(ref, { cwd: ctx.workspace });
+    const loaded = await loadGraph(ref, { cwd });
     if (!loaded.spec) {
       throw new Error(
         `subgraph: could not load "${uses}" (${ref}): ${loaded.diagnostics.map((d) => d.message).join("; ")}`,
       );
     }
     spec = loaded.spec;
-    cwd = path.dirname(path.resolve(ctx.workspace, ref));
+    cwd = path.dirname(path.resolve(cwd, ref));
   }
 
   const declared = ensureDeclaredOutputChannels(spec);
@@ -254,8 +254,8 @@ async function loadChild(
   parentEvents: EventBus,
   ctx: NodeRunContext,
 ): Promise<EmbeddedChild> {
-  const { compileGraphForEmbedding } = await import("../compiler.js");
-  const { spec, channels, channelDefs } = await loadChildSpec(uses, inlineSpec, parentNodeId, ctx);
+  const { compileGraphForEmbedding, resolveGraphWorkspace } = await import("../compiler.js");
+  const { spec, cwd, channels, channelDefs } = await loadChildSpec(uses, inlineSpec, parentNodeId, ctx);
 
   const forwardSink = (event: FlowgraphEvent) => {
     parentEvents.emit(event.type, event.data, {
@@ -265,7 +265,8 @@ async function loadChild(
   };
 
   const { compiledLg } = await compileGraphForEmbedding(spec, {
-    cwd: ctx.workspace,
+    cwd,
+    workspace: resolveGraphWorkspace(spec, ctx.workspace),
     sinks: [forwardSink],
     store: childStore(spec, ctx),
     ...(nodePolicyOf(ctx) ? { nodePolicy: nodePolicyOf(ctx)! } : {}),

@@ -12,6 +12,7 @@ import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
 import { RESERVED_STATE_CHANNELS } from "./state-annotation.js";
 import { memoryLintDiagnostics } from "../memory/validate.js";
 import { contextLintDiagnostics } from "../context/validate.js";
+import { staticGraphDiagnostics } from "./static-diagnostics.js";
 import {
   HITL_DEFAULT_ROUTE,
   hitlOutcomes,
@@ -36,7 +37,7 @@ export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
 }
 
 function outgoingTargets(spec: GraphSpec, from: string): string[] {
-  const targets: string[] = declaredRouteTargets(spec, from);
+  const targets: string[] = nodeRouteTargets(spec, from);
   for (const edge of spec.edges) {
     if (edge.from !== from) continue;
     if ("to" in edge) {
@@ -50,10 +51,58 @@ function outgoingTargets(spec: GraphSpec, from: string): string[] {
   return targets;
 }
 
+export function nodeToolTargets(spec: GraphSpec, id: string): string[] {
+  const node = spec.nodes.find((n) => n.id === id);
+  if (!node || (node.type !== "agent" && node.type !== "intelligent")) return [];
+  const withBlock = (node?.with ?? {}) as { tools?: Array<{ node?: string }>; agent?: string };
+  const targets = (Array.isArray(withBlock.tools) ? withBlock.tools : []).flatMap((tool) => tool && typeof tool.node === "string" ? [tool.node] : []);
+  // Reusable AGENT.md definitions resolve tools at run time.
+  if (typeof withBlock.agent === "string" && withBlock.agent) targets.push(...spec.nodes.filter((n) => n.id !== id).map((n) => n.id));
+  return [...new Set(targets)];
+}
+
+export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
+  const node = spec.nodes.find((n) => n.id === id);
+  const targets = declaredRouteTargets(spec, id);
+  if (node?.on?.error?.startsWith("route:")) targets.push(node.on.error.slice(6));
+  for (const hook of spec.runtime?.hooks ?? []) {
+    if (!hook.do.startsWith("route:") || !["node:before", "node:after", "node:error"].includes(hook.on)) continue;
+    if (hook.where?.nodeId !== undefined && hook.where.nodeId !== id) continue;
+    if (hook.where?.nodeType !== undefined && hook.where.nodeType !== node?.type) continue;
+    targets.push(hook.do.slice(6));
+  }
+  return [...new Set(targets)];
+}
+
+/** Public topology includes routes that do not require duplicate static edges. */
+export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; label?: string }> {
+  const edges: Array<{ from: string; to: string; label?: string }> = [];
+  for (const edge of spec.edges) {
+    if (declaredRouteTargets(spec, edge.from).length) continue;
+    if ("to" in edge) for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) edges.push({ from: edge.from, to });
+    else for (const branch of edge.branch) edges.push({ from: edge.from, to: branch.to, ...(branch.when ? { label: branch.when } : branch.default ? { label: "default" } : {}) });
+  }
+  for (const node of spec.nodes) {
+    for (const to of nodeRouteTargets(spec, node.id)) edges.push({ from: node.id, to, label: "route" });
+  }
+  return [...new Map(edges.map((edge) => [`${edge.from}:${edge.to}:${edge.label ?? ""}`, edge])).values()];
+}
+
+export function topologyDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const ids = new Set(["START", "END", ...spec.nodes.map((n) => n.id)]);
+  const diagnostics = reachabilityDiagnostics(spec);
+  for (const node of spec.nodes) {
+    for (const target of [...nodeRouteTargets(spec, node.id), ...nodeToolTargets(spec, node.id)]) {
+      if (!ids.has(target)) diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Node "${node.id}" references unknown target "${target}"`, path: `nodes.${node.id}` });
+    }
+  }
+  return diagnostics;
+}
+
 function incomingSources(spec: GraphSpec, to: string): string[] {
   const sources: string[] = [];
   for (const node of spec.nodes) {
-    if (declaredRouteTargets(spec, node.id).includes(to)) sources.push(node.id);
+    if (nodeRouteTargets(spec, node.id).includes(to)) sources.push(node.id);
   }
   for (const edge of spec.edges) {
     if ("to" in edge) {
@@ -111,16 +160,17 @@ export function reachabilityDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const fromStart = nodesReachableFromStart(spec);
   const toEnd = nodesThatReachEnd(spec);
+  const tools = new Set(spec.nodes.flatMap((node) => nodeToolTargets(spec, node.id)));
 
   for (const node of spec.nodes) {
-    if (!fromStart.has(node.id)) {
+    if (!fromStart.has(node.id) && !tools.has(node.id)) {
       diagnostics.push({
-        severity: "warning",
+        severity: "error",
         code: "UNREACHABLE_FROM_START",
         message: `Node "${node.id}" is not reachable from START`,
         path: `nodes.${node.id}`,
       });
-    } else if (!toEnd.has(node.id)) {
+    } else if (!toEnd.has(node.id) && !tools.has(node.id)) {
       diagnostics.push({
         severity: "warning",
         code: "NO_PATH_TO_END",
@@ -467,6 +517,8 @@ export function subgraphRefDiagnostics(spec: GraphSpec): Diagnostic[] {
 }
 
 export interface SubgraphOutputSite {
+  graph: GraphSpec;
+  placed: boolean;
   /** Node id, or the enclosing map id when the subgraph is anonymous. */
   id: string;
   /** Diagnostic path for `stateMap.out`. */
@@ -483,7 +535,7 @@ export function subgraphOutputSites(spec: GraphSpec): SubgraphOutputSite[] {
   const walk = (graph: GraphSpec, prefix: string) => {
     for (const node of graph.nodes ?? []) {
       if (node.type === "subgraph") {
-        sites.push(siteFor(node, `${prefix}nodes.${node.id}.with.stateMap.out`));
+        sites.push(siteFor(node, `${prefix}nodes.${node.id}.with.stateMap.out`, graph));
         if (node.spec) walk(node.spec, `${prefix}nodes.${node.id}.spec.`);
       }
       if (node.type === "map") {
@@ -491,7 +543,7 @@ export function subgraphOutputSites(spec: GraphSpec): SubgraphOutputSite[] {
         if (inner && inner.type === "subgraph") {
           const label = inner.id || node.id;
           sites.push({
-            ...siteFor(inner, `${prefix}nodes.${node.id}.with.node.with.stateMap.out`),
+            ...siteFor(inner, `${prefix}nodes.${node.id}.with.node.with.stateMap.out`, graph),
             id: label,
           });
           if (inner.spec) walk(inner.spec, `${prefix}nodes.${node.id}.with.node.spec.`);
@@ -503,9 +555,11 @@ export function subgraphOutputSites(spec: GraphSpec): SubgraphOutputSite[] {
   return sites;
 }
 
-function siteFor(node: NodeSpec, path: string): SubgraphOutputSite {
+function siteFor(node: NodeSpec, path: string, graph: GraphSpec): SubgraphOutputSite {
   const uses = typeof node.uses === "string" && node.uses.trim() ? node.uses.trim() : undefined;
   return {
+    graph,
+    placed: node.runsOn !== undefined,
     id: node.id,
     path,
     ...(uses ? { uses } : {}),
@@ -945,7 +999,8 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
     ...hitlRouterMergeDiagnostics(spec),
-    ...reachabilityDiagnostics(spec),
+    ...topologyDiagnostics(spec),
+    ...staticGraphDiagnostics(spec),
     ...demoToolExposureDiagnostics(spec),
     ...channelReducerDiagnostics(spec),
     ...undeclaredOutputChannelDiagnostics(spec),

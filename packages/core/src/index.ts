@@ -17,6 +17,7 @@ export {
   hitlRouteDiagnostics,
   hitlSelectDiagnostics,
   hitlRouterMergeDiagnostics,
+  graphEdges,
 } from "./runtime/validate-graph.js";
 export {
   hitlOutcomes,
