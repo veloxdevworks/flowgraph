@@ -488,7 +488,7 @@ export default async function (input, ctx) {
     #   workerThreads: false
     # env:
     #   MARK: "1"                 # opt-in; only a small default allowlist is inherited
-    output: { to: greet }
+    output: { to: greeting }
 ```
 
 ### How it runs
@@ -651,7 +651,7 @@ For `approve`, `choice` and `review`, the human's answer *is* the routing decisi
     message: "Describe the request"
     schema: { type: object, required: [title], properties: { title: { type: string } } }
     maxResumeAttempts: 5            # default 3
-    output: { to: intake }
+    output: { to: intakeResult }
 ```
 
 ### Reviewing generated assets (`artifacts`, `select`, `round`)
@@ -1133,13 +1133,12 @@ nodes:
       type: object
       properties:
         url: { type: string }
-        method: { type: string, enum: [GET, POST, PUT, PATCH, DELETE] }
         label: { type: string }
       required: [url]
     with:
       label: "{{ input.label }}"
       http:
-        method: "{{ input.method }}"
+        method: GET  # Static enum; use separate tool instances for other methods.
         url: "{{ input.url }}"
 
   - id: demo-director

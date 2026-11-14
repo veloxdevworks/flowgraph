@@ -1796,6 +1796,8 @@ export type LangChainVendor = z.infer<typeof LangChainVendorSchema>;
 export type DiagnosticSeverity = "error" | "warning" | "info";
 
 export interface Diagnostic {
+  /** Declaring source file when a diagnostic belongs outside the graph document. */
+  file?: string;
   severity: DiagnosticSeverity;
   code: string;
   message: string;

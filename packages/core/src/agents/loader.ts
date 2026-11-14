@@ -40,7 +40,9 @@ export async function loadAgentDef(
     return { agent: null, diagnostics };
   }
 
-  const parsed = matter(raw);
+  let parsed:ReturnType<typeof matter>;
+  try {parsed=matter(raw);}
+  catch(cause){return {agent:null,diagnostics:[{severity:"error",code:"AGENT_FRONT_MATTER_ERROR",file:resolvedPath,message:`${resolvedPath}: invalid agent front matter: ${cause instanceof Error?cause.message:String(cause)}`}]};}
   const frontMatterResult = AgentFrontMatterSchema.safeParse(parsed.data);
 
   if (!frontMatterResult.success) {
@@ -48,7 +50,8 @@ export async function loadAgentDef(
       diagnostics.push({
         severity: "error",
         code: "AGENT_SCHEMA_ERROR",
-        message: `${issue.path.join(".")}: ${issue.message}`,
+        file: resolvedPath,
+        message: `${resolvedPath}: ${issue.path.join(".")}: ${issue.message}`,
         path: issue.path.join("."),
       });
     }

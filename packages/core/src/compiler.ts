@@ -2166,7 +2166,13 @@ function toInterruptInfo(it: { id?: string; value?: unknown }): InterruptInfo {
         deadlineAt?: string;
       }
     | undefined;
-  const info: InterruptInfo = { id: it.id ?? "", payload: it.value, kind: "approval" };
+  // Replay attachments stay in private checkpoints, never in public payloads.
+  let payload=it.value;
+  if(value&&typeof value==="object"&&value.data&&typeof value.data==="object"){
+    const {__agentReplay:_replay,...data}=value.data as Record<string,unknown>;
+    payload={...value,data};
+  }
+  const info: InterruptInfo = { id: it.id ?? "", payload, kind: "approval" };
   if (value && typeof value === "object") {
     if (typeof value.reason === "string") info.reason = value.reason;
     if (value.kind) info.kind = value.kind;

@@ -4,7 +4,8 @@ import type { Diagnostic } from "@flowgraph/spec";
 export function printDiagnostics(diagnostics: Diagnostic[], filePath?: string): void {
   if (diagnostics.length === 0) return;
   for (const d of diagnostics) {
-    const location = filePath ? `${filePath}${d.path ? `:${d.path}` : ""}` : d.path ?? "";
+    const source=d.file??filePath;
+    const location = source ? `${source}${d.path ? `:${d.path}` : ""}` : d.path ?? "";
     const prefix =
       d.severity === "error"
         ? pc.red("error")

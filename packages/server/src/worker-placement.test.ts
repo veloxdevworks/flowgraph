@@ -325,11 +325,11 @@ describe("POST /worker/preflight", () => {
     expect(service.registry.list()).toEqual([]);
   });
 
-  it("applies the upload policy and reports stripped imports", async () => {
+  it("rejects uploaded imports explicitly at preflight", async () => {
     const { base } = await boot();
     const withImports = `imports:\n  nodes: ["./evil.js"]\n${shellGraph("pf-imp", "")}`;
     const body = (await (await post(`${base}/worker/preflight`, { yaml: withImports })).json()) as { ok: boolean; importsStripped?: boolean };
-    expect(body).toMatchObject({ ok: true, importsStripped: true });
+    expect(body).toMatchObject({ ok: false, importsStripped: true });
   });
 
   it("refuses untrusted graphs the run path would refuse", async () => {

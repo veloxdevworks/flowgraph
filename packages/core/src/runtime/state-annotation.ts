@@ -92,7 +92,10 @@ export function channelReducerAndDefault(
       );
     }
     return {
-      reducer: (cur, inc) => fn(cur, inc),
+      reducer: (cur, inc) => {
+        try {return fn(cur, inc);}
+        catch(cause){throw Object.assign(new Error(`Channel "${channelName}" reducer "${reducerName}": ${cause instanceof Error?cause.message:String(cause)}`,{cause}),{code:"REDUCER_FAILED",channel:channelName,reducer:reducerName});}
+      },
       default: () => ch.default ?? null,
     };
   }
