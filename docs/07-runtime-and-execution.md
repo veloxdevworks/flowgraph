@@ -423,3 +423,22 @@ A background timeout that cannot acquire admission emits a non-terminal
 `run.issue` (`WAIT_TIMEOUT_DEFERRED` for a busy owner), rather than silently
 vanishing or sending an unrelated `run.error` into the owner's stream. Inspect
 the pending deadline and retry once ownership is available.
+
+### SQLite retention cost and legacy checkpoints
+
+Checkpoint schema 7 stores a small `fg_channel_versions` JSON value beside each
+SQLite checkpoint. Pruning reads these references rather than deserializing the
+retained graph states. Parent-version lookup uses the same metadata. Legacy
+retained rows are decoded once, lazily, when a prune needs their references.
+Reads and checkpoint formats remain compatible, including deduplicated channel
+blobs. Blob GC runs against all current references in the deletion transaction;
+if another writer has inserted a row without publishing its metadata yet, GC
+keeps the blobs until a later prune. A migrated database cannot be reopened with
+an older runtime that supports only an earlier checkpoint schema.
+
+To measure retention overhead locally, build the repository and run
+`node scripts/retention-cost-bench.mjs`. It runs an 800-step graph that appends
+1 KiB per step with retention off, default retention and a 400-checkpoint window.
+Unit regressions count state deserializations rather than imposing a noisy
+wall-clock threshold. PostgreSQL CI reruns its integration suite against the
+same database after the full test run, guarding fixture reuse and cleanup.
