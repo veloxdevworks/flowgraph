@@ -21,6 +21,7 @@ import {
   missingToolIssue,
   spawnMissingToolError,
 } from "../runtime/requires.js";
+import { DEFAULT_INHERITED_ENV, pickHostEnv } from "../runtime/child-env.js";
 
 const configSchema = ShellWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -105,12 +106,13 @@ export const shellNode = defineNode<Config>({
           throw new Error(missingToolIssue(missing, { command, skipped: false }).message);
         }
 
-        const env: NodeJS.ProcessEnv = {};
-        for (const name of ["PATH", "SystemRoot", "WINDIR", ...(config.inheritEnv ?? [])]) {
-          if (config.inheritEnv?.includes(name)) assertSecretAllowed(nodePolicyOf(ctx), name, `shell node "${ctx.nodeId}"`);
-          if (Object.hasOwn(process.env, name)) env[name] = process.env[name];
+        for (const name of config.inheritEnv ?? []) {
+          assertSecretAllowed(nodePolicyOf(ctx), name, `shell node "${ctx.nodeId}"`);
         }
-        Object.assign(env, renderedEnv);
+        const env: NodeJS.ProcessEnv = {
+          ...pickHostEnv([...DEFAULT_INHERITED_ENV, ...(config.inheritEnv ?? [])]),
+          ...renderedEnv,
+        };
         let stdinData: string | undefined;
         if (input !== undefined) {
           const payload = JSON.stringify(input);

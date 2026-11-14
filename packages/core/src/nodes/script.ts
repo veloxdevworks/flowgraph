@@ -29,6 +29,7 @@ import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import { secretScope } from "../runtime/secret-scope.js";
 import { findMissingBins, missingToolIssue } from "../runtime/requires.js";
+import { DEFAULT_INHERITED_ENV, pickHostEnv } from "../runtime/child-env.js";
 
 const configSchema = ScriptWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -101,9 +102,8 @@ export async function runScriptSandboxed(
     nodeArgs.push(entryPath);
 
     const env: NodeJS.ProcessEnv = {
-      // Minimal env — do not inherit host process.env (avoids leaking secrets).
-      // Authors opt secrets in via with.env templates.
-      PATH: process.env.PATH,
+      // Minimal env — operational defaults only; authors opt secrets in via with.env.
+      ...pickHostEnv(DEFAULT_INHERITED_ENV),
       FLOWGRAPH_INPUT: JSON.stringify(options.input ?? {}),
       FLOWGRAPH_RESULT_PATH: resultPath,
       FLOWGRAPH_NODE_ID: options.nodeId ?? "",
