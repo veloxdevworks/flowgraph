@@ -37,8 +37,8 @@ nodes:
       mode: review
       message: "Review stamped packages before opening a PR-shaped change."
       diff:
-        before: "{{ state.results.0.diff.before }}"
-        after: "{{ state.results.0.diff.after }}"
+        before: "{{ state.results[0].diff.before }}"
+        after: "{{ state.results[0].diff.after }}"
       decision: [approve, request-changes]
       output: { to: review }
 
