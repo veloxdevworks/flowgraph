@@ -73,9 +73,13 @@ export function tokenize(input: string): Token[] {
     }
 
     // number
-    if (/[0-9]/.test(ch) || (ch === "-" && /[0-9]/.test(peekAt(1)))) {
+    if (/[0-9]/.test(ch)) {
       let num = advance();
-      while (/[0-9._]/.test(peek())) num += advance();
+      while (/[0-9_]/.test(peek())) num += advance();
+      if (peek() === "." && /[0-9]/.test(peekAt(1))) {
+        num += advance();
+        while (/[0-9_]/.test(peek())) num += advance();
+      }
       emit("NUMBER", num.replace(/_/g, ""), start);
       continue;
     }
@@ -111,28 +115,52 @@ export function tokenize(input: string): Token[] {
 
     // two-char operators
     if (ch === "=" && peekAt(1) === "=") {
-      advance(); advance(); emit("EQ", "==", start); continue;
+      advance();
+      advance();
+      emit("EQ", "==", start);
+      continue;
     }
     if (ch === "!" && peekAt(1) === "=") {
-      advance(); advance(); emit("NEQ", "!=", start); continue;
+      advance();
+      advance();
+      emit("NEQ", "!=", start);
+      continue;
     }
     if (ch === "<" && peekAt(1) === "=") {
-      advance(); advance(); emit("LTE", "<=", start); continue;
+      advance();
+      advance();
+      emit("LTE", "<=", start);
+      continue;
     }
     if (ch === ">" && peekAt(1) === "=") {
-      advance(); advance(); emit("GTE", ">=", start); continue;
+      advance();
+      advance();
+      emit("GTE", ">=", start);
+      continue;
     }
     if (ch === "&" && peekAt(1) === "&") {
-      advance(); advance(); emit("AND", "&&", start); continue;
+      advance();
+      advance();
+      emit("AND", "&&", start);
+      continue;
     }
     if (ch === "|" && peekAt(1) === "|") {
-      advance(); advance(); emit("OR", "||", start); continue;
+      advance();
+      advance();
+      emit("OR", "||", start);
+      continue;
     }
     if (ch === "?" && peekAt(1) === "?") {
-      advance(); advance(); emit("NULLISH", "??", start); continue;
+      advance();
+      advance();
+      emit("NULLISH", "??", start);
+      continue;
     }
     if (ch === "|" && peekAt(1) === ">") {
-      advance(); advance(); emit("PIPE", "|>", start); continue;
+      advance();
+      advance();
+      emit("PIPE", "|>", start);
+      continue;
     }
 
     // single-char

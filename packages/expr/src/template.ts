@@ -71,11 +71,9 @@ export function renderDeep(value: unknown, scope: EvalScope, strict = false): un
   if (typeof value === "string") return renderTemplate(value, scope, strict);
   if (Array.isArray(value)) return value.map((v) => renderDeep(v, scope, strict));
   if (value != null && typeof value === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      result[k] = renderDeep(v, scope, strict);
-    }
-    return result;
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, renderDeep(v, scope, strict)]),
+    );
   }
   return value;
 }
@@ -100,14 +98,25 @@ export function collectRefs(template: string): Set<string> {
   function walk(node: ReturnType<typeof parseExpr>): void {
     if (node.kind === "Ident") refs.add(node.name);
     else if (node.kind === "Member") walk(node.object);
-    else if (node.kind === "Index") { walk(node.object); walk(node.index); }
-    else if (node.kind === "Call") node.args.forEach(walk);
+    else if (node.kind === "Index") {
+      walk(node.object);
+      walk(node.index);
+    } else if (node.kind === "Call") node.args.forEach(walk);
     else if (node.kind === "Unary") walk(node.operand);
-    else if (node.kind === "Binary") { walk(node.left); walk(node.right); }
-    else if (node.kind === "Ternary") { walk(node.condition); walk(node.consequent); walk(node.alternate); }
-    else if (node.kind === "Nullish") { walk(node.left); walk(node.right); }
-    else if (node.kind === "Pipe") { walk(node.left); node.args.forEach(walk); }
-    else if (node.kind === "Array") node.elements.forEach(walk);
+    else if (node.kind === "Binary") {
+      walk(node.left);
+      walk(node.right);
+    } else if (node.kind === "Ternary") {
+      walk(node.condition);
+      walk(node.consequent);
+      walk(node.alternate);
+    } else if (node.kind === "Nullish") {
+      walk(node.left);
+      walk(node.right);
+    } else if (node.kind === "Pipe") {
+      walk(node.left);
+      node.args.forEach(walk);
+    } else if (node.kind === "Array") node.elements.forEach(walk);
     else if (node.kind === "Object") node.entries.forEach((e) => walk(e.value));
   }
 

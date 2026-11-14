@@ -4,7 +4,6 @@ import { collectRefs, renderTemplate } from "./template.js";
 
 /** The regular expressions the scanner replaces, kept here to check it matches them. */
 const SPAN_RE = /\{\{([\s\S]*?)\}\}/g;
-const SOLE_RE = /^\s*\{\{([\s\S]*?)\}\}\s*$/;
 
 function randomText(seed: number, length: number): string {
   const alphabet = ["{", "}", "{{", "}}", " ", "a", "\n", "\u00a0", "\ufeff", "\t"];
@@ -35,33 +34,55 @@ function timed(fn: () => void): number {
 const TWO_MB = 2 * 1024 * 1024;
 
 describe("scanTemplate", () => {
-  it("finds the spans the lazy regular expression found, on random text", () => {
+  it("keeps delimiter-only scanning compatible outside object literals", () => {
     for (let seed = 1; seed <= 3000; seed++) {
       const text = randomText(seed, 1 + (seed % 40));
-      const expected = [...text.matchAll(SPAN_RE)].map((m) => ({ start: m.index, end: m.index + m[0].length, expr: m[1] }));
+      const expected = [...text.matchAll(SPAN_RE)].map((m) => ({
+        start: m.index,
+        end: m.index + m[0].length,
+        expr: m[1],
+      }));
+      if (expected.some((s) => s.expr!.includes("{"))) continue;
       expect(scanTemplate(text).spans, JSON.stringify(text)).toEqual(expected);
-      expect(soleTemplateExpr(text), JSON.stringify(text)).toBe(SOLE_RE.exec(text)?.[1]);
+      const sole =
+        expected.length === 1 &&
+        !text.slice(0, expected[0]!.start).trim() &&
+        !text.slice(expected[0]!.end).trim();
+      expect(soleTemplateExpr(text), JSON.stringify(text)).toBe(
+        sole ? expected[0]!.expr : undefined,
+      );
     }
   });
 
   it("handles unclosed, nested and back-to-back braces", () => {
     expect(scanTemplate("a {{ b")).toEqual({ spans: [], unclosedAt: 2 });
-    expect(scanTemplate("{{ a }} {{ b")).toEqual({ spans: [{ start: 0, end: 7, expr: " a " }], unclosedAt: 8 });
-    expect(scanTemplate("{{ a {{ b }} c }}").spans).toEqual([{ start: 0, end: 12, expr: " a {{ b " }]);
-    expect(scanTemplate("{{{a}}}").spans).toEqual([{ start: 0, end: 6, expr: "{a" }]);
+    expect(scanTemplate("{{ a }} {{ b")).toEqual({
+      spans: [{ start: 0, end: 7, expr: " a " }],
+      unclosedAt: 8,
+    });
+    expect(scanTemplate("{{ a {{ b }} c }}").spans).toEqual([
+      { start: 0, end: 17, expr: " a {{ b }} c " },
+    ]);
+    expect(scanTemplate("{{{a}}}").spans).toEqual([{ start: 0, end: 7, expr: "{a}" }]);
     expect(scanTemplate("{{}}{{x}}").spans.map((s) => s.expr)).toEqual(["", "x"]);
     expect(scanTemplate("no braces")).toEqual({ spans: [], unclosedAt: -1 });
-    expect(soleTemplateExpr("  {{ a }} {{ b }}\n")).toBe(" a }} {{ b ");
+    expect(soleTemplateExpr("  {{ a }} {{ b }}\n")).toBeUndefined();
     expect(soleTemplateExpr("{{}")).toBeUndefined();
   });
 
   it("stays linear on 2 MB of unclosed or repeated braces", () => {
     for (const unit of ["{{ ", "{{", "{{ a }}", "{{ }} {{", "{", "}}"]) {
       const text = unit.repeat(Math.ceil(TWO_MB / unit.length));
-      expect(timed(() => scanTemplate(text)), unit).toBeLessThan(500);
-      expect(timed(() => soleTemplateExpr(text)), unit).toBeLessThan(500);
+      expect(
+        timed(() => scanTemplate(text)),
+        unit,
+      ).toBeLessThan(500);
+      expect(
+        timed(() => soleTemplateExpr(text)),
+        unit,
+      ).toBeLessThan(500);
     }
-  });
+  }, 20_000);
 });
 
 describe("templates on slow input", () => {

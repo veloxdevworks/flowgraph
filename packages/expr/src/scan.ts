@@ -26,9 +26,8 @@ export interface TemplateScan {
 }
 
 /**
- * Find the `{{ … }}` spans of a template. Each span runs from a `{{` to the
- * first `}}` after it, and scanning resumes after that `}}`, matching
- * `/\{\{([\s\S]*?)\}\}/g`. Runs in time linear in the length of the text.
+ * Find closed template spans, ignoring delimiters inside quoted strings and
+ * object literals. Each character is visited at most once.
  */
 export function scanTemplate(text: string): TemplateScan {
   const spans: TemplateSpan[] = [];
@@ -36,7 +35,26 @@ export function scanTemplate(text: string): TemplateScan {
   for (;;) {
     const start = text.indexOf("{{", from);
     if (start < 0) return { spans, unclosedAt: -1 };
-    const close = text.indexOf("}}", start + 2);
+    let close = -1;
+    let quote = "";
+    let braces = 0;
+    for (let i = start + 2; i < text.length; i++) {
+      const ch = text[i]!;
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = "";
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === "{") {
+        braces++;
+      } else if (ch === "}") {
+        if (braces > 0) braces--;
+        else if (text[i + 1] === "}") {
+          close = i;
+          break;
+        }
+      }
+    }
     if (close < 0) return { spans, unclosedAt: start };
     spans.push({ start, end: close + 2, expr: text.slice(start + 2, close) });
     from = close + 2;
@@ -45,12 +63,14 @@ export function scanTemplate(text: string): TemplateScan {
 
 /**
  * The expression of a template that is a single `{{ … }}` block with only
- * whitespace around it, or undefined. Matches `/^\s*\{\{([\s\S]*?)\}\}\s*$/`:
- * the block runs from the leading `{{` to the trailing `}}`, so text such as
- * `{{ a }} {{ b }}` counts as one block (and fails to parse), as before.
+ * whitespace around it, or undefined. Multiple spans are always interpolation.
  */
 export function soleTemplateExpr(text: string): string | undefined {
   const trimmed = text.trim();
-  if (trimmed.length < 4 || !trimmed.startsWith("{{") || !trimmed.endsWith("}}")) return undefined;
-  return trimmed.slice(2, -2);
+  if (!trimmed.startsWith("{{") || !trimmed.endsWith("}}")) return undefined;
+  const { spans, unclosedAt } = scanTemplate(text);
+  const span = spans[0];
+  if (unclosedAt >= 0 || spans.length !== 1 || !span) return undefined;
+  if (text.slice(0, span.start).trim() || text.slice(span.end).trim()) return undefined;
+  return span.expr;
 }

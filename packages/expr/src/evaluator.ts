@@ -5,6 +5,7 @@
 
 import type { Expr } from "./ast.js";
 import { stdlib } from "./stdlib.js";
+import { ownValue } from "./own-property.js";
 
 export type EvalScope = Record<string, unknown>;
 
@@ -46,7 +47,8 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
       return null;
 
     case "Ident": {
-      if (expr.name in scope) return expr.name === "state" ? visibleState(scope[expr.name]) : scope[expr.name];
+      if (Object.hasOwn(scope, expr.name))
+        return expr.name === "state" ? visibleState(scope[expr.name]) : scope[expr.name];
       if (strict) throw new EvalError(`Undefined identifier: ${expr.name}`);
       return null;
     }
@@ -54,14 +56,15 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
     case "Member": {
       const obj = evalExpr(expr.object, scope, strict);
       if (obj == null) {
-        if (strict) throw new EvalError(`Cannot access property "${expr.property}" of null/undefined`);
+        if (strict)
+          throw new EvalError(`Cannot access property "${expr.property}" of null/undefined`);
         return null;
       }
       if (typeof obj !== "object" && typeof obj !== "function") {
         if (strict) throw new EvalError(`Cannot access property "${expr.property}" on non-object`);
         return null;
       }
-      return (obj as Record<string, unknown>)[expr.property] ?? null;
+      return ownValue(obj, expr.property);
     }
 
     case "Index": {
@@ -73,17 +76,17 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
       }
       if (Array.isArray(obj)) {
         const i = Number(idx);
-        return obj[i < 0 ? obj.length + i : i] ?? null;
+        return ownValue(obj, i < 0 ? obj.length + i : i);
       }
       if (typeof obj === "object") {
-        return (obj as Record<string, unknown>)[String(idx)] ?? null;
+        return ownValue(obj, String(idx));
       }
       if (strict) throw new EvalError("Cannot index non-object");
       return null;
     }
 
     case "Call": {
-      const fn = stdlib[expr.callee];
+      const fn = Object.hasOwn(stdlib, expr.callee) ? stdlib[expr.callee] : undefined;
       if (!fn) throw new EvalError(`Unknown function: ${expr.callee}`);
       const args = expr.args.map((a) => evalExpr(a, scope, strict));
       return fn(...args);
@@ -111,26 +114,40 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
       const left = evalExpr(expr.left, scope, strict);
       const right = evalExpr(expr.right, scope, strict);
       switch (expr.op) {
-        case "==":  return left === right;
-        case "!=":  return left !== right;
-        case "<":   return (left as number) < (right as number);
-        case "<=":  return (left as number) <= (right as number);
-        case ">":   return (left as number) > (right as number);
-        case ">=":  return (left as number) >= (right as number);
-        case "+":   return typeof left === "string" || typeof right === "string"
-                      ? String(left) + String(right)
-                      : (left as number) + (right as number);
-        case "-":   return (left as number) - (right as number);
-        case "*":   return (left as number) * (right as number);
-        case "/":   return (left as number) / (right as number);
-        case "%":   return (left as number) % (right as number);
-        default:    throw new EvalError(`Unknown binary op: ${expr.op}`);
+        case "==":
+          return left === right;
+        case "!=":
+          return left !== right;
+        case "<":
+          return (left as number) < (right as number);
+        case "<=":
+          return (left as number) <= (right as number);
+        case ">":
+          return (left as number) > (right as number);
+        case ">=":
+          return (left as number) >= (right as number);
+        case "+":
+          return typeof left === "string" || typeof right === "string"
+            ? String(left) + String(right)
+            : (left as number) + (right as number);
+        case "-":
+          return (left as number) - (right as number);
+        case "*":
+          return (left as number) * (right as number);
+        case "/":
+          return (left as number) / (right as number);
+        case "%":
+          return (left as number) % (right as number);
+        default:
+          throw new EvalError(`Unknown binary op: ${expr.op}`);
       }
     }
 
     case "Ternary": {
       const cond = evalExpr(expr.condition, scope, strict);
-      return cond ? evalExpr(expr.consequent, scope, strict) : evalExpr(expr.alternate, scope, strict);
+      return cond
+        ? evalExpr(expr.consequent, scope, strict)
+        : evalExpr(expr.alternate, scope, strict);
     }
 
     case "Nullish": {
@@ -140,7 +157,7 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
 
     case "Pipe": {
       const left = evalExpr(expr.left, scope, strict);
-      const fn = stdlib[expr.fn];
+      const fn = Object.hasOwn(stdlib, expr.fn) ? stdlib[expr.fn] : undefined;
       if (!fn) throw new EvalError(`Unknown pipe function: ${expr.fn}`);
       const extraArgs = expr.args.map((a) => evalExpr(a, scope, strict));
       return fn(left, ...extraArgs);
@@ -150,11 +167,9 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
       return expr.elements.map((e) => evalExpr(e, scope, strict));
 
     case "Object": {
-      const result: Record<string, unknown> = {};
-      for (const { key, value } of expr.entries) {
-        result[key] = evalExpr(value, scope, strict);
-      }
-      return result;
+      return Object.fromEntries(
+        expr.entries.map(({ key, value }) => [key, evalExpr(value, scope, strict)]),
+      );
     }
 
     default:

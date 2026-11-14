@@ -3,6 +3,8 @@
  * in {{ expression }} blocks.
  */
 
+import { ownValue } from "./own-property.js";
+
 export type StdlibFn = (...args: unknown[]) => unknown;
 export type Stdlib = Record<string, StdlibFn>;
 
@@ -24,7 +26,10 @@ export const stdlib: Stdlib = {
   upper: (s) => toStr(s).toUpperCase(),
   trim: (s) => toStr(s).trim(),
   split: (s, sep) => toStr(s).split(toStr(sep)),
-  join: (arr, sep) => toArr(arr).map(toStr).join(toStr(sep ?? "")),
+  join: (arr, sep) =>
+    toArr(arr)
+      .map(toStr)
+      .join(toStr(sep ?? "")),
   replace: (s, search, repl) => toStr(s).replaceAll(toStr(search), toStr(repl)),
   contains: (s, sub) => toStr(s).includes(toStr(sub)),
   startsWith: (s, prefix) => toStr(s).startsWith(toStr(prefix)),
@@ -67,8 +72,8 @@ export const stdlib: Stdlib = {
     if (key != null) {
       const k = toStr(key);
       a.sort((x, y) => {
-        const xv = (x as Record<string, unknown>)[k];
-        const yv = (y as Record<string, unknown>)[k];
+        const xv = ownValue(x, k);
+        const yv = ownValue(y, k);
         return xv == null ? -1 : yv == null ? 1 : xv < yv ? -1 : xv > yv ? 1 : 0;
       });
     } else {
@@ -95,27 +100,32 @@ export const stdlib: Stdlib = {
   keys: (obj) => (obj != null && typeof obj === "object" ? Object.keys(obj as object) : []),
   values: (obj) => (obj != null && typeof obj === "object" ? Object.values(obj as object) : []),
   entries: (obj) =>
-    obj != null && typeof obj === "object" ? Object.entries(obj as object).map(([k, v]) => ({ key: k, value: v })) : [],
-  get: (obj, key) =>
-    obj != null && typeof obj === "object" ? (obj as Record<string, unknown>)[toStr(key)] ?? null : null,
+    obj != null && typeof obj === "object"
+      ? Object.entries(obj as object).map(([k, v]) => ({ key: k, value: v }))
+      : [],
+  get: (obj, key) => ownValue(obj, toStr(key)),
   has: (obj, key) =>
-    obj != null && typeof obj === "object" ? toStr(key) in (obj as object) : false,
+    obj != null && typeof obj === "object" ? Object.hasOwn(obj, toStr(key)) : false,
   pick: (obj, ...keys) => {
     if (obj == null || typeof obj !== "object") return {};
-    const result: Record<string, unknown> = {};
-    for (const k of keys.map(toStr)) result[k] = (obj as Record<string, unknown>)[k];
-    return result;
+    return Object.fromEntries(
+      keys
+        .map(toStr)
+        .filter((k) => Object.hasOwn(obj, k))
+        .map((k) => [k, ownValue(obj, k)]),
+    );
   },
   omit: (obj, ...keys) => {
     if (obj == null || typeof obj !== "object") return {};
     const ks = new Set(keys.map(toStr));
-    const result: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-      if (!ks.has(k)) result[k] = v;
-    }
-    return result;
+    return Object.fromEntries(Object.entries(obj).filter(([k]) => !ks.has(k)));
   },
-  merge: (...objects) => Object.assign({}, ...objects.filter((o) => o != null && typeof o === "object")),
+  merge: (...objects) =>
+    Object.fromEntries(
+      objects
+        .filter((o) => o != null && typeof o === "object")
+        .flatMap((o) => Object.entries(o as object)),
+    ),
 
   // Number/Math
   abs: (n) => Math.abs(toNum(n)),
@@ -133,7 +143,7 @@ export const stdlib: Stdlib = {
   parseFloat: (s) => parseFloat(toStr(s)),
 
   // Logic/util
-  default: (v, d) => (v ?? d),
+  default: (v, d) => v ?? d,
   coalesce: (...args) => args.find((a) => a != null) ?? null,
   ifElse: (cond, t, f) => (cond ? t : f),
   jsonParse: (s) => JSON.parse(toStr(s)),
