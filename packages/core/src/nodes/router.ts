@@ -155,7 +155,7 @@ async function runModelRouter(
   const req: AgentRequest = {
     prompt,
     tools: [],
-    schema: { type: "object", properties: { route: { type: "string", enum: routeKeys } }, required: ["route"] },
+    schema: { type: "object", properties: { route: { type: "string", enum: routeKeys } }, required: ["route"], additionalProperties: false },
     permission: "auto",
   };
   const providerCtx: ProviderRunContext = {

@@ -1421,7 +1421,7 @@ async function assembleCompiledLangGraph(
   // raw result (the outputs slug) so the LLM sees clean data, not the update envelope.
   toolWiring.invokeNode = async (id, args, ctx, state = {}) => {
     if (spec.nodes.find((n) => n.id === id)?.type === "map") {
-      throw new Error(`node-as-tool: map node "${id}" cannot be called as a tool; put it in a subgraph and call that instead.`);
+      throw Object.assign(new Error(`node-as-tool: map node "${id}" cannot be called as a tool; put it in a subgraph and call that instead.`), { code: "NODE_TOOL_UNSUPPORTED", retryable: false });
     }
     // Reached only by a tool list the compiler can't see, such as a reusable agent definition.
     if (provesObjective(spec.nodes.find((n) => n.id === id))) {

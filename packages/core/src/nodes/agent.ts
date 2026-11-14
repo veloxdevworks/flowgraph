@@ -32,6 +32,8 @@ import type { ContextConfigInput, ContextPolicy } from "../context/types.js";
 import { capIssueLines } from "../context/issues.js";
 import { getTokenEstimator } from "../context/estimator.js";
 import { startAgentContext, type AgentContextSession } from "./agent-context.js";
+import { validateAgentOutput } from "../runtime/agent-output.js";
+import { isNonRetryable } from "../runtime/retry.js";
 
 const configSchema = AgentWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -115,8 +117,10 @@ export const agentNode = defineNode<Config>({
         system = prependKnownIssues(system, state, contextPolicy);
         system = appendRecallSection(system, recall);
 
-        const { normalized, mcpRefs } = normalizeTools(config.tools as ToolRef[] | undefined, wiring);
-        let { specs, executors } = mergeTools(normalized, reportIssueTool());
+        const declared = (config.tools ?? []) as ToolRef[];
+        const reportsIssues = declared.some(t => "function" in t && t.function === "report_issue");
+        const { normalized, mcpRefs } = normalizeTools(declared.filter(t => !("function" in t && t.function === "report_issue")), wiring);
+        let { specs, executors } = reportsIssues ? mergeTools(normalized, reportIssueTool()) : normalized;
         const remember = rememberTool(ctx, memoryConfig, scope);
         if (remember) ({ specs, executors } = mergeTools({ specs, executors }, remember));
         if (mcpRefs.length > 0) {
@@ -218,7 +222,13 @@ export const agentNode = defineNode<Config>({
               { name, argsHash: toolArgsHash(callArgs) },
             );
             if (toolMemory) toolCtx.memory = toolMemory;
-            let result = await exec(callArgs, toolCtx, state);
+            let result: unknown;
+            try {
+              result = await exec(callArgs, toolCtx, state);
+            } catch (err) {
+              if (isGraphInterrupt(err) || err instanceof ReplayMismatchError || isNonRetryable(err) || ctx.signal?.aborted) throw err;
+              result = { isError: true, error: { code: (err as { code?: unknown } | null)?.code ?? "TOOL_ERROR", message: err instanceof Error ? err.message : String(err) } };
+            }
             ctx.emit("agent.tool.result", { tool: name, result });
 
             result = await reportToolResult(governance, name, callArgs, result);
@@ -278,6 +288,11 @@ export const agentNode = defineNode<Config>({
             enforceBudget(ctx, result.usage);
           }
 
+          if (result.stopReason !== "done") {
+            throw Object.assign(new Error(`agent node "${ctx.nodeId}" did not complete: ${result.stopReason}${result.stopReason === "maxSteps" ? ` (${req.maxSteps ?? 10} steps)` : ""}`), { code: result.stopReason === "maxSteps" ? "AGENT_MAX_STEPS" : "AGENT_INCOMPLETE", retryable: false, partialOutput: result.output });
+          }
+          validateAgentOutput(result.output, config.schema, `agent node "${ctx.nodeId}" schema`);
+
           replayStore.clear(cacheKey);
 
           const historyUpdate = contextSession?.historyUpdate(result);
@@ -316,7 +331,7 @@ function prependKnownIssues(
   if (contextPolicy) lines = capIssueLines(lines, contextPolicy.issuesMaxTokens, getTokenEstimator(contextPolicy.estimator));
   const block = lines.join("\n");
   const section =
-    `Known issues so far (these may affect result quality; try to remediate if you can, or report remaining gaps with report_issue):\n${block}`;
+    `Known issues so far (these may affect result quality; try to remediate if you can):\n${block}`;
   return system ? `${system}\n\n${section}` : section;
 }
 

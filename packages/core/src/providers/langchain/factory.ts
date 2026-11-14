@@ -104,6 +104,8 @@ async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): 
   }
 
   const modelOpts: Record<string, unknown> = { ...(cfg.options ?? {}) };
+  // Node retry policy owns retries and emits node.retry for every retry.
+  modelOpts["maxRetries"] = 0;
   if (cfg.model) modelOpts["model"] = cfg.model;
 
   const apiKeyEnv = cfg.apiKeyEnv ?? DEFAULT_API_KEY_ENV[vendor];

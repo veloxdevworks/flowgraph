@@ -20,11 +20,13 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@langchain/core": "^1.2.0",
-    "@langchain/langgraph": "^1.4.7",
     "@flowgraph/expr": "workspace:*",
     "@flowgraph/skills": "workspace:*",
     "@flowgraph/spec": "workspace:*",
+    "@langchain/core": "^1.2.0",
+    "@langchain/langgraph": "^1.4.7",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "esbuild": "^0.25.12",
     "gray-matter": "^4.0.3",
     "yaml": "^2.9.0",

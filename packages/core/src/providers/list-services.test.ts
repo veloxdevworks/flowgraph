@@ -124,14 +124,13 @@ describe("list_services / service_status tools", () => {
 
   it("service_status rejects a missing name", async () => {
     const scripted = createScriptedProvider("scripted-svc", async (_req, ctx) => {
-      await ctx.invokeTool("service_status", {});
+      expect(await ctx.invokeTool("service_status", {})).toMatchObject({ isError: true, error: { message: expect.stringMatching(/requires a "name"/) } });
       return { output: {}, stopReason: "done" };
     });
     const compiled = await compileGraph(agentGraph([{ function: "service_status" }]), {
       providers: [scripted],
     });
     const result = await compiled.run({ threadId: "svc-tools-bad" });
-    expect(result.status).toBe("error");
-    expect(result.error?.message).toMatch(/requires a "name"/);
+    expect(result.status).toBe("completed");
   });
 });

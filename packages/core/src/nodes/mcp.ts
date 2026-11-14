@@ -11,6 +11,7 @@ import { defineNode, type CompiledNode, type BuildContext, type NodeResult } fro
 import type { NodeRunContext } from "../context.js";
 import { requireMcpHub } from "../mcp/expand.js";
 import { applyOutput } from "./output.js";
+import { assertMcpToolSuccess } from "../mcp/tool-result.js";
 
 const configSchema = McpWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -44,7 +45,7 @@ export const mcpNode = defineNode<Config>({
             ? (renderDeep(config.arguments, scope) as Record<string, unknown>)
             : {};
           ctx.emit("mcp.tool.call", { server: config.server, tool: config.tool, args });
-          result = await hub.callTool(config.server, config.tool, args);
+          result = assertMcpToolSuccess(await hub.callTool(config.server, config.tool, args), config.server, config.tool);
           ctx.emit("mcp.tool.result", { server: config.server, tool: config.tool, result });
         } else {
           const uri = String(renderDeep(config.resource!, scope));

@@ -314,3 +314,11 @@ MCP OAuth tokens (`.flowgraph/mcp-oauth/`) and LLM API keys are independent. For
 Each adapter supplies a pricing function (model → $/token) used by the budget/cost machinery ([06 §6](./06-events-and-hooks.md#6-cost--token-accounting)). Tables are overridable via config for negotiated rates or new models.
 
 **LangChain vendors (including Bedrock):** the built-in LangChain adapter records token usage from the model response but does **not** populate `costUSD`. USD budgets (`runtime.budget.maxUSD` / related hooks) therefore do not enforce for LangChain backends today — use token budgets, or supply a custom pricing/cost path. This is an accepted limitation until vendor pricing maps are added.
+
+## 10. Agent completion and retries
+
+`with.schema` validates the final output against JSON Schema draft-07, including nested objects, arrays, required fields, enums, formats, and additional-property restrictions. Validation does not coerce data or remove fields. Invalid schemas/outputs fail with `AGENT_SCHEMA_INVALID`/`AGENT_OUTPUT_INVALID`. LangChain uses native structured output when supported. With tools, a constrained finalization call follows the tool loop; this can add one model call. Otherwise the final text must parse as valid JSON matching the schema. Vendor/model API restrictions still apply; OpenAI models that require the Responses API can set `options.useResponsesApi: true`.
+
+Tools are explicit. To offer issue reporting, add `tools: [{ function: report_issue }]`; it is no longer injected into every call. Recoverable tool-handler exceptions become `{ isError: true, error: { code, message } }` tool results, allowing the model to recover. Permission denial, interrupts, replay mismatches, cancellation, and non-retryable runtime failures still propagate. MCP `isError` fails deterministic nodes and becomes a recoverable tool failure inside an agent.
+
+Exhausting `with.maxSteps` fails with `AGENT_MAX_STEPS` (including `partialOutput` on the error) instead of reporting success. Configured LangChain models force SDK `maxRetries` to zero. Configure the node's `retry` policy for bounded retries with `node.retry` events; raw models supplied to `createLangChainProvider` remain the caller's responsibility.
