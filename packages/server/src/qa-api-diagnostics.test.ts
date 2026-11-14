@@ -108,3 +108,31 @@ it("includes a failed run's message in GET details, including after restart", as
     message: expect.stringContaining("specific failure"),
   });
 });
+
+it("returns a structured import refusal from the real upload endpoint", async () => {
+  const { base, service } = await boot();
+  const yaml = JSON.stringify({
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: "blocked" },
+    imports: [{ providers: "./module.mjs" }],
+    nodes: [{ id: "s", type: "shell", with: { command: "true" } }],
+    edges: [
+      { from: "START", to: "s" },
+      { from: "s", to: "END" },
+    ],
+  });
+  const response = await fetch(base + "/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadId: "blocked", yaml }),
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({
+    code: "UPLOAD_IMPORTS_BLOCKED",
+    diagnostics: expect.arrayContaining([
+      expect.objectContaining({ code: "UPLOAD_IMPORTS_BLOCKED" }),
+    ]),
+  });
+  expect(service.registry.get("blocked")).toBeUndefined();
+});

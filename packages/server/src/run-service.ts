@@ -677,7 +677,8 @@ export class RunService {
       const parsed = parseGraphYaml(yaml, { expandEnv: principal.trusted });
       if (!parsed.spec) {
         const msg = parsed.diagnostics.map((d) => d.message).join("; ");
-        throw new Error(`Invalid graph YAML: ${msg}`);
+        const code=parsed.diagnostics.some(d=>d.code==="UPLOAD_IMPORTS_BLOCKED")?"UPLOAD_IMPORTS_BLOCKED":"INVALID_GRAPH";
+        throw new ServerRequestError(400,code,`Invalid graph YAML: ${msg}`,parsed.diagnostics);
       }
       if (!principal.trusted) assertUntrustedUploadAllowed(yaml, parsed.spec, this.uploadOptions);
       if (parsed.importsStripped) {
