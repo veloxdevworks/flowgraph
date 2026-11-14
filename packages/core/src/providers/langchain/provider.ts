@@ -32,6 +32,7 @@ import type {
 import type { ContextMessage, ProviderContextManager } from "../../context/types.js";
 import { toLangChainMessage } from "../../context/messages.js";
 import { redactProviderErrors } from "../redact-errors.js";
+import { validateAgentOutput } from "../../runtime/agent-output.js";
 
 // Minimal structural type for a LangChain chat model (avoids a hard type dep
 // on a specific @langchain/core version's class shape).
@@ -85,9 +86,8 @@ export function createLangChainProvider(
 
       // Structured output without tools → single constrained call.
       if (req.schema && req.tools.length === 0 && typeof model.withStructuredOutput === "function") {
-        const structured = model.withStructuredOutput(req.schema);
-        const output = await structured.invoke(messages, { signal: ctx.signal });
-        return { output, messages: [], steps: [], stopReason: "done" };
+        const { output, usage } = await constrainedOutput(model, req, ctx, messages);
+        return { output, usage, messages: [], steps: [], stopReason: "done" };
       }
 
       const lcTools = req.tools.map((spec) => buildTool(spec, ctx));
@@ -140,8 +140,15 @@ export function createLangChainProvider(
 
       const content = extractText(final);
       let output: unknown = { text: content };
-      if (req.schema) {
-        output = tryParseJson(content) ?? { text: content };
+      if (req.schema && stopReason === "done") {
+        if (model.withStructuredOutput) {
+          const result = await constrainedOutput(model, req, ctx, messages);
+          output = result.output;
+          addUsage(usage, result.usage);
+        } else {
+          output = tryParseJson(content);
+          validateAgentOutput(output, req.schema, `provider ${name} schema`);
+        }
       }
 
       return { output, steps, usage, stopReason };
@@ -184,9 +191,8 @@ async function runWithContext(
   };
 
   if (req.schema && req.tools.length === 0 && typeof model.withStructuredOutput === "function") {
-    const structured = model.withStructuredOutput(req.schema);
-    const output = await structured.invoke(await build(), { signal: ctx.signal });
-    return { output, messages: [], steps: [], stopReason: "done", turn: [] };
+    const { output, usage } = await constrainedOutput(model, req, ctx, await build());
+    return { output, usage, messages: [], steps: [], stopReason: "done", turn: [] };
   }
 
   const lcTools = req.tools.map((spec) => buildTool(spec, ctx));
@@ -252,7 +258,17 @@ async function runWithContext(
 
   const content = extractText(final);
   let output: unknown = { text: content };
-  if (req.schema) output = tryParseJson(content) ?? { text: content };
+  if (req.schema && stopReason === "done") {
+    if (model.withStructuredOutput) {
+      const result = await constrainedOutput(model, req, ctx, await build());
+      output = result.output;
+      addUsage(usage, result.usage);
+      loop.push({ role: "assistant", content: JSON.stringify(output) });
+    } else {
+      output = tryParseJson(content);
+      validateAgentOutput(output, req.schema, "LangChain provider schema");
+    }
+  }
   return { output, steps, usage, stopReason, turn: loop };
 }
 
@@ -301,5 +317,23 @@ function tryParseJson(text: string): unknown {
     return JSON.parse(candidate);
   } catch {
     return undefined;
+  }
+}
+
+async function constrainedOutput(model: ChatModelLike, req: AgentRequest, ctx: ProviderRunContext, messages: BaseMessage[]): Promise<{ output: unknown; usage: TokenUsage }> {
+  const result = await model.withStructuredOutput!(req.schema, { includeRaw: true }).invoke(messages, { signal: ctx.signal });
+  const wrapped = result && typeof result === "object" && Object.hasOwn(result, "parsed") && Object.hasOwn(result, "raw")
+    ? result as { parsed: unknown; raw: AIMessage; parsing_error?: unknown } : undefined;
+  const output = wrapped ? wrapped.parsed : result;
+  validateAgentOutput(output, req.schema, `agent node "${ctx.node.nodeId}" schema`);
+  const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  if (wrapped?.raw) accumulateUsage(usage, wrapped.raw);
+  usage.totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+  return { output, usage };
+}
+
+function addUsage(total: TokenUsage, inc: TokenUsage): void {
+  for (const key of ["inputTokens", "outputTokens", "totalTokens", "costUSD"] as const) {
+    if (inc[key] !== undefined) total[key] = (total[key] ?? 0) + inc[key]!;
   }
 }

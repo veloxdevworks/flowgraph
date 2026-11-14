@@ -75,13 +75,13 @@ describe("LangChain provider (built into @flowgraph/core)", () => {
     expect(bound.length).toBeGreaterThan(0);
     const names = bound.map((t) => (t as { name?: string }).name);
     expect(names).toContain("weather");
-    expect(names).toContain("report_issue");
+    expect(names).not.toContain("report_issue");
     for (const t of bound) {
       expect(typeof (t as { invoke?: unknown }).invoke === "function" || typeof (t as { func?: unknown }).func === "function").toBe(true);
     }
   });
 
-  it("reports stopReason maxSteps and emits custom.agent.maxSteps when the loop is exhausted", async () => {
+  it("fails with AGENT_MAX_STEPS and emits custom.agent.maxSteps when the loop is exhausted", async () => {
     registerTool({ name: "spin", handler: () => ({ ok: true }) });
     const model = fakeModel([
       new AIMessage({ content: "", tool_calls: [{ name: "spin", args: {}, id: "t1" }] }),
@@ -103,7 +103,8 @@ describe("LangChain provider (built into @flowgraph/core)", () => {
       sinks: [(e) => { events.push(e.type); }],
     });
     const r = await compiled.run({ input: {} });
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("error");
+    expect(r.error).toMatchObject({ code: "AGENT_MAX_STEPS" });
     expect(events).toContain("custom.agent.maxSteps");
   });
 

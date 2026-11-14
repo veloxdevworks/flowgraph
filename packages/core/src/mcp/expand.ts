@@ -6,6 +6,7 @@ import type { McpHub } from "./types.js";
 import type { NodeRunContext } from "../context.js";
 import type { ToolSpec } from "../providers/types.js";
 import type { NormalizedTools, ToolExecutor } from "../providers/tools.js";
+import { assertMcpToolSuccess } from "./tool-result.js";
 
 export type McpToolRef = { mcp: string; tools?: string[] | undefined };
 
@@ -54,7 +55,7 @@ export async function expandMcpTools(
       if (t.schema) spec.schema = t.schema;
       specs.push(spec);
       executors.set(name, async (args: unknown, _ctx: NodeRunContext) =>
-        hub.callTool(server, t.name, args),
+        assertMcpToolSuccess(await hub.callTool(server, t.name, args), server, t.name),
       );
     }
   }

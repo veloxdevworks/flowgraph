@@ -147,6 +147,7 @@ describe("LangChain provider factory — bedrock construction", () => {
 
     const opts = readCtorOpts();
     expect(opts["region"]).toBe("us-west-2");
+    expect(opts["maxRetries"]).toBe(0);
     expect(opts["credentials"]).toBeUndefined();
     expect(opts["apiKey"]).toBeUndefined();
   });
