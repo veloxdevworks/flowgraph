@@ -83,7 +83,10 @@ export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; l
     else for (const branch of edge.branch) edges.push({ from: edge.from, to: branch.to, ...(branch.when ? { label: branch.when } : branch.default ? { label: "default" } : {}) });
   }
   for (const node of spec.nodes) {
-    for (const to of nodeRouteTargets(spec, node.id)) edges.push({ from: node.id, to, label: "route" });
+    const routes = node.type === "hitl" ? normalizeHitlRoutes(node.with?.routes) : node.type === "router" ? node.with?.routes as Record<string,{to?:string}> | undefined : undefined;
+    const labelled = new Set<string>();
+    for (const [label,route] of Object.entries(routes ?? {})) if (typeof route?.to === "string") {edges.push({from:node.id,to:route.to,label});labelled.add(route.to);}
+    for (const to of nodeRouteTargets(spec, node.id)) if (!labelled.has(to)) edges.push({ from: node.id, to, label: "route" });
   }
   return [...new Map(edges.map((edge) => [`${edge.from}:${edge.to}:${edge.label ?? ""}`, edge])).values()];
 }

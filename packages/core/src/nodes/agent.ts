@@ -332,6 +332,7 @@ export const agentNode = defineNode<Config>({
           }
 
           if (result.stopReason !== "done") {
+            if (!["maxSteps","interrupted","error"].includes(result.stopReason)) throw Object.assign(new Error(`agent node "${ctx.nodeId}": invalid stopReason ${JSON.stringify(result.stopReason)}. Allowed values: done, maxSteps, interrupted, error.`),{code:"AGENT_STOP_REASON_INVALID",retryable:false});
             throw Object.assign(new Error(`agent node "${ctx.nodeId}" did not complete: ${result.stopReason}${result.stopReason === "maxSteps" ? ` (${req.maxSteps ?? 10} steps)` : ""}`), { code: result.stopReason === "maxSteps" ? "AGENT_MAX_STEPS" : "AGENT_INCOMPLETE", retryable: false, partialOutput: result.output });
           }
           validateAgentOutput(result.output, config.schema, `agent node "${ctx.nodeId}" schema`);

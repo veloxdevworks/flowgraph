@@ -3,6 +3,7 @@
  * needed, poll with backoff, collect outputs. See ADR-0017.
  */
 
+import type { TokenUsage } from "../providers/types.js";
 import type { Artifact } from "@flowgraph/spec";
 import { randomUUID } from "node:crypto";
 import { parseDuration, sleep } from "../runtime/duration.js";
@@ -23,6 +24,7 @@ export interface RunMediaJobOptions {
 }
 
 export interface MediaJobResult {
+  usage?: TokenUsage;
   artifacts: Artifact[];
   /** Cost to charge this run's budget; 0 when the result came from the journal. */
   costUSD: number;
@@ -109,9 +111,9 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
   if (handle.done) {
     const reported = typeof handle.costUSD === "number" ? handle.costUSD : undefined;
     const costUSD = reported ?? estimate;
-    await journal.write({ version: 1, state: "done", provider: provider.name, submittedAt, handle, artifacts: handle.done, ...(costUSD === undefined ? {} : { costUSD }) });
+    await journal.write({ version: 1, state: "done", provider: provider.name, submittedAt, handle, ...(handle.usage ? {usage:handle.usage} : {}), artifacts: handle.done, ...(costUSD === undefined ? {} : { costUSD }) });
     opts.emit("done", { provider: provider.name, jobId: handle.id, artifacts: handle.done.length, ...(costUSD === undefined ? { costKnown: false } : { costUSD, costKnown: true, costEstimated: reported === undefined }) });
-    return { artifacts: handle.done, costUSD: costUSD ?? 0, costKnown: costUSD !== undefined, costEstimated: reported === undefined && estimate !== undefined, reused: false };
+    return { ...(handle.usage ? {usage:handle.usage} : {}), artifacts: handle.done, costUSD: costUSD ?? 0, costKnown: costUSD !== undefined, costEstimated: reported === undefined && estimate !== undefined, reused: false };
   }
   if (!provider.poll || !provider.fetch) {
     throw new Error(`media provider "${provider.name}" returned a pending job but has no poll/fetch`);
@@ -171,10 +173,11 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
     submittedAt,
     handle,
     artifacts,
+    ...(status.usage ? {usage:status.usage} : {}),
     costUSD,
   });
   opts.emit("done", { provider: provider.name, jobId: handle.id, artifacts: artifacts.length, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, ...(reportedCost === undefined ? {} : { costUSD }) });
-  return { artifacts, costUSD, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, reused: false };
+  return { ...(status.usage ? {usage:status.usage} : {}), artifacts, costUSD, costKnown: reportedCost !== undefined, costEstimated: status.costUSD === undefined && estimate !== undefined, reused: false };
 }
 
 /** Rejected HTTP requests and failures before a connection; never resets/timeouts/5xx. */

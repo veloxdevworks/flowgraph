@@ -1464,3 +1464,7 @@ default. Fanout waits for admitted jobs to settle and persist results/cost befor
 reporting a sibling failure.
 
 The CLI handles SIGHUP as cancellation while executing and while waiting for a webhook, so terminal/SSH closure stops its detached service groups. Embedded hosts should handle their shutdown signals and call `terminateThreadServices`; SIGKILL cannot run cleanup. On Windows, service-tree shutdown uses `taskkill /T /F`, so graceful `stopSignal` behavior is unavailable there. Descendants that deliberately detach or close all inherited stdio may outlive their registered leader; keep foreground service processes owned by the registry.
+
+Custom providers must return a `stopReason` of `done`, `maxSteps`, `interrupted` or `error`. Only `done` means a completed result. Invalid values now fail with `AGENT_STOP_REASON_INVALID` and list the allowed values. Scripts are self-contained ESM modules with a default function export, for example `export default async (input, ctx) => ({value: input.value})`; a top-level `return` is not a module export. Subgraph output projections belong under `with.output`.
+
+Media providers can report normalized token counts as `JobHandle.usage` (synchronous) or `JobStatus.usage` (async), alongside cost. Those counts enter run totals once per paid operation. Reusing completed journal artifacts makes no new call and adds no usage.

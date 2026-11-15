@@ -1,3 +1,4 @@
+import { errorInfo } from "./runtime/error-info.js";
 /**
  * Stage 2: build a LangGraph StateGraph from a validated GraphSpec,
  * plus run/resume/inspect with durability, HITL, and retry/timeout.
@@ -646,6 +647,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
     const startEvent =
       mode === "resume" ? "interrupt.resumed" : mode === "continue" ? "run.continued" : "run.start";
+    if (mode !== "start") events.emit("run.start", {graphName:graphSpec.metadata.name,mode,checkpointId:(runOpts as ResumeOptions).checkpointId});
     events.emit(startEvent, {
       graphName: graphSpec.metadata.name,
     });
@@ -661,7 +663,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           "retention" in retention &&
           (retention as { retention?: { enabled?: boolean } }).retention?.enabled !== false;
         const error = checkpointPrunedError(threadId, requestedCheckpoint, { retention: retentionOn });
-        events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
+        events.emit("run.error", { ...errorInfo(error), durationMs: Date.now() - startMs });
         // Do not record this as a pause. The outer exit restores the saved status.
         return finish({ status: "error", state: {}, runId, threadId, error, durationMs: Date.now() - startMs }, false, false);
       }
@@ -797,11 +799,11 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             const nodeId = (it.payload as { data?: { __nodeId?: string } } | undefined)?.data?.__nodeId;
             events.emit(
               "node.error",
-              { nodeId, error: message, resumeAttemptsExhausted: true, interruptId: it.id },
+              { nodeId, error: message, code:"RESUME_ATTEMPTS_EXHAUSTED", resumeAttemptsExhausted: true, interruptId: it.id },
               nodeId ? { nodeId } : {},
             );
           }
-          events.emit("run.error", { message, error: message, durationMs: Date.now() - startMs });
+          events.emit("run.error", { message, error: message, code:"RESUME_ATTEMPTS_EXHAUSTED", durationMs: Date.now() - startMs });
           return finish({
             status: "error",
             state: clean,
@@ -937,7 +939,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
       }
       const terminal = flowFailure(error);
-      events.emit("run.error", { message: error.message, error: error.message, ...(terminal ? { code: terminal.code, reason: terminal.reason } : {}), durationMs: Date.now() - startMs });
+      events.emit("run.error", { ...errorInfo(error), ...(terminal ? { code: terminal.code, reason: terminal.reason } : {}), durationMs: Date.now() - startMs });
       await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
       // A thread that moved on belongs to someone else now: release this run
       // without writing its status over theirs.
@@ -1579,7 +1581,7 @@ async function assembleCompiledLangGraph(
           const r = await hooks.run("node:error", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, error } });
           const c = r.control;
           if (c?.kind === "veto") {
-            events.emit("node.error", { nodeId: nodeSpec.id, error: error.message, swallowed: true }, scope);
+            events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(error,"NODE_ERROR"), swallowed: true }, scope);
             const swallowed: RunIssue = stampIssue(
               {
                 code: "ERROR_SWALLOWED",
@@ -1600,7 +1602,7 @@ async function assembleCompiledLangGraph(
             return { [ISSUES_CHANNEL]: [swallowed] };
           }
           if (c?.kind === "route") {
-            events.emit("node.error", { nodeId: nodeSpec.id, error: error.message, routed: c.to }, scope);
+            events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(error,"NODE_ERROR"), routed: c.to }, scope);
             return new Command({ goto: c.to }) as unknown as Record<string, unknown>;
           }
           if (c?.kind === "retry") {
@@ -1617,17 +1619,17 @@ async function assembleCompiledLangGraph(
         }
         const policy = nodeSpec.on?.error;
         if (policy === "continue" || policy === "ignore") {
-          events.emit("node.error", { nodeId: nodeSpec.id, error: String(err), swallowed: true, policy }, scope);
+          events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(err,"NODE_ERROR"), swallowed: true, policy }, scope);
           const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `node "${nodeSpec.id}" continued after an error: ${String(err)}`, impact: "The node produced no result; subsequent nodes and sibling branches continue." }, { nodeId: nodeSpec.id, nodeType: nodeSpec.type });
           events.emit("run.issue", issue, scope);
           return { [ISSUES_CHANNEL]: [issue] };
         }
         if (policy?.startsWith("route:")) {
           const to = policy.slice(6);
-          events.emit("node.error", { nodeId: nodeSpec.id, error: String(err), routed: to }, scope);
+          events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(err,"NODE_ERROR"), routed: to }, scope);
           return new Command({ goto: to === "END" ? END : to }) as unknown as Record<string, unknown>;
         }
-        events.emit("node.error", { nodeId: nodeSpec.id, error: String(err) }, scope);
+        events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(err,"NODE_ERROR") }, scope);
         throw err;
       }
     };
@@ -2779,7 +2781,7 @@ function addCheckpointedMap(
     const hook = await ctx.hooks.run("node:error", { state, run: ctx.baseCtx.meta as RunMeta, payload: { nodeId: mapId, nodeType: "map", error } });
     const innerPolicy = itemId === mapId ? undefined : (config.node as { on?: { error?: string } }).on?.error;
     const policy = hook.control?.kind === "route" ? `route:${hook.control.to}` : hook.control?.kind === "veto" ? "continue" : innerPolicy ?? nodeSpec.on?.error;
-    ctx.events.emit("node.error", { nodeId: itemId, error: error.message, ...(policy && policy !== "fail" ? { swallowed: true, policy } : {}) }, { nodeId: itemId, nodeType: itemId === mapId ? "map" : innerType });
+    ctx.events.emit("node.error", { nodeId: itemId, ...errorInfo(error,"NODE_ERROR"), ...(policy && policy !== "fail" ? { swallowed: true, policy } : {}) }, { nodeId: itemId, nodeType: itemId === mapId ? "map" : innerType });
     if (!policy || policy === "fail") throw err;
     const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `map item/node "${itemId}" failed: ${error.message}`, impact: "Failed items have no collected value; admitted siblings finish before recovery." }, { nodeId: itemId, nodeType: innerType });
     return { [ISSUES_CHANNEL]: [issue], ...(policy.startsWith("route:") ? { [ROUTING_CHANNEL]: { [mapId]: policy.slice(6) } } : {}) };
