@@ -225,6 +225,15 @@ describe("attach", () => {
     expect(await createHttpTransport({ fetch: fetchFn }).attach(w, "t").result).toMatchObject({ status: "error", error: { message: "bad input" } });
   });
 
+  it.each([true, false])("preserves failure codes for finished worker runs with journal=%s", async journal => {
+    const error = { code: "FLOW_FAILED", message: "worker rejected" };
+    const { fetchFn } = stub(u => u.endsWith("/journal")
+      ? json({ events: journal ? [{ seq: 1, type: "run.error", data: error }] : [] })
+      : u.endsWith("/state") ? json({ state: null }) : json({ status: "error", active: false, error }));
+    const result = await createHttpTransport({ fetch: fetchFn }).attach(w, "failed").result;
+    expect(result).toMatchObject({ status: "error", error });
+  });
+
   it("fails on an unknown thread (404) instead of waiting on an empty stream", async () => {
     const { fetchFn, calls } = stub(() => json({ error: 'No run "t"' }, 404));
     await expect(createHttpTransport({ fetch: fetchFn }).attach(w, "t").result).rejects.toThrow(/"w" returned 404/);

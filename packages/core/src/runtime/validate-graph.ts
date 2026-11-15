@@ -140,7 +140,7 @@ export function nodesThatReachEnd(spec: GraphSpec): Set<string> {
   const queue: string[] = [];
 
   for (const node of spec.nodes) {
-    if (outgoingTargets(spec, node.id).includes("END")) {
+    if (registry.get(node.type)?.capabilities?.terminal || outgoingTargets(spec, node.id).includes("END")) {
       queue.push(node.id);
     }
   }

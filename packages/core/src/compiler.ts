@@ -94,6 +94,7 @@ import type { PlacementInfo, RemoteNodeExecutor } from "./placement/remote.js";
 import { wrapperSpecForNode } from "./placement/remote.js";
 import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { acquireThreadRun, adoptThreadRunClaim, defaultThreadRunOwner, threadAdmissionError, type ThreadRunClaim } from "./checkpoint/execution-claim.js";
+import { flowFailure } from "./runtime/failure.js";
 import { exclusiveRouting, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
 
 import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
@@ -877,7 +878,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         current = resumeCommand(resumeValue, interrupts, threadId);
       }
     } catch (err) {
-      let error = err instanceof Error ? err : new Error(String(err));
+      let error = flowFailure(err) ?? (err instanceof Error ? err : new Error(String(err)));
       if (error.name === "GraphRecursionError") {
         let pending = spec.nodes.map(n => n.id).slice(0, 10);
         try { pending = [...(await compiledLg.getState(cfg)).next]; } catch { /* no checkpointer */ }
@@ -891,7 +892,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (hooks.has("run:error")) {
         try { await hooks.run("run:error", { state: {}, run: runMeta, payload: { error } }); } catch { /* ignore */ }
       }
-      events.emit("run.error", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
+      const terminal = flowFailure(error);
+      events.emit("run.error", { message: error.message, error: error.message, ...(terminal ? { code: terminal.code, reason: terminal.reason } : {}), durationMs: Date.now() - startMs });
       await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
       // A thread that moved on belongs to someone else now: release this run
       // without writing its status over theirs.
@@ -1516,6 +1518,11 @@ async function assembleCompiledLangGraph(
         return update;
       } catch (err) {
         if (isInterruptLike(err)) throw err; // let LangGraph handle the suspend
+        const terminal = flowFailure(err);
+        if (terminal) {
+          events.emit("node.error", { nodeId: nodeSpec.id, error: terminal.reason, code: terminal.code }, scope);
+          throw terminal;
+        }
 
         // node:error — swallow (veto) / route / retry
         if (hooks.has("node:error")) {
@@ -2717,6 +2724,8 @@ function addCheckpointedMap(
 
   const recover = async (err: unknown, state: Record<string, unknown>, itemId = mapId) => {
     if (isInterruptLike(err) || ctx.baseCtx.signal?.aborted) throw err;
+    const terminal = flowFailure(err);
+    if (terminal) throw terminal;
     const error = err instanceof Error ? err : new Error(String(err));
     const hook = await ctx.hooks.run("node:error", { state, run: ctx.baseCtx.meta as RunMeta, payload: { nodeId: mapId, nodeType: "map", error } });
     const innerPolicy = itemId === mapId ? undefined : (config.node as { on?: { error?: string } }).on?.error;

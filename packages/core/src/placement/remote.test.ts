@@ -226,6 +226,18 @@ describe("remote execution of placed nodes", () => {
   });
 
   describe("outcomes", () => {
+    it("preserves intentional failure endings across workers and refuses error recovery", async () => {
+      const { compiled, transport } = await build(
+        fnParent({}, { on: { error: "continue" }, retry: { maxAttempts: 3, baseMs: 1 } }),
+        { w1: { labels: WIN, attach: { outcome: { status: "error", error: { code: "FLOW_FAILED", message: "review rejected" } } } } },
+        LOCAL_MAC,
+      );
+      const result = await compiled.run({ threadId: "remote-terminal" });
+      expect(result.status).toBe("error");
+      expect(result.error).toMatchObject({ code: "FLOW_FAILED", message: "review rejected" });
+      expect(transport.dispatchCalls).toHaveLength(1);
+    });
+
     it("error -> REMOTE_NODE_FAILED naming the target and the child's message", async () => {
       const { compiled } = await build(
         fnParent(),

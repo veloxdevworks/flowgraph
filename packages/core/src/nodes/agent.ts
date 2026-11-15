@@ -34,6 +34,7 @@ import { getTokenEstimator } from "../context/estimator.js";
 import { startAgentContext, type AgentContextSession } from "./agent-context.js";
 import { validateAgentOutput } from "../runtime/agent-output.js";
 import { isNonRetryable } from "../runtime/retry.js";
+import { flowFailure } from "../runtime/failure.js";
 
 import {bindNodeReplay,isPendingStep,pendingStep,uncertainStep} from "../providers/replay-persistence.js";
 
@@ -249,7 +250,7 @@ export const agentNode = defineNode<Config>({
               // Reaching this catch means the tool has settled. A cooperative
               // abort can be retried; an operation still running after abort
               // never reaches here and keeps its uncertain receipt.
-              if (isGraphInterrupt(err) || ctx.signal?.aborted) {
+              if (isGraphInterrupt(err) || flowFailure(err) || ctx.signal?.aborted) {
                 replayStore.delete(cacheKey, toolIndex);
                 await replayStore.flush(cacheKey);
               }

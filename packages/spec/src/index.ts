@@ -59,6 +59,7 @@ export {
   PortWithSchema,
   ScriptPermissionsSchema,
   ScriptWithSchema,
+  FailWithSchema,
   AgentWithSchema,
   IntelligentWithSchema,
   SkillWithSchema,
