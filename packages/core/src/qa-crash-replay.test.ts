@@ -4,7 +4,7 @@ import { AIMessage } from "@langchain/core/messages";
 import { compileGraph } from "./compiler.js";
 import { GraphSpecSchema } from "@flowgraph/spec";
 import { createLangChainProvider, type ChatModelLike } from "./providers/langchain/provider.js";
-import { registerTool } from "./providers/index.js";
+import { createScriptedProvider, registerTool } from "./providers/index.js";
 it("keeps completed model and tool steps across an errored invocation and recompilation", async () => {
   const effect = vi.fn(() => "saved");
   registerTool({ name: "crash_effect", handler: effect });
@@ -163,6 +163,133 @@ it("preserves model content blocks when replaying a saved response", async () =>
   const content = [{ type: "text" as const, text: "completed answer" }];
   const restored = deserializeReplayValue(serializeReplayValue(new AIMessage({ content })));
   expect((restored as AIMessage).content).toEqual(content);
+});
+
+it.each(["abort", "timeout"])("retries a settled agent tool after controlled %s", async (mode) => {
+  const tool = `controlled_${mode}`;
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let calls = 0;
+  const effect = vi.fn();
+  registerTool({
+    name: tool,
+    async handler(_args, ctx) {
+      if (calls++ === 0) {
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          const stop = () => reject(ctx.signal!.reason);
+          ctx.signal!.addEventListener("abort", stop, { once: true });
+          if (ctx.signal!.aborted) stop();
+        });
+      }
+      effect();
+      return "done";
+    },
+  });
+  const provider = createScriptedProvider(tool, async (_req, ctx) => ({
+    output: await ctx.invokeTool(tool, {}),
+    stopReason: "done",
+  }));
+  const graph = await compileGraph(
+    GraphSpecSchema.parse({
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: `controlled-${mode}` },
+      nodes: [
+        {
+          id: "a",
+          type: "agent",
+          provider: tool,
+          ...(mode === "timeout"
+            ? { timeout: "1s", retry: { maxAttempts: 2, baseMs: 10, jitter: false } }
+            : {}),
+          with: { prompt: "test", tools: [{ function: tool }] },
+        },
+      ],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    }),
+    { providers: [provider], checkpointer: new MemorySaver() },
+  );
+  const controller = new AbortController();
+  const running = graph.run({ threadId: tool, signal: controller.signal });
+  await ready;
+  if (mode === "abort") {
+    controller.abort();
+    expect((await running).status).toBe("aborted");
+    expect((await graph.resume({ threadId: tool, resume: true })).status).toBe("completed");
+  } else {
+    const result = await running;
+    expect(result.status, JSON.stringify(result.error)).toBe("completed");
+  }
+  expect(calls).toBe(2);
+  expect(effect).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the uncertainty guard when an agent tool ignores cancellation", async () => {
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let finish!: () => void;
+  const result = new Promise<string>((resolve) => {
+    finish = () => resolve("done");
+  });
+  let completed!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    completed = resolve;
+  });
+  const handler = vi.fn(() => {
+    started();
+    return result;
+  });
+  registerTool({ name: "ignores_cancel", handler });
+  const provider = createScriptedProvider("ignores-cancel", async (_req, ctx) => {
+    const output = await ctx.invokeTool("ignores_cancel", {});
+    completed();
+    return { output, stopReason: "done" };
+  });
+  const graph = await compileGraph(
+    GraphSpecSchema.parse({
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "ignores-cancel" },
+      nodes: [
+        {
+          id: "a",
+          type: "agent",
+          provider: "ignores-cancel",
+          with: {
+            prompt: "test",
+            tools: [{ function: "ignores_cancel" }],
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    }),
+    { providers: [provider], checkpointer: new MemorySaver() },
+  );
+  try {
+    const controller = new AbortController();
+    const running = graph.run({ threadId: "ignores-cancel", signal: controller.signal });
+    await ready;
+    controller.abort();
+    expect((await running).status).toBe("aborted");
+    const resumed = await graph.resume({ threadId: "ignores-cancel", resume: true });
+    expect(resumed.status).toBe("error");
+    expect(resumed.error).toMatchObject({ code: "TOOL_OUTCOME_UNCERTAIN" });
+    expect(handler).toHaveBeenCalledTimes(1);
+  } finally {
+    finish();
+    await settled;
+  }
 });
 
 it("seeds legacy interrupt replay atomically before an upgraded resume can crash again", async () => {

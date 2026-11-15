@@ -44,7 +44,7 @@ export const agentNode = defineNode<Config>({
   type: "agent",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { streaming: true, interruptible: true, sideEffecting: true },
+  capabilities: { streaming: true, interruptible: true, sideEffecting: true, stopsOnTimeout: true },
 
   build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const nodeProvider = nodeSpec["provider"] as string | undefined;
@@ -57,7 +57,7 @@ export const agentNode = defineNode<Config>({
 
     return {
       contract: {},
-      capabilities: { streaming: true, interruptible: true, sideEffecting: true },
+      capabilities: { streaming: true, interruptible: true, sideEffecting: true, stopsOnTimeout: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const providerName =
@@ -246,7 +246,13 @@ export const agentNode = defineNode<Config>({
             try {
               result = await exec(callArgs, toolCtx, state);
             } catch (err) {
-              if (isGraphInterrupt(err)) { replayStore.delete(cacheKey,toolIndex); await replayStore.flush(cacheKey); }
+              // Reaching this catch means the tool has settled. A cooperative
+              // abort can be retried; an operation still running after abort
+              // never reaches here and keeps its uncertain receipt.
+              if (isGraphInterrupt(err) || ctx.signal?.aborted) {
+                replayStore.delete(cacheKey, toolIndex);
+                await replayStore.flush(cacheKey);
+              }
               if (isGraphInterrupt(err) || err instanceof ReplayMismatchError || isNonRetryable(err) || ctx.signal?.aborted) throw err;
               result = { isError: true, error: { code: (err as { code?: unknown } | null)?.code ?? "TOOL_ERROR", message: err instanceof Error ? err.message : String(err) } };
             }

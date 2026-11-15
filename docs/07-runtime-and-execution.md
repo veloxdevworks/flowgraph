@@ -567,7 +567,15 @@ native-tool loop expose only their adapter's replay boundaries.
 A tool or shell operation can finish externally before its result is saved.
 Such a record has an explicit unfinished receipt and resume raises
 `TOOL_OUTCOME_UNCERTAIN` / `SHELL_OUTCOME_UNCERTAIN`. It never silently runs that
-operation again. Inspect and resolve only after stopping/reconciling its owner:
+operation again.
+
+Agent tools receive the attempt's timeout/cancellation signal. If a tool settles
+by rejecting after that signal, its receipt is cleared before retry or explicit
+continuation. Tools must finish their abort cleanup before rejecting. A tool
+that ignores cancellation keeps its pending receipt until it settles or is
+explicitly reconciled, so a competing attempt cannot repeat it.
+
+Inspect and resolve only after stopping/reconciling its owner:
 
 ```bash
 flowgraph replay inspect graph.yaml --thread issue-123
