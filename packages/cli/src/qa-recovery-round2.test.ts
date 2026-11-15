@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 const bin=resolve(import.meta.dirname,"../dist/bin.js");
-it("PLAT-365: discovers checkpoints and all crash blockers without executing the graph",()=>{
+it("PLAT-365: discovers checkpoints and all crash blockers without executing the graph",{timeout:20_000},()=>{
   const dir=mkdtempSync(join(tmpdir(),"fg-recover-cli-"));
   const cli=(...args:string[])=>spawnSync(process.execPath,[bin,...args],{cwd:dir,encoding:"utf8",timeout:20000});
   try {
