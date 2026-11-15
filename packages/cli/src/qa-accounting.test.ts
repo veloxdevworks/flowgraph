@@ -79,7 +79,8 @@ it("retains completed usage and an unresolved receipt when a paid-call process i
   expect(JSON.parse(resolved.stdout).usage.totals).toMatchObject({ calls: 2, totalTokens: 7, costUSD: 0.002, unknownCalls: 0 });
   expect(JSON.parse(resolved.stdout).usage.pending).toEqual({});
 
-}, 30_000);
+// Startup (20s) plus four CLI commands (25s each), with cleanup headroom.
+}, 125_000);
 
 it("reconciles an ambiguous receipt through the CLI and resumes under the original hard cap", () => {
   const dir = mkdtempSync(join(tmpdir(), "fg-usage-resolve-")); dirs.push(dir);
