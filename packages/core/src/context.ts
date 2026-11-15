@@ -108,10 +108,10 @@ export function createLogger(events: EventBus, graphName: string): Logger {
   const log = (level: string, msg: string, data?: Record<string, unknown>) => {
     const ranks: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3, silent: 4 };
     const minimum = ranks[process.env["FLOWGRAPH_LOG_LEVEL"] ?? "info"] ?? ranks.info!;
-    if ((ranks[level] ?? 1) < minimum) return;
     const safe = events.redact?.({ msg, data }) as { msg: string; data?: Record<string, unknown> } | undefined;
     const message = safe?.msg ?? msg, fields = safe?.data ?? data;
     events.emit("log", { level, msg: message, ...fields }, {});
+    if ((ranks[level] ?? 1) < minimum) return;
     const out = `[${graphName}] ${level.toUpperCase()} ${message}`;
     if (level === "warn") console.warn(out, fields ?? "");
     else console.error(out, fields ?? "");

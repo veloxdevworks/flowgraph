@@ -160,3 +160,44 @@ it("PLAT-361: environment values cannot inject YAML structure", async () => {
   const loaded = await loadGraph(join(d, "flow.yaml"));
   expect(loaded.spec?.config?.vars?.multiline).toBe(value);
 });
+
+it("short secret values do not rewrite unrelated business text", async () => {
+  vi.stubEnv("FGQA_R2_SHORT", "on");
+  const compiled = await compileGraph(
+    spec({
+      type: "script",
+      with: {
+        code: "export default async input => ({value:input.secret,msg:'configuration done on 10 items'});",
+        input: { secret: "{{ secret.FGQA_R2_SHORT }}" },
+      },
+    }),
+    { cwd: await dir() },
+  );
+  const result = await compiled.run();
+  expect(result.status).toBe("completed");
+  expect(result.state.outputs).toMatchObject({
+    echo: { value: "[REDACTED]", msg: "configuration done on 10 items" },
+  });
+});
+it("console levels do not suppress structured log events", async () => {
+  vi.stubEnv("FLOWGRAPH_LOG_LEVEL", "silent");
+  const events: FlowgraphEvent[] = [];
+  const compiled = await compileGraph(
+    spec({
+      type: "shell",
+      with: { command: process.execPath, args: ["-e", "process.stdout.write('ok')"] },
+    }),
+    {
+      cwd: await dir(),
+      sinks: [
+        (event) => {
+          events.push(event);
+        },
+      ],
+    },
+  );
+  expect((await compiled.run()).status).toBe("completed");
+  expect(
+    events.some((e) => e.type === "log" && (e.data as { level: string }).level === "debug"),
+  ).toBe(true);
+});

@@ -34,26 +34,25 @@ export class SecretRedaction {
         if (/^Bearer\s+/i.test(value)) this.observe(value.replace(/^Bearer\s+/i, ""));
       }
   }
+  fork(): SecretRedaction {
+    return new SecretRedaction([...this.patterns.values()], [...this.headers]);
+  }
   absorb(other: SecretRedaction): void {
     for (const name of other.headers) this.headers.add(name);
     for (const value of other.values) this.values.add(value);
     for (const [key, p] of other.patterns) this.patterns.set(key, p);
   }
   redact(value: unknown): unknown {
-    const scanned = new WeakSet<object>();
-    const discover = (input: unknown): void => {
-      if (!input || typeof input !== "object" || scanned.has(input) || ArrayBuffer.isView(input))
-        return;
-      scanned.add(input);
-      this.observeHeaders(input as Record<string, unknown>);
-      for (const value of Object.values(input)) discover(value);
-    };
-    discover(value);
     const seen = new WeakMap<object, unknown>();
     const text = (input: string): string => {
       let out = input;
       for (const secret of [...this.values].sort((a, b) => b.length - a.length))
-        out = out.replaceAll(secret, "[REDACTED]");
+        out =
+          secret.length >= 6
+            ? out.replaceAll(secret, "[REDACTED]")
+            : out === secret
+              ? "[REDACTED]"
+              : out;
       for (const p of this.patterns.values()) out = out.replace(p, "[REDACTED]");
       return out;
     };
@@ -74,7 +73,13 @@ export class SecretRedaction {
       seen.set(input, out);
       for (const key of Reflect.ownKeys(input)) {
         const descriptor = Object.getOwnPropertyDescriptor(input, key)!;
-        const targetKey = typeof key === "string" && this.values.has(key) ? "[REDACTED]" : key;
+        const targetKey =
+          typeof key === "string" &&
+          key.length >= 6 &&
+          !Array.isArray(input) &&
+          this.values.has(key)
+            ? "[REDACTED]"
+            : key;
         if ("value" in descriptor) descriptor.value = walk(descriptor.value);
         Object.defineProperty(out, targetKey, descriptor);
       }
@@ -100,5 +105,5 @@ export function withSecretRedaction<T>(policy: SecretRedaction, invoke: () => T)
     parent.absorb(policy);
     return invoke();
   }
-  return active.run(policy, invoke);
+  return active.run(policy.fork(), invoke);
 }
