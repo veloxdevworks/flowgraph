@@ -8,6 +8,8 @@
  */
 
 import { copyCheckpoint, type Checkpoint, type CheckpointTuple } from "@langchain/langgraph";
+import { WRITES_IDX_MAP } from "@langchain/langgraph-checkpoint";
+import { CheckpointChunks, CHUNK_MIGRATION, CHUNK_TYPE } from "./chunks.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import {
   CHECKPOINT_INLINE_MAX_BYTES,
@@ -165,6 +167,7 @@ export function migrateSqliteCheckpointRetention(db: SqliteDatabase): number {
       { version: 6, sql: MIGRATION_V6 },
 
       { version: 7, sql: MIGRATION_V7 },
+      { version: 8, sql: CHUNK_MIGRATION },
     ];
     const latest = steps[steps.length - 1]?.version ?? 0;
     if (current > latest) {
@@ -208,6 +211,9 @@ export interface SqliteCheckpointStats {
   checkpointBytes: number;
   writeBytes: number;
   blobBytes: number;
+  /** Shared leaf/branch payload bytes, independent of the retention window. */
+  chunkBytes: number;
+  chunks: number;
 }
 
 export function sqliteCheckpointStats(db: SqliteDatabase): SqliteCheckpointStats {
@@ -229,6 +235,8 @@ export function sqliteCheckpointStats(db: SqliteDatabase): SqliteCheckpointStats
     checkpointBytes: checkpoints.b,
     writeBytes: writes.b,
     blobBytes: blobs.b,
+    chunkBytes: one("fg_checkpoint_chunks", "length(data)").b,
+    chunks: one("fg_checkpoint_chunks", "length(data)").n,
   };
 }
 
@@ -242,21 +250,25 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
   private readonly threadPolicy = new Map<string, ResolvedCheckpointRetention>();
   private readonly runs = new ThreadRunGuard();
   private schemaReady = false;
+  private readonly chunks: CheckpointChunks;
   private lastSweepAt = 0;
   private readonly clock: () => number;
 
   constructor(db: SqliteDatabase, retention: ResolvedCheckpointRetention, options?: FlowgraphSqliteSaverOptions) {
     super(db as never);
     this.sqlite = db;
+    this.chunks = new CheckpointChunks(db);
     this.retention = retention;
     this.clock = options?.clock ?? Date.now;
     const inner = this.serde;
-    // Stock SqliteSaver rejects this type. Our reads treat it as json and
-    // fill channel values from fg_checkpoint_blobs, whatever the current flags are.
+    // Decode legacy channel references and chunk roots independently of current
+    // retention flags. Metadata shares the checkpoint type and remains inline JSON.
     this.serde = {
       dumpsTyped: (value: unknown) => inner.dumpsTyped(value),
-      loadsTyped: (type: string, data: Uint8Array | string) =>
-        inner.loadsTyped(type === FG_CHECKPOINT_TYPE ? "json" : type, data),
+      loadsTyped: (type: string, data: Uint8Array | string) => {
+        const chunked = type.startsWith(CHUNK_TYPE) || type === FG_CHECKPOINT_TYPE;
+        return inner.loadsTyped(type === FG_CHECKPOINT_TYPE ? "json" : type.startsWith(CHUNK_TYPE) ? type.slice(CHUNK_TYPE.length) : type, chunked ? this.chunks.unpack(data) : data);
+      },
     };
   }
 
@@ -272,6 +284,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     super.setup();
     if (this.schemaReady) return;
     migrateSqliteCheckpointRetention(this.sqlite);
+    this.sqlite.pragma("recursive_triggers = ON");
     this.schemaReady = true;
   }
 
@@ -513,9 +526,25 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
       const parentId = config.configurable?.checkpoint_id;
       deduped = await this.writeBlobs(threadId, ns, stored, typeof parentId === "string" ? parentId : undefined);
     }
-    const result = await super.put(config, stored, metadata);
+    this.setup();
+    if (!threadId) throw new Error('Missing "thread_id" field in config.configurable.');
+    const [[type, checkpointBytes], [metadataType, metadataBytes]] = await Promise.all([
+      this.serde.dumpsTyped(copyCheckpoint(stored)), this.serde.dumpsTyped(metadata),
+    ]);
+    if (type !== metadataType) throw new Error("Checkpoint and metadata serializer types differ");
+    // The asynchronous serializer completes before the write transaction. No unrooted
+    // chunk can become visible to another connection's garbage collector.
+    this.sqlite.transaction(() => {
+      const packed = this.chunks.pack(checkpointBytes);
+      this.sqlite.prepare(`INSERT OR REPLACE INTO checkpoints (thread_id,checkpoint_ns,checkpoint_id,parent_checkpoint_id,type,checkpoint,metadata)
+        VALUES (?,?,?,?,?,?,?)`).run(threadId, ns, checkpoint.id, config.configurable?.checkpoint_id ?? null,
+        deduped ? FG_CHECKPOINT_TYPE : packed.root ? CHUNK_TYPE + type : type, packed.data, Buffer.from(metadataBytes));
+      this.chunks.attach("checkpoint", [threadId, ns, checkpoint.id], packed);
+      this.chunks.collect();
+    })();
+    const result = { configurable: { thread_id: threadId, checkpoint_ns: ns, checkpoint_id: checkpoint.id } };
     if (typeof threadId === "string") {
-      // Publish references after the parent saver inserts the row. GC skips a
+      // Publish channel-version references after inserting the row. GC skips a
       // namespace while an inserted row still lacks metadata. Thread admission
       // is still required: raw writes can create blobs before inserting a row.
       this.sqlite.prepare(
@@ -543,7 +572,21 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
     writes: Parameters<SqliteSaver["putWrites"]>[1],
     taskId: Parameters<SqliteSaver["putWrites"]>[2],
   ): Promise<void> {
-    await super.putWrites(config, writes, taskId);
+    this.setup();
+    const thread = config.configurable?.thread_id, ns = config.configurable?.checkpoint_ns ?? "", writeCheckpointId = config.configurable?.checkpoint_id;
+    if (!thread || !writeCheckpointId) throw new Error("putWrites requires thread_id and checkpoint_id");
+    const serialized = await Promise.all(writes.map(async ([channel, value], index) => ({ channel, index: WRITES_IDX_MAP[channel] ?? index, encoded: await this.serde.dumpsTyped(value) })));
+    // Match SqliteSaver 1.0.3: replace special receipt slots; ordinary task writes are first-writer-wins.
+    const special = writes.every(([channel]) => channel in WRITES_IDX_MAP);
+    this.sqlite.transaction(() => {
+      const insert = this.sqlite.prepare(`INSERT ${special ? "OR REPLACE" : "OR IGNORE"} INTO writes (thread_id,checkpoint_ns,checkpoint_id,task_id,idx,channel,type,value) VALUES (?,?,?,?,?,?,?,?)`);
+      for (const { channel, index, encoded: [type, bytes] } of serialized) {
+        const packed = this.chunks.pack(bytes);
+        const result = insert.run(thread, ns, writeCheckpointId, taskId, index, channel, packed.root ? CHUNK_TYPE + type : type, packed.data);
+        if (result.changes) this.chunks.attach("write", [thread, ns, writeCheckpointId, taskId, index], packed);
+      }
+      this.chunks.collect();
+    })();
     const threadIdEarly = config.configurable?.thread_id;
     if (typeof threadIdEarly === "string" && !this.policyFor(threadIdEarly).enabled) return;
     const channel = writes.find(([name]) => CHECKPOINT_PIN_CHANNELS.has(String(name)))?.[0];
@@ -861,7 +904,12 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
       const already = hasBlob.get(threadId, ns, channel, verKey);
       const repeated = parentVersions !== undefined && String(parentVersions[channel]) === verKey;
       if (!already && !repeated) continue;
-      if (!already) insert.run(threadId, ns, channel, verKey, type, Buffer.from(bytes));
+      if (!already) this.sqlite.transaction(() => {
+        const packed = this.chunks.pack(bytes);
+        const result = insert.run(threadId, ns, channel, verKey, packed.root ? CHUNK_TYPE + type : type, packed.data);
+        if (result.changes) this.chunks.attach("blob", [threadId, ns, channel, verKey], packed);
+        this.chunks.collect();
+      })();
       delete checkpoint.channel_values[channel];
       omitted = true;
     }
@@ -1064,6 +1112,7 @@ export class FlowgraphSqliteSaver extends SqliteSaver {
   }
 
   private maybeVacuum(deleted: number, policy: ResolvedCheckpointRetention): void {
+    deleted += this.chunks.collect();
     if (!policy.enabled || policy.vacuum === "never" || deleted <= 0) return;
     if (policy.vacuum === "auto") {
       try {
