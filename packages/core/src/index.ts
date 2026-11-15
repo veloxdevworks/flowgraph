@@ -400,7 +400,7 @@ export {
   GRAPH_MEDIA_PROVIDERS,
 } from "./media/registry.js";
 export { runMediaJob } from "./media/run-job.js";
-export { createFileJournal, fingerprintRequest, resolveMediaSubmission } from "./media/journal.js";
+export { createFileJournal, listMediaJournals, fingerprintRequest, resolveMediaSubmission } from "./media/journal.js";
 export { createOutputWriter, describeArtifactFile, artifactDir, extensionForMime, mimeForExtension, probeImageSize } from "./media/artifacts.js";
 export { resolveMediaInputs } from "./media/inputs.js";
 export { imageNode, videoNode, model3dNode, audioNode } from "./nodes/media.js";
@@ -423,7 +423,7 @@ export * from "./placement/index.js";
 export { CORE_VERSION } from "./version.js";
 export { CORE_BUILTIN_NODE_TYPES } from "./nodes/index.js";
 
-export { inspectThreadUsage, resolveThreadUsage, type RunUsage, type UsageRecord, type UsageReceipt, type UnresolvedUsageReceipt, type UsageCheckpointStore, type MeteredCallOptions } from "./usage/ledger.js";
+export { UsageLedger, inspectThreadUsage, resolveThreadUsage, type RunUsage, type UsageRecord, type UsageReceipt, type UnresolvedUsageReceipt, type UsageCheckpointStore, type MeteredCallOptions } from "./usage/ledger.js";
 
 export {MediaSubmissionRejectedError} from "./media/types.js";
 export {inspectThreadReplay,resolveThreadReplay} from "./providers/replay-persistence.js";

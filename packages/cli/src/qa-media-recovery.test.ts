@@ -86,6 +86,8 @@ it("SIGKILL leaves a submission intent; resume cannot repay, and explicit recove
       cli("media", "resolve", ...args, "--submission", intent.submissionId, "--not-submitted")
         .status,
     ).toBe(1);
+    const priorUsage = JSON.parse(cli("usage", "inspect", "flow.yaml", "--thread", "kill").stdout).usage;
+    const receipt = Object.keys(priorUsage.pending)[0]!;
     expect(
       cli(
         "media",
@@ -98,6 +100,8 @@ it("SIGKILL leaves a submission intent; resume cannot repay, and explicit recove
       ).status,
     ).toBe(0);
     const usage = JSON.parse(cli("usage", "inspect", "flow.yaml", "--thread", "kill").stdout).usage;
+    expect(usage.pending).toEqual({});
+    expect(usage.totals.unknownCalls).toBe(0);
     expect(
       cli(
         "usage",
@@ -106,7 +110,7 @@ it("SIGKILL leaves a submission intent; resume cannot repay, and explicit recove
         "--thread",
         "kill",
         "--receipt",
-        Object.keys(usage.pending)[0]!,
+        receipt,
         "--not-billed",
         "--owner-stopped",
       ).status,
