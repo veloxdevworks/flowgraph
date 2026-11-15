@@ -26,6 +26,7 @@ import {
   type RunMeta,
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
+import { createMapMemo, mapMemoGeneration, clearMapMemo } from "./runtime/map-memo.js";
 import { buildStateAnnotation, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
 import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 import {
@@ -2747,8 +2748,9 @@ function addCheckpointedMap(
       }
       ctx.events.emit("node.start", { nodeId: mapId, type: "map" }, { nodeId: mapId, nodeType: "map" });
       ctx.events.emit("node.output", { map: { over: config.over, count: collection.length, concurrency: config.concurrency } }, { nodeId: mapId, nodeType: "map" });
+      const memoGeneration = config.memoize ? mapMemoGeneration(state, mapId) : undefined;
       const round = randomUUID();
-      const reset = { [MAP_COLLECT_CHANNEL]: { [mapId]: { round, items: [], reset: true } } };
+      const reset = { ...(!config.memoize ? clearMapMemo(state, mapId) : {}), [MAP_COLLECT_CHANNEL]: { [mapId]: { round, items: [], reset: true } } };
       if (collection.length === 0) {
         const update = collectMapResults(config, [], mapId, scope);
         ctx.events.emit("node.end", { nodeId: mapId, update }, { nodeId: mapId, nodeType: "map" });
@@ -2760,7 +2762,7 @@ function addCheckpointedMap(
           (item, index) =>
             new Send(workerId, {
               ...state,
-              [MAP_TASK_CHANNEL]: { mapId, index, item, as: config.as, count: collection.length, round } satisfies MapTask,
+              [MAP_TASK_CHANNEL]: { mapId, index, item, as: config.as, count: collection.length, round, ...(memoGeneration !== undefined ? { memoGeneration } : {}) } satisfies MapTask,
             }),
         ),
       }) as unknown as Record<string, unknown>;
@@ -2777,6 +2779,7 @@ function addCheckpointedMap(
     if (!task || task.mapId !== mapId) {
       throw new Error(`map worker "${workerId}": missing __mapTask payload.`);
     }
+    const memo = createMapMemo(state, task, config.memoize);
     const itemId = `${mapId}[${task.index}]`;
     const itemScope = { nodeId: itemId, nodeType: innerType, parentSpanId: mapId };
     const itemLgConfig = namespacedRunnableConfig(lgConfig, itemId);
@@ -2800,7 +2803,7 @@ function addCheckpointedMap(
             itemLgConfig,
           );
           if (signal && innerReceivesTimeoutSignal) nodeCtx.signal = signal;
-          return runMapItem(buildCtx, mapId, config, state, nodeCtx, task).then((value) => {
+          return runMapItem(buildCtx, mapId, config, state, nodeCtx, task, memo).then((value) => {
             finishInterruptDeadline(runScopeOf(itemLgConfig), itemId);
             return { value, onceUpdates: nodeCtx._onceUpdates, issueUpdates: nodeCtx._issueUpdates };
           });
@@ -2823,6 +2826,7 @@ function addCheckpointedMap(
       }, lgConfig, signal), lgConfig, signal);
       ctx.events.emit("node.end", { nodeId: itemId, mapId, index: task.index }, itemScope);
       const update: Record<string, unknown> = {
+        ...memo?.delta,
         [MAP_COLLECT_CHANNEL]: { [mapId]: task.round ? { round: task.round, items: [{ i: task.index, v: run.value }] } : [{ i: task.index, v: run.value }] },
       };
       if (Object.keys(run.onceUpdates).length > 0) update[ONCE_CHANNEL] = run.onceUpdates;
