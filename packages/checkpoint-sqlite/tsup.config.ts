@@ -5,5 +5,5 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: ["@langchain/langgraph", "@langchain/langgraph-checkpoint-sqlite", "better-sqlite3", "@flowgraph/core"],
+  external: ["@langchain/langgraph-checkpoint", "@langchain/langgraph", "@langchain/langgraph-checkpoint-sqlite", "better-sqlite3", "@flowgraph/core"],
 });

@@ -20,6 +20,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@langchain/langgraph-checkpoint": "^1.1.5",
     "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
     "better-sqlite3": "^12.11.1"
   },
