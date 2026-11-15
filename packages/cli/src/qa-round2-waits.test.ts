@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { compileGraph, type GraphSpec } from "@flowgraph/core";
 import { openSqliteBackend } from "@flowgraph/checkpoint-sqlite";
 const dirs: string[] = [];
@@ -181,7 +181,7 @@ it("a webhook deadline exits 0 when another process already completed the thread
     }
     expect(url, stdout + stderr).toBeTruthy();
     const listedUntil = Date.now() + 10000;
-    let listed: ReturnType<typeof spawnSync> | undefined;
+    let listed: SpawnSyncReturns<string> | undefined;
     while (Date.now() < listedUntil) {
       listed = spawnSync(
         process.execPath,
