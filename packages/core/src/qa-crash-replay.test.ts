@@ -303,6 +303,46 @@ it("keeps the uncertainty guard when an agent tool ignores cancellation", async 
   }
 });
 
+it("returns a model timeout promptly even when the provider ignores its signal", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const provider = createScriptedProvider("held-model", async () => {
+    await held;
+    return { output: "late", stopReason: "done" };
+  });
+  const graph = await compileGraph(
+    GraphSpecSchema.parse({
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "held-model" },
+      nodes: [
+        {
+          id: "a",
+          type: "agent",
+          provider: "held-model",
+          timeout: "50ms",
+          with: { prompt: "test" },
+        },
+      ],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    }),
+    { providers: [provider] },
+  );
+  try {
+    const started = Date.now();
+    const result = await graph.run({ threadId: "held-model" });
+    expect(result.status).toBe("error");
+    expect(Date.now() - started).toBeLessThan(2000);
+  } finally {
+    release();
+  }
+});
+
 it("seeds legacy interrupt replay atomically before an upgraded resume can crash again", async () => {
   const { createScriptedProvider } = await import("./providers/index.js");
   const saver = new MemorySaver();
