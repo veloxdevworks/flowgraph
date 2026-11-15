@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { program } from "./commands.js";
 const json=process.argv.includes("--json");
-if(json)program.exitOverride();
+type CommandTree={exitOverride():unknown;commands:readonly CommandTree[]};
+const overrideExits=(cmd:CommandTree):void=>{cmd.exitOverride();for(const sub of cmd.commands)overrideExits(sub);};
+// Subcommands copy settings when created, so the override must be applied to every level.
+if(json)overrideExits(program);
 program.parseAsync(process.argv).catch(async (err: unknown) => {
   const row=err as {code?:string;exitCode?:number};
   if(row.exitCode===0)return;
