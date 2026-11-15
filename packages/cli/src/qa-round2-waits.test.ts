@@ -148,3 +148,37 @@ it("PLAT-370: a webhook deadline completes without confusing route cancellation 
       .some((e) => e.type === "run.end"),
   ).toBe(true);
 }, 20000);
+
+it("a webhook deadline exits 0 when another process already completed the thread", async () => {
+  const { dir } = await fixture({ webhook: true, timeout: "2s" });
+  const child = spawn(
+    process.execPath,
+    [bin, "run", "flow.json", "--thread", "external", "--json"],
+    { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "",
+    stderr = "";
+  child.stdout.on("data", (b) => (stdout += b));
+  child.stderr.on("data", (b) => (stderr += b));
+  const exited = new Promise<number | null>((r) => child.once("exit", r));
+  try {
+    const until = Date.now() + 10000;
+    while (Date.now() < until && !stdout.includes('"interrupt.raised"'))
+      await new Promise((r) => setTimeout(r, 20));
+    expect(stdout, stderr).toContain('"interrupt.raised"');
+    const resumed = spawnSync(
+      process.execPath,
+      [bin, "resume", "flow.json", "--thread", "external", "--resume", "true"],
+      { cwd: dir, encoding: "utf8", timeout: 10000 },
+    );
+    expect(resumed.status, resumed.stdout + resumed.stderr).toBe(0);
+    const status = await Promise.race([
+      exited,
+      new Promise<string>((r) => setTimeout(() => r("still running"), 8000)),
+    ]);
+    expect(status, stdout + stderr).toBe(0);
+  } finally {
+    child.kill("SIGKILL");
+    await exited;
+  }
+}, 20000);

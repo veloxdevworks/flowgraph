@@ -830,14 +830,17 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
                 const code = (err as { code?: string } | undefined)?.code;
                 const message = err instanceof Error ? err.message : String(err);
                 if (code === "THREAD_NOT_WAITING" || code === "THREAD_NOT_FOUND") {
-                  for (const info of overdue) unregisterWebhookRoute(threadId, undefined, info.id);
-                }
-                if (code === "THREAD_NOT_WAITING" || code === "THREAD_NOT_FOUND") {
+                  // Publish the thread's real outcome before releasing the webhook
+                  // routes: a host awaiting that route treats its cancellation as
+                  // "no news" and would otherwise report the stale interrupt.
+                  const release = () => {
+                    for (const info of overdue) unregisterWebhookRoute(threadId, undefined, info.id);
+                  };
                   void getCheckpointState({ configurable: { thread_id: threadId } }).then(snap => {
                     const pending = (snap.tasks ?? []).flatMap(task => task.interrupts ?? []).map(toInterruptInfo);
                     const completed = code === "THREAD_NOT_WAITING" && snap.next.length === 0 && pending.length === 0;
                     opts.onWaitTimeout?.({ status: completed ? "completed" : "error", state: stripReserved(snap.values ?? {}), runId, threadId, durationMs: 0, ...(completed ? {} : { error: err instanceof Error ? err : new Error(message) }), ...(pending.length ? { interrupts: pending } : {}) });
-                  }).catch(() => opts.onWaitTimeout?.({ status: "error", state: {}, runId, threadId, durationMs: 0, error: err instanceof Error ? err : new Error(message) }));
+                  }).catch(() => opts.onWaitTimeout?.({ status: "error", state: {}, runId, threadId, durationMs: 0, error: err instanceof Error ? err : new Error(message) })).finally(release);
                 } else {
                   opts.onWaitTimeout?.({ status: "error", state: {}, runId, threadId, durationMs: 0, error: err instanceof Error ? err : new Error(message) });
                 }
