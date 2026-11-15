@@ -6,6 +6,7 @@
 import type { Expr } from "./ast.js";
 import { stdlib } from "./stdlib.js";
 import { ownValue } from "./own-property.js";
+import { parseExpr } from "./parser.js";
 
 export type EvalScope = Record<string, unknown>;
 
@@ -89,6 +90,10 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
       const fn = Object.hasOwn(stdlib, expr.callee) ? stdlib[expr.callee] : undefined;
       if (!fn) throw new EvalError(`Unknown function: ${expr.callee}`);
       const args = expr.args.map((a) => evalExpr(a, scope, strict));
+      if (["map","filter","find"].includes(expr.callee) && typeof args[1] === "string") {
+        const callback=parseExpr(args[1]);
+        args[1]=(item:unknown,index:number)=>evalExpr(callback,{...scope,item,index},strict);
+      }
       return fn(...args);
     }
 

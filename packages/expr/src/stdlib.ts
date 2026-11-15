@@ -37,7 +37,7 @@ export const stdlib: Stdlib = {
   slice: (s, start, end) => toStr(s).slice(toNum(start), end != null ? toNum(end) : undefined),
   format: (template, ...args) => {
     let i = 0;
-    return toStr(template).replace(/\{\}/g, () => toStr(args[i++]));
+    return toStr(template).replace(/\{(\d*)\}/g, (_match, index: string) => toStr(args[index ? Number(index) : i++]));
   },
   len: (v) => {
     if (typeof v === "string") return v.length;
@@ -155,4 +155,12 @@ export const stdlib: Stdlib = {
   // Time
   now: () => new Date().toISOString(),
   toIso: (d) => new Date(toStr(d)).toISOString(),
+  duration: value => {
+    const source=toStr(value).trim();
+    const units:Record<string,number>={ms:1,s:1000,m:60000,h:3600000,d:86400000};
+    let total=0;
+    const rest=source.replace(/(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)/g,(_m,n:string,unit:string)=>{total+=Number(n)*units[unit]!;return "";});
+    if (!source || rest.trim() || !Number.isFinite(total)) throw new Error(`duration: invalid duration ${JSON.stringify(source)}; use units ms, s, m, h or d`);
+    return total;
+  },
 };

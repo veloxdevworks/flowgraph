@@ -1,3 +1,4 @@
+import { KNOWN_PHASES } from "./hooks/builtin.js";
 /**
  * Stage 1 of compilation: load a YAML file and return a validated GraphSpec.
  */
@@ -210,6 +211,7 @@ export function normalizeNodeTypeAliases(parsed: unknown): unknown {
 /** Offline lint — no side effects, no network */
 export function validateSpec(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
+  for (const [index,hook] of (spec.runtime?.hooks ?? []).entries()) if (!KNOWN_PHASES.has(hook.on)) diagnostics.push({severity:"error",code:"HOOK_PHASE_UNKNOWN",path:`runtime.hooks[${index}].on`,message:`Unknown hook phase "${hook.on}". Allowed phases: ${[...KNOWN_PHASES].join(", ")}`});
   const nodeIds = new Set(spec.nodes.map((n) => n.id));
 
   // Duplicate ids

@@ -15,7 +15,7 @@ const HOOK_PHASE_ALIASES: Readonly<Record<string, HookPhase>> = {
   "intelligent:afterToolCall": "agent:afterToolCall",
 };
 
-const KNOWN_PHASES: ReadonlySet<string> = new Set<string>([
+export const KNOWN_PHASES: ReadonlySet<string> = new Set<string>([
   "run:before", "run:after", "run:error",
   "node:before", "node:after", "node:error",
   "agent:beforeStep", "agent:beforeToolCall", "agent:afterToolCall",
@@ -63,7 +63,7 @@ export function hooksFromSpec(spec: GraphSpec): Hook[] {
 
   const hooks: Hook[] = [];
   for (const entry of entries) {
-    if (!KNOWN_PHASES.has(entry.on)) continue;
+    if (!KNOWN_PHASES.has(entry.on)) throw Object.assign(new Error(`Unknown hook phase "${entry.on}". Allowed phases: ${[...KNOWN_PHASES].join(", ")}`), {code:"HOOK_PHASE_UNKNOWN",retryable:false});
     const phase = (HOOK_PHASE_ALIASES[entry.on] ?? entry.on) as HookPhase;
     const where = entry.where as HookWhere | undefined;
     const resolve = directiveFor(entry.do, entry.reason, redactor);
