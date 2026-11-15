@@ -189,6 +189,8 @@ export type { NodeFactory, CompiledNode, NodeResult, NodeContract, NodeCapabilit
 export { registerFunction } from "./nodes/function.js";
 export { registerFunction as registerFn } from "./nodes/function.js";
 export { runScriptSandboxed } from "./nodes/script.js";
+export { FlowFailureError } from "./runtime/failure.js";
+export { failNode } from "./nodes/fail.js";
 export type {
   RunScriptSandboxedOptions,
   RunScriptSandboxedResult,

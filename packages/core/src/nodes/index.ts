@@ -10,6 +10,7 @@ import { shellNode } from "./shell.js";
 import { serviceNode } from "./service.js";
 import { portNode } from "./port.js";
 import { scriptNode } from "./script.js";
+import { failNode } from "./fail.js";
 import { waitNode } from "./wait.js";
 import { skillNode } from "./skill.js";
 import { agentNode } from "./agent.js";
@@ -36,6 +37,7 @@ const BUILT_INS = [
   serviceNode,
   portNode,
   scriptNode,
+  failNode,
   waitNode,
   skillNode,
   agentNode,
@@ -73,6 +75,7 @@ export {
   serviceNode,
   portNode,
   scriptNode,
+  failNode,
   waitNode,
   skillNode,
   agentNode,

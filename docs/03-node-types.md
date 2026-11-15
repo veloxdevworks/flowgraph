@@ -28,8 +28,47 @@ interface NodeCapabilities {
   streaming?: boolean;       // emits incremental output events
   interruptible?: boolean;   // may raise HITL interrupts
   routing?: boolean;         // returns control-flow commands
+  terminal?: boolean;        // deliberately ends execution
 }
 ```
+
+---
+
+## Failure endings — `fail`
+
+Use a `fail` terminal to end an invocation as failed with a reason. Routing to
+`END` declares successful completion, including when a gate's rejection route
+points there. Route a rejected decision to a failure terminal explicitly:
+
+```yaml
+apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: review-outcome }
+nodes:
+  - id: review
+    type: hitl
+    with:
+      mode: approve
+      message: Ship this result?
+      routes: { approved: END, rejected: reject }
+  - id: reject
+    type: fail
+    with:
+      reason: Review rejected by owner
+edges:
+  - { from: START, to: review }
+```
+
+`with.reason` is required and supports templates against the node's state and
+input. A failure terminal needs no outgoing edge. It returns status `error` with
+`error.code: FLOW_FAILED` and the rendered reason as its message. The CLI exits
+`1`; JSON/stream clients receive the same code and reason in `run.error`.
+
+Intentional failure endings bypass node retries and error recovery, including
+`on.error: continue`, error routing and hook vetoes. They propagate through
+subgraphs, map items, agent tools and workers. Successful branches still use
+`END` and exit `0`. Programmatic handlers can use the same ending by throwing the
+exported `FlowFailureError(reason)`.
 
 ---
 

@@ -18,6 +18,8 @@ export type NodeCapabilities = {
   streaming?: boolean;
   interruptible?: boolean;
   routing?: boolean;
+  /** Ends execution deliberately, without requiring an outgoing END edge. */
+  terminal?: boolean;
   /**
    * The node stops its work when `ctx.signal` aborts for a node `timeout`, and undoes nothing a
    * retry needs. Without either timeout-signal capability, `ctx.signal` is the run's

@@ -68,12 +68,12 @@ function abortError(target: TransportTarget, childThreadId: string): Error {
 
 /** Terminal-event mapping; mirrors the server's `isTerminalEvent`. */
 function terminalOutcome(ev: WorkerEvent): WorkerOutcome | undefined {
-  const data = (ev.data ?? {}) as { message?: string; error?: string; state?: Record<string, unknown>; interrupts?: unknown };
+  const data = (ev.data ?? {}) as { message?: string; error?: string; code?: string; state?: Record<string, unknown>; interrupts?: unknown };
   switch (ev.type) {
     case "run.end":
       return { status: "completed", ...(data.state && typeof data.state === "object" ? { state: data.state } : {}) };
     case "run.error":
-      return { status: "error", error: { message: data.message ?? data.error ?? "child run failed" } };
+      return { status: "error", error: { message: data.message ?? data.error ?? "child run failed", ...(typeof data.code === "string" ? { code: data.code } : {}) } };
     case "run.aborted":
       return { status: "cancelled" };
     case "run.paused":
@@ -200,9 +200,10 @@ export function createHttpTransport(opts: HttpTransportOptions = {}): WorkerTran
     }
   }
 
-  async function fetchStatus(target: TransportTarget, id: string, signal?: AbortSignal): Promise<{ status: string; active: boolean }> {
-    const j = (await request(target, "GET", runPath(id), undefined, [], signal)).json as { status?: string; active?: boolean };
-    return { status: j.status ?? "unknown", active: Boolean(j.active) };
+  async function fetchStatus(target: TransportTarget, id: string, signal?: AbortSignal): Promise<{ status: string; active: boolean; error?: WorkerOutcome["error"] }> {
+    const j = (await request(target, "GET", runPath(id), undefined, [], signal)).json as { status?: string; active?: boolean; error?: { message?: string; code?: string } };
+    const error = typeof j.error?.message === "string" ? { message: j.error.message, ...(typeof j.error.code === "string" ? { code: j.error.code } : {}) } : undefined;
+    return { status: j.status ?? "unknown", active: Boolean(j.active), ...(error ? { error } : {}) };
   }
 
   function attach(target: TransportTarget, childThreadId: string, aopts: AttachOptions = {}): WorkerRunAttachment {
@@ -236,7 +237,7 @@ export function createHttpTransport(opts: HttpTransportOptions = {}): WorkerTran
       if (st.active) return undefined;
       const status = STATUS_MAP[st.status];
       if (!status) return undefined;
-      return status === "error" ? { status, error: { message: `child run "${childThreadId}" on "${target.name}" ended with status error` } } : { status };
+      return status === "error" ? { status, error: st.error ?? { message: `child run "${childThreadId}" on "${target.name}" ended with status error` } } : { status };
     }
 
     const STATUS_MAP: Record<string, WorkerOutcome["status"] | undefined> = {
@@ -248,7 +249,7 @@ export function createHttpTransport(opts: HttpTransportOptions = {}): WorkerTran
     };
 
     /** A run that is not executing: read its journal instead of opening a stream that would never close. */
-    async function settled(status: string): Promise<WorkerOutcome | undefined> {
+    async function settled(status: string, failure?: WorkerOutcome["error"]): Promise<WorkerOutcome | undefined> {
       const fallback = STATUS_MAP[status];
       if (!fallback) return undefined;
       let journal: WorkerEvent[];
@@ -267,7 +268,7 @@ export function createHttpTransport(opts: HttpTransportOptions = {}): WorkerTran
         terminal = terminalOutcome(ev) ?? terminal;
       }
       notify();
-      const out: WorkerOutcome = terminal && terminal.status === fallback ? terminal : fallback === "error" ? { status: "error", error: { message: terminal?.error?.message ?? `child run "${childThreadId}" on "${target.name}" ended with status error` } } : { status: fallback };
+      const out: WorkerOutcome = terminal && terminal.status === fallback ? terminal : fallback === "error" ? { status: "error", error: failure ?? { message: terminal?.error?.message ?? `child run "${childThreadId}" on "${target.name}" ended with status error` } } : { status: fallback };
       if (out.status === "completed" && out.state) return { ...out, lastSeq };
       const snap = await fetchState(target, childThreadId);
       return {
@@ -283,7 +284,7 @@ export function createHttpTransport(opts: HttpTransportOptions = {}): WorkerTran
       try {
         const st = await fetchStatus(target, childThreadId, outer);
         if (!st.active) {
-          const done = await settled(st.status);
+          const done = await settled(st.status, st.error);
           if (done) return done;
         }
       } catch (err) {

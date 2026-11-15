@@ -11,6 +11,7 @@ import type { GraphSpec, NodeSpec } from "@flowgraph/spec";
 import type { NodeRunContext } from "../context.js";
 import type { EventScope, EventType } from "../events.js";
 import { isTimeoutError } from "../runtime/retry.js";
+import { FlowFailureError } from "../runtime/failure.js";
 import { resolvePlacements, wrapNodeAsGraph, type PlacementDecision } from "./resolve.js";
 import { stageIn, stageOut, StagingError, type StagedIn, type StagingErrorCode } from "./staging.js";
 import type { Topology } from "./topology.js";
@@ -261,6 +262,7 @@ export function createRemoteNodeExecutor(deps: RemoteExecutorDeps): RemoteNodeEx
           return outcome.state ?? {};
         case "error": {
           const e = outcome.error;
+          if (e?.code === "FLOW_FAILED") throw new FlowFailureError(e.message);
           throw new PlacementRuntimeError(
             "REMOTE_NODE_FAILED",
             `node "${nodeId}" failed on ${where}: ${e?.message ?? "child run failed"}${e?.code ? ` (${e.code})` : ""}`,

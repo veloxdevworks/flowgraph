@@ -891,6 +891,11 @@ export const ServiceWithSchema = BaseWithSchema.extend({
   }
 });
 
+export const FailWithSchema = z.object({
+  reason: z.string().regex(/\S/, "A failure reason is required")
+    .describe("Failure reason; templates render against the node's state and input."),
+});
+
 // script node — sandboxed Node.js (ESM) source
 export const ScriptPermissionsSchema = z.object({
   fsRead: z.array(z.string()).optional().describe("Paths granted via --allow-fs-read"),
