@@ -90,7 +90,7 @@ function reportRunResult(result: RunResult, opts: { json?: boolean; failOnIssues
   }
 }
 
-/** Run with Ctrl-C and SIGTERM cancelling it, for as long as it runs. */
+/** Run with Ctrl-C, SIGTERM and SIGHUP cancelling it, including any automatic webhook wait. */
 async function withCtrlC<T>(json: boolean | undefined, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const cancel = abortOnSignals(() => {
     // Keeps stdout pure JSONL under --json.
@@ -365,9 +365,11 @@ program
     if (policy === "prompt") runOpts.resolveInterrupt = promptResolver;
     let result;
     try {
-      result = await withCtrlC(opts.json, (signal) => compiled.run({ ...runOpts, signal }));
-      if (!opts.json && result.status === "interrupted" && webhookUrlFromInterrupts(result.interrupts)) reportInterrupts(result.interrupts, result.threadId);
-      result = await awaitAutomaticContinuations(result, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }));
+      result = await withCtrlC(opts.json, async (signal) => {
+        const initial = await compiled.run({ ...runOpts, signal });
+        if (!opts.json && initial.status === "interrupted" && webhookUrlFromInterrupts(initial.interrupts)) reportInterrupts(initial.interrupts, initial.threadId);
+        return awaitAutomaticContinuations(initial, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }), signal);
+      });
       reportRunResult(result, opts);
     } finally {
       await closeWebhookServers();
@@ -516,13 +518,13 @@ program
     if (policy === "prompt") resumeOpts.resolveInterrupt = promptResolver;
     let result;
     try {
-      result = await withCtrlC(opts.json, (signal) =>
-        opts.from
+      result = await withCtrlC(opts.json, async (signal) => {
+        const initial = await (opts.from
           ? compiled.resumeFrom({ ...resumeOpts, signal, checkpointId: opts.from })
-          : compiled.resume({ ...resumeOpts, signal }),
-      );
-      if (!opts.json && result.status === "interrupted" && webhookUrlFromInterrupts(result.interrupts)) reportInterrupts(result.interrupts, result.threadId);
-      result = await awaitAutomaticContinuations(result, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }));
+          : compiled.resume({ ...resumeOpts, signal }));
+        if (!opts.json && initial.status === "interrupted" && webhookUrlFromInterrupts(initial.interrupts)) reportInterrupts(initial.interrupts, initial.threadId);
+        return awaitAutomaticContinuations(initial, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }), signal);
+      });
       reportRunResult(result, opts);
     } finally {
       await closeWebhookServers();
