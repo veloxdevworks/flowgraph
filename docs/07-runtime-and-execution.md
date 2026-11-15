@@ -604,7 +604,7 @@ execution. An orphan may already have applied part of an effect.
 
 Historical `resumeFrom` / CLI `resume --from` differs from continuation at the
 current head. Replaying a historical side-effecting graph requires a separate
-`replayWorkspace` / `--replay-workspace <dir>`. Relative outputs go there, preserving
+`replayWorkspace` / `--replay-workspace <dir>`. The selected directory is recorded privately on that branch before nodes run, so later resumes (including after restarting the process) keep using it. An explicit `replayWorkspace` on a later invocation replaces the saved directory. Relative outputs go there, preserving
 the source workspace's files; explicit node workspace/cwd escapes are refused.
 Graph references still resolve from their declaring files. Copy any needed inputs
 into the new workspace. This is not a sandbox for arbitrary code or absolute

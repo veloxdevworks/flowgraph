@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { createExecutionLimit, type ExecutionLimit } from "./runtime/concurrency.js";
 import type { GraphSpec, NodeSpec, OutputMapping } from "@flowgraph/spec";
 import { applyOutput } from "./runtime/apply-output.js";
-import {mkdir} from "node:fs/promises";
+import {mkdir, realpath} from "node:fs/promises";
 import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
@@ -27,7 +27,7 @@ import {
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
 import { createMapMemo, mapMemoGeneration, clearMapMemo } from "./runtime/map-memo.js";
-import { buildStateAnnotation, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import { buildStateAnnotation, REPLAY_WORKSPACE_CHANNEL, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
 import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 import {
   checkpointPrunedError,
@@ -579,8 +579,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // store through the invoke config, never through a process-wide cache.
     replay = new ReplayStore();
     let pendingResumeInterrupts: Array<{ id?: string; value?: unknown }> = [];
+    let replayWorkspace = (runOpts as ResumeOptions).replayWorkspace;
     if (mode !== "start" && checkpointer) {
       const snap = await getCheckpointState(cfg);
+      const savedWorkspace = snap.values?.[REPLAY_WORKSPACE_CHANNEL];
+      if (replayWorkspace === undefined && savedWorkspace != null && (typeof savedWorkspace !== "string" || !path.isAbsolute(savedWorkspace))) throw Object.assign(new Error("The saved replay workspace is invalid; supply a valid replayWorkspace explicitly."), { code: "REPLAY_WORKSPACE_INVALID", retryable: false });
+      replayWorkspace ??= savedWorkspace as string | undefined;
       pendingResumeInterrupts = (snap.tasks ?? []).flatMap((task) => task.interrupts ?? []);
       // `threadId` lets interrupts saved by earlier releases (keyed
       // `<threadId>:<nodeId>`) resume without re-running approved tools.
@@ -609,7 +613,16 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
     }
 
-    const runScope: RunScope = { replay, checkpointer: checkpointer ?? compiledLg, ...((runOpts as ResumeOptions).replayWorkspace ? {replayWorkspace:path.resolve((runOpts as ResumeOptions).replayWorkspace!)} : {}), path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal, accounting };
+    if (replayWorkspace) {
+      await mkdir(path.resolve(replayWorkspace), { recursive: true });
+      replayWorkspace = await realpath(path.resolve(replayWorkspace));
+      // Command updates apply before pending work and are checkpointed before a
+      // later human gate. Only the engine can write this reserved channel.
+      payload = new Command({
+        ...(payload instanceof Command ? { resume: payload.resume, ...(payload.goto !== undefined ? { goto: payload.goto } : {}), update: { ...(payload.update as Record<string, unknown> ?? {}), [REPLAY_WORKSPACE_CHANNEL]: replayWorkspace } } : { update: { ...(payload ?? {}), [REPLAY_WORKSPACE_CHANNEL]: replayWorkspace } }),
+      });
+    }
+    const runScope: RunScope = { replay, checkpointer: checkpointer ?? compiledLg, ...(replayWorkspace ? { replayWorkspace } : {}), path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal, accounting };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
     const raised = new Set(pendingResumeInterrupts.map(it => interruptFingerprint(toInterruptInfo(it))));
     const emitStopInterrupts = (interrupts: InterruptInfo[]) => {
@@ -933,6 +946,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     mode: ExecuteMode,
   ) => {
     const threadId = runOpts.threadId ?? `thread-${runId}`;
+    const requestedWorkspace = (runOpts as ResumeOptions).replayWorkspace;
+    if (requestedWorkspace !== undefined && (typeof requestedWorkspace !== "string" || !requestedWorkspace.trim())) throw Object.assign(new Error("replayWorkspace must name a nonempty output directory."), { code: "REPLAY_WORKSPACE_INVALID", retryable: false });
     const checkpointId = (runOpts as ResumeOptions).checkpointId;
     const config = { configurable: { thread_id: threadId, ...(checkpointId ? { checkpoint_id: checkpointId } : {}) } };
     if (mode !== "start" && !checkpointer) throw threadAdmissionError("THREAD_NOT_FOUND", threadId, "does not exist.");
@@ -948,8 +963,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           const sideEffects=graphSpec.nodes.some(node=>registry.get(node.type)?.capabilities?.sideEffecting||node.type==="map"||node.type==="subgraph");
           if(sideEffects){
             const target=(runOpts as ResumeOptions).replayWorkspace;
-            if(!target||path.resolve(target)===path.resolve((baseCtx as RunContext).workspace))throw Object.assign(new Error("Historical replay may repeat side effects. Set replayWorkspace / --replay-workspace to a separate output directory; source artifacts must not be overwritten."),{code:"HISTORICAL_REPLAY_WORKSPACE_REQUIRED",retryable:false});
-            await mkdir(path.resolve(target),{recursive:true});
+            if (target) await mkdir(path.resolve(target), { recursive: true });
+            if(!target||await realpath(path.resolve(target))===await realpath((baseCtx as RunContext).workspace))throw Object.assign(new Error("Historical replay may repeat side effects. Set replayWorkspace / --replay-workspace to a separate output directory; source artifacts must not be overwritten."),{code:"HISTORICAL_REPLAY_WORKSPACE_REQUIRED",retryable:false});
           }
         }
         const snap = await getCheckpointState(config);
