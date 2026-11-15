@@ -682,12 +682,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         assertNoReservedInput(current, `graph "${graphSpec.metadata.name}" run (after run:before hooks)`);
       }
 
-      // Bind this thread's memory scope (subject rendered from input/run at start;
       if (mode === "start" && current && !(current instanceof Command)) {
         const unknown = Object.keys(current).filter(key => !declaredInputKeys.has(key));
         if (unknown.length) (baseCtx as RunContext).logger.warn(`INPUT_UNKNOWN_KEY: undeclared input key(s) ${unknown.map(key=>JSON.stringify(key)).join(", ")} will not be persisted. Declare them in inputs or state.channels.`, {code:"INPUT_UNKNOWN_KEY",keys:unknown});
       }
 
+      // Bind this thread's memory scope (subject rendered from input/run at start;
       // stored binding reused on resume/continue so a resume can't switch scope).
       const memoryRuntime = (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] as MemoryRuntime | undefined;
       if (memoryRuntime?.exposeMemory) {

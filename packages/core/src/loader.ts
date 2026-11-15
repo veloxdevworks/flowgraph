@@ -1,10 +1,10 @@
-import { KNOWN_PHASES } from "./hooks/builtin.js";
 /**
  * Stage 1 of compilation: load a YAML file and return a validated GraphSpec.
  */
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { KNOWN_PHASES, knownHookDirective } from "./hooks/builtin.js";
 import { parse as parseYaml } from "yaml";
 import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import {
@@ -212,6 +212,7 @@ export function normalizeNodeTypeAliases(parsed: unknown): unknown {
 export function validateSpec(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   for (const [index,hook] of (spec.runtime?.hooks ?? []).entries()) if (!KNOWN_PHASES.has(hook.on)) diagnostics.push({severity:"error",code:"HOOK_PHASE_UNKNOWN",path:`runtime.hooks[${index}].on`,message:`Unknown hook phase "${hook.on}". Allowed phases: ${[...KNOWN_PHASES].join(", ")}`});
+  for (const [index,hook] of (spec.runtime?.hooks ?? []).entries()) if (!knownHookDirective(hook.do)) diagnostics.push({severity:"error",code:"HOOK_DIRECTIVE_UNKNOWN",path:`runtime.hooks[${index}].do`,message:`Unknown hook directive "${hook.do}". Use retry, continue, ignore, interrupt, fail, redact or route:<node>.`});
   const nodeIds = new Set(spec.nodes.map((n) => n.id));
 
   // Duplicate ids

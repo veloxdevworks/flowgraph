@@ -7,7 +7,7 @@
  * that skipped the host's upload check still cannot run a blocked node.
  */
 
-import { evalExpr, parseExpr, scanTemplate, type Expr } from "@flowgraph/expr";
+import { literalCallbackExpr, evalExpr, parseExpr, scanTemplate, type Expr } from "@flowgraph/expr";
 import type { NodeRunContext } from "./context.js";
 import type { OutboundHttpPolicy } from "./outbound-http.js";
 
@@ -378,8 +378,10 @@ function childExprs(expr: Expr): Expr[] {
       return [expr.object];
     case "Index":
       return [expr.object, expr.index];
-    case "Call":
-      return expr.args;
+    case "Call": {
+      const callback=literalCallbackExpr(expr);
+      return callback ? [...expr.args,callback] : expr.args;
+    }
     case "Unary":
       return [expr.operand];
     case "Binary":
@@ -462,7 +464,7 @@ function refersToReservedInExprs(exprs: string[]): boolean {
     } catch {
       continue;
     }
-    if (hasReservedConstantIndex(expr)) return true;
+    try { if (hasReservedConstantIndex(expr)) return true; } catch { /* Invalid literal callback is reported by expression validation. */ }
   }
   return false;
 }
@@ -496,13 +498,15 @@ export function templateRefs(text: string): TemplateRefs {
   // read needs the secret pattern, a reserved read needs `__`, `[` (a
   // constant index) or something to fold or decode first.
   let checkSecret = SECRET_REF_RE.test(text);
+  const hasCallbacks = /\b(?:map|filter|find)\s*\(/.test(text);
   const checkReserved = NEEDS_FOLDING_RE.test(text) || text.includes("__") || text.includes("[");
-  if (!checkSecret && !checkReserved) return out;
+  if (!checkSecret && !checkReserved && !hasCallbacks) return out;
   const { spans, unclosedAt } = scanTemplate(text);
   if (checkSecret && spans.some((span) => SECRET_REF_RE.test(span.expr))) {
     out.secret = true;
     checkSecret = false;
   }
+  if (hasCallbacks && templateRootRefs(text,new Set(["secret","secrets"])).length) out.secret=true;
   if (checkReserved) out.reserved = refersToReservedInExprs(spans.map((span) => span.expr));
   if (checkSecret && unclosedAt >= 0 && SECRET_REF_RE.test(text.slice(unclosedAt + 2))) out.secret = true;
   return out;
@@ -540,7 +544,7 @@ export function templateRootRefs(text: string, roots: ReadonlySet<string>): stri
       return;
     }
     switch (e.kind) {
-      case "Call": e.args.forEach(walk); break;
+      case "Call": e.args.forEach(walk); {const callback=literalCallbackExpr(e);if(callback)walk(callback);} break;
       case "Unary": walk(e.operand); break;
       case "Binary": case "Nullish": walk(e.left); walk(e.right); break;
       case "Ternary": walk(e.condition); walk(e.consequent); walk(e.alternate); break;

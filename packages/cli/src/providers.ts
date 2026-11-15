@@ -11,6 +11,8 @@ import {
   isKnownLangChainVendor,
   createCliProvider,
   mockProvider,
+  getProvider,
+  registerProvider,
   detectLocalCli,
   type CliVendor,
 } from "@flowgraph/core";
@@ -161,12 +163,6 @@ export async function buildProviders(
     built.add("deepagents");
   }
 
-  const usesMock = (value: unknown): boolean => {
-    if (!value || typeof value !== "object") return false;
-    if (Array.isArray(value)) return value.some(usesMock);
-    const row=value as Record<string,unknown>;
-    return row.provider === "mock" || Object.values(row).some(usesMock);
-  };
-  if (!built.has("mock") && usesMock({provider: defaultName,nodes:spec.nodes})) providers.push(mockProvider);
+  if (!getProvider("mock")) registerProvider(mockProvider);
   return providers;
 }

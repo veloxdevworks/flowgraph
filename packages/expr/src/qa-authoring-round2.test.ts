@@ -13,3 +13,9 @@ it("PLAT-382: map/filter/find accept sandboxed expression strings with item/inde
   expect(renderTemplate("{{ find(state.rows, 'item.n == 4') }}",scope)).toBeNull();
   expect(renderTemplate("{{ map(state.rows, 'item.constructor') }}",scope)).toEqual([null,null,null]);
 });
+it.each(["map([1], state.mapper)","filter([1], 'it' + 'em > 0')","find([1], input.pred)"])("rejects callbacks computed from data: %s",source=>{
+  expect(()=>renderTemplate("{{ "+source+" }}",{state:{mapper:"map([1], state.mapper)"},input:{pred:"secret.TOKEN"}})).toThrow(/callback must be a quoted expression string/);
+});
+it("keeps nested literal callbacks available",()=>{
+  expect(renderTemplate(`{{ map([[1,2],[3]], "map(item, 'item * 2')") }}`,{})).toEqual([[2,4],[6]]);
+});

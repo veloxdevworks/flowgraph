@@ -1,7 +1,7 @@
 export { tokenize, LexError } from "./lexer.js";
 export type { Token, TokenKind } from "./lexer.js";
 
-export { parseExpr, ParseError } from "./parser.js";
+export { literalCallbackExpr, parseExpr, ParseError } from "./parser.js";
 export type { Expr, BinaryOp } from "./ast.js";
 
 export { evalExpr, EvalError, HIDDEN_STATE_PREFIX } from "./evaluator.js";

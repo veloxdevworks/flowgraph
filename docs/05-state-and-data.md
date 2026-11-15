@@ -444,3 +444,5 @@ The per-type subject cap and `similarSubjects` without tags read the covering in
 Array callbacks in YAML use expression strings: `map(state.rows, 'item.price * state.factor')`, `filter(state.rows, 'item.active')`, and `find(state.rows, 'item.id == input.id')`. Each callback sees the current `item`, zero-based `index` and the outer scope, with the same own-property restrictions as other expressions. JavaScript arrow functions are not part of the expression grammar.
 
 Undeclared run input keys produce an `INPUT_UNKNOWN_KEY` warning when they would be discarded by state storage. Declare intended keys in `inputs` or `state.channels`. Unknown `runtime.hooks[].on` phases fail validation with the supported names.
+
+Array callback source must be a quoted literal inside the expression. Runtime strings from input/state and concatenated strings are rejected. Literal callback bodies (including nested callbacks) participate in expression validation and secret/reserved-channel checks. Unknown hook directives also fail validation; supported directives are `retry`, `continue`, `ignore`, `interrupt`, `fail`, `redact` and `route:<node>`.

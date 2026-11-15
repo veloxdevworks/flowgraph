@@ -4,9 +4,10 @@ import * as core from "@flowgraph/core";
 import { buildProviders } from "./providers.js";
 
 describe("buildProviders", () => {
-  it("PLAT-382: supplies the built-in mock only when requested",async()=>{
+  it("PLAT-382: supplies the built-in mock as a registry fallback",async()=>{
     const providers=await buildProviders({metadata:{name:"mock"},nodes:[{id:"a",type:"agent",provider:"mock"}],edges:[]} as unknown as GraphSpec);
-    expect(providers.map(p=>p.name)).toEqual(["mock"]);
+    expect(providers).toEqual([]);
+    expect(core.getProvider("mock")).toBeDefined();
   });
   beforeEach(() => {
     vi.spyOn(core, "createLangChainProviderFromConfig").mockImplementation(async (name: string) => ({

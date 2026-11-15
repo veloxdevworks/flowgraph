@@ -26,6 +26,10 @@ export const KNOWN_PHASES: ReadonlySet<string> = new Set<string>([
   "interrupt:beforeRaise", "interrupt:beforeResume",
 ]);
 
+export function knownHookDirective(verb: string): boolean {
+  return ["retry","continue","ignore","interrupt","fail","redact"].includes(verb) || verb.startsWith("route:") && !!verb.slice(6).trim();
+}
+
 /** Map a YAML `do:` verb to a hook directive (or a redaction mutation). */
 function directiveFor(
   doVerb: string,
@@ -64,6 +68,7 @@ export function hooksFromSpec(spec: GraphSpec): Hook[] {
   const hooks: Hook[] = [];
   for (const entry of entries) {
     if (!KNOWN_PHASES.has(entry.on)) throw Object.assign(new Error(`Unknown hook phase "${entry.on}". Allowed phases: ${[...KNOWN_PHASES].join(", ")}`), {code:"HOOK_PHASE_UNKNOWN",retryable:false});
+    if (!knownHookDirective(entry.do)) throw Object.assign(new Error(`Unknown hook directive "${entry.do}". Use retry, continue, ignore, interrupt, fail, redact or route:<node>.`),{code:"HOOK_DIRECTIVE_UNKNOWN",retryable:false});
     const phase = (HOOK_PHASE_ALIASES[entry.on] ?? entry.on) as HookPhase;
     const where = entry.where as HookWhere | undefined;
     const resolve = directiveFor(entry.do, entry.reason, redactor);
