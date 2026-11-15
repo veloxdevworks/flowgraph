@@ -12,6 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { observeSecret } from "./runtime/secret-redaction.js";
 import type { EventSink, FlowgraphEvent } from "./events.js";
 
 // ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ export interface SecretProvider {
 
 export function createEnvSecretProvider(env: NodeJS.ProcessEnv = process.env): SecretProvider {
   return {
-    get: async (name) => env[name],
+    get: async (name) => { const value = env[name]; observeSecret(value); return value; },
     has: (name) => name in env,
   };
 }
@@ -59,7 +60,7 @@ export function createDotenvSecretProvider(
   const merged = { ...parsed, ...fallback };
 
   return {
-    get: async (name) => merged[name],
+    get: async (name) => { const value = merged[name]; observeSecret(value); return value; },
     has: (name) => name in merged,
   };
 }

@@ -188,7 +188,8 @@ export function createMapMemo(
         await validateArtifacts(value, ctx);
         return value;
       }
-      const value = await invoke();
+      const rawValue = await invoke();
+      const value = ctx.events.redact?.(rawValue) ?? rawValue;
       let payload: string;
       try {
         // JSON round-trip must preserve all types/fields; never coerce undefined, dates or non-finite numbers.

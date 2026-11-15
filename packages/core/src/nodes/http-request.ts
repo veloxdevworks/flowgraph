@@ -2,6 +2,7 @@
  * Shared outbound HTTP request helper used by the `http` and `demo` nodes.
  */
 
+import { observeSensitiveHeaders } from "../runtime/secret-redaction.js";
 import { guardedFetch, type OutboundHttpPolicy } from "../outbound-http.js";
 
 /** Header names whose values must never appear in event telemetry. */
@@ -101,6 +102,7 @@ export async function performHttpRequest(
 ): Promise<PerformHttpRequestResult> {
   const method = opts.method ?? "GET";
   const headers = opts.headers ?? {};
+  observeSensitiveHeaders(headers);
 
   let fullUrl = opts.url;
   if (opts.query && Object.keys(opts.query).length > 0) {

@@ -286,7 +286,7 @@ config:
     jiraProject: "PLAT"
 ```
 
-Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
+Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars. Expansion runs after YAML parsing, so environment values cannot inject YAML structure. `$${VAR}` escapes interpolation in those sections. Node bodies, inputs, state defaults, metadata and keys remain literal; shell `${VAR}` syntax is left for the child shell and its allowed environment. Use `{{ secret.NAME }}` for credentials instead of embedding them in config variables. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
 
 ## 8. Input / output mapping
 

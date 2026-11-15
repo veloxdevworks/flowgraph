@@ -100,27 +100,27 @@ describe("PLAT-297 / PLAT-326: explicit child credentials", () => {
     const compiled = await compileGraph(
       graph("shell", {
         command: process.execPath,
-        args: ["-e", "process.stdout.write(process.env.FGQA_DECOY + '|' + process.env.EXPLICIT)"],
+        args: ["-e", "process.stdout.write(process.env.FGQA_DECOY + '|' + process.env.EXPLICIT + '|' + (process.env.EXPLICIT === 'decoy-only'))"],
         inheritEnv: ["FGQA_DECOY"],
         env: { EXPLICIT: "{{ secret.FGQA_DECOY }}" },
       }),
     );
     const result = await compiled.run();
     expect(result.status).toBe("completed");
-    expect(result.state.answer).toMatchObject({ stdout: "decoy-only|decoy-only" });
+    expect(result.state.answer).toMatchObject({ stdout: "[REDACTED]|[REDACTED]|true" });
   });
 
   it("resolves secret templates in the script sandbox", async () => {
     vi.stubEnv("FGQA_DECOY", "decoy-only");
     const compiled = await compileGraph(
       graph("script", {
-        code: "export default async () => ({ value: process.env.EXPLICIT, hidden: process.env.FGQA_DECOY ?? null });",
+        code: "export default async () => ({ value: process.env.EXPLICIT, received: process.env.EXPLICIT === 'decoy-only', hidden: process.env.FGQA_DECOY ?? null });",
         env: { EXPLICIT: "{{ secret.FGQA_DECOY }}" },
       }),
     );
     const result = await compiled.run();
     expect(result.status).toBe("completed");
-    expect(result.state.answer).toMatchObject({ value: "decoy-only", hidden: null });
+    expect(result.state.answer).toMatchObject({ value: "[REDACTED]", received: true, hidden: null });
   });
 
   it("enforces secret policy for shell nodes", async () => {
