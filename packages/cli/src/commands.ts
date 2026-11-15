@@ -68,9 +68,16 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
     if (it.validationError) printWarning(`    Previous answer rejected (${it.attempt}/${it.maxAttempts}): ${it.validationError}`);
   }
   if (threadId) {
+    if ((interrupts ?? []).some(it=>it.kind === "form" || (it.payload as {data?:{schema?:unknown;select?:string}})?.data?.schema || ["one","many"].includes((it.payload as {data?:{select?:string}})?.data?.select ?? ""))) {
+      printInfo(`This gate requires an answer matching its schema or an artifact selection. Inspect its payload: flowgraph resume <graph> --thread ${threadId} --list`);
+      return;
+    }
+    if (interrupts?.length && interrupts.every(it=>(it.payload as {data?:{mode?:string}})?.data?.mode === "until")) {
+      printInfo(`Wait for the displayed deadline, then continue with: flowgraph resume <graph> --thread ${threadId}`);
+      return;
+    }
     const sample = (it: InterruptInfo) => {
-      const data = (it.payload as {data?:{mode?:string;selection?:string;select?:string;artifacts?:unknown[]}})?.data;
-      if (data?.mode === "review") return {decision:"approve"};
+      if (it.kind === "review") return {decision:it.choices?.includes("approve")?"approve":it.choices?.[0]??"approve"};
       if (it.kind === "question") return "your answer";
       if (it.kind === "choice") return it.choices?.[0] ?? "your choice";
       if (["form","selection"].includes(it.kind ?? "")) return "<answer matching the gate schema>";
@@ -538,6 +545,11 @@ program
       if (!opts.json && result.status === "interrupted" && webhookUrlFromInterrupts(result.interrupts)) reportInterrupts(result.interrupts, result.threadId);
       result = await awaitAutomaticContinuations(result, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }));
       reportRunResult(result, {...opts,durableCheckpoint: spec.runtime?.checkpoint?.enabled !== false && ["sqlite","postgres"].includes(spec.runtime?.checkpoint?.backend ?? "memory")});
+    } catch(err) {
+      if ((err as {code?:string}).code === "RESUME_VALUE_REQUIRED") {
+        (err as Error).message=`Thread "${opts.thread}" needs an answer. Pass --resume false or --resume null to deny, or --resume '<answer-json>'. Pending interrupt ids: ${snap.interrupts.map(it=>it.id).join(", ")}. Use --list to inspect gate payloads.`;
+      }
+      throw err;
     } finally {
       await closeWebhookServers();
       await closeMcpHub(mcpOpt.mcp);

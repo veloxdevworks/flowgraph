@@ -1,3 +1,4 @@
+import { replayInspection } from "./recovery-command.js";
 import { expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -34,4 +35,23 @@ it("PLAT-366: inspect help omits mutation flags",()=>{
     expect(result.stdout).not.toContain("--owner-stopped");
     expect(result.stdout).not.toContain("--result");
   }
+});
+it("PLAT-369: review gates suggest a decision and forms direct callers to their schema",()=>{
+  const dir=mkdtempSync(join(tmpdir(),"fg-gate-hints-"));
+  try {
+    for(const mode of ["review","form"]) {
+      writeFileSync(join(dir,"g.yaml"),JSON.stringify({apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"hints"},nodes:[{id:"gate",type:"hitl",with:{mode,message:"answer?",...(mode==="form"?{schema:{type:"object",properties:{name:{type:"string"}},required:["name"]}}:{})}}],edges:[{from:"START",to:"gate"},{from:"gate",to:"END"}]}));
+      const result=spawnSync(process.execPath,[bin,"run","g.yaml","--on-interrupt","fail","--thread","hint"],{cwd:dir,encoding:"utf8",timeout:20000});
+      expect(result.status,result.stderr).toBe(3);
+      expect(result.stdout).toContain(mode==="review"?'"decision":"approve"':"--list");
+      expect(result.stdout).toContain("not durable");
+    }
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+it("PLAT-366: replay inspection omits historical shell output unless full detail is requested",()=>{
+  const rows=[{task:'["node"]',entries:{shell:{identity:"x",result:{stdout:"historical-output",stderr:"",exitCode:0}},pending:{__fg:"PendingStep",id:"r",kind:"shell"}}}];
+  expect(JSON.stringify(replayInspection(rows))).not.toContain("historical-output");
+  expect(replayInspection(rows)[0]).toMatchObject({taskIdentity:["node"],completedSlots:["shell"],entries:{pending:{id:"r"}}});
+  expect(JSON.stringify(replayInspection(rows,true))).toContain("historical-output");
 });

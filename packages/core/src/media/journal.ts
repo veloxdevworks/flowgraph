@@ -119,7 +119,7 @@ export function createFileJournal(opts: {
       try {
         const parsed = JSON.parse(await readFile(file, "utf8")) as JournalEntry;
         if (parsed?.version !== 1 || !["intent", "submitted", "done"].includes(parsed.state) || !parsed.provider || !parsed.handle?.id || (parsed.state === "intent" && !parsed.submissionId)) throw new Error("Invalid media journal record");
-        return parsed;
+        return {...parsed,nodeId:opts.nodeId,fingerprint:opts.fingerprint};
       } catch (cause) {
         if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
         throw Object.assign(new Error(`Media journal ${file} cannot be read; inspect/reconcile it before retrying`), { code: "MEDIA_JOURNAL_INVALID", retryable: false, cause });

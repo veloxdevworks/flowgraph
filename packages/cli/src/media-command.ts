@@ -19,7 +19,7 @@ function base(command:Command) {
 }
 export function buildMediaCommand(): Command {
   const command=new Command("media").description("Discover and reconcile uncertain media submissions");
-  base(command.command("inspect [graph]")).action(async(graph:string|undefined,opts:Options)=>{
+  base(command.command("inspect [graph]").description("Read journal identities or one exact media journal")).action(async(graph:string|undefined,opts:Options)=>{
     const workspace=await workspaceFor(graph,opts.workspace);
     if (opts.node && opts.fingerprint) {
       const entry=await createFileJournal({workspace,scope:opts.thread,nodeId:opts.node,fingerprint:opts.fingerprint}).read();
@@ -30,7 +30,7 @@ export function buildMediaCommand(): Command {
       console.log(JSON.stringify({threadId:opts.thread,workspace,journals:rows}));
     }
   });
-  base(command.command("resolve [graph]")).option("--backend <backend>","Host checkpoint backend").option("--path <database>","Host checkpoint database")
+  base(command.command("resolve [graph]").description("Reconcile an exact vendor submission and its matching usage receipt")).option("--backend <backend>","Host checkpoint backend").option("--path <database>","Host checkpoint database")
     .requiredOption("--submission <id>","Exact inspected submission identity")
     .option("--handle <json>","Recovered vendor handle, optionally with done artifacts and costUSD")
     .option("--not-submitted","Vendor confirms the request was never accepted; uncertainty alone is insufficient")

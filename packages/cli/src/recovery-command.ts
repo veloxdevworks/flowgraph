@@ -12,14 +12,21 @@ export function buildRecoveryCommand(): Command {
     .action(async (graph: string | undefined, opts: ThreadDatabaseOptions & { thread:string; workspace?:string }) => {
       const db = await openThreadDatabase(graph, opts);
       try {
-        const config = { configurable:{thread_id:opts.thread} };
+        const config = { configurable:{thread_id:opts.thread,checkpoint_ns:""} };
         const checkpoints = [];
         for await (const tuple of db.saver.list(config)) checkpoints.push({id:tuple.checkpoint.id, createdAt:tuple.checkpoint.ts, parentId:tuple.parentConfig?.configurable?.checkpoint_id});
         const [claim,usage,replay,media] = await Promise.all([
           inspectClaim(db.saver,opts.thread), inspectThreadUsage(db.saver,opts.thread), inspectThreadReplay(db.saver,opts.thread), listMediaJournals(opts.workspace ?? db.workspace,opts.thread),
         ]);
-        console.log(JSON.stringify({threadId:opts.thread,workspace:opts.workspace ?? db.workspace,claim,usage,replay:replay.map(row=>({...row,taskIdentity:parseTask(row.task)})),media,checkpoints}));
+        console.log(JSON.stringify({threadId:opts.thread,workspace:opts.workspace ?? db.workspace,claim,usage,replay:replayInspection(replay),media,checkpoints}));
       } finally { await db.close(); }
     });
 }
 export function parseTask(task: string): unknown { try { return JSON.parse(task); } catch { return task; } }
+
+export function replayInspection(rows:Array<{task:string;entries:Record<string,unknown>}>,full=false) {
+  return rows.map(row=>({...row,taskIdentity:parseTask(row.task),...(full?{}:{
+    entries:Object.fromEntries(Object.entries(row.entries).filter(([,v])=>!!v&&typeof v==="object"&&(v as {__fg?:string}).__fg==="PendingStep")),
+    completedSlots:Object.keys(row.entries).filter(key=>!(row.entries[key]&&typeof row.entries[key]==="object"&&(row.entries[key] as {__fg?:string}).__fg==="PendingStep")),
+  })}));
+}

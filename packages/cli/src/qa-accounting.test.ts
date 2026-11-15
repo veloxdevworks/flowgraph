@@ -72,6 +72,8 @@ it("retains completed usage and an unresolved receipt when a paid-call process i
   const cli = (...args: string[]) => spawnSync(process.execPath, [resolve(import.meta.dirname, "../dist/bin.js"), ...args], { cwd: dir, encoding: "utf8", timeout: 25_000 });
   const inspected = JSON.parse(cli("thread", "inspect", "flow.yaml", "--thread", "crash").stdout).claim;
   expect(cli("thread", "release", "flow.yaml", "--thread", "crash", "--token", inspected.token, "--owner-stopped").status).toBe(0);
+  const repeated=cli("thread","release","flow.yaml","--thread","crash","--token",inspected.token,"--owner-stopped");
+  expect(repeated.status,repeated.stderr).toBe(0);expect(JSON.parse(repeated.stdout).alreadyReleased).toBe(true);
   const usage = JSON.parse(cli("usage", "inspect", "flow.yaml", "--thread", "crash").stdout).usage;
   const receipt = Object.keys(usage.pending)[0]!;
   const resolved = cli("usage", "resolve", "flow.yaml", "--thread", "crash", "--receipt", receipt, "--not-billed", "--owner-stopped");

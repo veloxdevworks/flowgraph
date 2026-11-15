@@ -27,6 +27,7 @@ it.each([{notApplied:true} as const,{result:{stdout:"done",stderr:"",exitCode:0}
     if(value===undefined)delete entries[key];else entries[key]=value;
     return true;
   }};
+  await expect(resolveThreadReplay(saver,"t","task","slot",step.id,{result:"wrong shape"})).rejects.toThrow(/Recovered shell result/);
   await resolveThreadReplay(saver,"t","task","slot",step.id,resolution);
   await resolveThreadReplay(saver,"t","task","slot",step.id,resolution);
   await expect(resolveThreadReplay(saver,"t","task","slot",step.id,{result:{stdout:"different",stderr:"",exitCode:0}})).rejects.toMatchObject({code:"REPLAY_RESOLUTION_CONFLICT"});
