@@ -232,3 +232,47 @@ describe("bundleGraphForRemote", () => {
     expect(twice.inlined.some((n) => n.includes("uses:"))).toBe(false);
   });
 });
+
+describe("bundleGraphForRemote — script file sources", () => {
+  const scriptGraph = (file: string): GraphSpec => ({
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: "script-file" },
+    nodes: [{ id: "transform", type: "script", with: { file, input: { n: 1 } } }],
+    edges: [
+      { from: "START", to: "transform" },
+      { from: "transform", to: "END" },
+    ],
+  });
+
+  it("inlines with.file as with.code, resolved from the declaring graph", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flowgraph-bundle-script-"));
+    try {
+      await fs.mkdir(path.join(dir, "scripts"));
+      const source = "export default input => ({ n: input.n + 1 });\n";
+      await fs.writeFile(path.join(dir, "scripts", "t.mjs"), source);
+      await fs.writeFile(path.join(dir, "child.graph.yaml"), yaml.stringify(scriptGraph("./scripts/t.mjs")));
+      const parent: GraphSpec = {
+        apiVersion: "flowgraph/v1",
+        kind: "Graph",
+        metadata: { name: "parent" },
+        nodes: [{ id: "child", type: "subgraph", uses: "./child.graph.yaml" }],
+        edges: [
+          { from: "START", to: "child" },
+          { from: "child", to: "END" },
+        ],
+      };
+      const result = await bundleGraphForRemote(parent, { cwd: dir });
+      expect(result.blockers).toEqual([]);
+      const inner = (result.spec.nodes[0]!.spec as GraphSpec).nodes[0]!;
+      expect(inner.with).toEqual({ code: source, input: { n: 1 } });
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unreadable script file as a blocker", async () => {
+    const result = await bundleGraphForRemote(scriptGraph("./missing.mjs"), { cwd: fixtureDir });
+    expect(result.blockers.join("\n")).toContain(path.join(fixtureDir, "missing.mjs"));
+  });
+});
