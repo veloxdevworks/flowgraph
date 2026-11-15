@@ -123,7 +123,7 @@ it("SIGKILL orphan shell work cannot race a resumed invocation", async () => {
   let orphan: number | undefined;
   try {
     const code =
-      "require('fs').writeFileSync('orphan.pid',String(process.pid));require('fs').writeFileSync('ready','yes');setTimeout(()=>require('fs').appendFileSync('effects','effect\\n'),30000);";
+      "require('fs').writeFileSync('orphan.pid',String(process.pid));require('fs').writeFileSync('ready','yes');setTimeout(()=>require('fs').appendFileSync('effects','effect\\n'),300000);";
     writeFileSync(
       join(dir, "flow.yaml"),
       JSON.stringify(

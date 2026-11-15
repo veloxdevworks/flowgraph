@@ -61,7 +61,8 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
-        run: pnpm test
+        # Each package has a Vitest worker pool; CLI cases spawn more processes.
+        run: pnpm test --concurrency=2
 
       - name: Retest PostgreSQL on the reused database
         run: pnpm --filter @flowgraph/checkpoint-postgres exec vitest run
