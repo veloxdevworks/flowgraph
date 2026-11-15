@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import type { NodeRunContext } from "../context.js";
 import { acquireThreadRun } from "../checkpoint/execution-claim.js";
-import { recordedToolResult, runScopeOf } from "./replay-cache.js";
+import { recordedToolResult, runScopeOf, toolArgsHash } from "./replay-cache.js";
 export interface ReplayCheckpointStore {
   /** Atomically seed an absent task record; leave an existing record unchanged. */
   initializeThreadReplay(
@@ -160,6 +160,12 @@ export async function resolveThreadReplay(
     const store = storage(saver),
       entries = await store.readThreadReplay(thread, task),
       step = entries?.[slot];
+    const auditSlot = `resolution:${slot}:${receipt}`;
+    const prior = entries?.[auditSlot] as { resolution?: unknown } | undefined;
+    if (prior) {
+      if (toolArgsHash(prior.resolution) !== toolArgsHash(resolution)) throw Object.assign(new Error("Replay receipt was already reconciled with a different result"), {code:"REPLAY_RESOLUTION_CONFLICT"});
+      if (!isPendingStep(step) || step.id !== receipt) return;
+    }
     if (!entries || !isPendingStep(step) || step.id !== receipt)
       throw new Error("No matching unresolved replay receipt; inspect again");
     if (step.kind === "shell" && "result" in resolution) {
@@ -184,6 +190,7 @@ export async function resolveThreadReplay(
         : step.kind === "tool"
           ? recordedToolResult(step.tool!, step.args, resolution.result)
           : { identity: step.identity, result: resolution.result };
+    if (!prior && !await store.compareThreadReplay(thread, task, auditSlot, undefined, {resolution, at:new Date().toISOString()})) throw new Error("Replay recovery audit changed; inspect again");
     if (!(await store.compareThreadReplay(thread, task, slot, step, value)))
       throw new Error("Replay receipt changed before reconciliation; inspect again");
   } finally {

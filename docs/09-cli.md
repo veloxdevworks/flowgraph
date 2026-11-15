@@ -301,3 +301,9 @@ See [usage and budget boundaries](./07-runtime-and-execution.md#usage-and-budget
 for late results, legacy receipts and pricing limitations.
 
 Hosted `GET /runs/:threadId` includes `pendingInterruptIds` for interrupted/paused runs. This lookup is read-only and best-effort; if providers or graph state are unavailable, run detail still returns with an empty list. Use `/state` for full interrupt payloads. Invalid-resume 400 responses also include `pendingInterruptIds`; busy responses expose no host ownership details.
+
+### Crash recovery discovery
+
+`flowgraph recover <graph> --thread <id>` reads all recovery blockers in one call: execution ownership (including same-host liveness), usage receipts, decoded replay task identities, media journals and checkpoint IDs with parent links. It does not run nodes, apply deadlines, release claims or buy work. Use `--workspace` only when overriding the graph's original `runtime.workspace`; media inspection uses the same rule. Host database overrides are `--backend sqlite|postgres --path <database>`.
+
+Stop the old owner and reconcile external work before an explicit resolution. Identical usage, replay and media resolutions can be retried safely; changing a reconciled result returns a conflict. Shell replay results have the shape `{"stdout":"...","stderr":"...","exitCode":0}`. A tool replay result is the tool's raw return value, not a tool-message wrapper. Inspect help lists only read options; resolve help lists mutation flags.

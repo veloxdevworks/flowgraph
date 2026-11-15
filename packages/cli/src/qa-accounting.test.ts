@@ -106,7 +106,7 @@ it("reconciles an ambiguous receipt through the CLI and resumes under the origin
   expect(cli(...args).status).toBe(1);
   const resolved = cli(...args,"--owner-stopped"); expect(resolved.status,resolved.stderr).toBe(0);
   expect(JSON.parse(resolved.stdout).usage.totals).toMatchObject({totalTokens:3,costUSD:0.002,unknownCalls:0});
-  expect(cli(...args,"--owner-stopped").status).toBe(1);
+  expect(cli(...args,"--owner-stopped").status).toBe(0);
   const resumed = cli("resume","flow.yaml","--thread","resolve","--resume","true","--json");
   expect(resumed.status,resumed.stdout+resumed.stderr).toBe(0);
   const end = resumed.stdout.trim().split("\n").map(line=>JSON.parse(line)).find(event=>event.type==="run.end");

@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { graphEdges, loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
+import { buildRecoveryCommand } from "./recovery-command.js";
 import { buildMediaCommand } from "./media-command.js";
 import {buildReplayCommand} from "./replay-command.js";
 import { buildUsageCommand } from "./usage-command.js";
@@ -24,6 +25,7 @@ import { printDiagnostics, printBanner, printSuccess, printError, printInfo, pri
 function printFailedUsage(result: RunResult): void {
   if (!["error", "aborted"].includes(result.status)) return;
   console.error(`Thread: ${result.threadId ?? "unknown"}`);
+  if (/UNCERTAIN|UNRESOLVED|THREAD_BUSY/.test((result.error as {code?:string})?.code ?? "")) console.error(`Inspect all recovery blockers: flowgraph recover <graph> --thread ${result.threadId}`);
   if (result.usage) console.error(`Usage (known): tokens=${result.usage.totalTokens}, usd=${result.usage.costUSD}; pending=${result.usage.pendingCalls}, unknown=${result.usage.unknownCalls}, unpriced=${result.usage.unpricedCalls}, unreportedTokens=${result.usage.unreportedTokenCalls}`);
 }
 
@@ -63,18 +65,26 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
   printWarning("Run interrupted (awaiting human input).");
   for (const it of interrupts ?? []) {
     printInfo(`  • ${it.id}: ${it.reason ?? ""}${it.deadlineAt ? ` (deadline ${it.deadlineAt})` : ""}`);
+    if (it.validationError) printWarning(`    Previous answer rejected (${it.attempt}/${it.maxAttempts}): ${it.validationError}`);
   }
   if (threadId) {
-    const example = (interrupts ?? []).length > 1
-      ? `'{"<interrupt-id>":{"approved":true}}'`
-      : `'{"approved":true}'`;
+    const sample = (it: InterruptInfo) => {
+      const data = (it.payload as {data?:{mode?:string;selection?:string;select?:string;artifacts?:unknown[]}})?.data;
+      if (data?.mode === "review") return {decision:"approve"};
+      if (it.kind === "question") return "your answer";
+      if (it.kind === "choice") return it.choices?.[0] ?? "your choice";
+      if (["form","selection"].includes(it.kind ?? "")) return "<answer matching the gate schema>";
+      return {approved:true};
+    };
+    const answers=(interrupts ?? []).map(it=>[it.id,sample(it)]);
+    const example = "'" + JSON.stringify(answers.length > 1 ? Object.fromEntries(answers) : answers[0]?.[1] ?? true) + "'";
     printInfo(`Resume with: flowgraph resume <graph> --thread ${threadId} --resume ${example}`);
   } else {
     printInfo("Tip: pass --thread <id> so the run is resumable.");
   }
 }
 
-function reportRunResult(result: RunResult, opts: { json?: boolean; failOnIssues?: boolean }): void {
+function reportRunResult(result: RunResult, opts: { json?: boolean; failOnIssues?: boolean; durableCheckpoint?:boolean }): void {
   printFailedUsage(result);
   if (result.status === "completed") {
     if (!opts.json) { printSuccess(`Completed in ${formatDuration(result.durationMs)}`); printInfo(`Run ID: ${result.runId}`); printIssues(result); }
@@ -82,7 +92,10 @@ function reportRunResult(result: RunResult, opts: { json?: boolean; failOnIssues
     return;
   }
   if (result.status === "interrupted" || result.status === "paused") {
-    if (!opts.json) reportInterrupts(result.interrupts, result.threadId);
+    if (!opts.json) {
+      reportInterrupts(result.interrupts, result.threadId);
+      if (!opts.durableCheckpoint) printWarning("Checkpoint storage is not durable. After this process exits, resume needs SQLite or PostgreSQL checkpoint storage.");
+    }
     process.exitCode = 3;
   } else {
     printError(result.status === "aborted" ? "Aborted" : `Failed: ${result.error?.message ?? "unknown error"}`);
@@ -112,6 +125,7 @@ const program = new Command()
 program.addCommand(buildSkillsCommand());
 program.addCommand(buildThreadCommand());
 program.addCommand(buildUsageCommand());
+program.addCommand(buildRecoveryCommand());
 program.addCommand(buildMediaCommand());
 program.addCommand(buildReplayCommand());
 
@@ -368,7 +382,7 @@ program
       result = await withCtrlC(opts.json, (signal) => compiled.run({ ...runOpts, signal }));
       if (!opts.json && result.status === "interrupted" && webhookUrlFromInterrupts(result.interrupts)) reportInterrupts(result.interrupts, result.threadId);
       result = await awaitAutomaticContinuations(result, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }));
-      reportRunResult(result, opts);
+      reportRunResult(result, {...opts,durableCheckpoint: spec.runtime?.checkpoint?.enabled !== false && ["sqlite","postgres"].includes(spec.runtime?.checkpoint?.backend ?? "memory")});
     } finally {
       await closeWebhookServers();
       await closeMcpHub(mcpOpt.mcp);
@@ -523,7 +537,7 @@ program
       );
       if (!opts.json && result.status === "interrupted" && webhookUrlFromInterrupts(result.interrupts)) reportInterrupts(result.interrupts, result.threadId);
       result = await awaitAutomaticContinuations(result, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }));
-      reportRunResult(result, opts);
+      reportRunResult(result, {...opts,durableCheckpoint: spec.runtime?.checkpoint?.enabled !== false && ["sqlite","postgres"].includes(spec.runtime?.checkpoint?.backend ?? "memory")});
     } finally {
       await closeWebhookServers();
       await closeMcpHub(mcpOpt.mcp);

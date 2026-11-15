@@ -186,7 +186,7 @@ it("SIGKILL orphan shell work cannot race a resumed invocation", async () => {
     ];
     expect(cli(...args).status).toBe(1);
     expect(cli(...args, "--owner-stopped").status).toBe(0);
-    expect(cli(...args, "--owner-stopped").status).toBe(1);
+    expect(cli(...args, "--owner-stopped").status).toBe(0);
     const result = cli("resume", "flow.yaml", "--thread", "kill", "--resume", "true", "--json");
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(existsSync(join(dir, "effects"))).toBe(false);
