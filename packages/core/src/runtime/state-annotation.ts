@@ -8,6 +8,7 @@ import { Annotation, messagesStateReducer } from "@langchain/langgraph";
 import type { GraphSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
 import { ISSUES_CHANNEL_CAP, issueDedupeKey, type RunIssue } from "./run-issues.js";
+import { MAP_MEMO_CHANNEL, reduceMapMemo } from "./map-memo.js";
 import { ROUTING_CHANNEL } from "./routing-policy.js";
 
 export const ONCE_CHANNEL = "__once";
@@ -30,6 +31,7 @@ export const RESERVED_STATE_CHANNELS = [
   REPLAY_CHANNEL,
   MAP_COLLECT_CHANNEL,
   MAP_TASK_CHANNEL,
+  MAP_MEMO_CHANNEL,
   SERVICES_CHANNEL,
   WORKTREES_CHANNEL,
   ISSUES_CHANNEL,
@@ -199,6 +201,7 @@ export function buildStateAnnotation(
     reducer: (cur = {}, inc) => ({ ...cur, ...inc }),
     default: () => ({}),
   });
+  fields[MAP_MEMO_CHANNEL] = Annotation({ reducer: reduceMapMemo, default: () => ({}) });
   fields[MAP_COLLECT_CHANNEL] = Annotation<Record<string, unknown>>({
     reducer: reduceMapCollect,
     default: () => ({}),

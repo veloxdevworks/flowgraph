@@ -964,6 +964,11 @@ export const SubgraphWithSchema = BaseWithSchema.extend({
 
 // map node
 export const MapWithSchema = z.object({
+  memoize: z.union([z.boolean(), z.object({
+    key: z.string().optional(), version: z.string().optional(),
+    maxEntries: z.number().int().positive().max(10000).optional(),
+    maxBytes: z.number().int().positive().max(64 * 1024 * 1024).optional(),
+  })]).optional().describe("Reuse completed item results across loop rounds; opt in only for deterministic item work"),
   over: z.string().describe("Expression evaluating to an array"),
   as: z.string().default("item"),
   concurrency: z.number().int().positive().optional().default(5),

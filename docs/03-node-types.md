@@ -691,6 +691,12 @@ Each entry into a map has a separate collection round, in input order. Looping b
       to: results                   # results array written via append reducer
 ```
 
+Set `with.memoize: true` to reuse completed per-item results when a loop returns to this map. The cache belongs to the thread/map checkpoint; it survives resume with a durable checkpointer and never crosses threads. Reordering items preserves reuse. Failed/unfinished work is not cached, and duplicates in the same dispatch may execute independently. Hits skip execution and side effects, then apply the current inner output projection and collection order.
+
+Keys include the item, inner request/configuration, rendered inputs, graph configuration and workspace. This is opt-in: pass all dependencies through rendered inputs, or supply `memoize: { key: "{{ state.sourceRevision }}", version: "v2" }` for implicit state, code or external data dependencies. Include the item index in an explicit input/key if work depends on position. Unchanged file paths do not imply unchanged file contents. Use a new version when external dependencies change.
+
+The default FIFO cache retains at most 128 JSON-compatible results / 16 MiB per map. Configure `maxEntries` (up to 10,000) and `maxBytes` (up to 64 MiB); oversized or non-JSON results execute normally without caching. Evicted items execute again. Cached Artifact references must still exist within the workspace with matching size/checksum when supplied; missing/changed artifacts fail explicitly instead of silently repeating potentially paid work. Disable memoization to clear a map's saved cache.
+
 ---
 
 ## 8. `hitl` — human gates (approve / question / choice)

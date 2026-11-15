@@ -13,6 +13,7 @@ import type { OutputMapping } from "@flowgraph/spec";
 import { registry, defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { assertNodeSpecAllowed, assertNodeTypeAllowed, isReservedChannel, nodePolicyOf, withoutReservedKeys } from "../node-policy.js";
+import type { MapMemo } from "../runtime/map-memo.js";
 import { applyOutput } from "./output.js";
 
 const configSchema = MapWithSchema;
@@ -38,6 +39,7 @@ export const mapNode = defineNode<Config>({
 export interface MapTask {
   /** Absent on checkpoints from versions before per-invocation collection bags. */
   round?: string;
+  memoGeneration?: number;
   mapId: string;
   index: number;
   item: unknown;
@@ -58,6 +60,7 @@ export async function runMapItem(
   state: Record<string, unknown>,
   ctx: NodeRunContext,
   task: MapTask,
+  memo?: MapMemo,
 ): Promise<unknown> {
   const parentInput = (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {};
   const baseScope = { state, input: parentInput, config: ctx.config, run: ctx.meta };
@@ -89,6 +92,7 @@ export async function runMapItem(
   );
   const mergedConfig = { ...parsedWith, ...renderedWith };
   const innerNodeSpec = { ...innerSpec, id: ctx.nodeId, with: mergedConfig };
+  assertNodeSpecAllowed(nodePolicyOf(ctx), innerNodeSpec, `map node "${mapId}" rendered inner node`);
   const compiledInner = factory.build(buildCtx, innerNodeSpec, mergedConfig);
 
   const childCtx: NodeRunContext & { _input: Record<string, unknown> } = {
@@ -100,8 +104,10 @@ export async function runMapItem(
       renderDeep(tpl, { ...itemScope, ...extra }),
   };
 
-  const res = await compiledInner.run(state, childCtx);
-  const value = unwrapUpdate(res);
+  const invoke = async () => unwrapUpdate(await compiledInner.run(state, childCtx));
+  const value = memo
+    ? await memo.run({ spec: { ...innerSpec, with: requestWith }, config: mergedConfig, input: renderedInput }, invoke, itemScope, childCtx)
+    : await invoke();
   if (rawOutput === undefined) return value;
   const output = typeof rawOutput === "object" && rawOutput !== null
     ? { ...rawOutput, ...("to" in rawOutput ? { to: renderDeep(rawOutput.to, itemScope) } : {}) }
