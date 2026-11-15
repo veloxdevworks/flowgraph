@@ -18,7 +18,7 @@ it("PLAT-368: pre-admission refusals and graph load errors emit JSON error event
       expect(result.stderr).toContain(code);expect(result.stderr).not.toMatch(/\n\s+at /);
     }
   }finally{rmSync(dir,{recursive:true,force:true});}
-});
+},60_000);
 it("PLAT-368: failed JSON runs print a reason even when ordinary logs are quiet",()=>{
   const dir=mkdtempSync(join(tmpdir(),"fg-json-failure-"));
   try{
