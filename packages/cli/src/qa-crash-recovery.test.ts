@@ -116,7 +116,8 @@ it("SIGKILL preserves completed model/tool steps and their charges across CLI pr
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-}, 60000);
+// Startup (15s) plus five CLI commands (25s each), with cleanup headroom.
+}, 150_000);
 it("SIGKILL orphan shell work cannot race a resumed invocation", async () => {
   const { dir, cli } = fixture("fg-shell-kill-");
   let orphan: number | undefined;
@@ -200,4 +201,5 @@ it("SIGKILL orphan shell work cannot race a resumed invocation", async () => {
     }
     rmSync(dir, { recursive: true, force: true });
   }
-}, 60000);
+// Startup (15s) plus eight CLI commands (25s each), with cleanup headroom.
+}, 230_000);
