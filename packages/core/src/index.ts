@@ -35,6 +35,7 @@ export {
   InputValidationError,
 } from "./inputs.js";
 export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError, assertResumeValue } from "./compiler.js";
+export { readThreadWorkspace } from "./runtime/thread-workspace.js";
 export {
   NODE_POLICY,
   NodePolicyError,

@@ -29,7 +29,8 @@ import {
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
 import { createMapMemo, mapMemoGeneration, clearMapMemo } from "./runtime/map-memo.js";
-import { buildStateAnnotation, channelReducerAndDefault, reduceMapCollect, REPLAY_WORKSPACE_CHANNEL, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import { buildStateAnnotation, channelReducerAndDefault, reduceMapCollect, REPLAY_WORKSPACE_CHANNEL, WORKSPACE_CHANNEL, WORKSPACE_NODES_CHANNEL, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import { canonicalWorkspace, savedWorkspace, workspaceDeclarations, assertWorkspaceDeclarations, workspaceError } from "./runtime/thread-workspace.js";
 import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 import {
   checkpointPrunedError,
@@ -372,7 +373,7 @@ export async function compileGraphForEmbedding(
     checkpointer: "none",
     // Preserve caller sinks (e.g. parent-bus forwarding from the subgraph node).
     // Do not force sinks: [] — nested events would otherwise be invisible.
-  });
+  }, undefined, true);
   return { compiledLg };
 }
 
@@ -415,6 +416,34 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     authoredMapNames.set(joinId, node.id);
   }
   const publicNodeId = (id: string): string => authoredMapNames.get(id) ?? id;
+  const declarations = await workspaceDeclarations(graphSpec, assembled.graphDir, !opts.nodePolicy?.blockSubgraphFiles);
+  const explicitWorkspace = opts.workspace !== undefined
+    ? path.resolve(opts.cwd ?? process.cwd(), opts.workspace)
+    : graphSpec.runtime?.workspace?.trim() ? resolveGraphWorkspace(graphSpec, assembled.graphDir) : undefined;
+  // Resolve filesystem aliases during compilation; starting an invocation needs no new host I/O.
+  const initialWorkspace = checkpointer
+    ? await canonicalWorkspace((baseCtx as RunContext).workspace)
+    : path.resolve((baseCtx as RunContext).workspace);
+  const explicitRoot = explicitWorkspace === undefined ? undefined : await canonicalWorkspace(explicitWorkspace);
+  const executionWorkspace = async (config: LangGraphRunnableConfig) => {
+    const tuple = await checkpointer?.getTuple(config);
+    const values = tuple?.checkpoint.channel_values ?? {};
+    const pinned = savedWorkspace(values, WORKSPACE_CHANNEL);
+    const replay = savedWorkspace(values, REPLAY_WORKSPACE_CHANNEL);
+    const explicit = explicitRoot;
+    if (pinned && explicit !== undefined && explicit !== pinned && explicit !== replay) {
+      throw workspaceError("THREAD_WORKSPACE_MISMATCH", `This thread is pinned to ${pinned}; the requested workspace is ${explicit}. Restore the original workspace or start a new thread.`);
+    }
+    if (tuple && !pinned && !replay && explicit === undefined) {
+      throw workspaceError("THREAD_WORKSPACE_REQUIRED", "This older checkpoint has no saved execution workspace. Recompile with workspace set to the known original folder (or restore its explicit runtime.workspace) before continuing; the current working directory is not safe evidence.");
+    }
+    assertWorkspaceDeclarations(values, declarations);
+    return {
+      root: pinned ?? explicit ?? replay ?? initialWorkspace,
+      replay,
+      needsBinding: !pinned || values[WORKSPACE_NODES_CHANNEL] == null,
+    };
+  };
 
   // Per compiled graph: two graphs that reuse a thread id must not cancel each other's timers.
   const waitTimers: WaitTimerMap = new Map();
@@ -467,6 +496,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   ): Promise<RunResult> => {
     const startMs = Date.now();
     const threadId = runOpts.threadId ?? `thread-${runId}`;
+    const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
+    if (overrides.singleStep) cfg["interruptAfter"] = "*";
+    let workspace = initialWorkspace;
     const graphRetention = graphSpec.runtime?.checkpoint?.retention;
     if (
       checkpointer &&
@@ -493,9 +525,6 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
     const unsubs = (runOpts.sinks ?? []).map((s) => events.subscribe(s));
     const policy = runOpts.onInterrupt ?? defaultPolicy;
-    const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
-    if (overrides.singleStep) cfg["interruptAfter"] = "*";
-    const workspace = (baseCtx as RunContext).workspace;
     const retention = checkpointer && isRetentionSaver(checkpointer) ? checkpointer : undefined;
     let retentionOpen = false;
     let runToken = 0;
@@ -540,11 +569,6 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       r.usage = accounting.snapshot();
       return r;
     };
-
-    // Reserved channels are the engine's own bookkeeping; callers never set them.
-    if (mode === "start" && payload != null && !(payload instanceof Command)) {
-      assertNoReservedInput(payload, `graph "${graphSpec.metadata.name}" run`);
-    }
 
     // Hold the thread and mark it active before any read, so a sweep in the
     // window before the first checkpoint write cannot delete it. If the run
@@ -591,6 +615,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       return answer;
     };
     try {
+      // Reserved channels are the engine's own bookkeeping; callers never set them.
+      if (mode === "start" && payload != null && !(payload instanceof Command)) {
+        assertNoReservedInput(payload, `graph "${graphSpec.metadata.name}" run`);
+      }
       runToken = retention?.beginThreadRun?.(threadId) ?? 0;
       retentionOpen = !!retention;
       try {
@@ -605,6 +633,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       } catch {
         // A missed active mark must not fail the run. The in-process hold still applies.
       }
+    // Keep checkpoint reads inside the retention hold and subscriber cleanup guard.
+    const binding = await executionWorkspace(cfg);
+    if (mode === "start" && binding.replay) {
+      throw workspaceError("THREAD_REPLAY_BRANCH", "This thread is an existing historical replay branch. Resume/continue it, or start a new thread; run() cannot restart it in the source workspace.");
+    }
+    workspace = binding.root;
 
     // Agent replay entries belong to this execution only. A fresh start begins
     // empty; resume/continue load the snapshots the engine attached to this
@@ -649,6 +683,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     if (replayWorkspace) {
       await mkdir(path.resolve(replayWorkspace), { recursive: true });
       replayWorkspace = await realpath(path.resolve(replayWorkspace));
+      workspace = replayWorkspace;
       // Command updates apply before pending work and are checkpointed before a
       // later human gate. Only the engine can write this reserved channel.
       payload = new Command({
@@ -656,7 +691,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       });
     }
     replay.setRedactor(value => events.redact?.(value) ?? value);
-    const runScope: RunScope = { replay, checkpointer: checkpointer ?? compiledLg, ...(replayWorkspace ? { replayWorkspace } : {}), path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal, accounting };
+    const runScope: RunScope = { replay, workspace: binding.root, checkpointer: checkpointer ?? compiledLg, ...(replayWorkspace ? { replayWorkspace } : {}), path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal, accounting };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
     const raised = new Set(pendingResumeInterrupts.map(it => interruptFingerprint(toInterruptInfo(it))));
     const emitStopInterrupts = (interrupts: InterruptInfo[]) => {
@@ -715,6 +750,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         const unknown = Object.keys(current).filter(key => !declaredInputKeys.has(key));
         if (unknown.length) (baseCtx as RunContext).logger.warn(`INPUT_UNKNOWN_KEY: undeclared input key(s) ${unknown.map(key=>JSON.stringify(key)).join(", ")} will not be persisted. Declare them in inputs or state.channels.`, {code:"INPUT_UNKNOWN_KEY",keys:unknown});
       }
+      if (checkpointer && (mode === "start" || binding.needsBinding)) {
+        const update = { [WORKSPACE_CHANNEL]: binding.root, [WORKSPACE_NODES_CHANNEL]: declarations };
+        current = current instanceof Command
+          ? new Command({ resume: current.resume, ...(current.goto !== undefined ? { goto: current.goto } : {}), update: { ...(current.update as Record<string, unknown> ?? {}), ...update } })
+          : mode === "start" ? { ...(current ?? {}), ...update } : new Command({ update: { ...(current ?? {}), ...update } });
+      }
 
       // Bind this thread's memory scope (subject rendered from input/run at start;
       // stored binding reused on resume/continue so a resume can't switch scope).
@@ -746,7 +787,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       while (true) {
         let result = ((await compiledLg.invoke(
           current as Parameters<typeof compiledLg.invoke>[0],
-          { ...cfg, signal: runOpts.signal } as Parameters<typeof compiledLg.invoke>[1],
+          { ...cfg, signal: runOpts.signal, ...(checkpointer ? { durability: "sync" as const } : {}) } as Parameters<typeof compiledLg.invoke>[1],
         )) ?? {}) as Record<string, unknown>;
         // Time-travel checkpoint_id applies only to the first superstep.
         if (cfg.configurable && typeof cfg.configurable === "object") {
@@ -1027,6 +1068,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const tuple = await checkpointer.getTuple(config);
       if (!tuple && !checkpointId) throw threadAdmissionError("THREAD_NOT_FOUND", threadId, "does not exist.");
       if (tuple) {
+        const binding = await executionWorkspace(config);
         if (checkpointId && checkpointId !== (await checkpointer.getTuple({ configurable: { thread_id: threadId } }))?.checkpoint.id && tuple.pendingWrites?.some(([, channel]) => channel === "__resume__")) {
           throw threadAdmissionError("HISTORICAL_DECISION_REPLAY", threadId, "already has an answer at this checkpoint; fork before the gate for a new decision.");
         }
@@ -1036,7 +1078,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           if(sideEffects){
             const target=(runOpts as ResumeOptions).replayWorkspace;
             if (target) await mkdir(path.resolve(target), { recursive: true });
-            if(!target||await realpath(path.resolve(target))===await realpath((baseCtx as RunContext).workspace))throw Object.assign(new Error("Historical replay may repeat side effects. Set replayWorkspace / --replay-workspace to a separate output directory; source artifacts must not be overwritten."),{code:"HISTORICAL_REPLAY_WORKSPACE_REQUIRED",retryable:false});
+            const targetWorkspace = target ? await canonicalWorkspace(target) : undefined;
+            const headValues = head?.checkpoint.channel_values ?? {};
+            const protectedWorkspaces = [binding.root, binding.replay, savedWorkspace(headValues, WORKSPACE_CHANNEL), savedWorkspace(headValues, REPLAY_WORKSPACE_CHANNEL)];
+            if(!targetWorkspace||protectedWorkspaces.includes(targetWorkspace))throw Object.assign(new Error("Historical replay may repeat side effects. Set replayWorkspace / --replay-workspace to a separate output directory; source artifacts must not be overwritten."),{code:"HISTORICAL_REPLAY_WORKSPACE_REQUIRED",retryable:false});
           }
         }
         const snap = await getCheckpointState(config);
@@ -1290,6 +1335,7 @@ async function assembleCompiledLangGraph(
   spec: GraphSpec,
   opts: CompileOptions,
   plan?: PlacementPlan,
+  embedded = false,
 ): Promise<AssembledGraph> {
   const sourceFile = graphFile(spec);
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
@@ -1441,6 +1487,7 @@ async function assembleCompiledLangGraph(
           events,
           baseCtx,
           graphWorkspace,
+          embedded,
           hooks,
           toolWiring,
           defaultRetry,
@@ -1485,7 +1532,7 @@ async function assembleCompiledLangGraph(
     ): Promise<NodeRun> =>
       runWithPolicy<NodeRun>(
         (attempt, signal) => {
-          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig);
+          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig, !embedded);
           if (signal && receivesTimeoutSignal) ctx.signal = signal;
           return compiled.run(state, ctx).then((res) => {
             finishInterruptDeadline(runScopeOf(lgConfig), nodeSpec.id);
@@ -1635,7 +1682,7 @@ async function assembleCompiledLangGraph(
             );
             events.emit("run.issue", swallowed, scope);
             try {
-              appendRunIssue(graphWorkspace, runIssuesKey(runMeta), swallowed);
+              appendRunIssue(runScopeOf(lgConfig)?.replayWorkspace ?? (!embedded ? runScopeOf(lgConfig)?.workspace : undefined) ?? graphWorkspace, runIssuesKey(runMeta), swallowed);
             } catch {
               /* ignore */
             }
@@ -1662,7 +1709,7 @@ async function assembleCompiledLangGraph(
           events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(err,"NODE_ERROR"), swallowed: true, policy }, scope);
           const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `node "${nodeSpec.id}" continued after an error: ${String(err)}`, impact: "The node produced no result; subsequent nodes and sibling branches continue." }, { nodeId: nodeSpec.id, nodeType: nodeSpec.type });
           events.emit("run.issue", issue, scope);
-          try { appendRunIssue(graphWorkspace, runIssuesKey(runMeta), issue); } catch { /* the issue is also checkpointed */ }
+          try { appendRunIssue(runScopeOf(lgConfig)?.replayWorkspace ?? (!embedded ? runScopeOf(lgConfig)?.workspace : undefined) ?? graphWorkspace, runIssuesKey(runMeta), issue); } catch { /* the issue is also checkpointed */ }
           return { [ISSUES_CHANNEL]: [issue] };
         }
         if (policy?.startsWith("route:")) {
@@ -2481,6 +2528,7 @@ function buildNodeCtx(
   attempt: number,
   inputOverride?: Record<string, unknown>,
   lgConfig?: LangGraphRunnableConfig,
+  usePinnedWorkspace = true,
 ) {
   // Embedded subgraphs have no run of their own: their nodes report the
   // top graph's run and thread (from the run scope in the invoke config).
@@ -2504,7 +2552,7 @@ function buildNodeCtx(
   const seenIssueKeys = new Set(existingIssues.map((i) => issueDedupeKey(i)));
   const parentSpanId = typeof nodeSpec["__parentSpanId"] === "string" ? nodeSpec["__parentSpanId"] : undefined;
 
-  const executionWorkspace=runScope?.replayWorkspace??workspace;
+  const executionWorkspace=runScope?.replayWorkspace??(usePinnedWorkspace ? runScope?.workspace : undefined)??workspace;
   let resolvedWorkspace = executionWorkspace;
   const wsTpl = nodeSpec["workspace"];
   if (typeof wsTpl === "string" && wsTpl.trim()) {
@@ -2806,6 +2854,7 @@ function addCheckpointedMap(
     events: EventBus;
     baseCtx: Partial<RunContext>;
     graphWorkspace: string;
+    embedded: boolean;
     hooks: HookBus;
     toolWiring: ToolWiring;
     defaultRetry: unknown;
@@ -2854,7 +2903,7 @@ function addCheckpointedMap(
     if (!policy || policy === "fail") throw err;
     const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `map item/node "${itemId}" failed: ${error.message}`, impact: "Failed items have no collected value; admitted siblings finish before recovery." }, { nodeId: itemId, nodeType: innerType });
     ctx.events.emit("run.issue", issue, { nodeId: itemId, nodeType: innerType });
-    try { appendRunIssue(ctx.graphWorkspace, runIssuesKey(meta), issue); } catch { /* the issue is also checkpointed */ }
+    try { appendRunIssue(runScopeOf(lgConfig)?.replayWorkspace ?? (!ctx.embedded ? runScopeOf(lgConfig)?.workspace : undefined) ?? ctx.graphWorkspace, runIssuesKey(meta), issue); } catch { /* the issue is also checkpointed */ }
     return { [ISSUES_CHANNEL]: [issue], ...(policy.startsWith("route:") ? { [ROUTING_CHANNEL]: { [mapId]: policy.slice(6) } } : {}) };
   };
 
@@ -2922,6 +2971,7 @@ function addCheckpointedMap(
             attempt,
             undefined,
             itemLgConfig,
+            !ctx.embedded,
           );
           if (signal && innerReceivesTimeoutSignal) nodeCtx.signal = signal;
           return runMapItem(buildCtx, mapId, config, state, nodeCtx, task, memo).then((value) => {

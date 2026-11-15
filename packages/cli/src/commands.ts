@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { graphEdges, loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildRecoveryCommand } from "./recovery-command.js";
 import { buildMediaCommand } from "./media-command.js";
@@ -235,6 +235,7 @@ program
   .option("--fail-on-issues", "Exit 1 when the run recorded any issues")
   .option("--targets <file>", "Topology file (YAML/JSON) naming the workers that `runsOn` nodes may be placed on")
   .option("--cwd <dir>", "Working directory")
+  .option("--workspace <dir>", "Execution workspace (original workspace required for legacy checkpoint recovery)")
   .action(async (
     graphPath: string,
     opts: {
@@ -247,6 +248,7 @@ program
       noMcpOauth?: boolean;
       failOnIssues?: boolean;
       cwd?: string;
+      workspace?: string;
     },
   ) => {
     const cwd = opts.cwd ?? process.cwd();
@@ -331,7 +333,14 @@ program
       (msg) => opts.json ? console.error(msg) : printInfo(msg),
     );
     const providers = await buildProviders(spec, cwd);
-    const localTools = await registerLocalTools(spec, cwd);
+    const checkpointOpts = await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) });
+    const savedWorkspace = opts.thread && checkpointOpts.checkpointer && typeof checkpointOpts.checkpointer === "object"
+      ? await readThreadWorkspace(checkpointOpts.checkpointer, opts.thread)
+      : undefined;
+    const executionWorkspace = savedWorkspace ?? (opts.workspace !== undefined
+      ? path.resolve(cwd, opts.workspace)
+      : spec.runtime?.workspace ? resolveGraphWorkspace(spec, graphDir) : path.resolve(cwd));
+    const localTools = await registerLocalTools(spec, cwd, { workspace: executionWorkspace });
     for (const w of localTools.warnings) {if(opts.json)console.error(w);else printWarning(w);}
     let placement: Awaited<ReturnType<typeof placementCompileOptions>> | undefined;
     if (opts.targets) {
@@ -354,10 +363,11 @@ program
       compiled = await compileGraph(spec, {
         cwd,
         graphPath,
+        ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),
         sinks,
         providers,
         onWaitTimeout: continuations.publish,
-        ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
+        ...checkpointOpts,
         ...mcpOpt,
         ...(placement ? { placement } : {}),
       });
@@ -414,6 +424,7 @@ program
   .option("--no-mcp-oauth", "Do not prompt for MCP OAuth on connect; fail if tokens are missing")
   .option("--fail-on-issues", "Exit 1 when the run recorded any issues")
   .option("--cwd <dir>", "Working directory")
+  .option("--workspace <dir>", "Execution workspace (original workspace required for legacy checkpoint recovery)")
   .action(async (
     graphPath: string,
     opts: {
@@ -428,6 +439,7 @@ program
       noMcpOauth?: boolean;
       failOnIssues?: boolean;
       cwd?: string;
+      workspace?: string;
     },
   ) => {
     const cwd = opts.cwd ?? process.cwd();
@@ -485,16 +497,24 @@ program
       (msg) => opts.json ? console.error(msg) : printInfo(msg),
     );
     const providers = await buildProviders(spec, cwd);
-    const localTools = await registerLocalTools(spec, cwd);
+    const checkpointOpts = await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) });
+    const savedWorkspace = checkpointOpts.checkpointer && typeof checkpointOpts.checkpointer === "object"
+      ? await readThreadWorkspace(checkpointOpts.checkpointer, opts.thread, opts.from ? { checkpointId: opts.from } : {})
+      : undefined;
+    const executionWorkspace = opts.replayWorkspace ? path.resolve(cwd, opts.replayWorkspace) : savedWorkspace ?? (opts.workspace !== undefined
+      ? path.resolve(cwd, opts.workspace)
+      : spec.runtime?.workspace ? resolveGraphWorkspace(spec, graphDir) : path.resolve(cwd));
+    const localTools = await registerLocalTools(spec, cwd, { workspace: executionWorkspace });
     for (const w of localTools.warnings) {if(opts.json)console.error(w);else printWarning(w);}
     const continuations = continuationMailbox();
     const compiled = await compileGraph(spec, {
       cwd,
       graphPath,
+      ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),
       sinks,
       providers,
       onWaitTimeout: continuations.publish,
-      ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
+      ...checkpointOpts,
       ...mcpOpt,
     });
 

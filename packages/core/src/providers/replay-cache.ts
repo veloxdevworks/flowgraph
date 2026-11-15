@@ -195,6 +195,8 @@ export interface RunScope {
   readonly replay: ReplayStore;
   readonly checkpointer?: object;
   readonly replayWorkspace?: string;
+  /** Original root restored from this thread's checkpoint, independent of host cwd. */
+  readonly workspace?: string;
   /** Ids of the subgraph nodes between the top graph and the current graph. */
   readonly path: readonly string[];
   /**

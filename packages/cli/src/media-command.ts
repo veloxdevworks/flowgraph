@@ -1,26 +1,35 @@
 import { Command } from "commander";
 import { resolve, dirname } from "node:path";
-import { acquireThreadRun, createFileJournal, listMediaJournals, loadGraph, resolveGraphWorkspace, resolveMediaSubmission, UsageLedger } from "@flowgraph/core";
+import { acquireThreadRun, createFileJournal, listMediaJournals, loadGraph, resolveGraphWorkspace, resolveMediaSubmission, UsageLedger, type GraphSpec } from "@flowgraph/core";
 import { openThreadDatabase, type ThreadDatabaseOptions } from "./thread-command.js";
 interface Options extends ThreadDatabaseOptions {
   thread:string; node?:string; fingerprint?:string; workspace?:string;
   submission?:string; handle?:string; notSubmitted?:boolean; ownerStopped?:boolean; receipt?:string; costUsd?:string;
 }
-async function workspaceFor(graph:string|undefined, workspace:string|undefined) {
-  if (workspace) return resolve(workspace);
-  if (!graph) throw new Error("Provide a graph to resolve runtime.workspace, or an explicit --workspace");
-  const loaded=await loadGraph(graph);
-  if (!loaded.spec) throw new Error(loaded.diagnostics.map(d=>d.message).join("; "));
-  return resolveGraphWorkspace(loaded.spec,dirname(resolve(graph)));
+async function workspaceFor(graph:string|undefined, opts:Options) {
+  if (opts.workspace) return resolve(opts.workspace);
+  let spec: GraphSpec | undefined;
+  if (graph) {
+    const loaded=await loadGraph(graph);
+    if (!loaded.spec) throw new Error(loaded.diagnostics.map(d=>d.message).join("; "));
+    spec=loaded.spec;
+  }
+  if (opts.backend || opts.path || (spec?.runtime?.checkpoint?.enabled !== false && ["sqlite","postgres"].includes(spec?.runtime?.checkpoint?.backend ?? "memory"))) {
+    const db=await openThreadDatabase(graph,opts);
+    try { return db.workspace; } finally { await db.close(); }
+  }
+  if (!spec || !graph) throw new Error("Provide a graph, a host checkpoint database, or an explicit --workspace");
+  return resolveGraphWorkspace(spec,dirname(resolve(graph)));
 }
 function base(command:Command) {
   return command.requiredOption("--thread <id>","Thread id").option("--node <id>","Media node id (omit to discover all journals)")
-    .option("--fingerprint <hash>","Request fingerprint (omit to discover identities)").option("--workspace <path>","Original execution workspace; defaults to the graph's runtime.workspace");
+    .option("--fingerprint <hash>","Request fingerprint (omit to discover identities)").option("--workspace <path>","Original execution workspace; defaults to the thread's recorded workspace")
+    .option("--backend <backend>","Host checkpoint backend").option("--path <database>","Host checkpoint database");
 }
 export function buildMediaCommand(): Command {
   const command=new Command("media").description("Discover and reconcile uncertain media submissions");
   base(command.command("inspect [graph]").description("Read journal identities or one exact media journal")).action(async(graph:string|undefined,opts:Options)=>{
-    const workspace=await workspaceFor(graph,opts.workspace);
+    const workspace=await workspaceFor(graph,opts);
     if (opts.node && opts.fingerprint) {
       const entry=await createFileJournal({workspace,scope:opts.thread,nodeId:opts.node,fingerprint:opts.fingerprint}).read();
       if (!entry) throw Object.assign(new Error(`No media journal in workspace ${workspace} for node ${opts.node}, fingerprint ${opts.fingerprint}; run media inspect without --node/--fingerprint to discover identities.`),{code:"MEDIA_JOURNAL_NOT_FOUND"});
@@ -30,7 +39,7 @@ export function buildMediaCommand(): Command {
       console.log(JSON.stringify({threadId:opts.thread,workspace,journals:rows}));
     }
   });
-  base(command.command("resolve [graph]").description("Reconcile an exact vendor submission and its matching usage receipt")).option("--backend <backend>","Host checkpoint backend").option("--path <database>","Host checkpoint database")
+  base(command.command("resolve [graph]").description("Reconcile an exact vendor submission and its matching usage receipt"))
     .requiredOption("--submission <id>","Exact inspected submission identity")
     .option("--handle <json>","Recovered vendor handle, optionally with done artifacts and costUSD")
     .option("--not-submitted","Vendor confirms the request was never accepted; uncertainty alone is insufficient")
@@ -43,8 +52,9 @@ export function buildMediaCommand(): Command {
       const handle=opts.handle?JSON.parse(opts.handle):undefined;
       const cost=opts.costUsd===undefined?handle?.costUSD:Number(opts.costUsd);
       if (cost!==undefined&&(!Number.isFinite(cost)||cost<0)) throw new Error("cost-usd must be a finite non-negative number");
-      const workspace=await workspaceFor(graph,opts.workspace),db=await openThreadDatabase(graph,opts);
+      const db=await openThreadDatabase(graph,opts);
       try {
+        const workspace=opts.workspace?resolve(opts.workspace):db.workspace;
         const claim=await acquireThreadRun(db.saver,opts.thread);
         try {
           const ledger=await UsageLedger.open(db.saver,opts.thread), usage=ledger.inspect();
