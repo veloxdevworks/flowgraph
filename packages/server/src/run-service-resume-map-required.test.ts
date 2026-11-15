@@ -143,6 +143,20 @@ describe("RunService.resumeRun with several pending interrupts", () => {
     expect(events).not.toContain("run.error");
   });
 
+  it("exposes pending ids on run detail and in malformed-map refusals", async () => {
+    const threadId = "pending-id-discovery";
+    const events = await interruptedThread(threadId);
+    const state = (await service.getState(threadId)).state!;
+    const ids = state.interrupts!.map(it => it.id!);
+    expect(await service.getRun(threadId)).toMatchObject({ pendingInterruptIds: ids });
+    try { await service.resumeRun({ threadId, resume: { wrong: true } }); throw new Error("accepted wrong ids"); }
+    catch (err) {
+      expect(err).toMatchObject({ status: 400, code: "RESUME_MAP_REQUIRED", extra: { pendingInterruptIds: ids } });
+      for (const id of ids) expect((err as Error).message).toContain(id);
+    }
+    await expectUntouched(threadId, events);
+  });
+
   it("does not leave a session when a cold resume is refused", async () => {
     const threadId = "resume-map-required-cold";
     await interruptedThread(threadId);
