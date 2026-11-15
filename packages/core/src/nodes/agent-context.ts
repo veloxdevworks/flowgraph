@@ -132,13 +132,14 @@ export function startAgentContext(args: {
   sharedHistory?: boolean;
   system?: string | undefined;
   prompt: string;
+  images?: import("../providers/types.js").ImageAttachment[] | undefined;
   tools: ToolSpec[];
   onUsage(usage: TokenUsage): void;
 }): AgentContextSession {
   const { policy, ctx, state, cacheKey, replayStore } = args;
   const est = getTokenEstimator(policy.estimator);
   const stored = readHistory(state, policy, args.nodeLabel, ctx.nodeId);
-  const promptMsg: ContextMessage = { role: "user", content: args.prompt };
+  const promptMsg: ContextMessage = { role: "user", content: args.prompt, ...(args.images?.length ? { images: args.images } : {}) };
   const extractive = extractiveSummarizer(est);
 
   // The summary provider is looked up before the first call, like the
@@ -251,6 +252,9 @@ export function startAgentContext(args: {
     manager,
     async prepare(req, provider) {
       const f = await manager.fit([]);
+      if (f.messages.some(message => message.images?.length) && !provider.capabilities.imageInput) {
+        throw Object.assign(new Error(`Provider "${provider.name}" cannot consume image history`), { code: "PROVIDER_IMAGE_INPUT_UNSUPPORTED", retryable: false });
+      }
       req.system = f.system;
       // The last message is the prompt (it carries the summary block when no history is kept).
       const history = f.messages.slice(0, -1);

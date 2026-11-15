@@ -285,6 +285,7 @@ export type {
   ToolSpec,
   ToolKind,
   Message,
+  ImageAttachment,
   TokenUsage,
   ToolFunctionDef,
   GraphProviders,

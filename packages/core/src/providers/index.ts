@@ -10,6 +10,7 @@ export {
   type ToolSpec,
   type ToolKind,
   type Message,
+  type ImageAttachment,
   type TokenUsage,
 } from "./types.js";
 

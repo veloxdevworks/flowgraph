@@ -105,6 +105,7 @@ export const UNTRUSTED_NODE_POLICY: NodePolicy = {
   blockHostExec: true,
   blockAgentRefs: true,
   blockScriptFiles: true,
+  blockImageFiles: true,
   blockImports: true,
   blockInboundWebhooks: true,
   reason: REASON,

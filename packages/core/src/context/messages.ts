@@ -81,6 +81,7 @@ type LcLike = {
   tool_calls?: unknown;
   tool_call_id?: unknown;
   additional_kwargs?: unknown;
+  images?: unknown;
 };
 
 export function contentText(content: unknown): string {
@@ -146,6 +147,8 @@ export function fromStoredMessage(raw: unknown): ContextMessage | undefined {
   }
   if (role === "tool" && typeof m.tool_call_id === "string") out.toolCallId = m.tool_call_id;
   const kw = m.additional_kwargs as Record<string, unknown> | undefined;
+  const images = m.images ?? kw?.["flowgraph_images"];
+  if (Array.isArray(images)) out.images = images as import("../providers/types.js").ImageAttachment[];
   const meta = kw?.["flowgraph"];
   if (meta && typeof meta === "object" && !Array.isArray(meta)) out.meta = meta as Record<string, unknown>;
   return out;
@@ -168,7 +171,10 @@ export function toLangChainMessage(m: ContextMessage): BaseMessage {
         content: m.content,
         ...id,
         ...name,
-        ...(m.meta ? { additional_kwargs: { flowgraph: m.meta } } : {}),
+        ...((m.meta || m.images?.length) ? { additional_kwargs: {
+          ...(m.meta ? { flowgraph: m.meta } : {}),
+          ...(m.images?.length ? { flowgraph_images: m.images } : {}),
+        } } : {}),
       });
     case "assistant":
       return new AIMessage({
@@ -198,7 +204,7 @@ export function removeMessage(id: string): BaseMessage {
  */
 export function historyMessageId(channel: string, nodeId: string, prevId: string, index: number, m: ContextMessage): string {
   const h = createHash("sha256")
-    .update([channel, nodeId, prevId, String(index), m.role, m.content, JSON.stringify(m.toolCalls ?? null), m.toolCallId ?? ""].join("\u0000"))
+    .update([channel, nodeId, prevId, String(index), m.role, m.content, JSON.stringify(m.toolCalls ?? null), m.toolCallId ?? "", ...(m.images?.length ? [JSON.stringify(m.images)] : [])].join("\u0000"))
     .digest("hex")
     .slice(0, 24);
   return `fg-${h}`;
@@ -213,7 +219,8 @@ export function renderTranscript(messages: ContextMessage[]): string {
         return `assistant: ${m.content ? `${m.content} ` : ""}[called ${calls}]`;
       }
       if (m.role === "tool") return `tool result${m.toolCallId ? ` (${m.toolCallId})` : ""}: ${m.content}`;
-      return `${m.role}: ${m.content}`;
+      const images = m.images?.length ? ` [${m.images.length} image attachment(s)]` : "";
+      return `${m.role}: ${m.content}${images}`;
     })
     .join("\n");
 }

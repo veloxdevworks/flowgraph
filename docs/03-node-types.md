@@ -130,6 +130,47 @@ An LLM-driven agent that runs a tool-calling loop. **This is the hub in hub-and-
 
 `provider: claude` ⇒ `@anthropic-ai/claude-agent-sdk` `query()` loop; `provider: cursor` ⇒ `@cursor/sdk`; `provider: langchain` ⇒ a bound `ChatModel` with tool-calling. Provider-specific knobs are namespaced (see [08](./08-providers.md)). Built-in tool names like `Read/Edit/Bash` are provider-native and validated against the chosen provider's capabilities at compile time.
 
+### Image inputs
+
+The stock LangChain adapter can send images to a vision-capable model without a
+custom provider. `with.images` accepts workspace paths, HTTP(S) URLs, base64 data
+URLs, or Artifact records. A template may resolve to an Artifact or a list:
+
+```yaml
+- id: inspect-capture
+  type: agent
+  provider: langchain
+  model: your-vision-model
+  with:
+    prompt: Check this screenshot for layout defects.
+    images: "{{ state.outputs.capture.artifacts }}"
+```
+
+For per-image controls, use an object such as
+`{ path: screenshots/result.png, detail: high, estimatedTokens: 2048 }`.
+`detail` is `auto` (default), `low` or `high`. Context fitting reserves 1,024 tokens
+per image by default; set `estimatedTokens` for your chosen model and image size.
+These are estimates; actual usage comes from the provider.
+
+Images are resolved at agent start and copied into immutable, checksummed
+workspace snapshots. History and replay retain Artifact references, not base64;
+the adapter materializes bytes into user-message image blocks for model calls.
+History trimming drops image inputs together with their turns. To inspect an
+artifact produced during a tool loop, route to a subsequent agent node with that
+artifact in `with.images`. Snapshot cleanup follows workspace file cleanup,
+independently of checkpoint retention.
+
+PNG, JPEG, GIF and WebP inputs are supported. Each file is limited to 20 MiB;
+a model call can retain at most 16 images and 50 MiB in total. File paths must
+stay inside the workspace, including after resolving symlinks. URLs are fetched
+through the host's outbound HTTP policy, including redirect and size checks.
+Untrusted server graphs use inline image data or HTTP sources; local file inputs
+are refused, while resumed history can read its own thread's image snapshots.
+
+Adapters advertise `capabilities.imageInput`. Unsupported adapters fail before
+invocation instead of silently dropping images. Select a model that supports
+vision on the chosen adapter; provider-specific model limits still apply.
+
 ---
 
 ## 2. `skill` — invoke a declared skill
