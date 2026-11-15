@@ -112,7 +112,12 @@ export async function runMapItem(
   const output = typeof rawOutput === "object" && rawOutput !== null
     ? { ...rawOutput, ...("to" in rawOutput ? { to: renderDeep(rawOutput.to, itemScope) } : {}) }
     : rawOutput;
-  return unwrapUpdate({ update: applyOutput(output as OutputMapping, value, { nodeId: ctx.nodeId, scope: itemScope }) });
+  const projected = applyOutput(output as OutputMapping, value, { nodeId: ctx.nodeId, scope: itemScope });
+  if (output && typeof output === "object" && "map" in output && output.map && typeof output.map === "object") {
+    // The declared map is the collected record, even when it has one key.
+    return Object.fromEntries(Object.keys(output.map).filter(key => key.trim() && !isReservedChannel(key)).map(key => [key, projected[key]]));
+  }
+  return unwrapUpdate({ update: projected });
 }
 
 /**

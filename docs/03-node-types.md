@@ -323,6 +323,8 @@ The primary escape hatch for custom logic: run any CLI, script, or shell pipelin
 | `args` set | `execFile(command, args)` — no shell, argv-safe | You have a discrete binary + arguments |
 | `args` omitted | OS shell (`/bin/sh -c` / `cmd.exe`) | You need pipes, `&&`, globs, or shell builtins |
 
+Each argument is one argv value. Whole-argument templates preserve their value until conversion: objects and arrays become JSON, while scalar values become text. Literal arguments in YAML must be strings. Use argv mode to pass structured data without shell quoting.
+
 ```yaml
 # Safe argv mode (recommended)
 - id: greet
@@ -376,7 +378,7 @@ Declare toolchains with `requires` so missing binaries are caught at preflight a
 
 **Injection caveat:** shell-string mode interpolates templates into the command line. Treat untrusted state values the same way you would for `http` URL/body templates — prefer argv mode (`args`) when values come from external input.
 
-**Load-time `${ENV}` gotcha:** do **not** write braced `${MY_VAR}` / `${MY_VAR:-default}` inside `command`, `args`, or `env` values when `MY_VAR` comes from this node's own `with.env`. Graph load rewrites those against the host process environment *before* the node runs (often to empty), so a script that does `BRANCH="plan/${SLUG}"` becomes `BRANCH="plan/"` even when `env.SLUG` is set correctly. Use unbraced `$MY_VAR` instead:
+**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values. In argv mode there is no shell expansion; use a `{{ ... }}` template to supply a value.
 
 ```yaml
 - id: materialize
@@ -384,13 +386,10 @@ Declare toolchains with `requires` so missing binaries are caught at preflight a
   with:
     env:
       SLUG: "{{ state.specsDraft.slug }}"
-    # GOOD — $SLUG expands when the shell runs
+    # $SLUG and ${SLUG} both expand when the child shell runs
     command: |
       BRANCH="plan/$SLUG"
       git worktree add -b "$BRANCH" ".worktrees/$SLUG"
-    # BAD — ${SLUG} is stripped at graph-load time → BRANCH="plan/"
-    # command: |
-    #   BRANCH="plan/${SLUG}"
 ```
 
 See [05 — State & Data §Two interpolation phases](./05-state-and-data.md#5-two-interpolation-phases-dont-confuse-them).
@@ -675,6 +674,8 @@ Run a node/subgraph once per item in a collection, concurrently, then fan-in. (S
 `with.concurrency` limits active items in that map. `runtime.concurrency` limits active node executions across the invocation, including map workers; dispatch and join bookkeeping do not consume slots. A limit of 1 serializes work without dropping it. Queued work can be cancelled, and unrelated branches do not inherit a map's cap.
 
 Each entry into a map has a separate collection round, in input order. Looping back replaces the internal collection bag; an explicitly append-reduced destination channel still follows its declared reducer. Inner `output.map` expressions run after execution with both `item` and `result` in scope. Inner retry/timeout settings override the map/default policy. Item IDs such as `views[0]` are stable across resume and are used by media journals and artifact writers. Older array-format collection checkpoints remain readable.
+
+An inner `output.map` always collects one object containing exactly its declared keys per item: `{value: "{{ result }}"}` produces `[{value: ...}, ...]`. Adding another key preserves that shape; the internal `outputs` wrapper is omitted. Inner `output.to` alone still collects the bare result. These item projections do not write separate parent channels; `collect` chooses the parent destination.
 
 ```yaml
 - id: implement-all
