@@ -263,7 +263,7 @@ export async function startService(
   const key = serviceKey(threadId, spec.name);
   const existing = services.get(key);
   if (existing && !existing.exited) {
-    if (existing.identity !== identity) throw Object.assign(new Error(`Service "${spec.name}" is already running with different start options; stop or restart it explicitly.`), { code: "SERVICE_START_CONFLICT", retryable: false });
+    if (existing.identity !== identity) throw Object.assign(new Error(`Service "${spec.name}" is already running with different start options; stop or restart it explicitly.`), { code: "SERVICE_START_CONFLICT" });
     return toInfo(existing);
   }
   // Stale entry from a prior exited process — drop it before re-start.
