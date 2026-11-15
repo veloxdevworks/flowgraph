@@ -209,7 +209,10 @@ export class ErrorMasker {
       return event;
     }
     if (masked.value === data) return event;
-    return { ...event, data: { ...(masked.value as Record<string, unknown>), ...(masked.errorIds[0] ? { errorId: masked.errorIds[0] } : {}) } };
+    const out = { ...(masked.value as Record<string, unknown>) };
+    // A masked system error keeps no errno name either (`code: "EACCES"`), matching INTERNAL_ERROR_BODY.
+    if (masked.errorIds.length > 0 && typeof out["code"] === "string" && ERRNO_CODES.has(out["code"])) out["code"] = "INTERNAL_ERROR";
+    return { ...event, data: { ...out, ...(masked.errorIds[0] ? { errorId: masked.errorIds[0] } : {}) } };
   }
 }
 
