@@ -1418,7 +1418,7 @@ async function assembleCompiledLangGraph(
     compiledNodes.set(nodeSpec.id, compiled);
 
     const nodeRetry = nodeSpec.retry ?? defaultRetry;
-    const nodeTimeout = nodeSpec.timeout ?? defaultTimeout ?? (["agent", "intelligent"].includes(nodeSpec.type) ? "2m" : undefined);
+    const nodeTimeout = nodeSpec.timeout ?? defaultTimeout;
     const scope = { nodeId: nodeSpec.id, nodeType: nodeSpec.type };
     const nsRecord = nodeSpec as unknown as Record<string, unknown>;
 
@@ -2757,7 +2757,7 @@ function addCheckpointedMap(
     ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),
   };
   const nodeRetry = ((config.node as Record<string, unknown>)["retry"] ?? nodeSpec.retry ?? ctx.defaultRetry) as RetryConfigInput;
-  const nodeTimeout = ((config.node as Record<string, unknown>)["timeout"] ?? nodeSpec.timeout ?? ctx.defaultTimeout ?? (["agent", "intelligent"].includes(innerType) ? "2m" : undefined)) as string | undefined;
+  const nodeTimeout = ((config.node as Record<string, unknown>)["timeout"] ?? nodeSpec.timeout ?? ctx.defaultTimeout) as string | undefined;
 
   const mapLimit = createExecutionLimit(config.concurrency);
 

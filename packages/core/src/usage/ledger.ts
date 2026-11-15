@@ -183,7 +183,7 @@ export class UsageLedger {
     const { maxTokens, maxUSD } = this.budget;
     const tokensOver = maxTokens !== undefined && (before ? usage.totalTokens >= maxTokens : usage.totalTokens > maxTokens);
     const reservedUSD = before ? Object.values(this.record.pending).reduce((sum, receipt) => addUSD(sum, receipt.estimateUSD ?? 0), 0) : 0;
-    const dollarsOver = maxUSD !== undefined && (before ? usage.costUSD >= maxUSD || addUSD(addUSD(usage.costUSD, reservedUSD), estimateUSD ?? 0) > maxUSD : usage.costUSD > maxUSD);
+    const dollarsOver = maxUSD !== undefined && (before ? usage.costUSD >= maxUSD || (estimateUSD === undefined ? addUSD(usage.costUSD, reservedUSD) >= maxUSD : addUSD(addUSD(usage.costUSD, reservedUSD), estimateUSD) > maxUSD) : usage.costUSD > maxUSD);
     if (!tokensOver && !dollarsOver) return;
     const detail = `tokens=${usage.totalTokens}/${maxTokens ?? "∞"}, usd=${usage.costUSD}/${maxUSD ?? "∞"}${estimateUSD === undefined ? "" : `, nextEstimateUSD=${estimateUSD}`}`;
     const onExceed = this.budget.onExceed ?? "warn";

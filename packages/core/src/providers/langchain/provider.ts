@@ -46,7 +46,10 @@ export interface ChatModelLike {
   withStructuredOutput?(schema: unknown, config?: unknown): { invoke(input: BaseMessage[], options?: unknown): Promise<unknown> };
 }
 
+const REQUEST_TIMEOUT = Symbol("modelRequestTimeout");
 export interface LangChainProviderOptions {
+  /** Per-model-request deadline; defaults to two minutes. null disables it. */
+  requestTimeoutMs?: number | null;
   name?: string;
   /** Known model ids for validation/autocomplete. */
   models?: string[];
@@ -67,6 +70,7 @@ export function createLangChainProvider(
   options: LangChainProviderOptions = {},
 ): ProviderAdapter {
   const name = options.name ?? "langchain";
+  if (options.requestTimeoutMs !== undefined && options.requestTimeoutMs !== null && (!Number.isFinite(options.requestTimeoutMs) || options.requestTimeoutMs <= 0)) throw new Error("requestTimeoutMs must be positive or null");
 
   return redactProviderErrors({
     name,
@@ -95,6 +99,7 @@ export function createLangChainProvider(
     },
 
     async run(req: AgentRequest, ctx: ProviderRunContext): Promise<AgentResult> {
+      ctx = Object.assign({...ctx}, {[REQUEST_TIMEOUT]: options.requestTimeoutMs === undefined ? 120000 : options.requestTimeoutMs});
       if (ctx.context) return runWithContext(model, req, ctx, ctx.context);
       const messages: BaseMessage[] = [];
       if (req.system) messages.push(new SystemMessage(req.system));
@@ -339,7 +344,7 @@ async function constrainedOutput(model: ChatModelLike, req: AgentRequest, ctx: P
   const cached = ctx.replay?.get("llm:structured");
   if (cached && typeof cached === "object" && "output" in cached) return cached as { output: unknown; usage: TokenUsage };
   const invoke = async () => {
-    const result = await withHeartbeat(ctx, () => model.withStructuredOutput!(req.schema, { includeRaw: true, strict: false }).invoke(messages, { signal: ctx.signal }));
+    const result = await withHeartbeat(ctx, signal => model.withStructuredOutput!(req.schema, { includeRaw: true, strict: false }).invoke(messages, { signal }));
     const wrapped = result && typeof result === "object" && Object.hasOwn(result, "parsed") && Object.hasOwn(result, "raw")
       ? result as { parsed: unknown; raw: AIMessage; parsing_error?: unknown } : undefined;
     return { output: wrapped ? wrapped.parsed : result, usage: wrapped?.raw ? modelUsage(wrapped.raw) : undefined };
@@ -365,10 +370,10 @@ function modelUsage(ai: AIMessage): TokenUsage | undefined {
 async function invokeModel(model: ChatModelLike, input: BaseMessage[], req: AgentRequest, ctx: ProviderRunContext): Promise<AIMessage> {
   let responseStarted = false;
   let partialUsage: TokenUsage | undefined;
-  const invoke = async () => {
-    if (!req.streaming || !model.stream) return withHeartbeat(ctx, () => model.invoke(input, { signal: ctx.signal }));
+  const invoke = () => withHeartbeat(ctx, async signal => {
+    if (!req.streaming || !model.stream) return model.invoke(input, { signal });
     let combined: AIMessageChunk | undefined;
-    for await (const chunk of await model.stream(input, { signal: ctx.signal })) {
+    for await (const chunk of await model.stream(input, { signal })) {
       responseStarted = true;
       const text = extractText(chunk);
       if (text) ctx.emit("token", { text });
@@ -378,7 +383,7 @@ async function invokeModel(model: ChatModelLike, input: BaseMessage[], req: Agen
     if (!combined) throw new Error("Model stream ended without a response");
     return new AIMessage({ content: combined.content, tool_calls: combined.tool_calls ?? [],
       ...(combined.usage_metadata ? { usage_metadata: combined.usage_metadata } : {}) });
-  };
+  });
   const ai = ctx.meterCall ? await ctx.meterCall(invoke, { usage: modelUsage, errorUsage: error => responseStarted ? partialUsage : rejectedRequestUsage(error), errorOutcomeUnknown: () => responseStarted }) : await invoke();
   if (!ctx.meterCall) { const usage = modelUsage(ai); if (usage) ctx.emit("usage", usage); }
   return ai;
@@ -391,12 +396,27 @@ function addUsage(total: TokenUsage, inc: TokenUsage): void {
 }
 
 /** Waiting on an SDK call should remain visible, including structured-output calls. */
-async function withHeartbeat<T>(ctx: ProviderRunContext, invoke: () => Promise<T>): Promise<T> {
+async function withHeartbeat<T>(ctx: ProviderRunContext, invoke: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const started = Date.now();
-  const timer = setInterval(() => ctx.node.emit("custom.agent.waiting", { phase: "model", elapsedMs: Date.now() - started }), 15000);
+  const timeoutMs = (ctx as ProviderRunContext & {[REQUEST_TIMEOUT]?: number|null})[REQUEST_TIMEOUT];
+  const controller = new AbortController();
+  const signal = ctx.signal ? AbortSignal.any([ctx.signal,controller.signal]) : controller.signal;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutMs !== null) {
+    const ms=timeoutMs ?? 120000;
+    deadline=setTimeout(()=>controller.abort(Object.assign(new Error(`Model request timed out after ${ms}ms; its provider outcome may need reconciliation`),{code:"MODEL_REQUEST_TIMEOUT",retryable:false})),ms);
+    deadline.unref();
+  }
+  const timer=setInterval(()=>ctx.node.emit("custom.agent.waiting",{phase:"model",elapsedMs:Date.now()-started}),15000);
   timer.unref();
-  const stop = () => clearInterval(timer);
-  ctx.signal?.addEventListener("abort", stop, { once: true });
-  if (ctx.signal?.aborted) stop();
-  try { return await invoke(); } finally { stop(); ctx.signal?.removeEventListener("abort", stop); }
+  let onAbort!:()=>void;
+  const aborted=new Promise<never>((_resolve,reject)=>{
+    onAbort=()=>{clearInterval(timer);reject(controller.signal.reason);};
+    controller.signal.addEventListener("abort",onAbort,{once:true});
+    if(controller.signal.aborted)onAbort();
+  });
+  const stopOnCallerAbort=()=>{clearInterval(timer);clearTimeout(deadline);};
+  ctx.signal?.addEventListener("abort",stopOnCallerAbort,{once:true});
+  try { signal.throwIfAborted(); return await Promise.race([invoke(signal),aborted]); }
+  finally {clearTimeout(deadline);clearInterval(timer);controller.signal.removeEventListener("abort",onAbort);ctx.signal?.removeEventListener("abort",stopOnCallerAbort);}
 }

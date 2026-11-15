@@ -169,31 +169,23 @@ it("PLAT-376: known media estimates share budget headroom concurrently", async (
   expect(ledger.snapshot()).toMatchObject({ calls: 3, costUSD: 0.3, pendingCalls: 0 });
 });
 
-it("PLAT-364: the default agent timeout aborts an unresponsive provider", async () => {
-  let entered!: () => void;
-  const ready = new Promise<void>((resolve) => {
-    entered = resolve;
-  });
-  const provider = createScriptedProvider("hang-default", async (_req, context) => {
-    entered();
-    return new Promise((_resolve, reject) =>
-      context.signal!.addEventListener("abort", () => reject(context.signal!.reason), {
-        once: true,
-      }),
-    );
-  });
-  const compiled = await compileGraph(
-    graph([{ id: "a", type: "agent", provider: "hang-default", with: { prompt: "answer" } }]),
-    { providers: [provider] },
-  );
+it("PLAT-364: times out a single model request while leaving long agent sessions configurable", async () => {
+  let entered!:()=>void;
+  const ready=new Promise<void>(r=>{entered=r;});
+  const provider=createLangChainProvider({invoke:async()=>{entered();return new Promise<AIMessage>(()=>{});}}, {name:"hang-default"});
+  const compiled=await compileGraph(graph([{id:"a",type:"agent",provider:"hang-default",with:{prompt:"answer"}}]),{providers:[provider]});
   vi.useFakeTimers();
-  const running = compiled.run();
-  await ready;
-  await vi.advanceTimersByTimeAsync(120001);
-  const result = await running;
-  expect(result.status).toBe("error");
-  expect(result.error?.message).toContain("120000");
-  expect(result.usage?.unknownCalls).toBe(1);
+  const running=compiled.run();await ready;await vi.advanceTimersByTimeAsync(120001);
+  const result=await running;
+  expect(result).toMatchObject({status:"error",error:{code:"MODEL_REQUEST_TIMEOUT"},usage:{unknownCalls:1}});
+});
+it("PLAT-364: a long coding-provider session does not inherit a model-request timeout", async () => {
+  let entered!:()=>void;
+  const ready=new Promise<void>(r=>{entered=r;});
+  const provider=createScriptedProvider("long-session",async()=>{entered();await new Promise(r=>setTimeout(r,150000));return {output:"done",stopReason:"done"};});
+  const compiled=await compileGraph(graph([{id:"a",type:"agent",provider:"long-session",with:{prompt:"answer"}}]),{providers:[provider]});
+  vi.useFakeTimers();const running=compiled.run();await ready;await vi.advanceTimersByTimeAsync(150001);
+  expect((await running).status).toBe("completed");
 });
 it("PLAT-364: outstanding model calls emit a heartbeat and stop emitting after completion", async () => {
   let finish!: (message: AIMessage) => void;
@@ -295,4 +287,15 @@ it("PLAT-359: an ordinary fan-out rejection leaves no never-started sibling rece
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+it("PLAT-376: an unestimated call cannot use fully reserved dollar headroom",async()=>{
+  const ledger=await UsageLedger.open({},"full-reservation",{maxUSD:0.2,onExceed:"fail"});
+  let release!:()=>void;const held=new Promise<void>(r=>{release=r;});
+  const invoke=vi.fn(async()=>{await held;return 1;});
+  const calls=[1,2].map(n=>ledger.call(ctx(String(n)),invoke,{kind:"media",estimateUSD:0.1,usage:()=>({costUSD:0.1})}));
+  await vi.waitFor(()=>expect(invoke).toHaveBeenCalledTimes(2));
+  const unestimated=vi.fn(async()=>1);
+  try {await expect(ledger.call(ctx("unknown"),unestimated,{kind:"media",usage:()=>({costUSD:0.05})})).rejects.toMatchObject({code:"BUDGET_EXCEEDED"});expect(unestimated).not.toHaveBeenCalled();}
+  finally{release();await Promise.all(calls);}
 });

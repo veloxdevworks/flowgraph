@@ -613,7 +613,7 @@ choosing historical replay. It does not create an immutable fork record or a
 state-patching API.
 
 
-Agent nodes default to a two-minute execution timeout when neither the node nor `runtime.timeoutDefault` sets one. Explicit timeouts take precedence, including mapped agent nodes. LangChain model calls emit `custom.agent.waiting` every 15 seconds while waiting; those heartbeats stop on completion or cancellation. A timed-out in-flight request can still have been billed: its usage remains unknown until the provider reports it or an operator reconciles it.
+Individual LangChain model requests default to a two-minute deadline and emit `custom.agent.waiting` every 15 seconds while waiting. The deadline resets for each request in a tool loop and does not cap whole coding-agent sessions. Programmatic providers can override it with `createLangChainProvider(model, {requestTimeoutMs: ...})`, or disable it with `null`. Explicit node `timeout` and `runtime.timeoutDefault` still bound entire nodes. A timed-out in-flight request can have been billed: its usage remains unknown until the provider reports it or an operator reconciles it.
 
 Model routers use the same usage ledger and budgets as agents. Structured-output requests use non-strict schema transport so ordinary JSON Schemas remain accepted; Flowgraph still validates the returned result against the original schema. Definite pre-acceptance HTTP 400/401/403/404/405/413/415/422/429 responses from a single model request count as known zero usage; streams that already started and opaque multi-call adapters remain conservative.
 
