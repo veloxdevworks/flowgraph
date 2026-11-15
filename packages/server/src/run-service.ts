@@ -756,7 +756,11 @@ export class RunService {
     const status = code === "THREAD_NOT_FOUND" ? 404
       : code === "THREAD_BUSY" || code === "THREAD_NOT_WAITING" || code === "HISTORICAL_DECISION_REPLAY" ? 409
       : code === "RESUME_MAP_REQUIRED" || code === "RESUME_VALUE_REQUIRED" ? 400 : undefined;
-    if (status && code) throw new ServerRequestError(status, code, (err as Error).message);
+    if (status && code) {
+      const threadId = (err as { claim?: { threadId?: string } }).claim?.threadId;
+      const message = code === "THREAD_BUSY" ? `Thread ${JSON.stringify(threadId ?? "requested thread")} is busy; retry after the active invocation finishes.` : (err as Error).message;
+      throw new ServerRequestError(status, code, message);
+    }
     throw err;
   }
 
@@ -1129,11 +1133,14 @@ export class RunService {
       // leaves the thread untouched.
       const pending = (await compiled.getState(req.threadId, { applyWaitTimeouts: false }))?.interrupts ?? [];
       try {
-        assertResumeValue(req.resume, pending, req.threadId);
+        if (pending.length) assertResumeValue(req.resume, pending, req.threadId);
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code === "RESUME_MAP_REQUIRED" || code === "RESUME_VALUE_REQUIRED") {
-          throw new ServerRequestError(400, code, (err as Error).message);
+          const pendingInterruptIds = pending.flatMap(it => it.id ? [it.id] : []);
+          const keys = req.resume && typeof req.resume === "object" && !Array.isArray(req.resume) ? Object.keys(req.resume) : [];
+          const unknown = pending.length > 1 ? keys.filter(key=>!pendingInterruptIds.includes(key)) : [];
+          throw new ServerRequestError(400, code, `${(err as Error).message}${unknown.length ? ` Keys ${unknown.map(key=>JSON.stringify(key)).join(", ")} are not pending interrupt ids.` : ""} Pending interrupt ids: ${pendingInterruptIds.join(", ")}.`, undefined, { pendingInterruptIds });
         }
         throw err;
       }
@@ -1418,6 +1425,15 @@ export class RunService {
     if (!persisted && !live) return null;
     const meta = persisted?.meta;
     const status = live?.status ?? meta?.status ?? "completed";
+    let pendingInterruptIds: string[] = [];
+    if (status === "interrupted" || status === "paused") {
+      try {
+      const principal = this.principalFor(caller);
+      const { spec, cwd } = await this.resolveSpec(threadId, undefined, principal);
+      const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
+      pendingInterruptIds = (await compiled.getState(threadId, { applyWaitTimeouts: false }))?.interrupts?.flatMap(it => it.id ? [it.id] : []) ?? [];
+      } catch (err) { log("warn", "run.pending_interrupts_unavailable", {threadId,...errorFields(err)}); }
+    }
     const failure = status === "error"
       ? [...(await this.getJournal(threadId, caller))].reverse().find((event) => event.type === "run.error")
       : undefined;
@@ -1438,6 +1454,7 @@ export class RunService {
       active: Boolean(live && (status === "running" || status === "started")),
       yaml: persisted?.yaml ?? live?.yaml ?? "",
       issues: this.readIssues(threadId),
+      pendingInterruptIds,
     };
   }
 

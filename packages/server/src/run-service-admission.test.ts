@@ -27,6 +27,7 @@ it("rejects same-service and replica competitors before altering the owner's str
   const { abort, pause } = a.registry.get("t")!;
   try {
     await expect(a.resumeRun({ threadId: "t", resume: true })).rejects.toMatchObject({ status: 409, code: "THREAD_BUSY" });
+    await expect(b.resumeRun({ threadId: "t", resume: true })).rejects.toMatchObject({ message: 'Thread "t" is busy; retry after the active invocation finishes.' });
     await expect(b.resumeRun({ threadId: "t", resume: true })).rejects.toMatchObject({ status: 409, code: "THREAD_BUSY" });
     await expect(a.continueRun("t")).rejects.toMatchObject({ status: 409, code: "THREAD_BUSY" });
     expect(a.registry.get("t")).toMatchObject({ status: "running", abort, pause });
@@ -47,6 +48,7 @@ it("maps invalid/finished/unknown continuations before replacing an interrupted 
   await a.resumeRun({ threadId: "t", resume: true });
   await expect.poll(() => a.registry.get("t")?.status).toBe("completed");
   await expect(a.resumeRun({ threadId: "t", resume: true })).rejects.toMatchObject({ status: 409, code: "THREAD_NOT_WAITING" });
+  await expect(a.resumeRun({ threadId: "t", resume: { "00000000000000000000000000000000": true } })).rejects.toMatchObject({ status: 409, code: "THREAD_NOT_WAITING" });
   expect(a.registry.get("t")?.status).toBe("completed");
   await expect(a.resumeRun({ threadId: "unknown", resume: true })).rejects.toMatchObject({ status: 404, code: "THREAD_NOT_FOUND" });
 });

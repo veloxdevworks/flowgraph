@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RunService } from "./run-service.js";
 import type { RunStatus } from "./types.js";
 import { ConnectClient, type WebSocketLike } from "./connect/client.js";
@@ -141,6 +141,28 @@ describe("RunService.resumeRun with several pending interrupts", () => {
     expect((await service.resumeRun({ threadId, resume: false })).status).toBe("started");
     await completed;
     expect(events).not.toContain("run.error");
+  });
+
+  it("exposes pending ids on run detail and in malformed-map refusals", async () => {
+    const threadId = "pending-id-discovery";
+    const events = await interruptedThread(threadId);
+    const state = (await service.getState(threadId)).state!;
+    const ids = state.interrupts!.map(it => it.id!);
+    const paths=(await fs.readdir(dir)).filter(file=>file.includes(threadId));
+    expect(paths.length).toBeGreaterThan(0);
+    const before=await Promise.all(paths.map(async file=>({file,raw:await fs.readFile(path.join(dir,file),"utf8"),mtime:(await fs.stat(path.join(dir,file))).mtimeMs})));
+    expect(await service.getRun(threadId)).toMatchObject({ pendingInterruptIds: ids });
+    expect(await service.getRun(threadId)).toMatchObject({ pendingInterruptIds: ids });
+    const unavailable=vi.spyOn(service as any,"compile").mockRejectedValueOnce(new Error("provider unavailable"));
+    expect(await service.getRun(threadId)).toMatchObject({status:"interrupted",pendingInterruptIds:[]});unavailable.mockRestore();
+    for(const old of before){expect(await fs.readFile(path.join(dir,old.file),"utf8")).toBe(old.raw);expect((await fs.stat(path.join(dir,old.file))).mtimeMs).toBe(old.mtime);}
+    try { await service.resumeRun({ threadId, resume: { wrong: true } }); throw new Error("accepted wrong ids"); }
+    catch (err) {
+      expect(err).toMatchObject({ status: 400, code: "RESUME_MAP_REQUIRED", extra: { pendingInterruptIds: ids } });
+      for (const id of ids) expect((err as Error).message).toContain(id);
+      expect((err as Error).message).toContain('"wrong"');
+    }
+    await expectUntouched(threadId, events);
   });
 
   it("does not leave a session when a cold resume is refused", async () => {

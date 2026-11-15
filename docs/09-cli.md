@@ -299,3 +299,5 @@ flowgraph thread inspect --backend postgres --path "$DATABASE_URL" --thread issu
 
 See [usage and budget boundaries](./07-runtime-and-execution.md#usage-and-budget-boundaries)
 for late results, legacy receipts and pricing limitations.
+
+Hosted `GET /runs/:threadId` includes `pendingInterruptIds` for interrupted/paused runs. This lookup is read-only and best-effort; if providers or graph state are unavailable, run detail still returns with an empty list. Use `/state` for full interrupt payloads. Invalid-resume 400 responses also include `pendingInterruptIds`; busy responses expose no host ownership details.
