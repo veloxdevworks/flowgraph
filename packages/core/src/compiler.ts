@@ -862,7 +862,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           const resolve = runOpts.resolveInterrupt;
           resumeValue = await awaitAnswer(() => resolve(interrupts));
         } else if (policy === "approve") {
-          resumeValue = Object.fromEntries(interruptIds(interrupts).map((id) => [id, true]));
+          const unsupported = interrupts.find(it => ["question", "choice", "form"].includes(it.kind ?? ""));
+          if (unsupported) throw Object.assign(new Error(`Auto-approve cannot answer ${unsupported.kind} interrupt "${unsupported.id}"; supply an explicit resume value or use prompt mode.`), { code: "AUTO_APPROVE_UNSUPPORTED", retryable: false });
+          resumeValue = Object.fromEntries(interrupts.map((it) => [it.id, it.kind === "review" ? { decision: "approve" } : true]));
         } else {
           const clean = stripReserved(result);
           return finish({
@@ -1109,8 +1111,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         // A missing answer is not a denial: fail before anything runs and leave the interrupt pending.
         const pending = (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []);
         const answer = resumeOpts.resume === undefined && isPauseInterrupt(pending.map(toInterruptInfo)) ? true : resumeOpts.resume;
-        if (answer === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
-        payload = resumeCommand(answer, pending, resumeOpts.threadId);
+        const expired = timeoutResumeCommand(snap, clock());
+        if (answer === undefined && !expired) throw resumeValueRequiredError(resumeOpts.threadId);
+        payload = answer === undefined ? expired! : resumeCommand(answer, pending, resumeOpts.threadId);
       }
       // Static breakpoints pause with empty task.interrupts and a non-empty
       // `next`. LangGraph continues those with null input, not Command({ resume }).

@@ -80,7 +80,7 @@ flowgraph run ./triage.graph.yaml \
 - Budget limits come from `runtime.budget` in the YAML (not `--max-usd`).
 - Skill preflight runs when a **skill node executes**, not upfront at run start.
 - With `--stream` / `--json`, events go to configured sinks; otherwise a compact summary prints at the end.
-- On interrupt under `--on-interrupt fail`, exits `3` and prints resume instructions.
+- A pending human gate under `--on-interrupt fail` exits `3` and prints resume instructions. Webhook listeners and timed waits stay active until their continuation completes or reaches a human gate. Final completion exits `0`, final failure exits `1`, and listener resources are closed. Webhook/timeout continuations keep `--json` stdout as JSONL.
 
 **Placement (`--targets`):**
 
@@ -193,10 +193,12 @@ flowgraph resume ./graph.yaml --thread release-42 --list --json
 | Flag | Description |
 |------|-------------|
 | `--thread <id>` | **Required.** Thread to resume. |
-| `--resume <json>` | Value passed to the interrupt handler (default: `{"approved":true}`). |
-| `--list` | List pending interrupts and exit (no resume). |
+| `--resume <json>` | Explicit JSON answer. Required for a pending human gate; `false` / `null` deny rather than approve. |
+| `--list` | Read-only: list pending interrupt ids and exit, including overdue waits; `--json` prints one JSON document. |
 | `--stream` / `--json` | Same as `run`. |
-| `--on-interrupt <policy>` | Policy if the run interrupts again. |
+| `--on-interrupt <policy>` | Policy if the run interrupts again. `approve` supplies `{decision:"approve"}` for review gates and `true` for approvals; question/choice/form gates require an explicit answer. |
+| `--from <checkpoint-id>` | Resume from a historical checkpoint; already-recorded decisions cannot be replaced. Fork before the gate instead. |
+| `--replay-workspace <dir>` | Separate output directory required when historical replay may repeat side effects. |
 | `--no-mcp-oauth` | CI-safe MCP behavior. |
 
 Requires a durable checkpoint backend (`runtime.checkpoint.backend: sqlite` or Postgres). See [07 §HITL](./07-runtime-and-execution.md#5-human-in-the-loop).

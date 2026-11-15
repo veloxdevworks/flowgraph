@@ -94,7 +94,7 @@ export const waitNode = defineNode<Config>({
           for (;;) {
             const satisfied = evalGuard(expr, { state, config: ctx.config, run: ctx.meta });
             if (satisfied) return { update: {} };
-            ctx.interrupt({
+            const payload = ctx.interrupt({
               reason: `Waiting for condition: ${config.until}`,
               kind: "custom",
               data: {
@@ -105,6 +105,11 @@ export const waitNode = defineNode<Config>({
                   : {}),
               },
             });
+            if (isTimedOut(payload)) {
+              const result = { timedOut: true };
+              ctx.emit("node.output", { wait: { mode: "until", result } });
+              return { update: applyOutput(config.output, result, { nodeId: ctx.nodeId, scope }) };
+            }
           }
         }
 
