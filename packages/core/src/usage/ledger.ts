@@ -22,6 +22,7 @@ export interface BudgetLimits {
   onExceed?: "warn" | "fail" | "interrupt" | undefined;
 }
 export interface UsageReceipt {
+  reference?: string;
   nodeId: string;
   kind: string;
   startedAt: string;
@@ -50,6 +51,7 @@ export interface UsageCheckpointStore {
   compareThreadUsage?(threadId: string, revision: number, record: UsageRecord): boolean | Promise<boolean>;
 }
 export interface MeteredCallOptions<T> {
+  reference?: string;
   kind?: "model" | "provider" | "summary" | "media";
   estimateUSD?: number | undefined;
   usage(result: T): TokenUsage | undefined;
@@ -156,7 +158,7 @@ export class UsageLedger {
           return;
         } catch (cause) {
           Object.assign(this.record, before);
-          if ((cause as { code?: string }).code?.startsWith("USAGE_RECEIPT")) throw cause;
+          if ((cause as { code?: string }).code?.startsWith("USAGE_RECEIPT") || (cause as {code?:string}).code === "USAGE_RESOLUTION_CONFLICT") throw cause;
           throw Object.assign(error("USAGE_WRITE_FAILED", "Could not persist accounting. Inspect with 'flowgraph usage inspect <graph> --thread <id>' and reconcile its receipt before retrying."), { cause });
         }
       }
@@ -212,7 +214,7 @@ export class UsageLedger {
       };
       checkAdmission();
       const id = randomUUID(), kind = options.kind ?? "model";
-      await this.mutate(() => { this.record.pending[id] = { nodeId: ctx.nodeId, kind, startedAt: new Date().toISOString(), ...(parallel ? { estimateUSD: options.estimateUSD! } : {}) }; });
+      await this.mutate(() => { this.record.pending[id] = { nodeId: ctx.nodeId, kind, ...(options.reference ? {reference:options.reference} : {}), startedAt: new Date().toISOString(), ...(parallel ? { estimateUSD: options.estimateUSD! } : {}) }; });
       try { checkAdmission(); } catch (err) { await this.mutate(() => { delete this.record.pending[id]; }); throw err; }
       if (parallel) { unlock?.(); unlock = undefined; }
       let result: T;
@@ -259,7 +261,11 @@ export class UsageLedger {
     const supplied = normalizeUsage(reported);
     if (!Object.keys(supplied).length) throw error("USAGE_INVALID", "Report usage or explicitly report known zero usage");
     await this.mutate(() => {
-      if (this.record.resolved[receiptId]) throw error("USAGE_RECEIPT_RESOLVED", `Receipt ${receiptId} was already reconciled`);
+      const resolved = this.record.resolved[receiptId];
+      if (resolved) {
+        if (Object.entries(supplied).every(([key, value]) => resolved.usage[key as keyof TokenUsage] === value)) return;
+        throw error("USAGE_RESOLUTION_CONFLICT", `Receipt ${receiptId} was already reconciled with different usage`);
+      }
       const pending = this.record.pending[receiptId], unresolved = this.record.unresolved[receiptId];
       if (!pending && !unresolved) throw error("USAGE_RECEIPT_NOT_FOUND", `No unresolved receipt ${receiptId}`);
       const receipt = pending ?? unresolved!;

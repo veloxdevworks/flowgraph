@@ -9,7 +9,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, readdir } from "node:fs/promises";
 import * as path from "node:path";
 import type { TokenUsage } from "../providers/types.js";
 import type { Artifact } from "@flowgraph/spec";
@@ -18,6 +18,9 @@ import type { JobHandle, MediaRequest } from "./types.js";
 
 export interface JournalEntry {
   usage?: TokenUsage;
+
+  nodeId?: string;
+  fingerprint?: string;
   version: 1;
   state: "intent" | "submitted" | "done";
   submissionId?: string;
@@ -30,6 +33,8 @@ export interface JournalEntry {
 }
 
 export interface Journal {
+  readResolution?(id: string): Promise<unknown>;
+  writeResolution?(id: string, resolution: unknown): Promise<void>;
   read(): Promise<JournalEntry | undefined>;
   write(entry: JournalEntry): Promise<void>;
   remove(): Promise<void>;
@@ -102,11 +107,22 @@ export function createFileJournal(opts: {
   const file = path.join(dir, `${safeSegment(opts.nodeId)}-${safeSegment(opts.fingerprint)}.json`);
 
   return {
+    async readResolution(id) {
+      try { return JSON.parse(await readFile(`${file}.${safeSegment(id)}.resolved`, "utf8")); }
+      catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw err; }
+    },
+    async writeResolution(id, resolution) {
+      await mkdir(dir, { recursive: true });
+      const target = `${file}.${safeSegment(id)}.resolved`, tmp = `${target}.${randomUUID()}.tmp`;
+      const fd = await open(tmp, "wx", 0o600);
+      try { await fd.writeFile(JSON.stringify(resolution)); await fd.sync(); } finally { await fd.close(); }
+      await rename(tmp, target);
+    },
     async read() {
       try {
         const parsed = JSON.parse(await readFile(file, "utf8")) as JournalEntry;
         if (parsed?.version !== 1 || !["intent", "submitted", "done"].includes(parsed.state) || !parsed.provider || !parsed.handle?.id || (parsed.state === "intent" && !parsed.submissionId)) throw new Error("Invalid media journal record");
-        return parsed;
+        return {...parsed,nodeId:opts.nodeId,fingerprint:opts.fingerprint};
       } catch (cause) {
         if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
         throw Object.assign(new Error(`Media journal ${file} cannot be read; inspect/reconcile it before retrying`), { code: "MEDIA_JOURNAL_INVALID", retryable: false, cause });
@@ -116,7 +132,7 @@ export function createFileJournal(opts: {
       await mkdir(dir, { recursive: true });
       const tmp = `${file}.${randomUUID()}.tmp`;
       const fd = await open(tmp, "wx", 0o600);
-      try { await fd.writeFile(JSON.stringify(entry), "utf8"); await fd.sync(); }
+      try { await fd.writeFile(JSON.stringify({ ...entry, nodeId: opts.nodeId, fingerprint: opts.fingerprint }), "utf8"); await fd.sync(); }
       finally { await fd.close(); }
       await rename(tmp, file);
     },
@@ -128,7 +144,7 @@ export function createFileJournal(opts: {
       let fd;
       try { fd = await open(file, "wx", 0o600); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; }
-      try { await fd.writeFile(JSON.stringify(entry), "utf8"); await fd.sync(); }
+      try { await fd.writeFile(JSON.stringify({ ...entry, nodeId: opts.nodeId, fingerprint: opts.fingerprint }), "utf8"); await fd.sync(); }
       finally { await fd.close(); }
       return true;
     },
@@ -138,9 +154,29 @@ export function createFileJournal(opts: {
 /** Caller must hold thread admission and stop/reconcile any external work first. */
 export async function resolveMediaSubmission(journal: Journal, submissionId: string, resolution: { notSubmitted: true } | { handle: JobHandle }): Promise<void> {
   const current = await journal.read();
+  const prior = await journal.readResolution?.(submissionId);
+  if (prior !== undefined) {
+    if (JSON.stringify(sortKeys(prior)) !== JSON.stringify(sortKeys(resolution))) throw Object.assign(new Error("Submission was already reconciled with a different resolution"), {code:"MEDIA_RESOLUTION_CONFLICT"});
+    if (!current) return;
+    if (current.submissionId !== submissionId) throw Object.assign(new Error("A newer media operation owns this journal; inspect its current submission identity"),{code:"MEDIA_SUBMISSION_CHANGED"});
+    if (current.state !== "intent") return;
+  }
   if (current?.state !== "intent" || current.submissionId !== submissionId) throw new Error("Submission identity changed or is no longer unresolved; inspect the journal again");
-  if ("notSubmitted" in resolution) { await journal.remove(); return; }
+  if ("notSubmitted" in resolution) { await journal.writeResolution?.(submissionId, resolution); await journal.remove(); return; }
   const handle = resolution.handle;
   if (!handle || typeof handle.id !== "string" || !handle.id || (handle.done !== undefined && !Array.isArray(handle.done))) throw new Error("Provide a vendor handle with an id and optional completed artifacts");
+  await journal.writeResolution?.(submissionId, resolution);
   await journal.write({ ...current, state: handle.done ? "done" : "submitted", handle, ...(handle.done ? { artifacts: handle.done } : {}), ...(handle.costUSD === undefined ? {} : { costUSD: handle.costUSD }) });
+}
+
+/** Read-only discovery, including journals written before identity fields were added. */
+export async function listMediaJournals(workspace: string, thread: string) {
+  const dir = path.join(workspace, ".flowgraph", "jobs", safeSegment(thread));
+  let files: string[];
+  try { files = await readdir(dir); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return []; throw err; }
+  return Promise.all(files.filter(file => file.endsWith(".json")).sort().map(async file => {
+    const match = /^(.*)-([a-f0-9]{16})\.json$/.exec(file);
+    const entry = JSON.parse(await readFile(path.join(dir, file), "utf8")) as JournalEntry;
+    return { ...entry, nodeId: entry.nodeId ?? match?.[1], fingerprint: entry.fingerprint ?? match?.[2], file: path.join(dir,file) };
+  }));
 }

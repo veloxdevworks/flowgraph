@@ -41,7 +41,7 @@ const DEFAULT_POLL_MAX_MS = 10_000;
 export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobResult> {
   const { provider, req, journal } = opts;
   const existing = await journal.read();
-  if (existing?.state === "intent") throw Object.assign(new Error(`Media submission ${existing.submissionId} has an uncertain outcome. Stop/reconcile its owner and vendor work, then use 'flowgraph media inspect/resolve' before retrying.`), { code: "MEDIA_SUBMISSION_UNCERTAIN", retryable: false });
+  if (existing?.state === "intent") throw Object.assign(new Error(`Media submission ${existing.submissionId} has an uncertain outcome (node ${existing.nodeId ?? "unknown"}, fingerprint ${existing.fingerprint ?? "unknown"}). Stop/reconcile its owner and vendor work, then use 'flowgraph media inspect/resolve' before retrying.`), { code: "MEDIA_SUBMISSION_UNCERTAIN", retryable: false });
   if (existing?.state === "done" && existing.artifacts && (await artifactsExist(opts.workspace, existing.artifacts))) {
     opts.emit("reused", { provider: provider.name, jobId: existing.handle.id });
     return { artifacts: existing.artifacts, costUSD: 0, costKnown: true, reused: true };

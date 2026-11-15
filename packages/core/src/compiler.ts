@@ -405,6 +405,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     interruptAfter,
     defaultPolicy,
   } = assembled;
+  const declaredInputKeys = new Set([...Object.keys(buildStateAnnotation(graphSpec).spec), ...(graphSpec.inputs ?? []).map(field => field.key)]);
 
   const authoredMapNames = new Map<string, string>();
   for (const node of graphSpec.nodes) {
@@ -681,6 +682,11 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         if (r.payload.input) current = r.payload.input;
         // A run:before hook's replacement input is run input too.
         assertNoReservedInput(current, `graph "${graphSpec.metadata.name}" run (after run:before hooks)`);
+      }
+
+      if (mode === "start" && current && !(current instanceof Command)) {
+        const unknown = Object.keys(current).filter(key => !declaredInputKeys.has(key));
+        if (unknown.length) (baseCtx as RunContext).logger.warn(`INPUT_UNKNOWN_KEY: undeclared input key(s) ${unknown.map(key=>JSON.stringify(key)).join(", ")} will not be persisted. Declare them in inputs or state.channels.`, {code:"INPUT_UNKNOWN_KEY",keys:unknown});
       }
 
       // Bind this thread's memory scope (subject rendered from input/run at start;

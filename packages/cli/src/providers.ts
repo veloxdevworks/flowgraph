@@ -10,6 +10,9 @@ import {
   createLangChainProviderFromConfig,
   isKnownLangChainVendor,
   createCliProvider,
+  mockProvider,
+  getProvider,
+  registerProvider,
   detectLocalCli,
   type CliVendor,
 } from "@flowgraph/core";
@@ -160,5 +163,6 @@ export async function buildProviders(
     built.add("deepagents");
   }
 
+  if (!getProvider("mock")) registerProvider(mockProvider);
   return providers;
 }

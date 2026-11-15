@@ -6,6 +6,7 @@
 import type { Expr } from "./ast.js";
 import { stdlib } from "./stdlib.js";
 import { ownValue } from "./own-property.js";
+import { literalCallbackExpr } from "./parser.js";
 
 export type EvalScope = Record<string, unknown>;
 
@@ -88,7 +89,12 @@ export function evalExpr(expr: Expr, scope: EvalScope, strict = false): unknown 
     case "Call": {
       const fn = Object.hasOwn(stdlib, expr.callee) ? stdlib[expr.callee] : undefined;
       if (!fn) throw new EvalError(`Unknown function: ${expr.callee}`);
+      if (["map","filter","find"].includes(expr.callee) && expr.args[1]?.kind !== "String") throw new EvalError(`${expr.callee}: callback must be a quoted expression string`);
       const args = expr.args.map((a) => evalExpr(a, scope, strict));
+      if (["map","filter","find"].includes(expr.callee)) {
+        const callback=literalCallbackExpr(expr)!;
+        args[1]=(item:unknown,index:number)=>evalExpr(callback,{...scope,item,index},strict);
+      }
       return fn(...args);
     }
 

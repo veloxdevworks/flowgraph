@@ -10,12 +10,12 @@ function amount(raw: string | undefined, name: string): number | undefined {
 }
 export function buildUsageCommand(): Command {
   const command = new Command("usage").description("Inspect and explicitly reconcile paid-call receipts");
-  command.command("inspect [graph]").requiredOption("--thread <id>", "Thread id").option("--backend <backend>", "Host checkpoint backend: sqlite|postgres").option("--path <database>", "Host checkpoint path/connection string").action(async (graph: string | undefined, opts: { thread: string } & ThreadDatabaseOptions) => {
+  command.command("inspect [graph]").description("Read paid-call totals and unresolved receipts").requiredOption("--thread <id>", "Thread id").option("--backend <backend>", "Host checkpoint backend: sqlite|postgres").option("--path <database>", "Host checkpoint path/connection string").action(async (graph: string | undefined, opts: { thread: string } & ThreadDatabaseOptions) => {
     const db = await openThreadDatabase(graph, opts);
     try { console.log(JSON.stringify({ threadId: opts.thread, usage: await inspectThreadUsage(db.saver, opts.thread) })); }
     finally { await db.close(); }
   });
-  command.command("resolve [graph]")
+  command.command("resolve [graph]").description("Record a confirmed provider outcome for one receipt; identical retries are safe")
     .requiredOption("--thread <id>", "Thread id")
     .requiredOption("--receipt <id>", "Exact pending/unresolved receipt from inspection")
     .option("--backend <backend>", "Host checkpoint backend: sqlite|postgres")

@@ -307,3 +307,11 @@ Hosted `GET /runs/:threadId` includes `pendingInterruptIds` for interrupted/paus
 Relative checkpoint database paths are host settings resolved against the CLI working directory. Node workspaces and media journals resolve from the declaring graph directory, or `runtime.workspace`. Use absolute checkpoint paths when invoking the same graph from different directories; `media inspect` and `recover` resolve the graph workspace unless `--workspace` overrides it.
 
 `--json` failures include a `run.error` event with `data.code` and a one-line reason on stderr, including refusals before a run is admitted. Node errors retain their typed code in both `node.error` and `run.error`. Continuations and forks begin a new invocation with `run.start` followed by their resume/continue event. CLI startup loads graph/runtime packages and optional integrations lazily where supported; this can add about half a second before execution and is separate from node duration.
+
+### Crash recovery discovery
+
+`flowgraph recover <graph> --thread <id>` reads all recovery blockers in one call: execution ownership (including same-host liveness), usage receipts, decoded replay task identities, media journals and checkpoint IDs with parent links. It does not run nodes, apply deadlines, release claims or buy work. Use `--workspace` only when overriding the graph's original `runtime.workspace`; media inspection uses the same rule. Host database overrides are `--backend sqlite|postgres --path <database>`.
+
+Stop the old owner and reconcile external work before an explicit resolution. Identical usage, replay and media resolutions can be retried safely; changing a reconciled result returns a conflict. Shell replay results have the shape `{"stdout":"...","stderr":"...","exitCode":0}`. A tool replay result is the tool's raw return value, not a tool-message wrapper. Inspect help lists only read options; resolve help lists mutation flags.
+
+`thread release` reports `alreadyReleased: true` when no claim is held; a token that mismatches a held claim is still refused. Obtain the token from `thread inspect` or `recover`. `replay inspect` and `recover` show unresolved operations plus completed slot names by default; `replay inspect --full` explicitly includes historical results and stdout.

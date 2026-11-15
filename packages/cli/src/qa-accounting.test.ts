@@ -72,6 +72,8 @@ it("retains completed usage and an unresolved receipt when a paid-call process i
   const cli = (...args: string[]) => spawnSync(process.execPath, [resolve(import.meta.dirname, "../dist/bin.js"), ...args], { cwd: dir, encoding: "utf8", timeout: 25_000 });
   const inspected = JSON.parse(cli("thread", "inspect", "flow.yaml", "--thread", "crash").stdout).claim;
   expect(cli("thread", "release", "flow.yaml", "--thread", "crash", "--token", inspected.token, "--owner-stopped").status).toBe(0);
+  const repeated=cli("thread","release","flow.yaml","--thread","crash","--token",inspected.token,"--owner-stopped");
+  expect(repeated.status,repeated.stderr).toBe(0);expect(JSON.parse(repeated.stdout).alreadyReleased).toBe(true);
   const usage = JSON.parse(cli("usage", "inspect", "flow.yaml", "--thread", "crash").stdout).usage;
   const receipt = Object.keys(usage.pending)[0]!;
   const resolved = cli("usage", "resolve", "flow.yaml", "--thread", "crash", "--receipt", receipt, "--not-billed", "--owner-stopped");
@@ -106,7 +108,7 @@ it("reconciles an ambiguous receipt through the CLI and resumes under the origin
   expect(cli(...args).status).toBe(1);
   const resolved = cli(...args,"--owner-stopped"); expect(resolved.status,resolved.stderr).toBe(0);
   expect(JSON.parse(resolved.stdout).usage.totals).toMatchObject({totalTokens:3,costUSD:0.002,unknownCalls:0});
-  expect(cli(...args,"--owner-stopped").status).toBe(1);
+  expect(cli(...args,"--owner-stopped").status).toBe(0);
   const resumed = cli("resume","flow.yaml","--thread","resolve","--resume","true","--json");
   expect(resumed.status,resumed.stdout+resumed.stderr).toBe(0);
   const end = resumed.stdout.trim().split("\n").map(line=>JSON.parse(line)).find(event=>event.type==="run.end");
