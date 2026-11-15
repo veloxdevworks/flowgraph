@@ -1138,7 +1138,9 @@ export class RunService {
         const code = (err as { code?: string }).code;
         if (code === "RESUME_MAP_REQUIRED" || code === "RESUME_VALUE_REQUIRED") {
           const pendingInterruptIds = pending.flatMap(it => it.id ? [it.id] : []);
-          throw new ServerRequestError(400, code, `${(err as Error).message} Pending interrupt ids: ${pendingInterruptIds.join(", ")}.`, undefined, { pendingInterruptIds });
+          const keys = req.resume && typeof req.resume === "object" && !Array.isArray(req.resume) ? Object.keys(req.resume) : [];
+          const unknown = pending.length > 1 ? keys.filter(key=>!pendingInterruptIds.includes(key)) : [];
+          throw new ServerRequestError(400, code, `${(err as Error).message}${unknown.length ? ` Keys ${unknown.map(key=>JSON.stringify(key)).join(", ")} are not pending interrupt ids.` : ""} Pending interrupt ids: ${pendingInterruptIds.join(", ")}.`, undefined, { pendingInterruptIds });
         }
         throw err;
       }
@@ -1425,10 +1427,12 @@ export class RunService {
     const status = live?.status ?? meta?.status ?? "completed";
     let pendingInterruptIds: string[] = [];
     if (status === "interrupted" || status === "paused") {
+      try {
       const principal = this.principalFor(caller);
-      const { spec, cwd } = await this.resolveSpec(threadId, persisted?.yaml ?? live?.yaml, principal);
+      const { spec, cwd } = await this.resolveSpec(threadId, undefined, principal);
       const compiled = await this.compile(spec, cwd, threadId, () => undefined, principal);
       pendingInterruptIds = (await compiled.getState(threadId, { applyWaitTimeouts: false }))?.interrupts?.flatMap(it => it.id ? [it.id] : []) ?? [];
+      } catch (err) { log("warn", "run.pending_interrupts_unavailable", {threadId,...errorFields(err)}); }
     }
     const failure = status === "error"
       ? [...(await this.getJournal(threadId, caller))].reverse().find((event) => event.type === "run.error")

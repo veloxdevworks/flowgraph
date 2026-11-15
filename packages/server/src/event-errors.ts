@@ -151,6 +151,7 @@ export class ErrorMasker {
     const errorIds: string[] = [];
     const walk = (v: unknown, depth: number): unknown => {
       if (typeof v === "string") {
+        if (v.includes("THREAD_BUSY") && /Owner:|thread inspect|--token/.test(v)) return "Wait-timeout continuation was deferred because the thread is busy; retry after the active invocation finishes.";
         if (!isSystemErrorText(v)) return v;
         const errorId = this.errorId(threadId, v);
         if (!errorIds.includes(errorId)) errorIds.push(errorId);
