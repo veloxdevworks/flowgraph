@@ -1350,6 +1350,7 @@ OpenAI image dimensions are checked offline and again after rendering, before in
 | `port` | Allocate free TCP port(s) at run time | — | core |
 | `script` | Sandboxed inline Node.js (ESM) | side-effecting | core |
 | `function` | Registered TS function (legacy) | varies | core |
+| `fail` | End the run as failed with a rendered reason (`FLOW_FAILED`) | terminal | core |
 | `subgraph` | Nested / embed a child graph | composite | core |
 | `map` | Fan-out over a collection | composite, parallel | core |
 | `hitl` | Human approve / question / choice gate | interruptible | core |
