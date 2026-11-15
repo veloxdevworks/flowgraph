@@ -326,7 +326,7 @@ Pass `certificate_arn` to Terraform to terminate HTTPS on the ALB (HTTP redirect
 ## v1 graph-source constraints
 
 - Clients upload graph YAML in the start request; it is persisted under `FLOWGRAPH_GRAPH_STORE`.
-- Client `imports` (custom nodes/providers/reducers modules) are **stripped** and not executed, including `imports` inside inline subgraphs and `map` inners at any depth.
+- New uploads containing client `imports` (custom nodes/providers/reducers modules) are rejected, including `imports` inside inline subgraphs and `map` inners at any depth. Older stored graphs still load with imports stripped and a server warning; their modules are never executed.
 - Only built-in node types + YAML `providers:` with `kind: langchain` (including `vendor: bedrock`) are supported.
 - Client-supplied provider secrets in `env` are **rejected**. Use the task IAM role for Bedrock and Secrets Manager / task env for API keys.
 
@@ -349,3 +349,4 @@ runs, recovered from the durable event journal after restart as well as live run
 Client-supplied imports are rejected at upload/preflight with
 `UPLOAD_IMPORTS_BLOCKED`, including imports nested in subgraphs/maps. Install and
 register required modules on the server; uploads never execute client code modules.
+Stored graphs accepted by older servers remain resumable with the same import stripping as before the upgrade.

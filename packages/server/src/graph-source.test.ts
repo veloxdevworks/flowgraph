@@ -129,6 +129,24 @@ edges:
 });
 
 describe("listPersistedGraphs", () => {
+  it("loads pre-upgrade stored graphs while stripping their imports", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-legacy-imports-"));
+    try {
+      const parsed = parseGraphYaml(MINIMAL);
+      const yaml = `${MINIMAL}\nimports:\n  - { providers: "./never-execute.mjs" }\n`;
+      await persistGraph(dir, "legacy", yaml, parsed.spec!, { yamlFormat: "raw" });
+      const loaded = await loadPersistedGraph(dir, "legacy");
+      expect(loaded?.spec.metadata.name).toBe("hello");
+      expect(loaded?.spec.imports).toBeUndefined();
+      expect(loaded?.yaml).toBe(yaml);
+      expect(parseGraphYaml(yaml).diagnostics).toContainEqual(
+        expect.objectContaining({ code: "UPLOAD_IMPORTS_BLOCKED" }),
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("lists meta for persisted graphs", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-graphs-"));
     try {

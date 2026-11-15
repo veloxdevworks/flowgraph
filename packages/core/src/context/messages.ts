@@ -118,10 +118,17 @@ export function fromStoredMessage(raw: unknown): ContextMessage | undefined {
   const serialized = raw as Record<string, unknown>;
   if (serialized["lc"] === 1 && serialized["type"] === "constructor" && Array.isArray(serialized["id"])) {
     const ids = serialized["id"] as unknown[];
-    const kinds: Record<string, string> = { HumanMessage: "human", AIMessage: "ai", SystemMessage: "system", ToolMessage: "tool" };
+    const kinds: Record<string, string> = {
+      HumanMessage: "human",
+      AIMessage: "ai",
+      SystemMessage: "system",
+      ToolMessage: "tool",
+    };
     const kind = ids[ids.length - 1];
     const kwargs = serialized["kwargs"];
-    if (typeof kind !== "string" || !kinds[kind] || !kwargs || typeof kwargs !== "object" || Array.isArray(kwargs)) return undefined;
+    if (typeof kind !== "string" || !kinds[kind] || !kwargs || typeof kwargs !== "object" || Array.isArray(kwargs)) {
+      return undefined;
+    }
     raw = { ...kwargs, type: kinds[kind], _getType: undefined, getType: undefined };
   }
   const m = raw as LcLike;
