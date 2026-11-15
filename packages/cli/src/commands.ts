@@ -233,9 +233,8 @@ program
 
     const { spec, diagnostics: loadDiags } = await loadGraph(graphPath, { cwd });
     if (!spec) {
-      printError("Failed to load graph:");
       printDiagnostics(loadDiags, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(`Failed to load graph: ${loadDiags[0]?.message ?? graphPath}`), {code:"GRAPH_LOAD_FAILED",exitCode:2});
     }
 
     const graphDir = path.dirname(path.resolve(cwd, graphPath));
@@ -412,9 +411,8 @@ program
     loadDotenvFromCwd(cwd);
     const { spec, diagnostics: loadDiags } = await loadGraph(graphPath, { cwd });
     if (!spec) {
-      printError("Failed to load graph:");
       printDiagnostics(loadDiags, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(`Failed to load graph: ${loadDiags[0]?.message ?? graphPath}`), {code:"GRAPH_LOAD_FAILED",exitCode:2});
     }
 
     const graphDir = path.dirname(path.resolve(cwd, graphPath));
@@ -546,9 +544,8 @@ mcpCmd
     const cwd = opts.cwd ?? process.cwd();
     const { spec, diagnostics: loadDiags } = await loadGraph(graphPath, { cwd });
     if (!spec) {
-      printError("Failed to load graph:");
       printDiagnostics(loadDiags, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(`Failed to load graph: ${loadDiags[0]?.message ?? graphPath}`), {code:"GRAPH_LOAD_FAILED",exitCode:2});
     }
     if (!spec.mcpServers || Object.keys(spec.mcpServers).length === 0) {
       printInfo("No mcpServers declared in this graph.");
@@ -598,9 +595,8 @@ mcpAuthCmd
     const cwd = opts.cwd ?? process.cwd();
     const { spec, diagnostics: loadDiags } = await loadGraph(graphPath, { cwd });
     if (!spec) {
-      printError("Failed to load graph:");
       printDiagnostics(loadDiags, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(`Failed to load graph: ${loadDiags[0]?.message ?? graphPath}`), {code:"GRAPH_LOAD_FAILED",exitCode:2});
     }
 
     try {
@@ -626,9 +622,8 @@ mcpAuthCmd
     const cwd = opts.cwd ?? process.cwd();
     const { spec, diagnostics: loadDiags } = await loadGraph(graphPath, { cwd });
     if (!spec) {
-      printError("Failed to load graph:");
       printDiagnostics(loadDiags, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(`Failed to load graph: ${loadDiags[0]?.message ?? graphPath}`), {code:"GRAPH_LOAD_FAILED",exitCode:2});
     }
 
     const rows = await mcpOAuthStatus(spec, cwd, serverName);
@@ -652,9 +647,8 @@ mcpAuthCmd
     const cwd = opts.cwd ?? process.cwd();
     const { spec, diagnostics: loadDiags } = await loadGraph(graphPath, { cwd });
     if (!spec) {
-      printError("Failed to load graph:");
       printDiagnostics(loadDiags, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(`Failed to load graph: ${loadDiags[0]?.message ?? graphPath}`), {code:"GRAPH_LOAD_FAILED",exitCode:2});
     }
 
     try {

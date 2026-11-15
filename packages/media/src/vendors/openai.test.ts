@@ -124,6 +124,7 @@ describe("generations", () => {
       n: 1,
     });
 
+    expect(handle.usage).toEqual({inputTokens:50,outputTokens:50,totalTokens:100});
     expect(saved).toHaveLength(1);
     const out = saved[0]! as { bytes: Uint8Array; mimeType: string; meta?: Record<string, unknown> };
     expect(out.mimeType).toBe("image/png");

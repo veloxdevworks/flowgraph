@@ -150,7 +150,11 @@ it("PLAT-370: a webhook deadline completes without confusing route cancellation 
 }, 20000);
 
 it("a webhook deadline exits 0 when another process already completed the thread", async () => {
-  const { dir } = await fixture({ webhook: true, timeout: "2s" });
+  const { dir, spec } = await fixture({ webhook: true, timeout: "2s" });
+  // Prepare the other process before the deadline is armed. CLI bootstrap
+  // must not consume the window in which this test delivers its external answer.
+  const external = await openSqliteBackend(join(dir,"state.db"));
+  const resumeGraph = await compileGraph(spec,{cwd:dir,checkpointer:external.checkpointer});
   const child = spawn(
     process.execPath,
     [bin, "run", "flow.json", "--thread", "external", "--json"],
@@ -166,12 +170,8 @@ it("a webhook deadline exits 0 when another process already completed the thread
     while (Date.now() < until && !stdout.includes('"interrupt.raised"'))
       await new Promise((r) => setTimeout(r, 20));
     expect(stdout, stderr).toContain('"interrupt.raised"');
-    const resumed = spawnSync(
-      process.execPath,
-      [bin, "resume", "flow.json", "--thread", "external", "--resume", "true"],
-      { cwd: dir, encoding: "utf8", timeout: 10000 },
-    );
-    expect(resumed.status, resumed.stdout + resumed.stderr).toBe(0);
+    const resumed = await resumeGraph.resume({threadId:"external",resume:true});
+    expect(resumed.status,resumed.error?.message).toBe("completed");
     const status = await Promise.race([
       exited,
       new Promise<string>((r) => setTimeout(() => r("still running"), 8000)),
@@ -180,5 +180,6 @@ it("a webhook deadline exits 0 when another process already completed the thread
   } finally {
     child.kill("SIGKILL");
     await exited;
+    external.close();
   }
 }, 20000);
