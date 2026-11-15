@@ -150,7 +150,11 @@ it("PLAT-370: a webhook deadline completes without confusing route cancellation 
 }, 20000);
 
 it("a webhook deadline exits 0 when another process already completed the thread", async () => {
-  const { dir } = await fixture({ webhook: true, timeout: "2s" });
+  // The waiting CLI only learns of an external resume when this deadline fires
+  // and the timeout path sees THREAD_NOT_WAITING. Keep the deadline generous so
+  // a slow second-process startup on CI cannot complete the thread first.
+  const deadlineMs = 30_000;
+  const { dir } = await fixture({ webhook: true, timeout: "30s" });
   const child = spawn(
     process.execPath,
     [bin, "run", "flow.json", "--thread", "external", "--json"],
@@ -162,23 +166,52 @@ it("a webhook deadline exits 0 when another process already completed the thread
   child.stderr.on("data", (b) => (stderr += b));
   const exited = new Promise<number | null>((r) => child.once("exit", r));
   try {
-    const until = Date.now() + 10000;
-    while (Date.now() < until && !stdout.includes('"interrupt.raised"'))
+    const until = Date.now() + 15000;
+    let url: string | undefined;
+    while (Date.now() < until) {
+      for (const line of stdout.split("\n")) {
+        try {
+          const e = JSON.parse(line);
+          if (e.type === "interrupt.raised")
+            url = e.data.interrupts?.[0]?.payload?.data?.webhookUrl;
+        } catch {}
+      }
+      if (url) break;
       await new Promise((r) => setTimeout(r, 20));
-    expect(stdout, stderr).toContain('"interrupt.raised"');
+    }
+    expect(url, stdout + stderr).toBeTruthy();
+    const listedUntil = Date.now() + 10000;
+    let listed: ReturnType<typeof spawnSync> | undefined;
+    while (Date.now() < listedUntil) {
+      listed = spawnSync(
+        process.execPath,
+        [bin, "resume", "flow.json", "--thread", "external", "--list", "--json"],
+        { cwd: dir, encoding: "utf8", timeout: 10000 },
+      );
+      if (listed.status === 0) {
+        try {
+          if (JSON.parse(listed.stdout).interrupts?.length === 1) break;
+        } catch {}
+      }
+      listed = undefined;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(listed?.status, (listed?.stdout ?? "") + (listed?.stderr ?? "")).toBe(0);
+    expect(JSON.parse(listed!.stdout).interrupts).toHaveLength(1);
     const resumed = spawnSync(
       process.execPath,
       [bin, "resume", "flow.json", "--thread", "external", "--resume", "true"],
-      { cwd: dir, encoding: "utf8", timeout: 10000 },
+      { cwd: dir, encoding: "utf8", timeout: 15000 },
     );
     expect(resumed.status, resumed.stdout + resumed.stderr).toBe(0);
+    expect(await readFile(join(dir, "effect.txt"), "utf8")).toBe("ran");
     const status = await Promise.race([
       exited,
-      new Promise<string>((r) => setTimeout(() => r("still running"), 8000)),
+      new Promise<string>((r) => setTimeout(() => r("still running"), deadlineMs + 10_000)),
     ]);
     expect(status, stdout + stderr).toBe(0);
   } finally {
     child.kill("SIGKILL");
     await exited;
   }
-}, 20000);
+}, 60000);
