@@ -75,6 +75,8 @@ export function deserializeReplayDump(entries: Record<string, unknown>): Record<
 
 /** Replay entries of one graph execution, keyed by node path (see {@link replayNodeKey}). */
 export class ReplayStore {
+  private redact: (value: unknown) => unknown = value => value;
+  setRedactor(redact: (value: unknown) => unknown): void { this.redact = redact; }
   private readonly nodes = new Map<string, Map<string, unknown>>();
   private readonly durable = new Map<string, {task:string; write:(entries:Record<string,unknown>,index:string,expected:unknown)=>void|Promise<void>; pending:Promise<void>}>();
   async bind(key:string, task:string, read:()=>Record<string,unknown>|undefined|Promise<Record<string,unknown>|undefined>, write:(entries:Record<string,unknown>,index:string,expected:unknown)=>void|Promise<void>, initialize?:(entries:Record<string,unknown>)=>void|Promise<void>):Promise<void> {
@@ -97,7 +99,7 @@ export class ReplayStore {
   private persist(key:string,index:string,expected:unknown):void {
     const binding=this.durable.get(key);if(!binding)return;
     const entries=this.snapshot(key);
-    binding.pending=binding.pending.then(()=>binding.write(entries,index,expected===undefined?undefined:serializeReplayValue(expected)));
+    binding.pending=binding.pending.then(()=>binding.write(entries,index,expected===undefined?undefined:this.redact(serializeReplayValue(expected))));
     // flush surfaces failures before callers proceed; avoid an unhandled rejection.
     void binding.pending.catch(()=>undefined);
   }
@@ -138,7 +140,7 @@ export class ReplayStore {
     const entries = this.nodes.get(key);
     if (!entries) return {};
     const out: Record<string, unknown> = {};
-    for (const [k, v] of entries) out[k] = serializeReplayValue(v);
+    for (const [k, v] of entries) out[k] = this.redact(serializeReplayValue(v));
     return out;
   }
 

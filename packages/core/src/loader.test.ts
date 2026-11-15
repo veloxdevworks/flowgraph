@@ -289,7 +289,7 @@ edges:
   - { from: run, to: END }
 `;
 
-  it("warns on ${VAR} inside shell command", () => {
+  it("preserves ${VAR} without a load-time warning inside shell command", () => {
     const diags = envExpansionCollisionDiagnostics(
       minimal(`      command: |
         BRANCH="plan/\${SLUG}"
@@ -297,21 +297,21 @@ edges:
 `),
     );
     expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION && d.path === "nodes.run.with.command")).toBe(
-      true,
+      false,
     );
-    expect(diags.some((d) => d.message.includes("${SLUG}"))).toBe(true);
+    expect(diags.some((d) => d.message.includes("${SLUG}"))).toBe(false);
   });
 
-  it("warns on ${VAR:-default} inside shell command", () => {
+  it("preserves ${VAR:-default} without a load-time warning inside shell command", () => {
     const diags = envExpansionCollisionDiagnostics(
       minimal(`      command: 'echo "\${SPEC_SLUG:-}"'`),
     );
     expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION && d.message.includes("SPEC_SLUG"))).toBe(
-      true,
+      false,
     );
   });
 
-  it("warns on ${VAR} inside shell args", () => {
+  it("preserves ${VAR} without a load-time warning inside shell args", () => {
     const diags = envExpansionCollisionDiagnostics(
       minimal(`      command: echo
       args:
@@ -319,11 +319,11 @@ edges:
 `),
     );
     expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION && d.path === "nodes.run.with.args[0]")).toBe(
-      true,
+      false,
     );
   });
 
-  it("warns on ${VAR} inside shell env values", () => {
+  it("preserves ${VAR} without a load-time warning inside shell env values", () => {
     const diags = envExpansionCollisionDiagnostics(
       minimal(`      command: echo hi
       env:
@@ -331,7 +331,7 @@ edges:
 `),
     );
     expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION && d.path === "nodes.run.with.env.X")).toBe(
-      true,
+      false,
     );
   });
 
@@ -373,7 +373,7 @@ edges:
     expect(diags.some((d) => d.code === NODE_BODY_ENV_EXPANSION)).toBe(false);
   });
 
-  it("loadGraph returns NODE_BODY_ENV_EXPANSION on the success path", async () => {
+  it("loadGraph preserves shell interpolation without obsolete collision warnings", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-env-lint-"));
     const file = path.join(dir, "g.graph.yaml");
     await fs.writeFile(
@@ -388,7 +388,7 @@ edges:
         diagnostics.some(
           (d) => d.code === NODE_BODY_ENV_EXPANSION && d.severity === "warning",
         ),
-      ).toBe(true);
+      ).toBe(false);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }

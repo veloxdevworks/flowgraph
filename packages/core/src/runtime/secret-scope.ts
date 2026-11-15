@@ -1,3 +1,4 @@
+import { observeSecret } from "./secret-redaction.js";
 import type { NodeRunContext } from "../context.js";
 import { assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
 
@@ -15,7 +16,9 @@ export function secretScope(ctx: NodeRunContext): Record<string, string> {
     get: (_target, name) => {
       if (typeof name !== "string") return undefined;
       check(name);
-      return Object.hasOwn(process.env, name) ? process.env[name] : "";
+      const value = Object.hasOwn(process.env, name) ? process.env[name] : "";
+      observeSecret(value);
+      return value;
     },
   });
 }

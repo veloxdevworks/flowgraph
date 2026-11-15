@@ -17,7 +17,8 @@ import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
-import { createEnvSecretProvider } from "./secrets.js";
+import { SecretRedaction, SECRET_REDACTION, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
+import { createEnvSecretProvider, DEFAULT_REDACT_PATTERNS } from "./secrets.js";
 import {
   createLogger,
   type RunContext,
@@ -622,6 +623,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         ...(payload instanceof Command ? { resume: payload.resume, ...(payload.goto !== undefined ? { goto: payload.goto } : {}), update: { ...(payload.update as Record<string, unknown> ?? {}), [REPLAY_WORKSPACE_CHANNEL]: replayWorkspace } } : { update: { ...(payload ?? {}), [REPLAY_WORKSPACE_CHANNEL]: replayWorkspace } }),
       });
     }
+    replay.setRedactor(value => events.redact?.(value) ?? value);
     const runScope: RunScope = { replay, checkpointer: checkpointer ?? compiledLg, ...(replayWorkspace ? { replayWorkspace } : {}), path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal, accounting };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
     const raised = new Set(pendingResumeInterrupts.map(it => interruptFingerprint(toInterruptInfo(it))));
@@ -1028,7 +1030,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       try {
         payload = await validateAdmission(payload, runOpts, mode);
         const accounting = await UsageLedger.open(checkpointer ?? compiledLg, threadId, graphSpec.runtime?.budget);
-        return await withUsageLedger(accounting, () => invokeOwned(payload, runOpts, mode, overrides));
+        return await withSecretRedaction((baseCtx as Record<symbol, unknown>)[SECRET_REDACTION] as SecretRedaction, () => withUsageLedger(accounting, () => invokeOwned(payload, runOpts, mode, overrides)));
       } finally { await claim.release(); }
     });
   };
@@ -1255,7 +1257,8 @@ async function assembleCompiledLangGraph(
     ? path.resolve(cwd, opts.workspace)
     : resolveGraphWorkspace(spec, graphDir);
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const events = createEventBus({ runId, graph: spec.metadata.name });
+  const redaction = new SecretRedaction([...DEFAULT_REDACT_PATTERNS, ...(spec.runtime?.secrets?.redact?.patterns ?? []).flatMap(p => { try { return [new RegExp(p, "gi")]; } catch { return []; } })], spec.runtime?.secrets?.redact?.headers);
+  const events = createEventBus({ runId, graph: spec.metadata.name, redact: value => redactSecrets(value, redaction) });
   for (const sink of opts.sinks ?? []) events.subscribe(sink);
 
   for (const extra of opts.extraFactories ?? []) {
@@ -1329,6 +1332,7 @@ async function assembleCompiledLangGraph(
     mcp: mcpHub,
     store,
   };
+  (baseCtx as Record<symbol, unknown>)[SECRET_REDACTION] = redaction;
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
   if (opts.nodePolicy) (baseCtx as Record<symbol, unknown>)[NODE_POLICY] = opts.nodePolicy;
   if (opts.providers?.length || opts.nodePolicy) {
@@ -1435,7 +1439,7 @@ async function assembleCompiledLangGraph(
           return compiled.run(state, ctx).then((res) => {
             finishInterruptDeadline(runScopeOf(lgConfig), nodeSpec.id);
             return { res, ctx };
-          });
+          }, err => { throw events.redact?.(err) ?? err; });
         },
         {
           retry: nodeRetry as RetryConfigInput,
@@ -1454,7 +1458,7 @@ async function assembleCompiledLangGraph(
       const sealed = { ...dropUnownedReserved(update, nodeSpec.type, opts.nodePolicy) };
       if (Object.keys(run.ctx._onceUpdates).length > 0) sealed[ONCE_CHANNEL] = run.ctx._onceUpdates;
       if (run.ctx._issueUpdates.length > 0) sealed[ISSUES_CHANNEL] = run.ctx._issueUpdates;
-      return sealed;
+      return (events.redact?.(sealed) ?? sealed) as Record<string, unknown>;
     };
     const finalizeUpdate = (run: NodeRun): Record<string, unknown> => sealUpdate(resultToUpdate(run.res), run);
 
@@ -2474,7 +2478,7 @@ function buildNodeCtx(
       const savedReplay = replayAttachment(runScope, nodeId);
       if (savedReplay) (data as Record<string, unknown>)["__agentReplay"] = savedReplay;
       const tagged = { ...payload, data };
-      return lgInterrupt(tagged) as T;
+      return lgInterrupt(events.redact?.(tagged) ?? tagged) as T;
     },
     async once<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
       const scopedKey = `${nodeId}:${key}`;
@@ -2484,7 +2488,7 @@ function buildNodeCtx(
       return value;
     },
     issue(input: IssueInput): RunIssue {
-      const stamped = stampIssue(input, { nodeId, nodeType });
+      const stamped = stampIssue((events.redact?.(input) ?? input) as IssueInput, { nodeId, nodeType });
       const key = issueDedupeKey(stamped);
       if (seenIssueKeys.has(key)) return stamped;
       seenIssueKeys.add(key);
@@ -2866,9 +2870,9 @@ function addCheckpointedMap(
       };
       if (Object.keys(run.onceUpdates).length > 0) update[ONCE_CHANNEL] = run.onceUpdates;
       if (run.issueUpdates.length > 0) update[ISSUES_CHANNEL] = run.issueUpdates;
-      return update;
+      return (ctx.events.redact?.(update) ?? update) as Record<string, unknown>;
     } catch (err) {
-      return recover(err, state, itemId);
+      return recover(ctx.events.redact?.(err) ?? err, state, itemId);
     }
   });
 

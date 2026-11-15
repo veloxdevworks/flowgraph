@@ -80,6 +80,7 @@ export interface FlowgraphEvent<T = unknown> {
 export type EventSink = (event: FlowgraphEvent) => void | Promise<void>;
 
 export interface EventBus {
+  redact?: (value: unknown) => unknown;
   emit(type: EventType, data: unknown, scope?: EventScope): void;
   subscribe(sink: EventSink): () => void;
   /** For streaming: get an async iterable of events */
@@ -87,6 +88,7 @@ export interface EventBus {
 }
 
 export interface EventBusOptions {
+  redact?: (value: unknown) => unknown;
   runId: string;
   threadId?: string;
   graph: string;
@@ -102,6 +104,7 @@ export function createEventBus(opts: EventBusOptions): EventBus {
     if (accounting && ["run.end", "run.error", "run.aborted", "run.paused"].includes(type)) {
       data = { ...(data as Record<string, unknown>), usage: accounting.snapshot() };
     }
+    if (opts.redact) data = opts.redact(data);
     const event: FlowgraphEvent = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       type,
@@ -168,7 +171,7 @@ export function createEventBus(opts: EventBusOptions): EventBus {
     }
   }
 
-  return { emit, subscribe, stream };
+  return { emit, subscribe, stream, ...(opts.redact ? { redact: opts.redact } : {}) };
 }
 
 // ---------------------------------------------------------------------------

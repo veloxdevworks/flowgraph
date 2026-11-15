@@ -259,7 +259,7 @@ The **same** graph file a developer runs locally with `--on-interrupt prompt --s
 ### JSONL and logging
 
 `run --json` and `resume --json` keep stdout as JSONL events. Runtime logger
-messages go to stderr, including debug/info messages. `FLOWGRAPH_LOG_LEVEL=warn`
+messages go to stderr. The default level is `info`; set `FLOWGRAPH_LOG_LEVEL=debug` explicitly for command diagnostics. Known secret values are masked at every level. `FLOWGRAPH_LOG_LEVEL=warn`
 limits console logs to warnings/errors; `FLOWGRAPH_LOG_LEVEL=silent` suppresses
 console logging while structured log events remain available. Failed runs print
 the thread id and known usage with pending/unknown/unpriced counts on stderr.

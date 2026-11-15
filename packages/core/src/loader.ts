@@ -8,7 +8,6 @@ import { parse as parseYaml } from "yaml";
 import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import {
   envExpansionCollisionDiagnostics,
-  LOAD_TIME_ENV_VAR_RE,
 } from "./runtime/env-expansion-lint.js";
 import {
   declaredRouteTargets,
@@ -64,7 +63,7 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
   catch { return { spec: null, diagnostics: [{ severity: "error", code: "FILE_NOT_FOUND", message: `Cannot read: ${resolved}` }] }; }
   const envCollisionDiags = envExpansionCollisionDiagnostics(raw);
   let parsed: unknown;
-  try { parsed = normalizeNodeTypeAliases(parseYaml(expandEnvVars(raw))); }
+  try { parsed = normalizeNodeTypeAliases(expandGraphEnv(parseYaml(raw))); }
   catch (err) {
     return { spec: null, diagnostics: [{ severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` }, ...envCollisionDiags] };
   }
@@ -125,10 +124,25 @@ function isGraphFileRef(ref: string): boolean {
   return ref.endsWith(".yaml") || ref.endsWith(".yml") || ref.startsWith(".") || ref.includes("/") || ref.includes("\\");
 }
 
-function expandEnvVars(yaml: string): string {
-  return yaml.replace(LOAD_TIME_ENV_VAR_RE, (_m, name: string, def: string) => {
-    return process.env[name] ?? def ?? "";
-  });
+/** Expand trusted config/runtime scalar values after parsing, never source text or keys. */
+function expandGraphEnv(parsed: unknown): unknown {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+  const root = parsed as Record<string, unknown>;
+  const expand = (value: unknown): unknown => {
+    if (typeof value === "string") return value.replace(/(?<!\$)\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => process.env[name] ?? def ?? "").replace(/\$\$\{/g, "${");
+    if (Array.isArray(value)) return value.map(expand);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, val]) => [key, expand(val)]));
+    return value;
+  };
+  for (const key of ["config", "runtime"]) if (root[key] != null) root[key] = expand(root[key]);
+  const node = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    const n = value as Record<string, unknown>, withConfig = n.with as Record<string, unknown> | undefined;
+    if (n.type === "map") node(withConfig?.node);
+    if (n.type === "subgraph") { if (n.graph) expandGraphEnv(n.graph); if (withConfig?.graph) expandGraphEnv(withConfig.graph); }
+  };
+  if (Array.isArray(root.nodes)) root.nodes.forEach(node);
+  return root;
 }
 
 /** Deprecated YAML node type → canonical type. */
