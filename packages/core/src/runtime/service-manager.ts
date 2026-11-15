@@ -8,6 +8,8 @@
  * does not orphan vite/dev-server processes.
  */
 
+import { createHash } from "node:crypto";
+import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as net from "node:net";
 import { normalizeShellText } from "../nodes/shell.js";
@@ -54,6 +56,7 @@ export interface ServiceInfo {
 }
 
 interface TrackedService {
+  identity: string;
   name: string;
   threadId: string;
   child: ChildProcess;
@@ -89,7 +92,7 @@ function ensureExitHook(): void {
     for (const svc of services.values()) {
       if (!svc.exited && svc.child.pid) {
         try {
-          svc.child.kill("SIGKILL");
+          signalTracked(svc, "SIGKILL");
         } catch {
           /* ignore */
         }
@@ -99,7 +102,7 @@ function ensureExitHook(): void {
 }
 
 function toInfo(svc: TrackedService): ServiceInfo {
-  const running = !svc.exited && svc.child.exitCode === null && !svc.child.killed;
+  const running = !svc.exited;
   return {
     name: svc.name,
     status: running ? "running" : "stopped",
@@ -252,9 +255,15 @@ export async function startService(
 ): Promise<ServiceInfo> {
   ensureExitHook();
 
+  const identity = createHash("sha256").update(JSON.stringify([
+    normalizeShellText(spec.command), spec.args?.map(normalizeShellText) ?? null, path.resolve(spec.cwd ?? process.cwd()),
+    Object.entries(spec.env ?? {}).sort(([a],[b]) => a.localeCompare(b)), spec.ready ?? null,
+    spec.readyTimeout ?? null, spec.readyInterval ?? null, spec.stopSignal ?? "SIGTERM", spec.stopTimeout ?? null, !!spec.keepAlive,
+  ])).digest("hex");
   const key = serviceKey(threadId, spec.name);
   const existing = services.get(key);
   if (existing && !existing.exited) {
+    if (existing.identity !== identity) throw Object.assign(new Error(`Service "${spec.name}" is already running with different start options; stop or restart it explicitly.`), { code: "SERVICE_START_CONFLICT" });
     return toInfo(existing);
   }
   // Stale entry from a prior exited process — drop it before re-start.
@@ -274,8 +283,9 @@ export async function startService(
   };
 
   const child = useShell
-    ? spawn(command, { shell: true, cwd, env, stdio: ["ignore", "pipe", "pipe"] })
+    ? spawn(command, { detached: process.platform !== "win32", shell: true, cwd, env, stdio: ["ignore", "pipe", "pipe"] })
     : spawn(command, args ?? [], {
+        detached: process.platform !== "win32",
         shell: false,
         cwd,
         env,
@@ -288,6 +298,7 @@ export async function startService(
     : DEFAULT_STOP_TIMEOUT_MS;
 
   const svc: TrackedService = {
+    identity,
     name: spec.name,
     threadId,
     child,
@@ -341,44 +352,32 @@ export async function startService(
   return toInfo(svc);
 }
 
+/** POSIX groups include shell children; ChildProcess.killed only means a signal was sent. */
+function signalTracked(svc: TrackedService, signal: NodeJS.Signals): void {
+  if (process.platform !== "win32" && svc.child.pid) {
+    try { process.kill(-svc.child.pid, signal); return; }
+    catch (error) { if (!["ESRCH", "EPERM"].includes((error as {code?: string}).code ?? "")) throw error; }
+  }
+  if (process.platform === "win32" && svc.child.pid) {
+    const killer = spawn("taskkill", ["/PID", String(svc.child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    killer.once("error", () => { svc.child.kill(signal); });
+    return;
+  }
+  svc.child.kill(signal);
+}
 async function stopTracked(
   svc: TrackedService,
   opts: { force?: boolean; signal?: AbortSignal } = {},
 ): Promise<void> {
   if (svc.exited) return;
-
-  const sig = opts.force ? "SIGKILL" : svc.stopSignal;
-  try {
-    svc.child.kill(sig);
-  } catch {
-    /* already gone */
-  }
-
-  if (opts.force) {
-    // Give the event loop a tick to observe the kill.
-    await sleep(0);
-    return;
-  }
-
-  const timeoutMs = svc.stopTimeoutMs;
-  const deadline = Date.now() + timeoutMs;
-  while (!svc.exited && Date.now() < deadline) {
-    if (opts.signal?.aborted) break;
-    try {
-      await sleep(Math.min(50, Math.max(0, deadline - Date.now())), opts.signal);
-    } catch {
-      break;
-    }
-  }
-
-  if (!svc.exited) {
-    try {
-      svc.child.kill("SIGKILL");
-    } catch {
-      /* ignore */
-    }
-    await sleep(0);
-  }
+  signalTracked(svc, opts.force ? "SIGKILL" : svc.stopSignal);
+  const wait = async (ms: number, interruptible = false) => {
+    const until = Date.now() + ms;
+    while (!svc.exited && Date.now() < until && !(interruptible && opts.signal?.aborted)) await sleep(Math.min(25, Math.max(1, until-Date.now())));
+  };
+  if (!opts.force && !opts.signal?.aborted) await wait(svc.stopTimeoutMs, true);
+  if (!svc.exited) { signalTracked(svc, "SIGKILL"); await wait(2000); }
+  if (!svc.exited) throw Object.assign(new Error(`Service "${svc.name}" did not stop after SIGKILL; its process is still tracked.`), {code:"SERVICE_STOP_FAILED",retryable:false});
 }
 
 export async function stopService(
@@ -419,14 +418,13 @@ export async function terminateThreadServices(
   opts: { force?: boolean } = {},
 ): Promise<void> {
   const toStop: TrackedService[] = [];
-  for (const [key, svc] of services) {
+  for (const svc of services.values()) {
     if (svc.threadId !== threadId) continue;
     if (!opts.force && svc.keepAlive) continue;
     toStop.push(svc);
-    services.delete(key);
   }
   await Promise.all(
-    toStop.map((svc) => stopTracked(svc, opts.force ? { force: true } : {})),
+    toStop.map(async (svc) => { await stopTracked(svc, opts.force ? { force: true } : {}); services.delete(serviceKey(svc.threadId, svc.name)); }),
   );
 }
 

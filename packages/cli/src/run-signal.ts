@@ -14,11 +14,13 @@ export function abortOnSignals(onFirst: () => void): { signal: AbortSignal; disp
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
+  process.on("SIGHUP", onSignal);
   return {
     signal: controller.signal,
     dispose() {
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
+      process.off("SIGHUP", onSignal);
     },
   };
 }
