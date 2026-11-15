@@ -104,6 +104,7 @@ export const UNTRUSTED_NODE_POLICY: NodePolicy = {
   allowedFunctions: [],
   blockHostExec: true,
   blockAgentRefs: true,
+  blockScriptFiles: true,
   blockImports: true,
   blockInboundWebhooks: true,
   reason: REASON,

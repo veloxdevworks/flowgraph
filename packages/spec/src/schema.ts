@@ -891,7 +891,7 @@ export const ServiceWithSchema = BaseWithSchema.extend({
   }
 });
 
-// script node — sandboxed inline Node.js (ESM) source
+// script node — sandboxed Node.js (ESM) source
 export const ScriptPermissionsSchema = z.object({
   fsRead: z.array(z.string()).optional().describe("Paths granted via --allow-fs-read"),
   fsWrite: z.array(z.string()).optional().describe("Paths granted via --allow-fs-write"),
@@ -902,14 +902,20 @@ export const ScriptPermissionsSchema = z.object({
 export const ScriptWithSchema = BaseWithSchema.extend({
   code: z
     .string()
-    .min(1, "Script code is required")
-    .describe("Node.js ESM source. Must `export default async function(input, ctx) { ... }`."),
-  input: z.record(z.string()).optional().describe("Rendered templates passed as the script's input argument"),
+    .regex(/\S/, "Script code must not be empty")
+    .optional()
+    .describe("Self-contained Node.js ESM source with a default-export function; mutually exclusive with file."),
+  file: z.string().trim().min(1).optional().describe("Self-contained ESM source file, relative to the declaring graph; mutually exclusive with code."),
+  input: z.record(z.unknown()).optional().describe("Structured input, with templates rendered recursively and value types preserved"),
   env: z.record(z.string()).optional().describe("Environment variables available to the child process"),
   timeout: DurationSchema.optional(),
   permissions: ScriptPermissionsSchema.optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
+}).superRefine((value, ctx) => {
+  if ((value.code !== undefined) === (value.file !== undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["code"], message: "script: provide exactly one of code or file" });
+  }
 });
 
 // subgraph node

@@ -49,6 +49,8 @@ export interface NodePolicy {
    * or package on the host (directly, or through an operator or import alias).
    */
   blockAgentRefs?: boolean | undefined;
+  /** Refuse script sources loaded from host files; inline code is unaffected. */
+  blockScriptFiles?: boolean | undefined;
   /**
    * Refuse `imports` in the graph and in inline subgraphs: node, provider and
    * reducer imports load a module from the host and register what it exports
@@ -77,6 +79,7 @@ export type NodePolicyErrorCode =
   | "HOST_EXEC_BLOCKED"
   | "RESERVED_CHANNEL_BLOCKED"
   | "AGENT_REF_BLOCKED"
+  | "SCRIPT_FILE_BLOCKED"
   | "IMPORTS_BLOCKED"
   | "INBOUND_WEBHOOK_BLOCKED";
 
@@ -204,6 +207,7 @@ export function assertNodeSpecAllowed(policy: NodePolicy | undefined, node: { ty
   if (!policy) return;
   const type = String(node.type ?? "");
   const w = (node.with ?? {}) as Record<string, unknown>;
+  if (type === "script" && w.file !== undefined) assertScriptFileAllowed(policy, where);
   if (type === "agent" || type === "intelligent") {
     for (const name of registeredToolNamesOf(w.tools)) assertToolAllowed(policy, name, `${where} agent tool`);
     if (w.agent !== undefined) assertAgentRefAllowed(policy, where);
@@ -660,6 +664,14 @@ export function assertAgentRefAllowed(policy: NodePolicy | undefined, where: str
   throw new NodePolicyError(
     "AGENT_REF_BLOCKED",
     `${where}: with.agent loads an AGENT.md from a path or package on the host, which is not allowed here${suffix(policy)}`,
+  );
+}
+
+export function assertScriptFileAllowed(policy: NodePolicy | undefined, where: string): void {
+  if (!policy?.blockScriptFiles) return;
+  throw new NodePolicyError(
+    "SCRIPT_FILE_BLOCKED",
+    `${where}: with.file loads script source from the host, which is not allowed here${suffix(policy)}`,
   );
 }
 

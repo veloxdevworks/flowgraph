@@ -50,6 +50,7 @@ export {
   assertNoReservedInput,
   withoutReservedKeys,
   assertAgentRefAllowed,
+  assertScriptFileAllowed,
   assertImportsAllowed,
   assertInboundWebhookAllowed,
   isReservedChannel,

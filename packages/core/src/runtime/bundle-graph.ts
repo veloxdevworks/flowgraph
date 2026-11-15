@@ -1,11 +1,12 @@
 /**
  * Partial graph bundler for remote portability.
  *
- * Inlines filesystem-backed subgraphs (`uses` → `spec`) and AGENT.md refs
- * (`with.agent` → `with.system`). Collects hard blockers for refs that cannot
+ * Inlines filesystem-backed subgraphs (`uses` → `spec`), AGENT.md refs
+ * (`with.agent` → `with.system`) and script sources (`with.file` → `with.code`). Collects hard blockers for refs that cannot
  * be made portable (skills, custom imports, stdio MCP, shell nodes).
  */
 
+import { readFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { GraphSpec, NodeSpec } from "@flowgraph/spec";
 import { loadGraph } from "../loader.js";
@@ -146,6 +147,26 @@ async function bundleNodeRef(
       } catch (err) {
         blockers.push(
           `node "${opts.pathPrefix}${node.id}" (with.agent: ${agentRef}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  if (node.type === "script") {
+    const withBlock = { ...((next.with ?? {}) as Record<string, unknown>) };
+    const fileRef = withBlock["file"];
+    if (typeof fileRef === "string" && fileRef.trim()) {
+      const resolved = path.resolve(opts.cwd, fileRef.trim());
+      try {
+        const code = await readFile(resolved, "utf8");
+        if (!code.trim()) throw new Error("source file is empty");
+        delete withBlock["file"];
+        withBlock["code"] = code;
+        next = { ...next, with: withBlock };
+        inlined.push(`script "${opts.pathPrefix}${node.id}" (with.file: ${fileRef}) → inlined as with.code`);
+      } catch (err) {
+        blockers.push(
+          `node "${opts.pathPrefix}${node.id}" (script with.file: ${fileRef}): could not read "${resolved}" — ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
