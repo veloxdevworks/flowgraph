@@ -7,6 +7,7 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
+import { currentEnvironment } from "../environment.js";
 import {
   defineProvider,
   type AgentRequest,
@@ -16,6 +17,7 @@ import {
 } from "./types.js";
 
 const execFile = promisify(execFileCb);
+const DEFAULT_CLI_TIMEOUT_MS = 300_000;
 
 export type CliVendor = "claude" | "cursor" | "codex" | "grok";
 
@@ -46,6 +48,8 @@ export interface CliProviderOptions {
   cwd?: string;
   /** Override the binary name/path (defaults per vendor). */
   binary?: string;
+  /** Wall-clock limit for one CLI invocation (default five minutes). */
+  timeoutMs?: number;
   /** Injected for tests. */
   execFileFn?: typeof execFile;
   /** Injected for tests. */
@@ -99,7 +103,7 @@ export function apiKeyEnvForProviderKind(kind: string, vendor?: string): string 
   return undefined;
 }
 
-export function hasApiKey(envName: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+export function hasApiKey(envName: string | undefined, env: NodeJS.ProcessEnv = currentEnvironment()): boolean {
   if (!envName) return false;
   const v = env[envName];
   return typeof v === "string" && v.trim().length > 0;
@@ -196,7 +200,7 @@ function buildArgs(vendor: CliVendor, prompt: string, model?: string): string[] 
       return args;
     }
     case "codex": {
-      const args = ["exec", prompt];
+      const args = ["exec", "--skip-git-repo-check", prompt];
       if (model) args.push("-m", model);
       return args;
     }
@@ -272,6 +276,10 @@ export function createCliProvider(options: CliProviderOptions): ProviderAdapter 
   const vendor = options.vendor;
   const runExec = options.execFileFn ?? execFile;
   const detectFn = options.detectFn;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("CLI timeoutMs must be a positive finite number");
+  }
 
   return defineProvider({
     name: options.name,
@@ -306,12 +314,17 @@ export function createCliProvider(options: CliProviderOptions): ProviderAdapter 
       ctx.emit("step", { provider: options.name, vendor, binary, model });
 
       try {
-        const { stdout, stderr } = await runExec(binary, args, {
+        const execution = runExec(binary, args, {
           cwd,
           maxBuffer: 20 * 1024 * 1024,
+          timeout: timeoutMs,
           signal: ctx.signal,
-          env: process.env,
+          env: currentEnvironment(),
         });
+        // The prompt is in argv. Leaving execFile's stdin pipe open makes
+        // non-interactive CLIs wait forever for additional input.
+        execution.child?.stdin?.end();
+        const { stdout, stderr } = await execution;
         if (stderr?.trim()) {
           ctx.node.logger.debug(`[cli:${vendor}] stderr: ${stderr.trim().slice(0, 500)}`);
         }
@@ -334,7 +347,10 @@ export function createCliProvider(options: CliProviderOptions): ProviderAdapter 
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`Local CLI provider "${options.name}" (${binary}) failed: ${msg}`, {
+        const detail = (err as { killed?: boolean; signal?: string })?.killed && (err as { signal?: string }).signal === "SIGTERM"
+          ? `timed out after ${timeoutMs}ms: ${msg}`
+          : msg;
+        throw new Error(`Local CLI provider "${options.name}" (${binary}) failed: ${detail}`, {
           cause: err,
         });
       }

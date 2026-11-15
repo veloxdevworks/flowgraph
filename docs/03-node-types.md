@@ -239,7 +239,7 @@ Model-based routing:
 ```
 
 - `with.match: firstMatch` (default) selects the first matching route. `with.match: allMatches` fans out to every matching destination, deduplicates destinations, and writes an array of chosen route keys as the router output. The default route is used only when no condition matches. Model routers select one route.
-- Model-based routers are constrained to emit one of the declared route keys (enforced via structured output), so routing is always valid.
+- Model-based routers receive every declared route key and description, including the default as an explicit "none of the above" choice (enforced via structured output).
 - Routers are `routing: true` capability; they return a `Command{ goto }` rather than a state update.
 - In the desktop builder, dragging from a router node adds a route (not a parallel edge), and the canvas draws dashed edges from `with.routes`.
 
@@ -542,7 +542,7 @@ The script **must** `export default` an async (or sync) function:
 
 ```js
 export default async function (input, ctx) {
-  // input  — rendered with.input object
+  // input  — rendered with.input object, or the model's tool arguments when omitted
   // ctx    — { nodeId, runId, threadId }
   return { greeting: `Hello, ${input.name}!` };
 }
@@ -587,6 +587,8 @@ The file must contain the same default-export function as inline code:
         findings: "{{ state.findings }}"
       options: { compact: true, limit: 10 }
 ```
+
+When a script is exposed as a node tool, omitting `with.input` passes the model's tool arguments directly. An explicit `with.input` object can select or transform those arguments with `{{ input.qty }}`.
 
 `with.input` accepts nested objects, arrays, numbers, booleans and null. Templates
 render recursively: a whole-value expression preserves its result's type, while

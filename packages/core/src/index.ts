@@ -428,3 +428,5 @@ export { UsageLedger, inspectThreadUsage, resolveThreadUsage, type RunUsage, typ
 export {MediaSubmissionRejectedError} from "./media/types.js";
 export {inspectThreadReplay,resolveThreadReplay} from "./providers/replay-persistence.js";
 export type {ReplayCheckpointStore} from "./providers/replay-persistence.js";
+
+export { currentEnvironment, withEnvironment } from "./environment.js";

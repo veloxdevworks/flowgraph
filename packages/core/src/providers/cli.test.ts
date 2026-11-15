@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createCliProvider,
   detectLocalCli,
@@ -75,6 +78,41 @@ describe("cli provider helpers", () => {
 });
 
 describe("createCliProvider", () => {
+  it.each(["claude", "cursor", "codex", "grok"] as const)("bounds %s invocations with a default timeout", async (vendor) => {
+    const execFileFn = vi.fn(async () => ({ stdout: "ok", stderr: "" }));
+    const provider = createCliProvider({ name: vendor, vendor, detectFn: async () => true, execFileFn: execFileFn as never });
+    await provider.run({ prompt: "pong", tools: [], permission: "auto" }, fakeCtx());
+    expect(execFileFn).toHaveBeenCalledWith(expect.any(String), expect.any(Array), expect.objectContaining({ timeout: 300_000 }));
+    if (vendor === "codex") expect((execFileFn.mock.calls[0] as unknown[])[1]).toContain("--skip-git-repo-check");
+  });
+
+  it.skipIf(process.platform === "win32")("closes stdin so a CLI waiting for EOF completes in a non-git directory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "fg-cli-eof-"));
+    const binary = join(dir, "codex-stub");
+    try {
+      await writeFile(binary, `#!${process.execPath}\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write('pong'));\n`);
+      await chmod(binary, 0o755);
+      const provider = createCliProvider({ name: "codex", vendor: "codex", binary, timeoutMs: 2000, detectFn: async () => true });
+      const ctx = fakeCtx();
+      ctx.node.workspace = dir;
+      const result = await provider.run({ prompt: "reply pong", tools: [], permission: "auto" }, ctx);
+      expect(result.output).toBe("pong");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(process.platform === "win32")("fails with a readable timeout when a CLI never exits", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "fg-cli-timeout-"));
+    const binary = join(dir, "codex-stub");
+    try {
+      await writeFile(binary, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`);
+      await chmod(binary, 0o755);
+      const provider = createCliProvider({ name: "codex", vendor: "codex", binary, timeoutMs: 100, detectFn: async () => true });
+      const ctx = fakeCtx();
+      ctx.node.workspace = dir;
+      await expect(provider.run({ prompt: "reply pong", tools: [], permission: "auto" }, ctx)).rejects.toThrow(/timed out after 100ms/);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
   it("throws when binary is missing", async () => {
     const provider = createCliProvider({
       name: "local-claude",
@@ -200,7 +238,7 @@ describe("createCliProvider", () => {
     await provider.run({ prompt: "build it", tools: [], permission: "auto" }, fakeCtx());
     expect(execFileFn).toHaveBeenCalledWith(
       "codex",
-      ["exec", "build it", "-m", "gpt-5"],
+      ["exec", "--skip-git-repo-check", "build it", "-m", "gpt-5"],
       expect.any(Object),
     );
   });

@@ -2,14 +2,14 @@
  * Build a Cursor provider from declarative provider config (YAML `providers` block).
  */
 
-import type { ProviderAdapter } from "@flowgraph/core";
+import { currentEnvironment, type ProviderAdapter } from "@flowgraph/core";
 import type { CursorProviderConfig } from "@flowgraph/spec";
 import { createCursorProvider, type CursorRuntime } from "./provider.js";
 
 const DEFAULT_API_KEY_ENV = "CURSOR_API_KEY";
 
 function readEnvKey(name: string): string | undefined {
-  const raw = process.env[name];
+  const raw = currentEnvironment()[name];
   if (raw === undefined || raw === "") return undefined;
   return raw.trim();
 }

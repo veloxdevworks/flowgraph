@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { compileGraph } from "./compiler.js";
 import { ScriptWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { runScriptSandboxed } from "./nodes/script.js";
+import { defineProvider } from "./providers/types.js";
 
 function scriptSpec(nodeWith: Record<string, unknown>): GraphSpec {
   return {
@@ -209,6 +210,23 @@ export default async function() {
 });
 
 describe("script node", () => {
+  it("passes tool arguments by default and preserves explicit input mappings", async () => {
+    for (const mapped of [false, true]) {
+      const spec = scriptSpec({ code: "export default input => input;", ...(mapped ? { input: { qty: "{{ input.qty }}", unit: "{{ input.from }}" } } : {}) });
+      spec.nodes[0]!.id = "convert";
+      spec.nodes[0]!.when = "false";
+      spec.nodes.push({ id: "assistant", type: "agent", provider: "conversion-test", with: { prompt: "convert cups to ml", tools: [{ node: "convert" }], output: { to: "out" } } } as GraphSpec["nodes"][number]);
+      spec.edges = [{ from: "START", to: "convert" }, { from: "convert", to: "assistant" }, { from: "assistant", to: "END" }];
+      const provider = defineProvider({
+        name: "conversion-test", capabilities: { toolCalling: true, structuredOutput: false, streaming: false },
+        async run(_req, ctx) { return { output: await ctx.invokeTool("convert", { qty: 2.5, from: "cups", to: "ml" }), stopReason: "done" }; },
+      });
+      const result = await (await compileGraph(spec, { providers: [provider] })).run();
+      expect(result.status, String(result.error)).toBe("completed");
+      expect(result.state.out).toEqual(mapped ? { qty: 2.5, unit: "cups" } : { qty: 2.5, from: "cups", to: "ml" });
+    }
+  });
+
   it("runs inline code and maps output", async () => {
     // with.input values are template strings; scripts coerce as needed
     const compiled = await compileGraph(

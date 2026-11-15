@@ -304,7 +304,7 @@ Hosted `GET /runs/:threadId` includes `pendingInterruptIds` for interrupted/paus
 
 ### Paths and error events
 
-Relative checkpoint database paths are host settings resolved against the CLI working directory. Node workspaces and media journals resolve from the declaring graph directory, or `runtime.workspace`. Use absolute checkpoint paths when invoking the same graph from different directories; `media inspect` and `recover` resolve the graph workspace unless `--workspace` overrides it.
+Relative checkpoint database paths are host settings resolved against the CLI working directory. The run working directory (`--cwd`, or the current directory) is the default execution workspace, so shell/file paths stay relative to that folder even when the graph is in a subfolder. An explicit `runtime.workspace` still resolves relative to the declaring graph directory, as do graph imports and script source files. Use absolute checkpoint paths when invoking the same graph from different directories; `media inspect` and `recover` resolve the graph workspace unless `--workspace` overrides it.
 
 `--json` failures include a `run.error` event with `data.code` and a one-line reason on stderr, including refusals before a run is admitted. Node errors retain their typed code in both `node.error` and `run.error`. Continuations and forks begin a new invocation with `run.start` followed by their resume/continue event. CLI startup loads graph/runtime packages and optional integrations lazily where supported; this can add about half a second before execution and is separate from node duration.
 

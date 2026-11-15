@@ -187,12 +187,16 @@ export class UsageLedger {
     const reservedUSD = before ? Object.values(this.record.pending).reduce((sum, receipt) => addUSD(sum, receipt.estimateUSD ?? 0), 0) : 0;
     const dollarsOver = maxUSD !== undefined && (before ? usage.costUSD >= maxUSD || (estimateUSD === undefined ? addUSD(usage.costUSD, reservedUSD) >= maxUSD : addUSD(addUSD(usage.costUSD, reservedUSD), estimateUSD) > maxUSD) : usage.costUSD > maxUSD);
     if (!tokensOver && !dollarsOver) return;
-    const detail = `tokens=${usage.totalTokens}/${maxTokens ?? "∞"}, usd=${usage.costUSD}/${maxUSD ?? "∞"}${estimateUSD === undefined ? "" : `, nextEstimateUSD=${estimateUSD}`}`;
     const onExceed = this.budget.onExceed ?? "warn";
+    // A completed response belongs in the node's output. Interrupt only the
+    // next paid admission, so a budget gate cannot discard already-paid work.
+    if (onExceed === "interrupt" && !before) return;
+    const dollars = usage.unpricedCalls > 0 ? `unknown (known subtotal=${usage.costUSD})` : String(usage.costUSD);
+    const detail = `tokens=${usage.totalTokens}/${maxTokens ?? "∞"}, usd=${dollars}/${maxUSD ?? "∞"}${estimateUSD === undefined ? "" : `, nextEstimateUSD=${estimateUSD}`}`;
     ctx.emit("custom.budget.exceeded", { detail, onExceed, usage });
     if (onExceed === "fail") throw error("BUDGET_EXCEEDED", `Budget exceeded (${detail})`);
     if (onExceed === "interrupt") {
-      const answer = ctx.interrupt({ reason: `Budget exceeded (${detail}). Approve one additional paid call? Each approval admits one call; later calls may request approval again.`, kind: "approval", data: { usage } });
+      const answer = ctx.interrupt({ reason: `Budget exceeded (${detail}). Approve one additional paid call? Each approval admits one call; later calls may request approval again.`, kind: "approval", data: { usage, budgetGate: true } });
       if (answer !== true && !(answer && typeof answer === "object" && (answer as { approved?: unknown }).approved === true)) throw error("BUDGET_DENIED", "Budget continuation was denied; no further paid call was admitted");
     } else ctx.logger.warn(`Budget exceeded (${detail}); continuing (onExceed: warn).`);
   }

@@ -154,7 +154,7 @@ providers:
 - A bare vendor name also works (`provider: xai` on a node) using that vendor's default key env var.
 - A node without `provider:` uses `config.defaults.provider` when that provider can do the modality, otherwise the only provider that can, otherwise fails listing the candidates.
 - **Third-party vendors:** a plugin loaded through `imports[].providers` calls `registerMediaVendor({ vendor, modalities, create })` (or `registerMediaProvider`) from `@flowgraph/core`; `kind: media` entries then name the vendor. A `MediaProvider` implements `start` / `poll` / `fetch` / `cancel` and persists outputs through the supplied `saveOutput`.
-**Reference vendors (`@flowgraph/media`)**, loaded automatically by the CLI and server. Written from each vendor's official docs (2026-11-05); **not yet exercised against the live APIs**. Model ids and prices move quickly, so check the vendor docs and override with `model:` on the node or `model` on the provider entry.
+**Reference vendors (`@flowgraph/media`)**, loaded automatically by the CLI and server. Written from each vendor's official docs (2026-11-05); **not yet exercised against the live APIs**. Model ids and prices move quickly, so check the vendor docs. Media model precedence is top-level node `model:`, then `with.model`, then the provider's `model`; the node overrides are passed through to the vendor.
 
 | Vendor id | Use via | Serves | Key env (default) | Default model(s) | Notes |
 |---|---|---|---|---|---|
@@ -189,6 +189,8 @@ providers:
 **v1 limits:** the CLI provider is single-shot (prompt → text). It does not mediate flowgraph tools/MCP through the CLI; the installed CLI runs its own agent loop. For hub-and-spoke tool wiring, use the SDK providers (`claude` / `cursor` / `langchain`) with an API key.
 
 Cursor CLI (`vendor: cursor`) is always invoked with `-p --trust` so headless Desktop/sidecar runs skip the workspace-trust prompt. Claude CLI uses `-p --permission-mode dontAsk` (Claude `-p` already skips its trust dialog). Neither path passes `--force` / `--yolo` / `--always-approve` (those auto-allow shell commands).
+
+CLI providers close stdin after passing the prompt in arguments and enforce a five-minute wall-clock timeout. A stalled child fails with the provider/binary name and timeout. Programmatic hosts may set `createCliProvider({ timeoutMs })` to another positive finite limit. Codex uses `exec --skip-git-repo-check`, so ordinary non-git working folders are supported.
 
 ## 3. Adapter: Claude (`@flowgraph/provider-claude`)
 

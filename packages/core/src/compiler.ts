@@ -29,7 +29,7 @@ import {
 } from "./context.js";
 import type { NodeResult } from "./registry.js";
 import { createMapMemo, mapMemoGeneration, clearMapMemo } from "./runtime/map-memo.js";
-import { buildStateAnnotation, REPLAY_WORKSPACE_CHANNEL, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
+import { buildStateAnnotation, channelReducerAndDefault, reduceMapCollect, REPLAY_WORKSPACE_CHANNEL, ONCE_CHANNEL, MAP_COLLECT_CHANNEL, MAP_TASK_CHANNEL, SERVICES_CHANNEL, WORKTREES_CHANNEL, ISSUES_CHANNEL, RESERVED_STATE_CHANNELS } from "./runtime/state-annotation.js";
 import { FlowgraphMemorySaver } from "./checkpoint/memory-saver.js";
 import {
   checkpointPrunedError,
@@ -423,8 +423,32 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
   const getCheckpointState = async (config: LangGraphRunnableConfig) => {
     const snap = await compiledLg.getState(config);
-    if (!checkpointer || !snap.tasks.some((task) => task.interrupts.length > 0)) return snap;
+    if (!checkpointer || snap.tasks.length === 0 || (authoredMapNames.size === 0 && !snap.tasks.some(task => task.interrupts.length > 0))) return snap;
     const saved = await checkpointer.getTuple(snap.config);
+    // Completed map workers are durable pending writes until their whole
+    // superstep joins. Expose those results while a sibling is parked or
+    // denied, without writing collect channels early (append reducers would
+    // otherwise collect the same values again when the join finally runs).
+    let bags = (snap.values[MAP_COLLECT_CHANNEL] ?? {}) as Record<string, unknown>;
+    for (const [, channel, value] of saved?.pendingWrites ?? []) {
+      if (channel === MAP_COLLECT_CHANNEL) bags = reduceMapCollect(bags, value as Record<string, unknown>);
+    }
+    const values = { ...snap.values, [MAP_COLLECT_CHANNEL]: bags };
+    for (const node of graphSpec.nodes) {
+      if (node.type !== "map") continue;
+      const { workerId } = mapSyntheticIds(node.id);
+      if (!snap.next.includes(workerId) && !snap.tasks.some(task => task.name === workerId && task.interrupts.length > 0)) continue;
+      const raw = bags[node.id];
+      const items = Array.isArray(raw) ? raw : (raw as { items?: Array<{ i: number; v: unknown }> } | undefined)?.items;
+      if (!items?.length) continue;
+      const parsed = MapWithSchema.safeParse(node.with);
+      if (!parsed.success) continue;
+      const update = collectMapResults(parsed.data, items, node.id, { state: values, config: baseCtx.config ?? {}, run: baseCtx.meta ?? {} });
+      for (const [channel, value] of Object.entries(update)) {
+        const definition = graphSpec.state?.channels[channel];
+        values[channel] = definition ? channelReducerAndDefault(channel, definition).reducer(values[channel], value) : value;
+      }
+    }
     // LangGraph can retain old interrupt writes after a task finishes in a
     // partially answered superstep. Real channel/result writes mark it done;
     // resume writes alone do not (a re-prompt can still be pending).
@@ -432,7 +456,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       Object.prototype.hasOwnProperty.call(snap.values, channel) ||
       channel === "__no_writes__" || channel === "__return__" || channel.startsWith("branch:to:"),
     ).map(([taskId]) => taskId));
-    return { ...snap, tasks: snap.tasks.map((task) => completed.has(task.id) ? { ...task, interrupts: [] } : task) };
+    return { ...snap, values, tasks: snap.tasks.map((task) => completed.has(task.id) ? { ...task, interrupts: [] } : task) };
   };
 
   const invokeOwned = async (
@@ -479,6 +503,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const resumedRun = () => mode === "resume" || mode === "continue";
     let replay = new ReplayStore();
     const finish = async (r: RunResult, bookkeeping = true, resumed?: boolean): Promise<RunResult> => {
+      if (bookkeeping && enteredRun && r.status !== "completed" && checkpointer && authoredMapNames.size > 0) {
+        try { r.state = stripReserved((await getCheckpointState(cfg)).values); } catch { /* preserve the execution error */ }
+      }
       try { await accounting.flush(); } catch (error) {
         if (!r.error) { r.status = "error"; r.error = error instanceof Error ? error : new Error(String(error)); }
       }
@@ -717,7 +744,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const result = ((await compiledLg.invoke(
+        let result = ((await compiledLg.invoke(
           current as Parameters<typeof compiledLg.invoke>[0],
           { ...cfg, signal: runOpts.signal } as Parameters<typeof compiledLg.invoke>[1],
         )) ?? {}) as Record<string, unknown>;
@@ -727,6 +754,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         }
 
         const interrupts = extractInterrupts(result);
+        if (interrupts.length > 0 && checkpointer && authoredMapNames.size > 0) result = { ...result, ...(await getCheckpointState(cfg)).values };
 
         if (hooks.has("interrupt:beforeRaise") && interrupts.length > 0) {
           await hooks.run("interrupt:beforeRaise", {
@@ -921,10 +949,22 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         }
 
         events.emit("interrupt.resumed", { resume: resumeValue });
-        current = resumeCommand(resumeValue, interrupts, threadId);
+        const pendingAnswers = checkpointer
+          ? (await getCheckpointState(cfg)).tasks.flatMap(task => task.interrupts ?? [])
+          : (result["__interrupt__"] as Array<{ id?: string; value?: unknown }> | undefined) ?? interrupts;
+        current = resumeCommand(resumeValue, pendingAnswers, threadId);
       }
     } catch (err) {
       let error = flowFailure(err) ?? (err instanceof Error ? err : new Error(String(err)));
+      const budgetDenials = (value: unknown, depth = 0): boolean => {
+        if (!value || typeof value !== "object" || depth > 8) return false;
+        if ((value as { code?: string }).code === "BUDGET_DENIED") return true;
+        const errors = (value as { errors?: unknown }).errors;
+        return Array.isArray(errors) && errors.length > 0 && errors.every(child => budgetDenials(child, depth + 1));
+      };
+      if (budgetDenials(error) && (error as { code?: string }).code !== "BUDGET_DENIED") {
+        error = Object.assign(new Error("Budget continuation was denied; no further paid call was admitted", { cause: error }), { code: "BUDGET_DENIED", retryable: false });
+      }
       if (error.name === "GraphRecursionError") {
         let pending = spec.nodes.map(n => n.id).slice(0, 10);
         try { pending = [...(await compiledLg.getState(cfg)).next]; } catch { /* no checkpointer */ }
@@ -1107,7 +1147,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       next,
       checkpointId: snap.config?.configurable?.checkpoint_id,
       createdAt: snap.createdAt,
-      interrupts,
+      interrupts: coalesceBudgetInterrupts(interrupts),
     };
   };
 
@@ -1266,7 +1306,7 @@ async function assembleCompiledLangGraph(
       : sourceFile ? path.dirname(sourceFile) : cwd;
   const graphWorkspace = opts.workspace !== undefined
     ? path.resolve(cwd, opts.workspace)
-    : resolveGraphWorkspace(spec, graphDir);
+    : opts.cwd !== undefined && !spec.runtime?.workspace ? path.resolve(cwd) : resolveGraphWorkspace(spec, graphDir);
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const redaction = new SecretRedaction([...DEFAULT_REDACT_PATTERNS, ...(spec.runtime?.secrets?.redact?.patterns ?? []).flatMap(p => { try { return [new RegExp(p, "gi")]; } catch { return []; } })], spec.runtime?.secrets?.redact?.headers);
   const events = createEventBus({ runId, graph: spec.metadata.name, redact: value => redactSecrets(value, redaction) });
@@ -2168,7 +2208,7 @@ function unknownResumeKeys(value: unknown, pending: ReadonlyArray<{ id?: string 
  */
 export function assertResumeValue(
   value: unknown,
-  pending: ReadonlyArray<{ id?: string }>,
+  pending: ReadonlyArray<{ id?: string; value?: unknown; payload?: unknown }>,
   threadId: string,
 ): void {
   if (value === undefined && interruptIds(pending).length > 0) throw resumeValueRequiredError(threadId);
@@ -2211,11 +2251,23 @@ function resumeAnswerIds(
  * A truthy unkeyed value with several interrupts pending is refused so it
  * cannot be applied to every gate.
  */
-function resumeCommand(value: unknown, pending: ReadonlyArray<{ id?: string }>, threadId: string): Command {
+function resumeCommand(value: unknown, pending: ReadonlyArray<{ id?: string; value?: unknown; payload?: unknown }>, threadId: string): Command {
   const unknown = unknownResumeKeys(value, pending);
   if (unknown && unknown.length > 0) throw resumeUnknownKeysError(threadId, unknown);
-  if (isKeyedResumeMap(value, pending)) return new Command({ resume: value });
+  const budget = pending.filter(isBudgetInterrupt);
+  const denied = (answer: unknown) => answer !== true && !(answer && typeof answer === "object" && (answer as { approved?: unknown }).approved === true);
+  if (isKeyedResumeMap(value, pending)) {
+    const denial = budget.find(it => it.id && Object.hasOwn(value, it.id) && denied(value[it.id]));
+    // The UI presents all budget waits as one run-level decision. Denying it
+    // rejects every queued paid call; other human gates keep their own answers.
+    return new Command({ resume: denial ? { ...value, ...Object.fromEntries(budget.map(it => [it.id!, value[denial.id!]])) } : value });
+  }
   const ids = interruptIds(pending);
+  if (budget.length === pending.length && budget.length > 0 && value !== undefined) {
+    // Approving the displayed gate admits one call, never the whole fan-out.
+    const selected = denied(value) ? budget : budget.slice(0, 1);
+    return new Command({ resume: Object.fromEntries(selected.map(it => [it.id!, value])) });
+  }
   if (ids.length > 1 && value) throw resumeMapRequiredError(threadId, ids.length);
   if (value) return new Command({ resume: value });
   if (ids.length > 0) {
@@ -2227,7 +2279,22 @@ function resumeCommand(value: unknown, pending: ReadonlyArray<{ id?: string }>, 
 function extractInterrupts(result: Record<string, unknown>): InterruptInfo[] {
   const raw = result["__interrupt__"];
   if (!Array.isArray(raw)) return [];
-  return raw.map((it) => toInterruptInfo(it as { id: string; value?: unknown }));
+  return coalesceBudgetInterrupts(raw.map((it) => toInterruptInfo(it as { id: string; value?: unknown })));
+}
+
+function isBudgetInterrupt(it: { value?: unknown; payload?: unknown }): boolean {
+  const payload = (it.value ?? it.payload) as { data?: { budgetGate?: boolean } } | undefined;
+  return payload?.data?.budgetGate === true;
+}
+
+function coalesceBudgetInterrupts(interrupts: InterruptInfo[]): InterruptInfo[] {
+  let shown = false;
+  return interrupts.filter(it => {
+    if (!isBudgetInterrupt(it)) return true;
+    if (shown) return false;
+    shown = true;
+    return true;
+  });
 }
 
 function toInterruptInfo(it: { id?: string; value?: unknown }): InterruptInfo {
@@ -2773,23 +2840,26 @@ function addCheckpointedMap(
 
   const mapLimit = createExecutionLimit(config.concurrency);
 
-  const recover = async (err: unknown, state: Record<string, unknown>, itemId = mapId) => {
+  const recover = async (err: unknown, state: Record<string, unknown>, itemId = mapId, lgConfig?: LangGraphRunnableConfig) => {
     if (isInterruptLike(err) || ctx.baseCtx.signal?.aborted) throw err;
     const terminal = flowFailure(err);
     if (terminal) throw terminal;
     const error = err instanceof Error ? err : new Error(String(err));
-    const hook = await ctx.hooks.run("node:error", { state, run: ctx.baseCtx.meta as RunMeta, payload: { nodeId: mapId, nodeType: "map", error } });
+    const meta = (runScopeOf(lgConfig)?.meta ?? ctx.baseCtx.meta) as RunMeta;
+    const hook = await ctx.hooks.run("node:error", { state, run: meta, payload: { nodeId: mapId, nodeType: "map", error } });
     const innerPolicy = itemId === mapId ? undefined : (config.node as { on?: { error?: string } }).on?.error;
     const policy = hook.control?.kind === "route" ? `route:${hook.control.to}` : hook.control?.kind === "veto" ? "continue" : innerPolicy ?? nodeSpec.on?.error;
     ctx.events.emit("node.error", { nodeId: itemId, ...errorInfo(error,"NODE_ERROR"), ...(policy && policy !== "fail" ? { swallowed: true, policy } : {}) }, { nodeId: itemId, nodeType: itemId === mapId ? "map" : innerType });
     if (!policy || policy === "fail") throw err;
     const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `map item/node "${itemId}" failed: ${error.message}`, impact: "Failed items have no collected value; admitted siblings finish before recovery." }, { nodeId: itemId, nodeType: innerType });
+    ctx.events.emit("run.issue", issue, { nodeId: itemId, nodeType: innerType });
+    try { appendRunIssue(ctx.graphWorkspace, runIssuesKey(meta), issue); } catch { /* the issue is also checkpointed */ }
     return { [ISSUES_CHANNEL]: [issue], ...(policy.startsWith("route:") ? { [ROUTING_CHANNEL]: { [mapId]: policy.slice(6) } } : {}) };
   };
 
   graph.addNode(
     mapId,
-    async (state: Record<string, unknown>) => {
+    async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
       try {
       const scope = { state, config: ctx.baseCtx.config ?? {}, run: ctx.baseCtx.meta ?? {} };
       const collection = renderDeep(config.over, scope);
@@ -2817,7 +2887,7 @@ function addCheckpointedMap(
         ),
       }) as unknown as Record<string, unknown>;
       } catch (err) {
-        const update = await recover(err, state);
+        const update = await recover(err, state, mapId, lgConfig);
         return new Command({ goto: joinId, update: { [MAP_COLLECT_CHANNEL]: { [mapId]: [] }, [ROUTING_CHANNEL]: { [mapId]: null }, ...update } }) as unknown as Record<string, unknown>;
       }
     },
@@ -2871,6 +2941,11 @@ function addCheckpointedMap(
       // cancellation reaches an admitted node (media jobs survive node timeouts).
       const signal = lgConfig?.signal ?? runSignalOf(lgConfig, ctx.baseCtx.signal);
       const run = await mapLimit(() => ctx.executionLimit(() => {
+        const runScope = runScopeOf(lgConfig);
+        if (runScope?.pauseSignal?.aborted) {
+          const data = withReplayData(undefined, runScope, itemId);
+          lgInterrupt({ reason: "paused", __flowgraphPause: true, ...(data !== undefined ? { data } : {}) });
+        }
         ctx.events.emit("node.start", { nodeId: itemId, type: innerType, mapId, index: task.index }, itemScope);
         return executeItem();
       }, lgConfig, signal), lgConfig, signal);
@@ -2883,7 +2958,7 @@ function addCheckpointedMap(
       if (run.issueUpdates.length > 0) update[ISSUES_CHANNEL] = run.issueUpdates;
       return (ctx.events.redact?.(update) ?? update) as Record<string, unknown>;
     } catch (err) {
-      return recover(ctx.events.redact?.(err) ?? err, state, itemId);
+      return recover(ctx.events.redact?.(err) ?? err, state, itemId, lgConfig);
     }
   });
 

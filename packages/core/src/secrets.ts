@@ -1,3 +1,4 @@
+import { currentEnvironment } from "./environment.js";
 /**
  * Secret providers and event/log redaction.
  *
@@ -24,7 +25,7 @@ export interface SecretProvider {
   has(name: string): boolean;
 }
 
-export function createEnvSecretProvider(env: NodeJS.ProcessEnv = process.env): SecretProvider {
+export function createEnvSecretProvider(env: NodeJS.ProcessEnv = currentEnvironment()): SecretProvider {
   return {
     get: async (name) => { const value = env[name]; observeSecret(value); return value; },
     has: (name) => name in env,
@@ -33,7 +34,7 @@ export function createEnvSecretProvider(env: NodeJS.ProcessEnv = process.env): S
 
 export function createDotenvSecretProvider(
   dotenvPath?: string,
-  fallback: NodeJS.ProcessEnv = process.env,
+  fallback: NodeJS.ProcessEnv = currentEnvironment(),
 ): SecretProvider {
   const resolved = dotenvPath ?? path.resolve(process.cwd(), ".env");
   const parsed: Record<string, string> = {};

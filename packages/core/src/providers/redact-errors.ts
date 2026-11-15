@@ -1,3 +1,4 @@
+import { currentEnvironment } from "../environment.js";
 import type { ProviderAdapter } from "./types.js";
 import { createRedactor, DEFAULT_REDACT_PATTERNS } from "../secrets.js";
 import { isGraphInterrupt } from "./replay-cache.js";
@@ -12,7 +13,7 @@ export function redactProviderErrors(provider: ProviderAdapter): ProviderAdapter
         return await run(req, ctx);
       } catch (error) {
         if (isGraphInterrupt(error)) throw error;
-        const values = Object.entries(process.env)
+        const values = Object.entries(currentEnvironment())
           .filter(([name]) => /key|token|secret|password|credential/i.test(name))
           .flatMap(([, value]) => (value ? [value] : []));
         const redact = createRedactor(values, DEFAULT_REDACT_PATTERNS);

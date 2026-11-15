@@ -245,7 +245,7 @@ for the verified restart procedure and current delivery/validation limitations.
 ## 6. Concurrency & parallelism
 
 - LangGraph executes fan-out branches concurrently within a superstep; reducers merge fan-in ([05 §2](./05-state-and-data.md#2-reducers)).
-- `map` nodes bound parallelism via `concurrency`.
+- `map` nodes bound parallelism via `concurrency`. A graceful pause lets admitted items finish and parks queued items before admission. `continueRun` finishes the remainder. While parked or stopped by an error, state inspection and the run result expose finished items in their collect channels; continuing does not append them twice.
 - A global `runtime.concurrency` caps simultaneous node executions (protects rate limits / resources).
 - Intelligent-node tool calls run within the node; their concurrency is provider-governed.
 
@@ -510,6 +510,13 @@ and refuses a live owner. For host-configured databases, omit the graph and use
 automatically, and no vendor cancellation or exactly-once billing is guaranteed.
 
 With `onExceed: fail|interrupt`, paid calls within a thread are admitted serially.
+Budget waits in a fan-out appear as one run-level approval. A single
+`{approved: false}` (or a rejection keyed by the displayed interrupt id) denies
+every queued budget wait with `BUDGET_DENIED`, while finished item outputs remain
+available. Approving admits only one additional paid call; the next call can
+raise the gate again. For `onExceed: interrupt`, a completed response is retained
+and the gate is raised before the next paid call. Budget messages label USD as
+unknown when any completed call is unpriced; the known subtotal is not total spend.
 Known media estimates that exceed remaining USD are rejected before purchase.
 Built-in LangChain loops check actual spend between calls, including summary and
 structured-finalization calls, so fanout cannot multiply the number of admitted

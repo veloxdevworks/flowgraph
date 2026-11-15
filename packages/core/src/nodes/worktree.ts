@@ -165,7 +165,7 @@ async function requirePath(
 
 /** `p` must be strictly inside `root`, also after resolving symlinks of its existing ancestors. */
 export async function assertInsideRoot(p: string, root: string, nodeId: string): Promise<void> {
-  const realRoot = await realpathOrSelf(root);
+  const realRoot = await realpathExistingPrefix(root);
   const realP = await realpathExistingPrefix(p);
   for (const [candidate, base] of [
     [p, path.resolve(root)],
@@ -178,14 +178,6 @@ export async function assertInsideRoot(p: string, root: string, nodeId: string):
           `(runtime.worktrees.root, default runtime.workspace).`,
       );
     }
-  }
-}
-
-async function realpathOrSelf(p: string): Promise<string> {
-  try {
-    return await fs.realpath(p);
-  } catch {
-    return path.resolve(p);
   }
 }
 
