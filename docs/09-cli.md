@@ -80,7 +80,7 @@ flowgraph run ./triage.graph.yaml \
 - Budget limits come from `runtime.budget` in the YAML (not `--max-usd`).
 - Skill preflight runs when a **skill node executes**, not upfront at run start.
 - With `--stream` / `--json`, events go to configured sinks; otherwise a compact summary prints at the end.
-- A pending human gate under `--on-interrupt fail` exits `3` and prints resume instructions. Webhook listeners and timed waits stay active until their continuation completes or reaches a human gate. Final completion exits `0`, final failure exits `1`, and listener resources are closed. Webhook/timeout continuations keep `--json` stdout as JSONL.
+- A pending human gate under `--on-interrupt fail` exits `3` and prints resume instructions. Webhook listeners stay active until their continuation completes or reaches a human gate. Signal and conditional waits return exit `3` with their deadline and resume instructions; a separate invocation resumes them. Final completion exits `0`, final failure exits `1`, and listener resources are closed. Webhook/timeout continuations keep `--json` stdout as JSONL.
 
 **Placement (`--targets`):**
 

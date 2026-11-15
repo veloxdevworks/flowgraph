@@ -62,7 +62,7 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
   }
   printWarning("Run interrupted (awaiting human input).");
   for (const it of interrupts ?? []) {
-    printInfo(`  • ${it.reason ?? it.id}`);
+    printInfo(`  • ${it.id}: ${it.reason ?? ""}${it.deadlineAt ? ` (deadline ${it.deadlineAt})` : ""}`);
   }
   if (threadId) {
     const example = (interrupts ?? []).length > 1

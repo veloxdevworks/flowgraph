@@ -65,20 +65,21 @@ it("PLAT-356: --list is read-only and prints exactly one JSON document after a d
   expect(JSON.parse(listed.stdout).interrupts).toHaveLength(1);
   await expect(readFile(join(dir, "effect.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 }, 20000);
-it("PLAT-370: a wait timeout completing the run exits zero with JSON-only stdout", async () => {
-  const { dir } = await fixture({ signal: "ready", timeout: "50ms" });
+it("durable signal waits exit pending rather than blocking on a long deadline", async () => {
+  const { dir } = await fixture({ signal: "ready", timeout: "30d" });
   const result = spawnSync(
     process.execPath,
     [bin, "run", "flow.json", "--thread", "timeout", "--json"],
     { cwd: dir, encoding: "utf8", timeout: 10000 },
   );
-  expect(result.status, result.stdout + result.stderr).toBe(0);
+  expect(result.status, result.stdout + result.stderr).toBe(3);
+  expect(result.stderr).not.toContain("TimeoutOverflowWarning");
   const events = result.stdout
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
-  expect(events.some((e) => e.type === "run.end")).toBe(true);
-  expect(await readFile(join(dir, "effect.txt"), "utf8")).toBe("ran");
+  expect(events.some((e) => e.type === "interrupt.raised")).toBe(true);
+  await expect(readFile(join(dir, "effect.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 }, 20000);
 it("PLAT-357: the CLI exits after a webhook resumes and completes a run", async () => {
   const { dir } = await fixture({ webhook: true });

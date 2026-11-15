@@ -832,6 +832,15 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
                 if (code === "THREAD_NOT_WAITING" || code === "THREAD_NOT_FOUND") {
                   for (const info of overdue) unregisterWebhookRoute(threadId, undefined, info.id);
                 }
+                if (code === "THREAD_NOT_WAITING" || code === "THREAD_NOT_FOUND") {
+                  void getCheckpointState({ configurable: { thread_id: threadId } }).then(snap => {
+                    const pending = (snap.tasks ?? []).flatMap(task => task.interrupts ?? []).map(toInterruptInfo);
+                    const completed = code === "THREAD_NOT_WAITING" && snap.next.length === 0 && pending.length === 0;
+                    opts.onWaitTimeout?.({ status: completed ? "completed" : "error", state: stripReserved(snap.values ?? {}), runId, threadId, durationMs: 0, ...(completed ? {} : { error: err instanceof Error ? err : new Error(message) }), ...(pending.length ? { interrupts: pending } : {}) });
+                  }).catch(() => opts.onWaitTimeout?.({ status: "error", state: {}, runId, threadId, durationMs: 0, error: err instanceof Error ? err : new Error(message) }));
+                } else {
+                  opts.onWaitTimeout?.({ status: "error", state: {}, runId, threadId, durationMs: 0, error: err instanceof Error ? err : new Error(message) });
+                }
                 events.emit("run.issue", {
                   code: code === "THREAD_BUSY" ? "WAIT_TIMEOUT_DEFERRED" : "WAIT_TIMEOUT_ADMISSION_FAILED",
                   severity: "warning", message: `Wait-timeout continuation was not admitted: ${message}`,
@@ -862,8 +871,13 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           const resolve = runOpts.resolveInterrupt;
           resumeValue = await awaitAnswer(() => resolve(interrupts));
         } else if (policy === "approve") {
-          const unsupported = interrupts.find(it => ["question", "choice", "form"].includes(it.kind ?? ""));
-          if (unsupported) throw Object.assign(new Error(`Auto-approve cannot answer ${unsupported.kind} interrupt "${unsupported.id}"; supply an explicit resume value or use prompt mode.`), { code: "AUTO_APPROVE_UNSUPPORTED", retryable: false });
+          const unsupported = interrupts.find(it => {
+            if (["question", "choice", "form"].includes(it.kind ?? "")) return true;
+            const data = (it.payload as { data?: { select?: string; artifactRefs?: unknown[]; schema?: unknown; decision?: string[] } } | undefined)?.data;
+            return data?.select != null && data.select !== "none" && (data.artifactRefs?.length ?? 0) > 0 && !(data.select === "one" && data.artifactRefs?.length === 1)
+              || it.kind === "review" && (data?.schema != null || data?.decision != null && !data.decision.includes("approve"));
+          });
+          if (unsupported) throw Object.assign(new Error(`Auto-approve cannot answer ${unsupported.kind} interrupt requiring an explicit answer, selection or custom validation: "${unsupported.id}"; supply an explicit resume value or use prompt mode.`), { code: "AUTO_APPROVE_UNSUPPORTED", retryable: false });
           resumeValue = Object.fromEntries(interrupts.map((it) => [it.id, it.kind === "review" ? { decision: "approve" } : true]));
         } else {
           const clean = stripReserved(result);
@@ -1763,7 +1777,7 @@ function scheduleWaitTimeoutTimer(
   clearWaitTimeoutTimer(waitTimeoutTimers, threadId);
   const deadline = earliestDeadlineMs(interrupts);
   if (deadline === undefined) return;
-  const delay = Math.max(0, deadline - now());
+  const delay = Math.min(2 ** 31 - 1, Math.max(0, deadline - now()));
   const timer = schedule(() => {
     waitTimeoutTimers.delete(threadId);
     onFire();

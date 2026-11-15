@@ -32,13 +32,10 @@ export async function awaitAutomaticContinuations(
     const ready = mailbox.take();
     if (ready) current = ready;
     if (current.status !== "interrupted" || !current.threadId) return current;
-    const timed = current.interrupts?.some(
-      (it) => it.deadlineAt && Number.isFinite(Date.parse(it.deadlineAt)),
-    );
     const webhook = waitForWebhookResume(current.threadId);
-    if (!timed && !webhook) return current;
-    // Core wait timers are unref'ed for embedded hosts. The CLI explicitly owns
-    // this wait and keeps the process alive until its continuation finishes.
+    if (!webhook) return current;
+    // Only a webhook listener belongs to this CLI process. Durable signal and
+    // conditional waits return their pending status for a later external resume.
     const keepAlive = setInterval(() => {}, 60_000);
     let unsubscribe = () => {};
     let onSignal = () => {};
