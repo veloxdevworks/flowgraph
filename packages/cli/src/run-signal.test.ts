@@ -4,7 +4,7 @@ import { abortOnSignals } from "./run-signal.js";
 describe("abortOnSignals", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it.each(["SIGINT", "SIGTERM"] as const)("%s aborts the run once and exits on the second", (name) => {
+  it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)("%s aborts the run once and exits on the second", (name) => {
     const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
     const onFirst = vi.fn();
     const cancel = abortOnSignals(onFirst);

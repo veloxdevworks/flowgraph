@@ -1,4 +1,4 @@
-import { waitForWebhookResume, type RunResult, type StateSnapshot } from "@flowgraph/core";
+import { waitForWebhookResume, terminateThreadServices, type RunResult, type StateSnapshot } from "@flowgraph/core";
 
 /** The engine may finish a timed wait before the CLI begins awaiting it. */
 export function continuationMailbox() {
@@ -47,8 +47,10 @@ export async function awaitAutomaticContinuations(
         onSignal = () => resolve({ status: "aborted" });
         process.once("SIGINT", onSignal);
         process.once("SIGTERM", onSignal);
+        process.once("SIGHUP", onSignal);
       });
       const done = await Promise.race([timeout, cancelled, ...(webhook ? [webhook] : [])]);
+      if (done.status === "aborted") await terminateThreadServices(current.threadId, {force:true});
       // A timeout unregisters its webhook before publishing the full result.
       const published = mailbox.take();
       if (published) {
@@ -78,6 +80,7 @@ export async function awaitAutomaticContinuations(
       unsubscribe();
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
+      process.off("SIGHUP", onSignal);
     }
   }
 }

@@ -1457,3 +1457,5 @@ Custom adapters can throw `MediaSubmissionRejectedError` only when the entire
 submission was definitely unaccepted; opaque SDK failures remain uncertain by
 default. Fanout waits for admitted jobs to settle and persist results/cost before
 reporting a sibling failure.
+
+The CLI handles SIGHUP as cancellation while executing and while waiting for a webhook, so terminal/SSH closure stops its detached service groups. Embedded hosts should handle their shutdown signals and call `terminateThreadServices`; SIGKILL cannot run cleanup. On Windows, service-tree shutdown uses `taskkill /T /F`, so graceful `stopSignal` behavior is unavailable there. Descendants that deliberately detach or close all inherited stdio may outlive their registered leader; keep foreground service processes owned by the registry.
