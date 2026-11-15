@@ -128,7 +128,8 @@ export async function runScriptSandboxed(
     const durationMs = Date.now() - started;
 
     if (exitCode !== 0) {
-      const excerpt = stderr.trim().slice(0, STDERR_EXCERPT) || stdout.trim().slice(0, STDERR_EXCERPT);
+      const lines=stderr.trim().split("\n");
+      const excerpt=(lines.find(line=>/^(?:\w*Error|error):/.test(line.trim())) ?? lines.filter(line=>!/^\s+at /.test(line)).slice(0,3).join(" ")).slice(0,STDERR_EXCERPT) || stdout.trim().slice(0,STDERR_EXCERPT);
       throw new Error(
         `script: process exited with code ${exitCode}` + (excerpt ? `: ${excerpt}` : ""),
       );
@@ -367,7 +368,7 @@ export const scriptNode = defineNode<Config>({
         ).catch(err=>{
           const error=err instanceof Error?err:new Error(String(err));
           error.message=`script node "${ctx.nodeId}": ${error.message}`;
-          if (/Illegal return statement|default.*function|default export/i.test(error.message)) error.message += ". Scripts are ESM modules; use export default async (input, ctx) => { ... }.";
+          if (/Illegal return statement|default.*function|default.*export|export.*default/i.test(error.message)) error.message += ". Scripts are ESM modules; use export default async (input, ctx) => { ... }.";
           throw error;
         });
 

@@ -26,12 +26,14 @@ it("PLAT-383/384: script failures name their node and missing module export",asy
   const result=await(await compileGraph(graph({id:"work",type:"script",with:{code:"return 42;"}}))).run();
   expect(result.error?.message).toContain('script node "work"');
   expect(result.error?.message).toContain("export default");
+  expect(result.error?.message).not.toMatch(/\n\s+at /);
 });
 it("PLAT-383: media token usage enters run totals and reused results do not double charge",async()=>{
   const cwd=await mkdtemp(join(tmpdir(),"fg-image-usage-"));dirs.push(cwd);
   const spec=graph({id:"work",type:"image",provider:"image-usage",with:{prompt:"draw"}});
-  const g=await compileGraph(spec,{cwd,mediaProviders:[{name:"image-usage",vendor:"test",modalities:["image"],start:async()=>({id:"done",done:[],usage:{inputTokens:50,outputTokens:100,totalTokens:150},costUSD:0.1})}]});
+  const g=await compileGraph(spec,{cwd,mediaProviders:[{name:"image-usage",vendor:"test",modalities:["image"],start:async(_req,ctx)=>({id:"done",done:[await ctx.saveOutput({bytes:Uint8Array.from([137,80,78,71,13,10,26,10]),mimeType:"image/png"})],usage:{inputTokens:50,outputTokens:100,totalTokens:150},costUSD:0.1})}]});
   expect(await g.run({threadId:"tokens"})).toMatchObject({status:"completed",usage:{inputTokens:50,outputTokens:100,totalTokens:150,costUSD:0.1}});
+  expect(await g.run({threadId:"tokens"})).toMatchObject({status:"completed",usage:{inputTokens:50,outputTokens:100,totalTokens:150,costUSD:0.1,calls:1}});
 });
 it("PLAT-384: route topology uses declared outcome names",()=>{
   const spec=graph({id:"work",type:"hitl",with:{mode:"approve",message:"go?",routes:{approved:"END",rejected:"END"}}});
