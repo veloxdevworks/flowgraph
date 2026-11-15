@@ -35,6 +35,7 @@ import { toLangChainMessage } from "../../context/messages.js";
 import { redactProviderErrors } from "../redact-errors.js";
 import { rejectedRequestUsage } from "../../usage/rejected-request.js";
 import { validateAgentOutput } from "../../runtime/agent-output.js";
+import { assertImageBatch, imageContentBlocks, imageError } from "../images.js";
 
 // Minimal structural type for a LangChain chat model (avoids a hard type dep
 // on a specific @langchain/core version's class shape).
@@ -51,6 +52,16 @@ export interface LangChainProviderOptions {
   models?: string[];
 }
 
+async function modelMessage(message: ContextMessage, ctx: ProviderRunContext): Promise<BaseMessage> {
+  if (!message.images?.length) return toLangChainMessage(message);
+  if (message.role !== "user") throw imageError("IMAGE_INPUT_INVALID", "Only user messages can carry image inputs");
+  return new HumanMessage({
+    content: [{ type: "text", text: message.content }, ...await imageContentBlocks(message.images, ctx.node)],
+    ...(message.id !== undefined ? { id: message.id } : {}),
+    ...(message.name !== undefined ? { name: message.name } : {}),
+  });
+}
+
 export function createLangChainProvider(
   model: ChatModelLike,
   options: LangChainProviderOptions = {},
@@ -60,6 +71,7 @@ export function createLangChainProvider(
   return redactProviderErrors({
     name,
     capabilities: {
+      imageInput: true,
       toolCalling: typeof model.bindTools === "function",
       contextMessages: true,
       structuredOutput: typeof model.withStructuredOutput === "function",
@@ -86,7 +98,7 @@ export function createLangChainProvider(
       if (ctx.context) return runWithContext(model, req, ctx, ctx.context);
       const messages: BaseMessage[] = [];
       if (req.system) messages.push(new SystemMessage(req.system));
-      messages.push(new HumanMessage(req.prompt));
+      messages.push(await modelMessage({ role: "user", content: req.prompt, images: req.images }, ctx));
 
       // Structured output without tools → single constrained call.
       if (req.schema && req.tools.length === 0 && typeof model.withStructuredOutput === "function") {
@@ -175,21 +187,22 @@ async function runWithContext(
   const loop: ContextMessage[] = [];
   const lcOf = new Map<ContextMessage, BaseMessage>();
   const converted = new WeakMap<ContextMessage, BaseMessage>();
-  const toLc = (m: ContextMessage): BaseMessage => {
+  const toLc = async (m: ContextMessage): Promise<BaseMessage> => {
     const own = lcOf.get(m);
     if (own) return own;
     let c = converted.get(m);
     if (!c) {
-      c = toLangChainMessage(m);
+      c = await modelMessage(m, ctx);
       converted.set(m, c);
     }
     return c;
   };
   const build = async (): Promise<BaseMessage[]> => {
     const f = await cm.fit(loop);
+    assertImageBatch(f.messages.flatMap(message => message.images ?? []));
     const out: BaseMessage[] = [];
     if (f.system) out.push(new SystemMessage(f.system));
-    for (const m of f.messages) out.push(toLc(m));
+    for (const m of f.messages) out.push(await toLc(m));
     return out;
   };
 

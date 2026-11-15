@@ -376,12 +376,28 @@ export const AgentContextSchema = z
   .strict();
 
 // agent node (formerly "intelligent")
+const AgentImageSourceSchema = z.union([
+  z.string().min(1),
+  z.object({
+    path: z.string().min(1).optional(),
+    url: z.string().min(1).optional(),
+    detail: z.enum(["auto", "low", "high"]).optional(),
+    estimatedTokens: z.number().int().positive().optional(),
+  }).passthrough().superRefine((value, ctx) => {
+    if ((value.path !== undefined) === (value.url !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "An image requires exactly one of path or url" });
+    }
+  }),
+]);
+
 export const AgentWithSchema = BaseWithSchema.extend({
   streaming: z.boolean().optional(),
   /** Reference to a reusable agent definition (AGENT.md), resolved at run time. */
   agent: z.string().optional(),
   system: z.string().optional(),
   prompt: z.string(),
+  images: z.union([AgentImageSourceSchema, z.array(AgentImageSourceSchema).max(16)]).optional()
+    .describe("Image paths, URLs, data URLs or Artifact references; templates may resolve to a list."),
   tools: z
     .array(
       z.union([

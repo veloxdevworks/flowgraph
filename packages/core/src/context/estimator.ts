@@ -3,6 +3,7 @@
  * recall: UTF-8 bytes / 4, rounded up. Hosts can register a real tokenizer.
  */
 import type { ContextMessage } from "./types.js";
+import { DEFAULT_IMAGE_TOKENS } from "../providers/types.js";
 
 export type TokenEstimator = (text: string) => number;
 
@@ -51,6 +52,11 @@ export function getTokenEstimator(name: string | undefined): TokenEstimator {
 /** Tokens for one message: content, tool calls, and a fixed overhead. */
 export function messageTokens(m: ContextMessage, est: TokenEstimator): number {
   let t = MESSAGE_OVERHEAD_TOKENS + est(m.content);
+  for (const image of m.images ?? []) {
+    const tokens = image?.meta?.["imageTokens"] ?? DEFAULT_IMAGE_TOKENS;
+    if (typeof tokens !== "number" || !Number.isSafeInteger(tokens) || tokens <= 0) throw new Error("Image token estimate must be a positive integer");
+    t += tokens;
+  }
   if (m.toolCalls && m.toolCalls.length > 0) t += est(JSON.stringify(m.toolCalls));
   return t;
 }

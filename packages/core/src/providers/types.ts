@@ -9,8 +9,15 @@
 import type { MeteredCallOptions } from "../usage/ledger.js";
 import type { NodeRunContext } from "../context.js";
 import type { ProviderContextManager } from "../context/types.js";
+import type { Artifact } from "@flowgraph/spec";
+
+/** Immutable image input stored as an Artifact, never inline base64 in history. */
+export type ImageAttachment = Artifact & { role: "image"; sha256: string };
+export const DEFAULT_IMAGE_TOKENS = 1024;
 
 export interface ProviderCapabilities {
+  /** Can send first-class image attachments to a model. */
+  imageInput?: boolean;
   /** Provider wraps every actual paid call with ctx.meterCall (replays are excluded). */
   callAccounting?: boolean;
   toolCalling: boolean;
@@ -29,6 +36,7 @@ export interface ProviderCapabilities {
 export interface Message {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  images?: ImageAttachment[] | undefined;
   name?: string;
   /** Stable id (history channels key messages by id). */
   id?: string;
@@ -70,6 +78,7 @@ export interface AgentStep {
 export interface AgentRequest {
   system?: string | undefined;
   prompt: string;
+  images?: ImageAttachment[] | undefined;
   messages?: Message[] | undefined;
   tools: ToolSpec[];
   schema?: Record<string, unknown> | undefined;

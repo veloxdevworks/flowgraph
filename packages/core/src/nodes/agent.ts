@@ -35,6 +35,7 @@ import { startAgentContext, type AgentContextSession } from "./agent-context.js"
 import { validateAgentOutput } from "../runtime/agent-output.js";
 import { isNonRetryable } from "../runtime/retry.js";
 import { flowFailure } from "../runtime/failure.js";
+import { imageError, resolveAgentImages } from "../providers/images.js";
 
 import {bindNodeReplay,isPendingStep,pendingStep,uncertainStep} from "../providers/replay-persistence.js";
 
@@ -108,6 +109,11 @@ export const agentNode = defineNode<Config>({
         const tplScope = recall ? { ...scope, memory: recall.vars } : scope;
 
         const prompt = stringifyRendered(renderDeep(config.prompt, tplScope));
+        const imageRefs = config.images === undefined ? undefined : renderDeep(config.images, tplScope);
+        if (imageRefs !== undefined && (!Array.isArray(imageRefs) || imageRefs.length > 0) && !provider.capabilities.imageInput) {
+          throw imageError("PROVIDER_IMAGE_INPUT_UNSUPPORTED", `Provider "${providerName}" does not support image inputs; use an image-capable adapter and model`);
+        }
+        const images = config.images === undefined ? undefined : await resolveAgentImages(imageRefs, ctx);
 
         let system: string | undefined;
         if (agentBody !== undefined) {
@@ -133,6 +139,7 @@ export const agentNode = defineNode<Config>({
 
         const req: AgentRequest = {
           prompt,
+          ...(images?.length ? { images } : {}),
           system,
           tools: specs,
           schema: config.schema,
@@ -283,6 +290,7 @@ export const agentNode = defineNode<Config>({
               sharedHistory: !!contextPolicy.history && !!buildCtx.sharedHistoryChannels?.has(contextPolicy.history),
               system,
               prompt,
+              ...(images?.length ? { images } : {}),
               tools: specs,
               onUsage: (usage) => {
                 if (ctx.accounting) return;

@@ -51,6 +51,8 @@ export interface NodePolicy {
   blockAgentRefs?: boolean | undefined;
   /** Refuse script sources loaded from host files; inline code is unaffected. */
   blockScriptFiles?: boolean | undefined;
+  /** Refuse local image inputs except this thread's engine-created image snapshots. */
+  blockImageFiles?: boolean | undefined;
   /**
    * Refuse `imports` in the graph and in inline subgraphs: node, provider and
    * reducer imports load a module from the host and register what it exports
@@ -80,6 +82,7 @@ export type NodePolicyErrorCode =
   | "RESERVED_CHANNEL_BLOCKED"
   | "AGENT_REF_BLOCKED"
   | "SCRIPT_FILE_BLOCKED"
+  | "IMAGE_FILE_BLOCKED"
   | "IMPORTS_BLOCKED"
   | "INBOUND_WEBHOOK_BLOCKED";
 
