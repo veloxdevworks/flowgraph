@@ -14,6 +14,8 @@ import { ROUTING_CHANNEL } from "./routing-policy.js";
 export const ONCE_CHANNEL = "__once";
 /** Declared so checkpoints written by older versions still load; the engine no longer reads or writes it. */
 export const REPLAY_CHANNEL = "__agentReplay";
+/** Persist the output directory selected for a historical branch. */
+export const REPLAY_WORKSPACE_CHANNEL = "__replayWorkspace";
 /** Fan-in bags keyed by map id and dispatch round; legacy arrays remain readable. */
 export const MAP_COLLECT_CHANNEL = "__mapCollect";
 /** Per-Send map worker payload (index, item, binding name). */
@@ -29,6 +31,7 @@ export const RESERVED_STATE_CHANNELS = [
   ROUTING_CHANNEL,
   ONCE_CHANNEL,
   REPLAY_CHANNEL,
+  REPLAY_WORKSPACE_CHANNEL,
   MAP_COLLECT_CHANNEL,
   MAP_TASK_CHANNEL,
   MAP_MEMO_CHANNEL,
@@ -170,6 +173,7 @@ export function buildStateAnnotation(
     },
     default: () => ({}),
   });
+  fields[REPLAY_WORKSPACE_CHANNEL] = Annotation<string | null>({ reducer: (_cur, incoming) => incoming, default: () => null });
   fields[MAP_TASK_CHANNEL] = Annotation<unknown>({
     reducer: (_cur: unknown, inc: unknown) => inc,
     default: () => null,
