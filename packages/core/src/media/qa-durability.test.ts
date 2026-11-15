@@ -201,3 +201,11 @@ it("waits for admitted fanout siblings to journal completion before returning fa
   }
   expect(completed).toBe(true);
 });
+
+it("PLAT-359: cancellation during intent persistence removes an unsubmitted intent", async () => {
+  const opts = await fixture(); const abort = new AbortController(); const reserve = opts.journal.reserve!.bind(opts.journal);
+  opts.journal.reserve = async entry => { const result = await reserve(entry); abort.abort(); return result; };
+  const start = vi.fn(async()=>({id:"never",done:[]}));
+  await expect(runMediaJob({...opts,mctx:{...opts.mctx,submissionSignal:abort.signal},provider:{name:"cancelled",vendor:"test",modalities:["image"],start}})).rejects.toMatchObject({mediaNotBilled:true});
+  expect(start).not.toHaveBeenCalled(); expect(await opts.journal.read()).toBeUndefined();
+});

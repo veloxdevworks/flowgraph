@@ -477,6 +477,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     const resumedRun = () => mode === "resume" || mode === "continue";
     let replay = new ReplayStore();
     const finish = async (r: RunResult, bookkeeping = true, resumed?: boolean): Promise<RunResult> => {
+      try { await accounting.flush(); } catch (error) {
+        if (!r.error) { r.status = "error"; r.error = error instanceof Error ? error : new Error(String(error)); }
+      }
       try {
         const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
         if (issues.length > 0) r.issues = issues;

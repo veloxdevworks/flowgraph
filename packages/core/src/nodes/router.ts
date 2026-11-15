@@ -13,6 +13,8 @@ import type { NodeRunContext } from "../context.js";
 import { providerFor, providerNamesFor } from "../providers/registry.js";
 import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
 import { applyOutput } from "./output.js";
+import { enforceBudget } from "./agent.js";
+import type { TokenUsage } from "../providers/types.js";
 import { ISSUE_CODE } from "../runtime/run-issues.js";
 
 const configSchema = RouterWithSchema;
@@ -158,16 +160,34 @@ async function runModelRouter(
     schema: { type: "object", properties: { route: { type: "string", enum: routeKeys } }, required: ["route"], additionalProperties: false },
     permission: "auto",
   };
+  let reportedUsage: TokenUsage = {};
   const providerCtx: ProviderRunContext = {
+    ...(ctx.accounting && provider.capabilities.callAccounting ? { meterCall: <T>(invoke: () => Promise<T>, options: import("../usage/ledger.js").MeteredCallOptions<T>) => ctx.accounting!.call(ctx, invoke, options) } : {}),
     node: ctx,
     signal: ctx.signal,
-    emit: () => {},
+    emit: (type, data) => {
+      if (type === "usage") {
+        for (const key of ["inputTokens", "outputTokens", "totalTokens", "costUSD"] as const) {
+          const value = (data as TokenUsage)[key]; if (value !== undefined) reportedUsage[key] = (reportedUsage[key] ?? 0) + value;
+        }
+      } else ctx.emit(`agent.${type}` as import("../events.js").EventType, data);
+    },
     invokeTool: () => Promise.reject(new Error("router model mode does not expose tools")),
     checkToolCall: (_name, args) => Promise.resolve(args),
     reportToolResult: (_name, _args, result) => Promise.resolve(result),
   };
 
-  const result = await provider.run(req, providerCtx);
+  const usage = (result: import("../providers/types.js").AgentResult): TokenUsage => Object.fromEntries(
+    (["inputTokens", "outputTokens", "totalTokens", "costUSD"] as const).flatMap(key => {
+      const value = Math.max(result.usage?.[key] ?? 0, reportedUsage[key] ?? 0);
+      return result.usage?.[key] !== undefined || reportedUsage[key] !== undefined ? [[key, value]] : [];
+    }),
+  );
+  const result = ctx.accounting && !provider.capabilities.callAccounting
+    ? await ctx.accounting.call(ctx, () => provider.run(req, providerCtx), { kind: "provider", usage, errorUsage: () => reportedUsage, errorOutcomeUnknown: () => true })
+    : await provider.run(req, providerCtx);
+  if (ctx.accounting) ctx.accounting.enforce(ctx);
+  else { const used = usage(result); ctx.emit("agent.usage", used); enforceBudget(ctx, used); }
   const out = result.output as { route?: string } | undefined;
   let chosenKey = out?.route;
   if (!chosenKey || !(chosenKey in config.routes)) {

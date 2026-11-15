@@ -6,7 +6,7 @@ export function rejectedRequestUsage(error: unknown): TokenUsage | undefined {
   for (let depth = 0; depth < 5 && value && typeof value === "object"; depth++) {
     const fields = value as { code?: unknown; status?: unknown; statusCode?: unknown; cause?: unknown };
     const status = Number(fields.status ?? fields.statusCode);
-    if ([401, 403, 429].includes(status) || ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(String(fields.code))) {
+    if ([400, 401, 403, 404, 405, 413, 415, 422, 429].includes(status) || ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(String(fields.code))) {
       return { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUSD: 0 };
     }
     value = fields.cause;

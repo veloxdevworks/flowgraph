@@ -25,6 +25,7 @@ export interface UsageReceipt {
   nodeId: string;
   kind: string;
   startedAt: string;
+  estimateUSD?: number;
 }
 export interface UnresolvedUsageReceipt extends UsageReceipt {
   usage: TokenUsage;
@@ -181,36 +182,50 @@ export class UsageLedger {
     if (!this.budget) return;
     const { maxTokens, maxUSD } = this.budget;
     const tokensOver = maxTokens !== undefined && (before ? usage.totalTokens >= maxTokens : usage.totalTokens > maxTokens);
-    const dollarsOver = maxUSD !== undefined && (before ? usage.costUSD >= maxUSD || addUSD(usage.costUSD, estimateUSD ?? 0) > maxUSD : usage.costUSD > maxUSD);
+    const reservedUSD = before ? Object.values(this.record.pending).reduce((sum, receipt) => addUSD(sum, receipt.estimateUSD ?? 0), 0) : 0;
+    const dollarsOver = maxUSD !== undefined && (before ? usage.costUSD >= maxUSD || (estimateUSD === undefined ? addUSD(usage.costUSD, reservedUSD) >= maxUSD : addUSD(addUSD(usage.costUSD, reservedUSD), estimateUSD) > maxUSD) : usage.costUSD > maxUSD);
     if (!tokensOver && !dollarsOver) return;
     const detail = `tokens=${usage.totalTokens}/${maxTokens ?? "∞"}, usd=${usage.costUSD}/${maxUSD ?? "∞"}${estimateUSD === undefined ? "" : `, nextEstimateUSD=${estimateUSD}`}`;
     const onExceed = this.budget.onExceed ?? "warn";
     ctx.emit("custom.budget.exceeded", { detail, onExceed, usage });
     if (onExceed === "fail") throw error("BUDGET_EXCEEDED", `Budget exceeded (${detail})`);
     if (onExceed === "interrupt") {
-      const answer = ctx.interrupt({ reason: `Budget exceeded (${detail}). Approve this continuation?`, kind: "approval", data: { usage } });
+      const answer = ctx.interrupt({ reason: `Budget exceeded (${detail}). Approve one additional paid call? Each approval admits one call; later calls may request approval again.`, kind: "approval", data: { usage } });
       if (answer !== true && !(answer && typeof answer === "object" && (answer as { approved?: unknown }).approved === true)) throw error("BUDGET_DENIED", "Budget continuation was denied; no further paid call was admitted");
     } else ctx.logger.warn(`Budget exceeded (${detail}); continuing (onExceed: warn).`);
   }
 
   async call<T>(ctx: NodeRunContext, invoke: () => Promise<T>, options: MeteredCallOptions<T>): Promise<T> {
-    // All paid calls are serialized under a hard cap, including known estimates.
+    // Only known USD estimates can reserve headroom. Token/unknown-cost caps
+    // keep the admission lock through completion because no safe reservation exists.
+    const parallel = this.hard && this.budget?.maxTokens === undefined && this.budget?.maxUSD !== undefined && options.estimateUSD !== undefined;
     const previous = this.paid;
-    let release!: () => void;
-    if (this.hard) this.paid = new Promise<void>(resolve => { release = resolve; });
+    let unlock: (() => void) | undefined;
+    if (this.hard) this.paid = new Promise<void>(resolve => { unlock = resolve; });
     if (this.hard) await previous;
     try {
       Object.assign(this.record, recordState(await this.read()));
       this.enforce(ctx, true, options.estimateUSD);
-      ctx.signal?.throwIfAborted();
+      const checkAdmission = () => {
+        ctx.signal?.throwIfAborted();
+        (ctx as NodeRunContext & { _lgConfig?: { signal?: AbortSignal } })._lgConfig?.signal?.throwIfAborted();
+      };
+      checkAdmission();
       const id = randomUUID(), kind = options.kind ?? "model";
-      await this.mutate(() => { this.record.pending[id] = { nodeId: ctx.nodeId, kind, startedAt: new Date().toISOString() }; });
+      await this.mutate(() => { this.record.pending[id] = { nodeId: ctx.nodeId, kind, startedAt: new Date().toISOString(), ...(parallel ? { estimateUSD: options.estimateUSD! } : {}) }; });
+      try { checkAdmission(); } catch (err) { await this.mutate(() => { delete this.record.pending[id]; }); throw err; }
+      if (parallel) { unlock?.(); unlock = undefined; }
       let result: T;
       try { result = await invoke(); }
       catch (err) { await this.complete(ctx, id, kind, options.errorUsage?.(err), options.errorOutcomeUnknown?.(err)); throw err; }
       await this.complete(ctx, id, kind, options.usage(result));
       return result;
-    } finally { if (this.hard) release(); }
+    } finally { unlock?.(); }
+  }
+
+  /** Drain receipt writes/settlements without waiting on an in-flight vendor request. */
+  async flush(): Promise<void> {
+    for (;;) { const pending = this.pendingUpdates; await pending; await Promise.resolve(); if (pending === this.pendingUpdates) return; }
   }
 
   private applyUsage(kind: string, usage: TokenUsage, sign: 1 | -1, unknown = !Object.keys(usage).length): void {
