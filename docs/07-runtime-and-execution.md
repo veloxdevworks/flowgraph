@@ -574,6 +574,8 @@ by rejecting after that signal, its receipt is cleared before retry or explicit
 continuation. Tools must finish their abort cleanup before rejecting. A tool
 that ignores cancellation keeps its pending receipt until it settles or is
 explicitly reconciled, so a competing attempt cannot repeat it.
+Delivering the signal does not delay a node timeout while an uncooperative model
+call keeps running; its late usage is still recorded separately.
 
 Inspect and resolve only after stopping/reconciling its owner:
 

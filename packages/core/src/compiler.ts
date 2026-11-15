@@ -1383,6 +1383,7 @@ async function assembleCompiledLangGraph(
 
     type NodeRun = { res: NodeResult; ctx: NodeRunContext & { _onceUpdates: Record<string, unknown>; _issueUpdates: RunIssue[] } };
     const stopsOnTimeout = compiled.capabilities?.stopsOnTimeout === true;
+    const receivesTimeoutSignal = stopsOnTimeout || compiled.capabilities?.receivesTimeoutSignal === true;
     const runOnce = (
       state: Record<string, unknown>,
       inputOverride?: Record<string, unknown>,
@@ -1392,7 +1393,7 @@ async function assembleCompiledLangGraph(
       runWithPolicy<NodeRun>(
         (attempt, signal) => {
           const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig);
-          if (signal && stopsOnTimeout) ctx.signal = signal;
+          if (signal && receivesTimeoutSignal) ctx.signal = signal;
           return compiled.run(state, ctx).then((res) => {
             finishInterruptDeadline(runScopeOf(lgConfig), nodeSpec.id);
             return { res, ctx };
@@ -2702,6 +2703,7 @@ function addCheckpointedMap(
 
   const innerType = String((config.node as Record<string, unknown>)["type"] ?? "");
   const innerStopsOnTimeout = registry.get(innerType)?.capabilities?.stopsOnTimeout === true;
+  const innerReceivesTimeoutSignal = innerStopsOnTimeout || registry.get(innerType)?.capabilities?.receivesTimeoutSignal === true;
   const buildCtx = {
     graphName: spec.metadata.name,
     toolWiring: ctx.toolWiring,
@@ -2788,7 +2790,7 @@ function addCheckpointedMap(
             undefined,
             itemLgConfig,
           );
-          if (signal && innerStopsOnTimeout) nodeCtx.signal = signal;
+          if (signal && innerReceivesTimeoutSignal) nodeCtx.signal = signal;
           return runMapItem(buildCtx, mapId, config, state, nodeCtx, task).then((value) => {
             finishInterruptDeadline(runScopeOf(itemLgConfig), itemId);
             return { value, onceUpdates: nodeCtx._onceUpdates, issueUpdates: nodeCtx._issueUpdates };
