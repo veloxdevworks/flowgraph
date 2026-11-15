@@ -11,14 +11,14 @@ it("PLAT-368: pre-admission refusals and graph load errors emit JSON error event
     writeFileSync(join(dir,"g.yaml"),JSON.stringify({apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"refused"},nodes:[{id:"gate",type:"hitl",with:{mode:"approve",message:"go?"}}],edges:[{from:"START",to:"gate"},{from:"gate",to:"END"}],runtime:{checkpoint:{backend:"sqlite",path:"state.db"}}}));
     expect(cli("run","g.yaml","--thread","t","--on-interrupt","fail","--json").status).toBe(3);
     writeFileSync(join(dir,"invalid.yaml"),JSON.stringify({apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"invalid"},nodes:[{id:"bad",type:"shell",with:{}}],edges:[{from:"START",to:"bad"},{from:"bad",to:"END"}]}));
-    for(const [args,code] of [[ ["run","g.yaml","--json","--bogus"],"CLI_ARGUMENT_INVALID" ],[ ["run","invalid.yaml","--json"],"GRAPH_VALIDATION_FAILED" ],[ ["resume","g.yaml","--thread","t","--json"],"RESUME_VALUE_REQUIRED" ],[ ["run","missing.yaml","--json"],"GRAPH_LOAD_FAILED" ]] as const){
+    for(const [args,code] of [[ ["run","invalid.yaml","--json"],"GRAPH_VALIDATION_FAILED" ],[ ["resume","g.yaml","--thread","t","--json"],"RESUME_VALUE_REQUIRED" ],[ ["run","missing.yaml","--json"],"GRAPH_LOAD_FAILED" ],[ ["run","g.yaml","--json","--bogus"],"CLI_ARGUMENT_INVALID" ],[ ["resume","g.yaml","--json"],"CLI_ARGUMENT_INVALID" ]] as const){
       const result=cli(...args);expect(result.status).not.toBe(0);
       const events=result.stdout.trim().split("\n").map(line=>JSON.parse(line));
       expect(events).toContainEqual(expect.objectContaining({type:"run.error",ts:expect.any(String),data:expect.objectContaining({code})}));
       expect(result.stderr).toContain(code);expect(result.stderr).not.toMatch(/\n\s+at /);
     }
   }finally{rmSync(dir,{recursive:true,force:true});}
-});
+},60_000);
 it("PLAT-368: failed JSON runs print a reason even when ordinary logs are quiet",()=>{
   const dir=mkdtempSync(join(tmpdir(),"fg-json-failure-"));
   try{
