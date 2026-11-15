@@ -171,7 +171,7 @@ function buildMediaNode(spec: ModalitySpec) {
             typeof nodeSpec["provider"] === "string" ? nodeSpec["provider"] : undefined,
             modality === "audio" ? config.kind : undefined,
           );
-          const model = typeof nodeSpec["model"] === "string" ? nodeSpec["model"] : undefined;
+          const model = typeof nodeSpec["model"] === "string" ? nodeSpec["model"] : str(config.model);
 
           const callFetch: typeof fetch = (...args) => globalThis.fetch(...args);
           const rawInput = renderDeep(config.input as never, scope);

@@ -16,6 +16,10 @@ export const ONCE_CHANNEL = "__once";
 export const REPLAY_CHANNEL = "__agentReplay";
 /** Persist the output directory selected for a historical branch. */
 export const REPLAY_WORKSPACE_CHANNEL = "__replayWorkspace";
+/** Original execution root, pinned before the first node runs. */
+export const WORKSPACE_CHANNEL = "__workspace";
+/** Workspace declarations whose changes could hide pending side-effect journals. */
+export const WORKSPACE_NODES_CHANNEL = "__workspaceNodes";
 /** Fan-in bags keyed by map id and dispatch round; legacy arrays remain readable. */
 export const MAP_COLLECT_CHANNEL = "__mapCollect";
 /** Per-Send map worker payload (index, item, binding name). */
@@ -32,6 +36,8 @@ export const RESERVED_STATE_CHANNELS = [
   ONCE_CHANNEL,
   REPLAY_CHANNEL,
   REPLAY_WORKSPACE_CHANNEL,
+  WORKSPACE_CHANNEL,
+  WORKSPACE_NODES_CHANNEL,
   MAP_COLLECT_CHANNEL,
   MAP_TASK_CHANNEL,
   MAP_MEMO_CHANNEL,
@@ -174,6 +180,8 @@ export function buildStateAnnotation(
     default: () => ({}),
   });
   fields[REPLAY_WORKSPACE_CHANNEL] = Annotation<string | null>({ reducer: (_cur, incoming) => incoming, default: () => null });
+  fields[WORKSPACE_CHANNEL] = Annotation<string | null>({ reducer: (_cur, incoming) => incoming, default: () => null });
+  fields[WORKSPACE_NODES_CHANNEL] = Annotation<Record<string, string> | null>({ reducer: (_cur, incoming) => incoming, default: () => null });
   fields[MAP_TASK_CHANNEL] = Annotation<unknown>({
     reducer: (_cur: unknown, inc: unknown) => inc,
     default: () => null,

@@ -170,21 +170,49 @@ it("PLAT-376: known media estimates share budget headroom concurrently", async (
 });
 
 it("PLAT-364: times out a single model request while leaving long agent sessions configurable", async () => {
-  let entered!:()=>void;
-  const ready=new Promise<void>(r=>{entered=r;});
-  const provider=createLangChainProvider({invoke:async()=>{entered();return new Promise<AIMessage>(()=>{});}}, {name:"hang-default"});
-  const compiled=await compileGraph(graph([{id:"a",type:"agent",provider:"hang-default",with:{prompt:"answer"}}]),{providers:[provider]});
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const provider = createLangChainProvider({ invoke: async () => {
+    entered();
+    return new Promise<AIMessage>(() => {});
+  } }, { name: "hang-default" });
+  // Keep checkpointing enabled, but omit the unused legacy store: LangGraph's
+  // store batching loop otherwise schedules a timer for every fake millisecond.
+  const compiled = await compileGraph(
+    graph([{ id: "a", type: "agent", provider: "hang-default", with: { prompt: "answer" } }]),
+    { providers: [provider], store: "none" },
+  );
   vi.useFakeTimers();
-  const running=compiled.run();await ready;await vi.advanceTimersByTimeAsync(120001);
-  const result=await running;
-  expect(result).toMatchObject({status:"error",error:{code:"MODEL_REQUEST_TIMEOUT"},usage:{unknownCalls:1}});
+  const running = compiled.run();
+  let settled = false;
+  void running.then(() => { settled = true; });
+  await ready;
+  await vi.advanceTimersByTimeAsync(119999);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(2);
+  const result = await running;
+  expect(result).toMatchObject({ status: "error", error: { code: "MODEL_REQUEST_TIMEOUT" }, usage: { unknownCalls: 1 } });
 });
 it("PLAT-364: a long coding-provider session does not inherit a model-request timeout", async () => {
-  let entered!:()=>void;
-  const ready=new Promise<void>(r=>{entered=r;});
-  const provider=createScriptedProvider("long-session",async()=>{entered();await new Promise(r=>setTimeout(r,150000));return {output:"done",stopReason:"done"};});
-  const compiled=await compileGraph(graph([{id:"a",type:"agent",provider:"long-session",with:{prompt:"answer"}}]),{providers:[provider]});
-  vi.useFakeTimers();const running=compiled.run();await ready;await vi.advanceTimersByTimeAsync(150001);
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const provider = createScriptedProvider("long-session", async () => {
+    entered();
+    await new Promise((resolve) => setTimeout(resolve, 150000));
+    return { output: "done", stopReason: "done" };
+  });
+  const compiled = await compileGraph(
+    graph([{ id: "a", type: "agent", provider: "long-session", with: { prompt: "answer" } }]),
+    { providers: [provider], store: "none" },
+  );
+  vi.useFakeTimers();
+  const running = compiled.run();
+  let settled = false;
+  void running.then(() => { settled = true; });
+  await ready;
+  await vi.advanceTimersByTimeAsync(120001);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(30000);
   expect((await running).status).toBe("completed");
 });
 it("PLAT-364: outstanding model calls emit a heartbeat and stop emitting after completion", async () => {

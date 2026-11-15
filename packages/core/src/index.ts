@@ -35,6 +35,7 @@ export {
   InputValidationError,
 } from "./inputs.js";
 export { compileGraph, resolveGraphWorkspace, ResumeAttemptsExhaustedError, assertResumeValue } from "./compiler.js";
+export { readThreadWorkspace } from "./runtime/thread-workspace.js";
 export {
   NODE_POLICY,
   NodePolicyError,
@@ -428,3 +429,5 @@ export { UsageLedger, inspectThreadUsage, resolveThreadUsage, type RunUsage, typ
 export {MediaSubmissionRejectedError} from "./media/types.js";
 export {inspectThreadReplay,resolveThreadReplay} from "./providers/replay-persistence.js";
 export type {ReplayCheckpointStore} from "./providers/replay-persistence.js";
+
+export { currentEnvironment, withEnvironment } from "./environment.js";

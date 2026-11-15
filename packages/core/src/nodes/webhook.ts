@@ -1,3 +1,4 @@
+import { currentEnvironment } from "../environment.js";
 /**
  * Built-in node type: `webhook`
  *
@@ -39,7 +40,7 @@ export const webhookNode = defineNode<Config>({
               typeof prop === "string" ? { configurable: true, enumerable: false } : undefined,
             get: (_t, prop) => {
               if (typeof prop === "string") assertSecretAllowed(nodePolicyOf(ctx), prop, `webhook node "${ctx.nodeId}"`);
-              const val = process.env[String(prop)];
+              const val = currentEnvironment()[String(prop)];
               return val ?? "";
             },
           }),

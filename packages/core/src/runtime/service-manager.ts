@@ -1,3 +1,4 @@
+import { currentEnvironment } from "../environment.js";
 /**
  * Process-scoped registry for long-running background services started by
  * `service` nodes. Services are keyed by (threadId, name), survive HITL
@@ -274,7 +275,7 @@ export async function startService(
   const useShell = args === undefined;
   const cwd = spec.cwd;
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...currentEnvironment(),
     ...(spec.env
       ? Object.fromEntries(
           Object.entries(spec.env).map(([k, v]) => [k, normalizeShellText(String(v))]),

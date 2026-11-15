@@ -199,6 +199,7 @@ flowgraph resume ./graph.yaml --thread release-42 --list --json
 | `--on-interrupt <policy>` | Policy if the run interrupts again. `approve` supplies `{decision:"approve"}` for review gates and `true` for approvals; question/choice/form gates require an explicit answer. |
 | `--from <checkpoint-id>` | Resume from a historical checkpoint; already-recorded decisions cannot be replaced. Fork before the gate instead. |
 | `--replay-workspace <dir>` | Separate output directory required when historical replay may repeat side effects. |
+| `--workspace <dir>` | Confirm the original execution workspace for a legacy thread that predates workspace recording. A recorded thread refuses a different explicit workspace. |
 | `--no-mcp-oauth` | CI-safe MCP behavior. |
 
 Requires a durable checkpoint backend (`runtime.checkpoint.backend: sqlite` or Postgres). See [07 §HITL](./07-runtime-and-execution.md#5-human-in-the-loop).
@@ -304,13 +305,17 @@ Hosted `GET /runs/:threadId` includes `pendingInterruptIds` for interrupted/paus
 
 ### Paths and error events
 
-Relative checkpoint database paths are host settings resolved against the CLI working directory. Node workspaces and media journals resolve from the declaring graph directory, or `runtime.workspace`. Use absolute checkpoint paths when invoking the same graph from different directories; `media inspect` and `recover` resolve the graph workspace unless `--workspace` overrides it.
+Relative checkpoint database paths are host settings resolved against the CLI working directory. The first run's working directory (`--cwd`, or the current directory) is the default execution workspace, so shell/file paths stay relative to that folder even when the graph is in a subfolder. An explicit `runtime.workspace` still resolves relative to the declaring graph directory, as do graph imports and script source files.
+
+Checkpointed runs record their workspace before executing nodes. Resume and continue reuse it even when invoked from another directory, so media submission journals and shell replay records remain in the same place. An explicitly changed workspace or node workspace declaration is refused with `THREAD_WORKSPACE_MISMATCH`; historical replay still uses its separate `--replay-workspace`. Legacy checkpoints without a recorded workspace require the known original workspace via `--workspace` or `runtime.workspace` before executing again (`THREAD_WORKSPACE_REQUIRED`). Use absolute checkpoint paths when invoking the same graph from different directories.
+
+Dynamic `node.workspace` templates must resolve to the same folder during recovery. The saved root and declaration checks do not pin changes to values used inside a template, such as graph configuration or run metadata; start a new thread when intentionally changing those destinations.
 
 `--json` failures include a `run.error` event with `data.code` and a one-line reason on stderr, including refusals before a run is admitted. Node errors retain their typed code in both `node.error` and `run.error`. Continuations and forks begin a new invocation with `run.start` followed by their resume/continue event. CLI startup loads graph/runtime packages and optional integrations lazily where supported; this can add about half a second before execution and is separate from node duration.
 
 ### Crash recovery discovery
 
-`flowgraph recover <graph> --thread <id>` reads all recovery blockers in one call: execution ownership (including same-host liveness), usage receipts, decoded replay task identities, media journals and checkpoint IDs with parent links. It does not run nodes, apply deadlines, release claims or buy work. Use `--workspace` only when overriding the graph's original `runtime.workspace`; media inspection uses the same rule. Host database overrides are `--backend sqlite|postgres --path <database>`.
+`flowgraph recover <graph> --thread <id>` reads all recovery blockers in one call: execution ownership (including same-host liveness), usage receipts, decoded replay task identities, media journals and checkpoint IDs with parent links. It does not run nodes, apply deadlines, release claims or buy work. Recovery and media inspection use the thread's recorded workspace; for legacy records, read-only discovery falls back to the graph workspace. Use `--workspace` to inspect or reconcile a known original workspace explicitly. Host database overrides are `--backend sqlite|postgres --path <database>`; `media inspect` also accepts them without a graph.
 
 Stop the old owner and reconcile external work before an explicit resolution. Identical usage, replay and media resolutions can be retried safely; changing a reconciled result returns a conflict. Shell replay results have the shape `{"stdout":"...","stderr":"...","exitCode":0}`. A tool replay result is the tool's raw return value, not a tool-message wrapper. Inspect help lists only read options; resolve help lists mutation flags.
 

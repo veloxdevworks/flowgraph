@@ -1,36 +1,39 @@
 import { expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-it("SIGKILL leaves a submission intent; resume cannot repay, and explicit recovery works", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "fg-media-kill-"));
+it("SIGKILL keeps the original workspace across cwd changes for resume and recovery", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg-media-kill-")));
+  const graphDir = join(dir, "graphs with spaces");
+  mkdirSync(graphDir);
+  const graph = join(graphDir, "flow.yaml");
   const bin = resolve(import.meta.dirname, "../dist/bin.js");
   const cli = (...args: string[]) =>
-    spawnSync(process.execPath, [bin, ...args], { cwd: dir, encoding: "utf8", timeout: 20000 });
+    spawnSync(process.execPath, [bin, ...args], { cwd: graphDir, encoding: "utf8", timeout: 20000 });
   const core = pathToFileURL(resolve(import.meta.dirname, "../../core/dist/index.js")).href;
   try {
     writeFileSync(
       join(dir, "vendor.mjs"),
-      `import {registerMediaProvider} from ${JSON.stringify(core)}; import {appendFileSync,writeFileSync,existsSync} from 'node:fs'; registerMediaProvider({name:'test',vendor:'test',modalities:['image'],async start(){appendFileSync('calls','call\\n');writeFileSync('ready','yes');if(!existsSync('finish')) await new Promise(()=>{});return {id:'done',done:[],costUSD:0};}});export default [];`,
+      `import {registerMediaProvider} from ${JSON.stringify(core)}; import {appendFileSync,writeFileSync,existsSync} from 'node:fs'; registerMediaProvider({name:'test',vendor:'test',modalities:['image'],async start(){appendFileSync(new URL('./calls',import.meta.url),'call\\n');writeFileSync(new URL('./ready',import.meta.url),'yes');if(!existsSync(new URL('./finish',import.meta.url))) await new Promise(()=>{});return {id:'done',done:[],costUSD:0};}});export default [];`,
     );
     writeFileSync(
-      join(dir, "flow.yaml"),
+      graph,
       JSON.stringify({
         apiVersion: "flowgraph/v1",
         kind: "Graph",
         metadata: { name: "media-kill" },
-        imports: [{ providers: "./vendor.mjs" }],
+        imports: [{ providers: "../vendor.mjs" }],
         nodes: [{ id: "img", type: "image", provider: "test", with: { prompt: "test" } }],
         edges: [
           { from: "START", to: "img" },
           { from: "img", to: "END" },
         ],
-        runtime: { checkpoint: { backend: "sqlite", path: "cp.db" } },
+        runtime: { checkpoint: { backend: "sqlite", path: join(dir, "cp.db") } },
       }),
     );
-    const child = spawn(process.execPath, [bin, "run", "flow.yaml", "--thread", "kill", "--json"], {
+    const child = spawn(process.execPath, [bin, "run", graph, "--thread", "kill", "--json"], {
       cwd: dir,
       stdio: "ignore",
     });
@@ -66,6 +69,12 @@ it("SIGKILL leaves a submission intent; resume cannot repay, and explicit recove
     expect(resumed.status, resumed.stdout + resumed.stderr).toBe(1);
     expect(resumed.stdout + resumed.stderr).toContain("uncertain outcome");
     expect(readFileSync(join(dir, "calls"), "utf8")).toBe("call\n");
+    const recovery = cli("recover", "flow.yaml", "--thread", "kill");
+    expect(recovery.status, recovery.stderr).toBe(0);
+    expect(JSON.parse(recovery.stdout)).toMatchObject({ workspace: dir, media: [expect.objectContaining({ nodeId: "img" })] });
+    const thread = cli("thread", "inspect", "flow.yaml", "--thread", "kill");
+    expect(thread.status, thread.stderr).toBe(0);
+    expect(JSON.parse(thread.stdout).workspace).toBe(dir);
     const file = readdirSync(join(dir, ".flowgraph/jobs/kill"))[0]!,
       fingerprint = file.slice(4, -5);
     const args = [
@@ -76,12 +85,13 @@ it("SIGKILL leaves a submission intent; resume cannot repay, and explicit recove
       "img",
       "--fingerprint",
       fingerprint,
-      "--workspace",
-      dir,
     ];
     const inspect = cli("media", "inspect", ...args);
     expect(inspect.status, inspect.stderr).toBe(0);
     const intent = JSON.parse(inspect.stdout);
+    const discovered = cli("media", "inspect", "--backend", "sqlite", "--path", join(dir, "cp.db"), "--thread", "kill");
+    expect(discovered.status, discovered.stderr).toBe(0);
+    expect(JSON.parse(discovered.stdout)).toMatchObject({ workspace: dir, journals: [expect.objectContaining({ nodeId: "img" })] });
     expect(
       cli("media", "resolve", ...args, "--submission", intent.submissionId, "--not-submitted")
         .status,

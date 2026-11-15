@@ -1,3 +1,4 @@
+import { currentEnvironment } from "../environment.js";
 /** Topology (ADR-0020 §4): which targets exist and how to reach them. Supplied by the host, never the graph. */
 
 import { z } from "zod";
@@ -59,7 +60,7 @@ export function parseTopology(input: unknown): { topology: Topology; diagnostics
 /** Resolve a target's token: `env:NAME` reads `env[NAME]`; anything else is literal. */
 export function resolveTargetToken(
   target: Pick<TopologyTarget, "token">,
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = currentEnvironment(),
 ): string | undefined {
   const t = target.token;
   if (t === undefined) return undefined;

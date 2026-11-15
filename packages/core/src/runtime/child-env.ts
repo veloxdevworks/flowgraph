@@ -1,3 +1,4 @@
+import { currentEnvironment } from "../environment.js";
 /**
  * Default host environment inherited by `shell` and `script` children.
  *
@@ -30,7 +31,7 @@ export const DEFAULT_INHERITED_ENV = [
 export function pickHostEnv(names: readonly string[]): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of names) {
-    if (Object.hasOwn(process.env, name)) env[name] = process.env[name];
+    if (Object.hasOwn(currentEnvironment(), name)) env[name] = currentEnvironment()[name];
   }
   return env;
 }

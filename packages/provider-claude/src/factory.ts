@@ -2,14 +2,14 @@
  * Build a Claude provider from declarative provider config (YAML `providers` block).
  */
 
-import type { ProviderAdapter } from "@flowgraph/core";
+import { currentEnvironment, type ProviderAdapter } from "@flowgraph/core";
 import type { ClaudeProviderConfig } from "@flowgraph/spec";
 import { createClaudeProvider, type ClaudePermissionMode } from "./provider.js";
 
 const DEFAULT_API_KEY_ENV = "ANTHROPIC_API_KEY";
 
 function readEnvKey(name: string): string | undefined {
-  const raw = process.env[name];
+  const raw = currentEnvironment()[name];
   if (raw === undefined || raw === "") return undefined;
   return raw.trim();
 }

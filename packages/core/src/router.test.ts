@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
 import type { GraphSpec } from "@flowgraph/spec";
+import { defineProvider } from "./providers/types.js";
 
 /**
  * Router drives exclusive routing via Command{ goto } alone — no duplicate
@@ -51,6 +52,33 @@ function routerOnlySpec(_flag: string): GraphSpec {
 }
 
 describe("router Command.goto", () => {
+  it("offers the default route and its description to the model", async () => {
+    const spec = routerOnlySpec("maybe");
+    spec.nodes[0]!.provider = "classifier";
+    spec.nodes[0]!.with = {
+      mode: "model",
+      input: "What a lovely sunny day, thanks for the flowers!",
+      routes: {
+        bills: { to: "take-yes", description: "Payments and invoices" },
+        repairs: { to: "take-yes" },
+        other: { to: "take-no", default: true, description: "None of the household tasks above" },
+      },
+    };
+    const provider = defineProvider({
+      name: "classifier", capabilities: { toolCalling: false, structuredOutput: true, streaming: false },
+      async run(req) {
+        expect(req.schema).toMatchObject({ properties: { route: { enum: ["bills", "repairs", "other"] } } });
+        expect(req.prompt).toContain("None of the household tasks above");
+        expect(req.prompt).toContain("default: choose when no other route fits");
+        return { output: { route: "other" }, stopReason: "done" };
+      },
+    });
+    const compiled = await compileGraph(spec, { providers: [provider] });
+    const result = await compiled.run();
+    expect(result.status).toBe("completed");
+    expect(result.state.path).toBe("no");
+  });
+
   registerFunction("emitYes", () => "yes");
   registerFunction("emitNo", () => "no");
 

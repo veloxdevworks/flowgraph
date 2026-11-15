@@ -1,11 +1,11 @@
 import { Command } from "commander";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
-import { inspectThreadRun, releaseThreadRun, loadGraph, resolveGraphWorkspace, type GraphSpec } from "@flowgraph/core";
+import { inspectThreadRun, releaseThreadRun, loadGraph, readThreadWorkspace, resolveGraphWorkspace, type GraphSpec } from "@flowgraph/core";
 import { checkpointerOption } from "./interrupts.js";
 import { loadDotenvFromCwd } from "./env.js";
 
-export interface ThreadDatabaseOptions { backend?: string; path?: string }
+export interface ThreadDatabaseOptions { backend?: string; path?: string; thread?: string }
 export async function openThreadDatabase(graph: string | undefined, overrides: ThreadDatabaseOptions = {}) {
   loadDotenvFromCwd(process.cwd());
   let spec: GraphSpec;
@@ -31,12 +31,17 @@ export async function openThreadDatabase(graph: string | undefined, overrides: T
   }
   const { checkpointer } = await checkpointerOption(spec, { onNotice: message => console.error(message) });
   if (!checkpointer || typeof checkpointer !== "object") throw new Error("No durable checkpoint database was opened");
+  const close = async () => {
+    const resource = checkpointer as unknown as { end?: () => Promise<void>; db?: { close(): void } };
+    if (resource.end) await resource.end(); else resource.db?.close();
+  };
+  let workspace: string;
+  try {
+    workspace = (overrides.thread ? await readThreadWorkspace(checkpointer, overrides.thread) : undefined)
+      ?? resolveGraphWorkspace(spec, graph ? dirname(resolve(graph)) : process.cwd());
+  } catch (error) { await close(); throw error; }
   return {
-    saver: checkpointer, spec, workspace: resolveGraphWorkspace(spec, graph ? dirname(resolve(graph)) : process.cwd()),
-    async close() {
-      const resource = checkpointer as unknown as { end?: () => Promise<void>; db?: { close(): void } };
-      if (resource.end) await resource.end(); else resource.db?.close();
-    },
+    saver: checkpointer, spec, workspace, close,
   };
 }
 function ownerIsAlive(pid: number): boolean {
@@ -51,7 +56,7 @@ export function buildThreadCommand(): Command {
   const command = new Command("thread").description("Inspect and explicitly reconcile execution claims");
   command.command("inspect [graph]").description("Read the execution claim and same-host owner status without changing it").requiredOption("--thread <id>", "Thread id").option("--backend <backend>", "Host checkpoint backend: sqlite|postgres").option("--path <database>", "Host checkpoint path/connection string").action(async (graph: string | undefined, opts: { thread: string } & ThreadDatabaseOptions) => {
     const db = await openThreadDatabase(graph, opts);
-    try { console.log(JSON.stringify({ threadId: opts.thread, claim: await inspectClaim(db.saver, opts.thread) })); }
+    try { console.log(JSON.stringify({ threadId: opts.thread, workspace: db.workspace, claim: await inspectClaim(db.saver, opts.thread) })); }
     finally { await db.close(); }
   });
   command.command("release [graph]").description("Release an inspected crash claim after stopping and reconciling its owner")

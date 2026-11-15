@@ -28,19 +28,25 @@ export interface LocalToolsRegistration {
 
 /**
  * Register local tools declared in the graph spec (filesystem, etc.).
+ * `workspace` is an already resolved execution root (including a recovered thread
+ * binding). Only localTools.fs.workspaceRoot is resolved beneath it.
  */
-export async function registerLocalTools(spec: GraphSpec, cwd = process.cwd()): Promise<LocalToolsRegistration> {
+export async function registerLocalTools(
+  spec: GraphSpec,
+  cwd = process.cwd(),
+  opts: { workspace?: string } = {},
+): Promise<LocalToolsRegistration> {
   const warnings: string[] = [];
   const fsCfg = spec.localTools?.fs;
   if (!fsCfg) return { warnings };
 
   const toolsFs = await loadToolsFs();
   const workspaceRoot = path.resolve(
-    spec.runtime?.workspace
+    opts.workspace ?? (spec.runtime?.workspace
       ? path.isAbsolute(spec.runtime.workspace)
         ? spec.runtime.workspace
         : path.resolve(cwd, spec.runtime.workspace)
-      : cwd,
+      : cwd),
     fsCfg.workspaceRoot ?? ".",
   );
   const operations = fsCfg.operations;

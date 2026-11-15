@@ -208,7 +208,7 @@ export const OutputMappingObjectSchema = z.object({
   /** Write the full result to this channel (in addition to `state.<nodeId>`). */
   to: z.string().optional(),
   /** Project fields from `result` into channels (in addition to `state.<nodeId>`). */
-  map: z.record(z.string()).optional(),
+  map: z.record(z.string({ invalid_type_error: 'Use an expression string, for example "{{ [\'x\'] }}", instead of a YAML list or object.' })).optional(),
   /** When true, write nothing to state (pure side-effect). */
   none: z.boolean().optional(),
 });
@@ -218,7 +218,7 @@ export const OutputMappingSchema = z.union(
   {
     errorMap: () => ({
       message:
-        'expected "none", { none: true }, { to: "<channel>" }, and/or { map: { <channel>: "<expr>" } } — not a bare string or flat field map',
+        'expected "none", { none: true }, { to: "<channel>" }, and/or { map: { <channel>: "<expr>" } }. Map values must be expression strings, for example "{{ [\'x\'] }}", rather than YAML lists or objects.',
     }),
   },
 );
@@ -793,6 +793,7 @@ export const ArtifactSchema = z.object({
 const MediaInputRefSchema = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
 
 const MediaCommonWithSchema = BaseWithSchema.extend({
+  model: z.string().min(1).optional().describe("Media model override; top-level node model takes precedence"),
   prompt: z.string().optional(),
   negativePrompt: z.string().optional(),
   input: MediaInputRefSchema.optional().describe(

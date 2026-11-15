@@ -114,6 +114,19 @@ describe("media with-schemas", () => {
 });
 
 describe("image node", () => {
+  it("honors with.model and keeps top-level model precedence", async () => {
+    for (const topLevel of [undefined, "top-level-model"]) {
+      const calls = newCalls();
+      const compiled = await compileGraph(
+        graph([{ id: "img", type: "image", provider: "fake", ...(topLevel ? { model: topLevel } : {}), with: { prompt: "bake-sale poster", model: "fgqa-test-mini" } }]),
+        { cwd: dir, mediaProviders: [syncProvider(calls)] },
+      );
+      const result = await compiled.run({ threadId: topLevel ?? "with-model" });
+      expect(result.status, String(result.error)).toBe("completed");
+      expect(calls.start[0]?.model).toBe(topLevel ?? "fgqa-test-mini");
+    }
+  });
+
   it("saves a synchronous provider's output as an Artifact on disk", async () => {
     const calls = newCalls();
     const compiled = await compileGraph(

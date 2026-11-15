@@ -1,3 +1,4 @@
+import { currentEnvironment } from "../environment.js";
 /**
  * Shared skill execution: resolve a SKILL.md, preflight, run its handler.
  * Used by both the `skill` node and skill-as-tool for intelligent nodes.
@@ -9,7 +10,7 @@ import type { NodeRunContext } from "../context.js";
 
 export async function loadResolvedSkill(uses: string, ctx: NodeRunContext): Promise<SkillDef> {
   const skillDir = await resolveSkillPath(uses, {
-    cwd: ctx.workspace,
+    cwd: typeof ctx.config.graphDir === "string" ? ctx.config.graphDir : ctx.workspace,
     aliases:
       (ctx.config as Record<string, unknown> & { skills?: Record<string, string> })?.skills ?? {},
   });
@@ -80,7 +81,7 @@ async function runCommand(
 
   const [cmd, ...args] = command as [string, ...string[]];
   const { stdout } = await execFileAsync(cmd, args, {
-    env: { ...process.env, FLOWGRAPH_INPUT: JSON.stringify(input) },
+    env: { ...currentEnvironment(), FLOWGRAPH_INPUT: JSON.stringify(input) },
     cwd: ctx.workspace,
     signal: ctx.signal,
   });

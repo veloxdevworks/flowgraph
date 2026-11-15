@@ -147,12 +147,15 @@ async function runModelRouter(
     throw new Error(`router "${nodeId}" mode=model: provider "${providerName}" is not registered. Available: ${providerNamesFor(ctx).join(", ") || "(none)"}.`);
   }
 
-  const routeKeys = Object.keys(config.routes).filter((k) => !config.routes[k]?.default);
+  const routeKeys = Object.keys(config.routes);
   const inputText = config.input ? String(renderDeep(config.input, scope)) : JSON.stringify(state);
   const instruction = config.instruction ?? "Choose the single most appropriate route for the input.";
   const prompt =
     `${instruction}\n\nInput:\n${inputText}\n\n` +
-    `Available routes: ${routeKeys.join(", ")}.\nReturn the chosen route key.`;
+    `Available routes:\n${routeKeys.map((key) => {
+      const route = config.routes[key]!;
+      return `- ${key}${route.description ? `: ${route.description}` : ""}${route.default ? " (default: choose when no other route fits)" : ""}`;
+    }).join("\n")}\nReturn the chosen route key.`;
 
   const req: AgentRequest = {
     prompt,

@@ -1,3 +1,4 @@
+import { currentEnvironment } from "../environment.js";
 /**
  * Built-in node type: `demo`
  *
@@ -273,7 +274,7 @@ function buildScope(
       getOwnPropertyDescriptor: (_t, prop) =>
         typeof prop === "string" ? { configurable: true, enumerable: false } : undefined,
       get: (_t, prop) => {
-        const value = process.env[String(prop)] ?? "";
+        const value = currentEnvironment()[String(prop)] ?? "";
         if (value) usedSecrets.add(value);
         return value;
       },

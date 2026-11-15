@@ -496,6 +496,14 @@ describe("validateSpec node config", () => {
       ),
     ).toBe(true);
   });
+
+  it("shows an expression-string example for YAML-list output projections", () => {
+    const diags = validateSpec({
+      metadata: { name: "list-output" }, nodes: [{ id: "fetch", type: "http", with: { url: "https://example.com", output: { map: { values: ["x"] } } } }],
+      edges: [{ from: "START", to: "fetch" }, { from: "fetch", to: "END" }],
+    } as unknown as GraphSpec);
+    expect(diags.some((d) => d.code === "NODE_CONFIG_ERROR" && d.message.includes("{{ ['x'] }}"))).toBe(true);
+  });
 });
 
 describe("loadGraph unknown keys", () => {
@@ -532,5 +540,14 @@ describe("loadGraph unknown keys", () => {
     expect(r.spec).toBeNull();
     expect(r.diagnostics[0]).toMatchObject({ code: "UNKNOWN_FIELD", path: "futureField" });
     expect(r.diagnostics[0]!.message).toContain("on the graph");
+  });
+
+  it("reports an unknown type alongside an unknown field on the same graph", async () => {
+    const r = await loadYaml(`${head}nodes:\n  - { id: typo, type: shel, with: { command: echo } }\n  - { id: misplaced, type: shell, runOn: local, with: { command: echo } }\nedges:\n  - { from: START, to: typo }\n  - { from: typo, to: misplaced }\n  - { from: misplaced, to: END }\n`);
+    expect(r.spec).toBeNull();
+    expect(r.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "UNKNOWN_FIELD", path: "nodes.misplaced.runOn" }),
+      expect.objectContaining({ code: "UNKNOWN_NODE_TYPE", path: "nodes.typo.type" }),
+    ]));
   });
 });

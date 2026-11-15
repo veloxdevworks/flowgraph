@@ -1,3 +1,4 @@
+import { withEnvironment } from "../../environment.js";
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import * as os from "node:os";
 import * as fs from "node:fs";
@@ -98,6 +99,18 @@ describe("LangChain provider factory — bedrock construction", () => {
   function readCtorOpts(): Record<string, unknown> {
     return JSON.parse(fs.readFileSync(ctorOutPath, "utf8")) as Record<string, unknown>;
   }
+
+  it("uses scoped AWS region/profile without retaining them in later invocations", async () => {
+    stashAwsEnv();
+    const { createLangChainProviderFromConfig } = await import("./factory.js");
+    await withEnvironment({ AWS_REGION: "us-east-2", AWS_PROFILE: "run-profile", AWS_ACCESS_KEY_ID: undefined, AWS_SECRET_ACCESS_KEY: undefined }, () => createLangChainProviderFromConfig(
+      "bedrock", { kind: "langchain", vendor: "bedrock", model: "test-model" }, { cwd: tmpDir },
+    ));
+    expect(readCtorOpts()).toMatchObject({ region: "us-east-2", profile: "run-profile" });
+    await createLangChainProviderFromConfig("bedrock", { kind: "langchain", vendor: "bedrock", model: "test-model", region: "us-west-2" }, { cwd: tmpDir });
+    expect(readCtorOpts().profile).toBeUndefined();
+    expect(process.env.AWS_PROFILE).toBeUndefined();
+  });
 
   it("constructs ChatBedrockConverse with region and explicit credentials when AWS env vars are present", async () => {
     stashAwsEnv();

@@ -1,3 +1,4 @@
+import { currentEnvironment } from "./environment.js";
 /**
  * Stage 1 of compilation: load a YAML file and return a validated GraphSpec.
  */
@@ -31,6 +32,31 @@ export {
 
 type LoadResult = { spec: GraphSpec | null; diagnostics: Diagnostic[] };
 const filePlacement = new WeakSet<GraphSpec>();
+
+/** Type names can be checked even when strict graph parsing rejects another field. */
+function rawNodeTypeDiagnostics(parsed: unknown): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const graph = (value: unknown, prefix = ""): void => {
+    if (!value || typeof value !== "object") return;
+    const raw = value as { nodes?: unknown; imports?: Array<{ nodes?: unknown }> };
+    // Plugin types are not known until imports are loaded. Do not incorrectly
+    // label a plugin type as unknown while reporting an unrelated schema error.
+    if (Array.isArray(raw.imports) && raw.imports.some((imp) => imp && typeof imp.nodes === "string")) return;
+    if (!Array.isArray(raw.nodes)) return;
+    const node = (value: unknown, base: string): void => {
+      if (!value || typeof value !== "object") return;
+      const rawNode = value as { id?: unknown; type?: unknown; with?: { node?: unknown; graph?: unknown }; spec?: unknown };
+      if (typeof rawNode.type === "string" && !registry.has(rawNode.type)) {
+        diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_TYPE", path: `${base}.type`, message: `Node "${String(rawNode.id)}" has unregistered type "${rawNode.type}"` });
+      }
+      if (rawNode.type === "map") node(rawNode.with?.node, `${base}.with.node`);
+      if (rawNode.type === "subgraph") graph(rawNode.spec ?? rawNode.with?.graph, `${base}.spec.`);
+    };
+    raw.nodes.forEach((entry, index) => node(entry, `${prefix}nodes.${typeof entry?.id === "string" ? entry.id : index}`));
+  };
+  graph(parsed);
+  return diagnostics;
+}
 
 export async function loadGraph(
   filePath: string,
@@ -69,7 +95,7 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
     return { spec: null, diagnostics: [{ severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` }, ...envCollisionDiags] };
   }
   const result = GraphSpecSchema.safeParse(parsed);
-  if (!result.success) return { spec: null, diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...envCollisionDiags] };
+  if (!result.success) return { spec: null, diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...rawNodeTypeDiagnostics(parsed), ...envCollisionDiags] };
   const spec = result.data;
   setGraphFile(spec, resolved);
   const dir = path.dirname(resolved);
@@ -130,7 +156,7 @@ function expandGraphEnv(parsed: unknown): unknown {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
   const root = parsed as Record<string, unknown>;
   const expand = (value: unknown): unknown => {
-    if (typeof value === "string") return value.replace(/(?<!\$)\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => process.env[name] ?? def ?? "").replace(/\$\$\{/g, "${");
+    if (typeof value === "string") return value.replace(/(?<!\$)\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => currentEnvironment()[name] ?? def ?? "").replace(/\$\$\{/g, "${");
     if (Array.isArray(value)) return value.map(expand);
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, val]) => [key, expand(val)]));
     return value;
@@ -301,10 +327,10 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
     if (!vendor) return;
     const w = node.with as Record<string, unknown> ?? {};
     // Dynamic requests are checked after rendering, before submission.
-    if (JSON.stringify([w.size, w.params]).includes("{{")) return;
+    if (JSON.stringify([w.model, w.size, w.params]).includes("{{")) return;
     try {
       vendor.create({ name: String(name), ...(cfg?.kind === "media" ? { model: cfg.model, options: cfg.options } : {}) }).validateRequest?.({
-        modality: node.type as import("./media/types.js").MediaModality, model: typeof node.model === "string" ? node.model : undefined,
+        modality: node.type as import("./media/types.js").MediaModality, model: typeof node.model === "string" ? node.model : typeof w.model === "string" ? w.model : undefined,
         inputs: [], count: 1, params: w.params as Record<string, unknown> ?? {}, ...(typeof w.size === "string" ? { size: w.size } : {}),
       });
     } catch (err) { diagnostics.push({ severity: "error", code: "MEDIA_REQUEST_INVALID", path: `nodes.${node.id}.with`, message: `Media node "${node.id}": ${String(err)}` }); }

@@ -1,3 +1,4 @@
+import { currentEnvironment } from "../../environment.js";
 /**
  * Build a LangChain ChatModel from declarative provider config (YAML `providers` block).
  */
@@ -49,7 +50,7 @@ function isLangChainVendor(v: string): v is LangChainVendor {
 }
 
 function readEnvKey(name: string): string | undefined {
-  const raw = process.env[name];
+  const raw = currentEnvironment()[name];
   if (raw === undefined || raw === "") return undefined;
   return raw.trim();
 }
@@ -144,7 +145,10 @@ async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): 
   // explicitly ONLY when access-key env vars are present, otherwise we let the
   // AWS default credential chain (profile / ~/.aws / SSO) resolve them.
   if (vendor === "bedrock") {
-    if (cfg.region) modelOpts["region"] = cfg.region;
+    const region = cfg.region ?? readEnvKey("AWS_REGION") ?? readEnvKey("AWS_DEFAULT_REGION");
+    if (region) modelOpts["region"] = region;
+    const profile = readEnvKey("AWS_PROFILE");
+    if (profile) modelOpts["profile"] = profile;
     const accessKeyId = readEnvKey("AWS_ACCESS_KEY_ID");
     const secretAccessKey = readEnvKey("AWS_SECRET_ACCESS_KEY");
     if (accessKeyId && secretAccessKey) {
