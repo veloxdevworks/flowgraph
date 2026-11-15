@@ -1,4 +1,9 @@
-import { waitForWebhookResume, terminateThreadServices, type RunResult, type StateSnapshot } from "@flowgraph/core";
+import {
+  waitForWebhookResume,
+  terminateThreadServices,
+  type RunResult,
+  type StateSnapshot,
+} from "@flowgraph/core";
 
 /** The engine may finish a timed wait before the CLI begins awaiting it. */
 export function continuationMailbox() {
@@ -26,19 +31,28 @@ export async function awaitAutomaticContinuations(
   initial: RunResult,
   mailbox: ReturnType<typeof continuationMailbox>,
   refresh?: (threadId: string) => Promise<StateSnapshot | null>,
+  signal?: AbortSignal,
 ): Promise<RunResult> {
+  const abortCurrent = async (current: RunResult): Promise<RunResult> => {
+    if (current.threadId) await terminateThreadServices(current.threadId, { force: true });
+    return { ...current, status: "aborted" };
+  };
   let current = initial;
   for (;;) {
     const ready = mailbox.take();
     if (ready) current = ready;
+    // A SIGHUP/INT/TERM may have already aborted the run signal in the gap
+    // after compiled.run() returned interrupted and before this wait starts.
+    if (signal?.aborted) return abortCurrent(current);
     if (current.status !== "interrupted" || !current.threadId) return current;
     const webhook = waitForWebhookResume(current.threadId);
-    if (!webhook) return current;
+    if (!webhook) return signal?.aborted ? abortCurrent(current) : current;
     // Only a webhook listener belongs to this CLI process. Durable signal and
     // conditional waits return their pending status for a later external resume.
     const keepAlive = setInterval(() => {}, 60_000);
     let unsubscribe = () => {};
     let onSignal = () => {};
+    let onAbort = () => {};
     try {
       const timeout = new Promise<RunResult>((resolve) => {
         unsubscribe = mailbox.subscribe(resolve);
@@ -48,9 +62,16 @@ export async function awaitAutomaticContinuations(
         process.once("SIGINT", onSignal);
         process.once("SIGTERM", onSignal);
         process.once("SIGHUP", onSignal);
+        if (signal) {
+          onAbort = () => resolve({ status: "aborted" });
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        }
       });
       const done = await Promise.race([timeout, cancelled, ...(webhook ? [webhook] : [])]);
-      if (done.status === "aborted") await terminateThreadServices(current.threadId, {force:true});
+      // Aborting the run unregisters webhook routes and settles them as
+      // "cancelled". That must not win over the abort and leave exit code 3.
+      if (signal?.aborted || done.status === "aborted") return abortCurrent(current);
       // A timeout unregisters its webhook before publishing the full result.
       const published = mailbox.take();
       if (published) {
@@ -81,6 +102,7 @@ export async function awaitAutomaticContinuations(
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
       process.off("SIGHUP", onSignal);
+      signal?.removeEventListener("abort", onAbort);
     }
   }
 }
