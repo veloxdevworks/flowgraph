@@ -309,3 +309,14 @@ export function parseExpr(input: string): Expr {
   const parser = new Parser(tokens);
   return parser.parseComplete();
 }
+
+const callbacks = new WeakMap<Expr, Expr>();
+/** Parsed source for the literal callbacks supported by the expression language. */
+export function literalCallbackExpr(expr: Expr): Expr | undefined {
+  if (expr.kind !== "Call" || !["map", "filter", "find"].includes(expr.callee) || expr.args[1]?.kind !== "String") return undefined;
+  const cached=callbacks.get(expr);
+  if (cached) return cached;
+  const parsed=parseExpr(expr.args[1].value);
+  callbacks.set(expr,parsed);
+  return parsed;
+}

@@ -1,5 +1,5 @@
 import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
-import { parseExpr, scanTemplate, stdlib, tokenize } from "@flowgraph/expr";
+import { literalCallbackExpr, parseExpr, scanTemplate, stdlib, tokenize } from "@flowgraph/expr";
 
 const MAX_DEPTH = 256;
 const MAX_TOKENS = 2048;
@@ -38,6 +38,11 @@ function expressionDiagnostics(source: string, path: string): Diagnostic[] {
       const name = node.kind === "Call" ? node.callee : node.kind === "Pipe" ? node.fn : undefined;
       if (name && !Object.hasOwn(stdlib, name))
         return diagnostic("EXPR_UNKNOWN_FUNCTION", `Unknown expression function "${name}"`);
+      if (node.kind === "Call" && ["map","filter","find"].includes(node.callee ?? "")) {
+        const call=value as import("@flowgraph/expr").Expr & {kind:"Call"};
+        if (call.args[1]?.kind !== "String") return diagnostic("EXPR_CALLBACK_LITERAL",`${call.callee}: callback must be a quoted expression string`);
+        stack.push({value:literalCallbackExpr(call),depth:depth+1});
+      }
       for (const child of Object.values(value)) stack.push({ value: child, depth: depth + 1 });
     }
     return [];

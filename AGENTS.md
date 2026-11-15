@@ -57,8 +57,7 @@ packages via `link:` to a sibling checkout of this repo.
 
 ### Providers gotcha
 
-- `intelligent` nodes require a *registered* provider. The built-in `mock`
-  provider is NOT auto-registered by the CLI/runtime; graphs using `provider: mock`
-  must register it via an `imports` module, and `provider: langchain` needs a model
-  plus an API key. Deterministic node types (`router`, `skill`, `code` with
+- `intelligent` nodes require a *registered* provider. The CLI supplies the built-in `mock` provider when a graph
+  requests it. Programmatic runtimes must register a provider explicitly;
+  `provider: langchain` needs a model plus an API key. Deterministic node types (`router`, `skill`, `code` with
   registered functions) run with no LLM.
