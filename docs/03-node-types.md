@@ -455,9 +455,9 @@ For substantial reusable logic, prefer a **skill** (portable, contract + env dec
 
 ---
 
-## 5c. `script` — sandboxed inline Node.js
+## 5c. `script` — sandboxed Node.js
 
-Run inline Node.js (ESM) source without registering TypeScript or dropping into a shell. Prefer this over `shell` when the logic is pure JS data transformation / Node-builtin I/O and you want a real editor (Monaco) + sandbox rather than a shell string.
+Run inline or file-based Node.js (ESM) source without registering TypeScript or dropping into a shell. Prefer this over `shell` when the logic is pure JS data transformation / Node-builtin I/O and you want a real editor (Monaco) + sandbox rather than a shell string.
 
 The script **must** `export default` an async (or sync) function:
 
@@ -493,11 +493,38 @@ export default async function (input, ctx) {
 
 ### How it runs
 
-1. The engine writes your `code` to a temp `script.mjs` plus a thin `entry.mjs` wrapper.
+Choose exactly one of `with.code` or `with.file`. A file path is static and resolves
+relative to the graph file declaring the node, independently of `runtime.workspace`.
+The file must contain the same default-export function as inline code:
+
+```yaml
+- id: summarize
+  type: script
+  with:
+    file: ./scripts/summarize.mjs
+    input:
+      report:
+        title: "{{ state.title }}"
+        findings: "{{ state.findings }}"
+      options: { compact: true, limit: 10 }
+```
+
+`with.input` accepts nested objects, arrays, numbers, booleans and null. Templates
+render recursively: a whole-value expression preserves its result's type, while
+embedded text remains a string. Missing or empty source files name the node and
+resolved path in the error. Hosts can set `NodePolicy.blockScriptFiles` to refuse
+file sources; untrusted server uploads retain their script restrictions.
+
+1. The engine reads the selected source and writes it to a temp `script.mjs` plus a thin `entry.mjs` wrapper.
 2. It spawns `node --permission … entry.mjs` in that temp directory (no `node_modules` on the resolution path).
 3. The wrapper calls your default export with the rendered `input` and writes the JSON-serialized return value to a result file, which is mapped via `output`.
 
 **Defaults:** timeout `30s`, stdout/stderr capped at 10MB. Non-zero exit, timeout, or a missing/invalid result file fail the node (stderr excerpt included).
+
+File sources remain self-contained modules: their contents run in the same temp
+sandbox as inline code. Loading a source file grants the child no access to its
+original directory. Use `node:*` builtins; sibling imports and npm dependencies
+remain unsupported.
 
 ### Sandbox (Node permission model)
 

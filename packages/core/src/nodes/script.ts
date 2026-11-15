@@ -1,7 +1,7 @@
 /**
  * Built-in node type: `script`
  *
- * Runs inline Node.js (ESM) source in a sandboxed child process using
+ * Runs inline or file-based Node.js (ESM) source in a sandboxed child process using
  * Node's built-in permission model (`--permission`). Engine bookkeeping
  * lives in an isolated temp directory; the child process `cwd` defaults to
  * the graph workspace so relative paths match `shell` / `demo` / `service`.
@@ -24,7 +24,7 @@ import { ScriptWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import { assertHostProbeAllowed, nodePolicyOf } from "../node-policy.js";
+import { assertHostProbeAllowed, assertScriptFileAllowed, nodePolicyOf } from "../node-policy.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import { secretScope } from "../runtime/secret-scope.js";
@@ -310,6 +310,18 @@ export const scriptNode = defineNode<Config>({
 
         const timeoutMs = config.timeout ? parseDuration(config.timeout) : DEFAULT_TIMEOUT_MS;
         const permissions = normalizeScriptPermissions(config.permissions);
+        let code = config.code;
+        if (config.file !== undefined) {
+          assertScriptFileAllowed(nodePolicyOf(ctx), `script node "${ctx.nodeId}"`);
+          const file = resolve(ctx.config.graphDir ?? ctx.workspace, config.file);
+          try {
+            code = readFileSync(file, "utf8");
+            if (!code.trim()) throw new Error("source file is empty");
+          } catch (cause) {
+            throw new Error(`script node "${ctx.nodeId}" could not load "${file}": ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+          }
+        }
+        if (code === undefined) throw new Error(`script node "${ctx.nodeId}": provide exactly one of code or file`);
 
         assertHostProbeAllowed(nodePolicyOf(ctx), config.requires, `script node "${ctx.nodeId}"`);
         const missing = await findMissingBins(config.requires);
@@ -336,11 +348,11 @@ export const scriptNode = defineNode<Config>({
         ctx.logger.debug("script exec", {
           timeoutMs,
           permissions,
-          codeLength: config.code.length,
+          codeLength: code.length,
         });
 
         const { result, stdout, stderr, exitCode, durationMs } = await runScriptSandboxed(
-          config.code,
+          code,
           {
             input,
             ...(env ? { env } : {}),
