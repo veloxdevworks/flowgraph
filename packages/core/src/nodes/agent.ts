@@ -35,6 +35,8 @@ import { startAgentContext, type AgentContextSession } from "./agent-context.js"
 import { validateAgentOutput } from "../runtime/agent-output.js";
 import { isNonRetryable } from "../runtime/retry.js";
 
+import {bindNodeReplay,isPendingStep,pendingStep,uncertainStep} from "../providers/replay-persistence.js";
+
 const configSchema = AgentWithSchema;
 type Config = z.infer<typeof configSchema>;
 
@@ -42,7 +44,7 @@ export const agentNode = defineNode<Config>({
   type: "agent",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { streaming: true, interruptible: true, sideEffecting: true },
+  capabilities: { streaming: true, interruptible: true, sideEffecting: true, receivesTimeoutSignal: true },
 
   build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const nodeProvider = nodeSpec["provider"] as string | undefined;
@@ -55,7 +57,7 @@ export const agentNode = defineNode<Config>({
 
     return {
       contract: {},
-      capabilities: { streaming: true, interruptible: true, sideEffecting: true },
+      capabilities: { streaming: true, interruptible: true, sideEffecting: true, receivesTimeoutSignal: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const providerName =
@@ -151,6 +153,12 @@ export const agentNode = defineNode<Config>({
         const runScope = runScopeOf(lgConfigOf(ctx));
         const replayStore = runScope?.replay ?? new ReplayStore();
         const cacheKey = replayNodeKey(runScope?.path ?? [], ctx.nodeId);
+        await bindNodeReplay(ctx,cacheKey);
+        const requestIdentity=toolArgsHash({provider:providerName,request:req});
+        const savedIdentity=replayStore.get(cacheKey,"agent:request");
+        if(savedIdentity!==undefined&&savedIdentity!==requestIdentity)throw new ReplayMismatchError(`Agent "${ctx.nodeId}" request changed while recovering completed steps; fork into a new execution instead of reusing incompatible results`);
+        replayStore.set(cacheKey,"agent:request",requestIdentity);
+        await replayStore.flush(cacheKey);
         let toolSeq = 0;
         // Older builds counted every tool write on the outermost agent's
         // handle, in call order. A nested agent reuses that cursor, namespace
@@ -176,7 +184,7 @@ export const agentNode = defineNode<Config>({
           },
           replay: {
             get: (index) => replayStore.get(cacheKey, index),
-            set: (index, value) => replayStore.set(cacheKey, index, value),
+            set: async (index, value) => { replayStore.set(cacheKey, index, value); await replayStore.flush(cacheKey); },
           },
           checkToolCall: (name, args) => checkToolCall(governance, name, args),
           reportToolResult: (name, args, result) => reportToolResult(governance, name, args, result),
@@ -189,6 +197,7 @@ export const agentNode = defineNode<Config>({
             const toolIndex = `tool:${toolSeq++}`;
             // A cached result is reused only for the same tool and arguments.
             const cached = replayStore.get(cacheKey, toolIndex);
+            if (isPendingStep(cached)) throw uncertainStep(cached);
             if (cached !== undefined) {
               try {
                 return replayedToolResult(cached, name, args, `agent node "${ctx.nodeId}" ${toolIndex}`);
@@ -232,9 +241,18 @@ export const agentNode = defineNode<Config>({
             );
             if (toolMemory) toolCtx.memory = toolMemory;
             let result: unknown;
+            replayStore.set(cacheKey,toolIndex,pendingStep("tool",{tool:name,args}));
+            await replayStore.flush(cacheKey);
             try {
               result = await exec(callArgs, toolCtx, state);
             } catch (err) {
+              // Reaching this catch means the tool has settled. A cooperative
+              // abort can be retried; an operation still running after abort
+              // never reaches here and keeps its uncertain receipt.
+              if (isGraphInterrupt(err) || ctx.signal?.aborted) {
+                replayStore.delete(cacheKey, toolIndex);
+                await replayStore.flush(cacheKey);
+              }
               if (isGraphInterrupt(err) || err instanceof ReplayMismatchError || isNonRetryable(err) || ctx.signal?.aborted) throw err;
               result = { isError: true, error: { code: (err as { code?: unknown } | null)?.code ?? "TOOL_ERROR", message: err instanceof Error ? err.message : String(err) } };
             }
@@ -242,6 +260,7 @@ export const agentNode = defineNode<Config>({
 
             result = await reportToolResult(governance, name, callArgs, result);
             replayStore.set(cacheKey, toolIndex, recordedToolResult(name, args, result));
+            await replayStore.flush(cacheKey);
             return result;
           },
         };
@@ -321,7 +340,7 @@ export const agentNode = defineNode<Config>({
             },
           };
         } catch (err) {
-          if (!isGraphInterrupt(err)) replayStore.clear(cacheKey);
+          // Completed steps remain available for retries and crash recovery.
           throw err;
         }
       },

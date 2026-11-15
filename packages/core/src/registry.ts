@@ -20,10 +20,16 @@ export type NodeCapabilities = {
   routing?: boolean;
   /**
    * The node stops its work when `ctx.signal` aborts for a node `timeout`, and undoes nothing a
-   * retry needs. Without this, `ctx.signal` is the run's own and aborting it means the run was
-   * cancelled, so a node may treat it as permission to cancel paid work or kill what it started.
+   * retry needs. Without either timeout-signal capability, `ctx.signal` is the run's
+   * own and aborting it means the run was cancelled, so a node may treat it as
+   * permission to cancel paid work or kill what it started.
    */
   stopsOnTimeout?: boolean;
+  /**
+   * Receive an attempt's timeout signal without waiting for the entire invocation
+   * to settle. The node must guard work that ignores cancellation before retrying.
+   */
+  receivesTimeoutSignal?: boolean;
 };
 
 export type NodeResult =

@@ -149,6 +149,12 @@ export async function migratePostgresCheckpointRetention(pool: pg.Pool, schema: 
       await client.query(`CREATE TABLE ${s}.fg_run_usage (thread_id TEXT PRIMARY KEY, record JSONB NOT NULL)`);
       await client.query(`INSERT INTO ${s}.fg_schema_migrations (component, version, applied_at) VALUES ('usage', 1, $1)`, [Date.now()]);
     }
+    const replayVersion=Number((await client.query<{v:number|null}>(`SELECT MAX(version) AS v FROM ${s}.fg_schema_migrations WHERE component='replay'`)).rows[0]?.v??0);
+    if(replayVersion>1)throw new Error("Replay schema is newer than this flowgraph supports");
+    if(replayVersion<1){
+      await client.query(`CREATE TABLE ${s}.fg_run_replay(thread_id TEXT NOT NULL,task TEXT NOT NULL,entries JSONB NOT NULL,PRIMARY KEY(thread_id,task))`);
+      await client.query(`INSERT INTO ${s}.fg_schema_migrations(component,version,applied_at) VALUES('replay',1,$1)`,[Date.now()]);
+    }
     await client.query("COMMIT");
     return applied;
   } catch (err) {
@@ -263,6 +269,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
     const pool = this.db();
     await pool.query(`DELETE FROM ${this.q}.fg_checkpoint_pins WHERE thread_id = $1`, [threadId]);
     await pool.query(`DELETE FROM ${this.q}.fg_checkpoint_threads WHERE thread_id = $1`, [threadId]);
+    await pool.query(`DELETE FROM ${this.q}.fg_run_replay WHERE thread_id = $1`, [threadId]);
     await pool.query(`DELETE FROM ${this.q}.fg_memory_threads WHERE thread_id = $1`, [threadId]).catch((err: { code?: string }) => {
       if (err.code !== "42P01") throw err;
     });
@@ -300,7 +307,7 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
           await client.query("COMMIT");
           return;
         }
-        for (const table of ["checkpoints", "checkpoint_blobs", "checkpoint_writes", "fg_checkpoint_pins", "fg_checkpoint_threads"]) {
+        for (const table of ["checkpoints", "checkpoint_blobs", "checkpoint_writes", "fg_checkpoint_pins", "fg_checkpoint_threads", "fg_run_replay"]) {
           await client.query(`DELETE FROM ${this.q}.${table} WHERE thread_id = $1`, [threadId]);
         }
         if (dropMemoryThreads) {
@@ -333,6 +340,35 @@ export class FlowgraphPostgresSaver extends PostgresSaver {
 
   noteThreadPolicy(threadId: string, policy: ResolvedCheckpointRetention): void {
     this.threadPolicy.set(threadId, policy);
+  }
+
+  async initializeThreadReplay(threadId:string,task:string,entries:Record<string,unknown>):Promise<void> {
+    await this.db().query(`INSERT INTO ${this.q}.fg_run_replay(thread_id,task,entries) VALUES($1,$2,$3::jsonb) ON CONFLICT(thread_id,task) DO NOTHING`,[threadId,task,JSON.stringify(entries)]);
+  }
+  async readThreadReplay(threadId:string,task:string):Promise<Record<string,unknown>|undefined> {
+    return (await this.db().query<{entries:Record<string,unknown>}>(`SELECT entries FROM ${this.q}.fg_run_replay WHERE thread_id=$1 AND task=$2`,[threadId,task])).rows[0]?.entries;
+  }
+  async writeThreadReplay(threadId:string,task:string,entries:Record<string,unknown>):Promise<void> {
+    await this.db().query(`INSERT INTO ${this.q}.fg_run_replay(thread_id,task,entries) VALUES($1,$2,$3::jsonb) ON CONFLICT(thread_id,task) DO UPDATE SET entries=excluded.entries`,[threadId,task,JSON.stringify(entries)]);
+  }
+  async compareThreadReplay(threadId:string,task:string,index:string,expected:unknown,value:unknown):Promise<boolean> {
+    if(expected!==undefined){
+      return !!(await this.db().query(
+        `UPDATE ${this.q}.fg_run_replay SET entries=CASE WHEN $4::jsonb IS NULL THEN entries-$3::text ELSE jsonb_set(entries,ARRAY[$3::text],$4::jsonb,true) END
+         WHERE thread_id=$1 AND task=$2 AND entries->$3::text IS NOT DISTINCT FROM $5::jsonb RETURNING task`,
+        [threadId,task,index,value===undefined?null:JSON.stringify(value),JSON.stringify(expected)],
+      )).rowCount;
+    }
+    return !!(await this.db().query(
+      `INSERT INTO ${this.q}.fg_run_replay AS current(thread_id,task,entries) VALUES($1,$2,$5::jsonb)
+       ON CONFLICT(thread_id,task) DO UPDATE
+       SET entries=CASE WHEN $4::jsonb IS NULL THEN current.entries-$3::text ELSE jsonb_set(current.entries,ARRAY[$3::text],$4::jsonb,true) END
+       WHERE current.entries->$3::text IS NULL RETURNING task`,
+      [threadId,task,index,value===undefined?null:JSON.stringify(value),JSON.stringify(value===undefined?{}:{[index]:value})],
+    )).rowCount;
+  }
+  async listThreadReplay(threadId:string):Promise<Array<{task:string;entries:Record<string,unknown>}>> {
+    return (await this.db().query<{task:string;entries:Record<string,unknown>}>(`SELECT task,entries FROM ${this.q}.fg_run_replay WHERE thread_id=$1 ORDER BY task`,[threadId])).rows;
   }
 
   async readThreadUsage(threadId: string): Promise<UsageRecord | undefined> {

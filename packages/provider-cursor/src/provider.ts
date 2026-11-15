@@ -247,7 +247,7 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
       }
 
       const agentResult = { output, steps, usage, stopReason };
-      ctx.replay?.set("provider:result", agentResult);
+      await ctx.replay?.set("provider:result", agentResult);
       return agentResult;
     },
   };

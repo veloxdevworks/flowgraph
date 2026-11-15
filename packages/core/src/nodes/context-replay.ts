@@ -51,5 +51,6 @@ export async function cachedContextArtefact<T>(
   if (isContextEntry(cached) && cached.inputHash === inputHash && isValue(cached.value)) return cached.value;
   const value = await compute();
   store.set(cacheKey, name, { inputHash, value } satisfies ContextEntry);
+  await store.flush(cacheKey);
   return value;
 }

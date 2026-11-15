@@ -98,7 +98,7 @@ export function createDeepAgentsProvider(options: DeepAgentsProviderOptions): Pr
       try {
         const da = await tryCreateDeepAgent(options.model, req, ctx, options.agentOptions ?? {});
         if (da) {
-          ctx.replay?.set("provider:result", da);
+          await ctx.replay?.set("provider:result", da);
           return da;
         }
       } catch (err) {

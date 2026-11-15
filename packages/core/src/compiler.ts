@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { createExecutionLimit, type ExecutionLimit } from "./runtime/concurrency.js";
 import type { GraphSpec, NodeSpec, OutputMapping } from "@flowgraph/spec";
 import { applyOutput } from "./runtime/apply-output.js";
+import {mkdir} from "node:fs/promises";
 import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
@@ -266,6 +267,8 @@ export interface ResumeOptions {
   sinks?: EventSink[];
   onInterrupt?: InterruptPolicy;
   resolveInterrupt?: (interrupts: InterruptInfo[]) => Promise<unknown> | unknown;
+  /** Separate workspace required for historical replay of side-effecting nodes. */
+  replayWorkspace?: string;
   /** Time-travel: start this resume from a historical checkpoint id. */
   checkpointId?: string;
 }
@@ -469,6 +472,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     let runToken = 0;
     let answeredResumeIds: string[] = [];
     const resumedRun = () => mode === "resume" || mode === "continue";
+    let replay = new ReplayStore();
     const finish = async (r: RunResult, bookkeeping = true, resumed?: boolean): Promise<RunResult> => {
       try {
         const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
@@ -497,6 +501,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           if ((r.error as { code?: unknown } | undefined)?.code === THREAD_WAIT_NOT_RECORDED) Object.assign(r.error!, { parkError: err });
         }
       }
+      await replay.flushAll();
       r.usage = accounting.snapshot();
       return r;
     };
@@ -570,7 +575,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     // empty; resume/continue load the snapshots the engine attached to this
     // thread's pending interrupts. Nodes (and embedded subgraphs) reach the
     // store through the invoke config, never through a process-wide cache.
-    let replay = new ReplayStore();
+    replay = new ReplayStore();
     let pendingResumeInterrupts: Array<{ id?: string; value?: unknown }> = [];
     if (mode !== "start" && checkpointer) {
       const snap = await getCheckpointState(cfg);
@@ -602,7 +607,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
     }
 
-    const runScope: RunScope = { replay, path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal, accounting };
+    const runScope: RunScope = { replay, checkpointer: checkpointer ?? compiledLg, ...((runOpts as ResumeOptions).replayWorkspace ? {replayWorkspace:path.resolve((runOpts as ResumeOptions).replayWorkspace!)} : {}), path: [], meta: runMeta, signal: runOpts.signal, pauseSignal: runOpts.pauseSignal, accounting };
     (cfg["configurable"] as Record<string, unknown>)[RUN_SCOPE_KEY] = runScope;
     const raised = new Set(pendingResumeInterrupts.map(it => interruptFingerprint(toInterruptInfo(it))));
     const emitStopInterrupts = (interrupts: InterruptInfo[]) => {
@@ -934,6 +939,15 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       if (tuple) {
         if (checkpointId && checkpointId !== (await checkpointer.getTuple({ configurable: { thread_id: threadId } }))?.checkpoint.id && tuple.pendingWrites?.some(([, channel]) => channel === "__resume__")) {
           throw threadAdmissionError("HISTORICAL_DECISION_REPLAY", threadId, "already has an answer at this checkpoint; fork before the gate for a new decision.");
+        }
+        const head=await checkpointer.getTuple({configurable:{thread_id:threadId}});
+        if(checkpointId&&checkpointId!==head?.checkpoint.id){
+          const sideEffects=graphSpec.nodes.some(node=>registry.get(node.type)?.capabilities?.sideEffecting||node.type==="map"||node.type==="subgraph");
+          if(sideEffects){
+            const target=(runOpts as ResumeOptions).replayWorkspace;
+            if(!target||path.resolve(target)===path.resolve((baseCtx as RunContext).workspace))throw Object.assign(new Error("Historical replay may repeat side effects. Set replayWorkspace / --replay-workspace to a separate output directory; source artifacts must not be overwritten."),{code:"HISTORICAL_REPLAY_WORKSPACE_REQUIRED",retryable:false});
+            await mkdir(path.resolve(target),{recursive:true});
+          }
         }
         const snap = await getCheckpointState(config);
         const pending = (snap.tasks ?? []).flatMap(task => task.interrupts ?? []);
@@ -1369,6 +1383,7 @@ async function assembleCompiledLangGraph(
 
     type NodeRun = { res: NodeResult; ctx: NodeRunContext & { _onceUpdates: Record<string, unknown>; _issueUpdates: RunIssue[] } };
     const stopsOnTimeout = compiled.capabilities?.stopsOnTimeout === true;
+    const receivesTimeoutSignal = stopsOnTimeout || compiled.capabilities?.receivesTimeoutSignal === true;
     const runOnce = (
       state: Record<string, unknown>,
       inputOverride?: Record<string, unknown>,
@@ -1378,7 +1393,7 @@ async function assembleCompiledLangGraph(
       runWithPolicy<NodeRun>(
         (attempt, signal) => {
           const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig);
-          if (signal && stopsOnTimeout) ctx.signal = signal;
+          if (signal && receivesTimeoutSignal) ctx.signal = signal;
           return compiled.run(state, ctx).then((res) => {
             finishInterruptDeadline(runScopeOf(lgConfig), nodeSpec.id);
             return { res, ctx };
@@ -2363,11 +2378,13 @@ function buildNodeCtx(
   const seenIssueKeys = new Set(existingIssues.map((i) => issueDedupeKey(i)));
   const parentSpanId = typeof nodeSpec["__parentSpanId"] === "string" ? nodeSpec["__parentSpanId"] : undefined;
 
-  let resolvedWorkspace = workspace;
+  const executionWorkspace=runScope?.replayWorkspace??workspace;
+  let resolvedWorkspace = executionWorkspace;
   const wsTpl = nodeSpec["workspace"];
   if (typeof wsTpl === "string" && wsTpl.trim()) {
     const rendered = String(renderDeep(wsTpl, { ...scope, input: _input }));
-    resolvedWorkspace = path.isAbsolute(rendered) ? rendered : path.resolve(workspace, rendered);
+    resolvedWorkspace = path.isAbsolute(rendered) ? rendered : path.resolve(executionWorkspace, rendered);
+    if(runScope?.replayWorkspace){const relative=path.relative(executionWorkspace,resolvedWorkspace);if(relative.startsWith("..")||path.isAbsolute(relative))throw Object.assign(new Error(`Node "${nodeId}" workspace escapes the historical replay directory`),{code:"REPLAY_WORKSPACE_ESCAPE",retryable:false});}
   }
 
   const logger = (base as RunContext).logger ?? { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
@@ -2686,6 +2703,7 @@ function addCheckpointedMap(
 
   const innerType = String((config.node as Record<string, unknown>)["type"] ?? "");
   const innerStopsOnTimeout = registry.get(innerType)?.capabilities?.stopsOnTimeout === true;
+  const innerReceivesTimeoutSignal = innerStopsOnTimeout || registry.get(innerType)?.capabilities?.receivesTimeoutSignal === true;
   const buildCtx = {
     graphName: spec.metadata.name,
     toolWiring: ctx.toolWiring,
@@ -2772,7 +2790,7 @@ function addCheckpointedMap(
             undefined,
             itemLgConfig,
           );
-          if (signal && innerStopsOnTimeout) nodeCtx.signal = signal;
+          if (signal && innerReceivesTimeoutSignal) nodeCtx.signal = signal;
           return runMapItem(buildCtx, mapId, config, state, nodeCtx, task).then((value) => {
             finishInterruptDeadline(runScopeOf(itemLgConfig), itemId);
             return { value, onceUpdates: nodeCtx._onceUpdates, issueUpdates: nodeCtx._issueUpdates };
