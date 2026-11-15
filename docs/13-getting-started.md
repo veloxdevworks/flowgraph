@@ -4,8 +4,8 @@ This guide gets you from zero to a running graph in a few minutes. For the full 
 
 ## Prerequisites
 
-- **Node.js ≥ 20**
-- **pnpm ≥ 9** (for monorepo development)
+- **Node.js ≥ 22.13**
+- **pnpm ≥ 11 (repository pin: 11.0.9)** (for monorepo development)
 
 ## Install
 

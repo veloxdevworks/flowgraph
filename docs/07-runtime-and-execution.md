@@ -145,7 +145,7 @@ A falsy resume value (`false`, `null`, `0`, `""`) is applied as given, from `com
 
 Two limits apply to falsy answers:
 
-- `resumeFrom()` keys a falsy answer by the interrupts pending at the latest point in the thread, not at the requested checkpoint. Resuming from a checkpoint whose interrupt was already answered replays the stored answer, whatever value you pass (truthy or falsy).
+- `resumeFrom()` matches answers to the interrupts at the requested checkpoint. A historical checkpoint that already contains a decision is refused with `HISTORICAL_DECISION_REPLAY`; fork before the gate to make a different decision, and use a separate `replayWorkspace` when side effects may repeat.
 - A webhook POST answers only that webhook's own interrupt, whether the body is truthy or falsy.
 
 ```yaml

@@ -2,13 +2,14 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { graphEdges, loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, waitForWebhookResume, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { graphEdges, loadGraph, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildMediaCommand } from "./media-command.js";
 import {buildReplayCommand} from "./replay-command.js";
 import { buildUsageCommand } from "./usage-command.js";
 import { buildThreadCommand } from "./thread-command.js";
 import { buildSkillsCommand } from "./skills-command.js";
+import { continuationMailbox, awaitAutomaticContinuations } from "./run-continuations.js";
 import { abortOnSignals } from "./run-signal.js";
 import { checkpointerOption, CLI_MEMORY_BACKENDS, promptResolver, serializePendingInterrupts } from "./interrupts.js";
 import { mcpHubForRun, closeMcpHub, loginMcpServer, mcpOAuthStatus, logoutMcpServer } from "./mcp.js";
@@ -38,13 +39,6 @@ function printIssues(result: RunResult): void {
   }
 }
 
-function maybeFailOnIssues(result: RunResult, failOnIssues: boolean | undefined): void {
-  if (failOnIssues && (result.issues?.length ?? 0) > 0) {
-    printError("Run completed with issues (--fail-on-issues).");
-    process.exit(1);
-  }
-}
-
 function webhookUrlFromInterrupts(interrupts: InterruptInfo[] | undefined): string | undefined {
   for (const it of interrupts ?? []) {
     const payload = it.payload as { data?: { webhookUrl?: string; mode?: string } } | undefined;
@@ -68,7 +62,7 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
   }
   printWarning("Run interrupted (awaiting human input).");
   for (const it of interrupts ?? []) {
-    printInfo(`  • ${it.reason ?? it.id}`);
+    printInfo(`  • ${it.id}: ${it.reason ?? ""}${it.deadlineAt ? ` (deadline ${it.deadlineAt})` : ""}`);
   }
   if (threadId) {
     const example = (interrupts ?? []).length > 1
@@ -80,50 +74,20 @@ function reportInterrupts(interrupts: InterruptInfo[] | undefined, threadId: str
   }
 }
 
-/**
- * When a webhook wait interrupt is active, keep the process alive until the
- * HTTP listener resumes (or the user hits Ctrl-C). Returns the post-resume
- * status when available.
- */
-async function awaitWebhookIfNeeded(result: RunResult): Promise<RunResult> {
-  if (result.status !== "interrupted") return result;
-  const webhookUrl = webhookUrlFromInterrupts(result.interrupts);
-  if (!webhookUrl || !result.threadId) return result;
-
-  let done: { status: string; error?: string };
-  for (;;) {
-    const waiter = waitForWebhookResume(result.threadId);
-    if (!waiter) return result;
-
-    printInfo("Listening for webhook… (Ctrl-C to exit)");
-    done = await new Promise<{ status: string; error?: string }>((resolve) => {
-      const onSig = () => {
-        printWarning("Interrupted by user.");
-        resolve({ status: "cancelled" });
-      };
-      process.once("SIGINT", onSig);
-      process.once("SIGTERM", onSig);
-      void waiter.then((r) => {
-        process.off("SIGINT", onSig);
-        process.off("SIGTERM", onSig);
-        resolve(r);
-      });
-    });
-    if (done.status !== "interrupted") break;
+function reportRunResult(result: RunResult, opts: { json?: boolean; failOnIssues?: boolean }): void {
+  printFailedUsage(result);
+  if (result.status === "completed") {
+    if (!opts.json) { printSuccess(`Completed in ${formatDuration(result.durationMs)}`); printInfo(`Run ID: ${result.runId}`); printIssues(result); }
+    if (opts.failOnIssues && (result.issues?.length ?? 0) > 0) { printError("Run completed with issues (--fail-on-issues)."); process.exitCode = 1; }
+    return;
   }
-
-  if (done.status === "completed") {
-    printSuccess("Webhook received — run completed.");
-    return { ...result, status: "completed" };
+  if (result.status === "interrupted" || result.status === "paused") {
+    if (!opts.json) reportInterrupts(result.interrupts, result.threadId);
+    process.exitCode = 3;
+  } else {
+    printError(result.status === "aborted" ? "Aborted" : `Failed: ${result.error?.message ?? "unknown error"}`);
+    process.exitCode = result.status === "aborted" ? 130 : 1;
   }
-  if (done.status === "cancelled") {
-    return result;
-  }
-  if (done.status === "error") {
-    printError(`Webhook resume failed: ${done.error ?? "unknown error"}`);
-    return { ...result, status: "error", error: new Error(done.error ?? "resume failed") };
-  }
-  return { ...result, status: done.status as RunResult["status"] };
 }
 
 /** Run with Ctrl-C and SIGTERM cancelling it, for as long as it runs. */
@@ -364,6 +328,7 @@ program
         loadGraph,
       });
     }
+    const continuations = continuationMailbox();
     let compiled;
     try {
       compiled = await compileGraph(spec, {
@@ -371,6 +336,7 @@ program
         graphPath,
         sinks,
         providers,
+        onWaitTimeout: continuations.publish,
         ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
         ...mcpOpt,
         ...(placement ? { placement } : {}),
@@ -400,42 +366,11 @@ program
     let result;
     try {
       result = await withCtrlC(opts.json, (signal) => compiled.run({ ...runOpts, signal }));
-      printFailedUsage(result);
-
-      if (!opts.json) {
-        if (result.status === "completed") {
-          printSuccess(`Completed in ${formatDuration(result.durationMs)}`);
-          printInfo(`Run ID: ${result.runId}`);
-          printIssues(result);
-          maybeFailOnIssues(result, opts.failOnIssues);
-        } else if (result.status === "interrupted") {
-          reportInterrupts(result.interrupts, result.threadId);
-          result = await awaitWebhookIfNeeded(result);
-          if (result.status === "completed") {
-            printSuccess("Completed after webhook resume.");
-            printInfo(`Run ID: ${result.runId}`);
-            printIssues(result);
-            maybeFailOnIssues(result, opts.failOnIssues);
-          } else if (result.status === "error") {
-            process.exit(1);
-          } else {
-            process.exit(3);
-          }
-        } else if (result.status === "aborted") {
-          printError("Aborted");
-          process.exit(130);
-        } else if (result.status === "error") {
-          printError(`Failed: ${result.error?.message ?? "unknown error"}`);
-          process.exit(1);
-        }
-      } else if (result.status === "interrupted") {
-        result = await awaitWebhookIfNeeded(result);
-        if (result.status === "error") process.exit(1);
-        if (result.status !== "completed") process.exit(3);
-      } else if (result.status === "error" || result.status === "aborted") {
-        process.exit(result.status === "aborted" ? 130 : 1);
-      }
+      if (!opts.json && result.status === "interrupted" && webhookUrlFromInterrupts(result.interrupts)) reportInterrupts(result.interrupts, result.threadId);
+      result = await awaitAutomaticContinuations(result, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }));
+      reportRunResult(result, opts);
     } finally {
+      await closeWebhookServers();
       await closeMcpHub(mcpOpt.mcp);
     }
   });
@@ -531,16 +466,18 @@ program
     const providers = await buildProviders(spec, cwd);
     const localTools = await registerLocalTools(spec, cwd);
     for (const w of localTools.warnings) printWarning(w);
+    const continuations = continuationMailbox();
     const compiled = await compileGraph(spec, {
       cwd,
       graphPath,
       sinks,
       providers,
+      onWaitTimeout: continuations.publish,
       ...(await checkpointerOption(spec, { cwd, onNotice: (m) => (opts.json ? console.error(m) : printInfo(m)) })),
       ...mcpOpt,
     });
 
-    const snap = await compiled.getState(opts.thread);
+    const snap = await compiled.getState(opts.thread, { applyWaitTimeouts: false });
     if (!snap) {
       printError(`No checkpoint found for thread "${opts.thread}". Is the checkpoint backend durable (runtime.checkpoint.backend: sqlite)?`);
       process.exit(2);
@@ -559,7 +496,7 @@ program
         } else {
           printInfo(`Pending interrupts for thread "${opts.thread}":`);
           for (const it of listed.interrupts) {
-            printInfo(`  • [${String(it["kind"])}] ${String(it["reason"] ?? it["id"])}`);
+            printInfo(`  • ${String(it["id"])} [${String(it["kind"])}] ${String(it["reason"] ?? "")}`);
             if (Array.isArray(it["choices"]) && it["choices"].length > 0) {
               for (const [i, c] of (it["choices"] as string[]).entries()) {
                 printInfo(`      ${i + 1}. ${c}`);
@@ -584,41 +521,11 @@ program
           ? compiled.resumeFrom({ ...resumeOpts, signal, checkpointId: opts.from })
           : compiled.resume({ ...resumeOpts, signal }),
       );
-      printFailedUsage(result);
-
-      if (!opts.json) {
-        if (result.status === "completed") {
-          printSuccess(`Completed in ${formatDuration(result.durationMs)}`);
-          printIssues(result);
-          maybeFailOnIssues(result, opts.failOnIssues);
-        } else if (result.status === "interrupted") {
-          reportInterrupts(result.interrupts, result.threadId);
-          result = await awaitWebhookIfNeeded(result);
-          if (result.status === "completed") {
-            printSuccess("Completed after webhook resume.");
-            printIssues(result);
-            maybeFailOnIssues(result, opts.failOnIssues);
-          } else if (result.status === "error") {
-            process.exit(1);
-          } else {
-            process.exit(3);
-          }
-        } else if (result.status === "aborted") {
-          printError("Aborted");
-          process.exit(130);
-        } else if (result.status === "error") {
-          printError(`Failed: ${result.error?.message ?? "unknown error"}`);
-          process.exit(1);
-        }
-      } else if (result.status === "interrupted") {
-        result = await awaitWebhookIfNeeded(result);
-        if (result.status === "error") process.exit(1);
-        if (result.status !== "completed") process.exit(3);
-      } else if (result.status !== "completed") {
-        // remaining: error | paused | aborted (interrupted handled above)
-        process.exit(result.status === "paused" ? 3 : result.status === "aborted" ? 130 : 1);
-      }
+      if (!opts.json && result.status === "interrupted" && webhookUrlFromInterrupts(result.interrupts)) reportInterrupts(result.interrupts, result.threadId);
+      result = await awaitAutomaticContinuations(result, continuations, (threadId) => compiled.getState(threadId, { applyWaitTimeouts: false }));
+      reportRunResult(result, opts);
     } finally {
+      await closeWebhookServers();
       await closeMcpHub(mcpOpt.mcp);
     }
   });
@@ -671,6 +578,7 @@ mcpCmd
         }
       }
     } finally {
+      await closeWebhookServers();
       await closeMcpHub(mcpOpt.mcp);
     }
   });

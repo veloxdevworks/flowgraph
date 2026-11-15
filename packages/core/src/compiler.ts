@@ -843,7 +843,19 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
                 const code = (err as { code?: string } | undefined)?.code;
                 const message = err instanceof Error ? err.message : String(err);
                 if (code === "THREAD_NOT_WAITING" || code === "THREAD_NOT_FOUND") {
-                  for (const info of overdue) unregisterWebhookRoute(threadId, undefined, info.id);
+                  // Publish the thread's real outcome before releasing the webhook
+                  // routes: a host awaiting that route treats its cancellation as
+                  // "no news" and would otherwise report the stale interrupt.
+                  const release = () => {
+                    for (const info of overdue) unregisterWebhookRoute(threadId, undefined, info.id);
+                  };
+                  void getCheckpointState({ configurable: { thread_id: threadId } }).then(snap => {
+                    const pending = (snap.tasks ?? []).flatMap(task => task.interrupts ?? []).map(toInterruptInfo);
+                    const completed = code === "THREAD_NOT_WAITING" && snap.next.length === 0 && pending.length === 0;
+                    opts.onWaitTimeout?.({ status: completed ? "completed" : "error", state: stripReserved(snap.values ?? {}), runId, threadId, durationMs: 0, ...(completed ? {} : { error: err instanceof Error ? err : new Error(message) }), ...(pending.length ? { interrupts: pending } : {}) });
+                  }).catch(() => opts.onWaitTimeout?.({ status: "error", state: {}, runId, threadId, durationMs: 0, error: err instanceof Error ? err : new Error(message) })).finally(release);
+                } else {
+                  opts.onWaitTimeout?.({ status: "error", state: {}, runId, threadId, durationMs: 0, error: err instanceof Error ? err : new Error(message) });
                 }
                 events.emit("run.issue", {
                   code: code === "THREAD_BUSY" ? "WAIT_TIMEOUT_DEFERRED" : "WAIT_TIMEOUT_ADMISSION_FAILED",
@@ -875,7 +887,14 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           const resolve = runOpts.resolveInterrupt;
           resumeValue = await awaitAnswer(() => resolve(interrupts));
         } else if (policy === "approve") {
-          resumeValue = Object.fromEntries(interruptIds(interrupts).map((id) => [id, true]));
+          const unsupported = interrupts.find(it => {
+            if (["question", "choice", "form"].includes(it.kind ?? "")) return true;
+            const data = (it.payload as { data?: { select?: string; artifactRefs?: unknown[]; schema?: unknown; decision?: string[] } } | undefined)?.data;
+            return data?.select != null && data.select !== "none" && (data.artifactRefs?.length ?? 0) > 0 && !(data.select === "one" && data.artifactRefs?.length === 1)
+              || it.kind === "review" && (data?.schema != null || data?.decision != null && !data.decision.includes("approve"));
+          });
+          if (unsupported) throw Object.assign(new Error(`Auto-approve cannot answer ${unsupported.kind} interrupt requiring an explicit answer, selection or custom validation: "${unsupported.id}"; supply an explicit resume value or use prompt mode.`), { code: "AUTO_APPROVE_UNSUPPORTED", retryable: false });
+          resumeValue = Object.fromEntries(interrupts.map((it) => [it.id, it.kind === "review" ? { decision: "approve" } : true]));
         } else {
           const clean = stripReserved(result);
           return finish({
@@ -1124,8 +1143,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         // A missing answer is not a denial: fail before anything runs and leave the interrupt pending.
         const pending = (snap?.tasks ?? []).flatMap((t) => t.interrupts ?? []);
         const answer = resumeOpts.resume === undefined && isPauseInterrupt(pending.map(toInterruptInfo)) ? true : resumeOpts.resume;
-        if (answer === undefined) throw resumeValueRequiredError(resumeOpts.threadId);
-        payload = resumeCommand(answer, pending, resumeOpts.threadId);
+        const expired = timeoutResumeCommand(snap, clock());
+        if (answer === undefined && !expired) throw resumeValueRequiredError(resumeOpts.threadId);
+        payload = answer === undefined ? expired! : resumeCommand(answer, pending, resumeOpts.threadId);
       }
       // Static breakpoints pause with empty task.interrupts and a non-empty
       // `next`. LangGraph continues those with null input, not Command({ resume }).
@@ -1775,7 +1795,7 @@ function scheduleWaitTimeoutTimer(
   clearWaitTimeoutTimer(waitTimeoutTimers, threadId);
   const deadline = earliestDeadlineMs(interrupts);
   if (deadline === undefined) return;
-  const delay = Math.max(0, deadline - now());
+  const delay = Math.min(2 ** 31 - 1, Math.max(0, deadline - now()));
   const timer = schedule(() => {
     waitTimeoutTimers.delete(threadId);
     onFire();
