@@ -88,6 +88,7 @@ export function diagnosticsFromZodIssues(issues: readonly ZodIssue[], data: unkn
           code: "UNKNOWN_FIELD",
           message:
             `Unknown field "${key}" ${where}.` +
+            (key === "description" && scope.kind !== "node" ? " Use metadata.description." : key === "output" && scope.kind === "node" ? " Put output under with.output." : "") +
             (hint ? ` Did you mean "${hint}"?` : "") +
             " If this graph was written for a newer flowgraph, upgrade flowgraph.",
           path: `${scope.prefix}${scope.prefix ? "." : ""}${key}`,

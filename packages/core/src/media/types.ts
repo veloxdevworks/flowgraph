@@ -5,6 +5,7 @@
  * is a (possibly long) job, not an agent loop. See ADR-0017.
  */
 
+import type { TokenUsage } from "../providers/types.js";
 import type { Artifact } from "@flowgraph/spec";
 import type { Logger } from "../context.js";
 import type { SecretProvider } from "../secrets.js";
@@ -89,6 +90,7 @@ export interface MediaCallContext {
  * instead of submitting (and paying for) a second job.
  */
 export interface JobHandle {
+  usage?: TokenUsage;
   id: string;
   /** Set by vendors whose call is synchronous: the finished artifacts. */
   done?: Artifact[];
@@ -100,6 +102,7 @@ export interface JobHandle {
 export type JobState = "queued" | "running" | "done" | "failed" | "canceled";
 
 export interface JobStatus {
+  usage?: TokenUsage;
   state: JobState;
   /** 0..100 when the vendor reports it. */
   progress?: number;

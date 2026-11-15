@@ -11,11 +11,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import * as path from "node:path";
+import type { TokenUsage } from "../providers/types.js";
 import type { Artifact } from "@flowgraph/spec";
 import { safeSegment } from "./artifacts.js";
 import type { JobHandle, MediaRequest } from "./types.js";
 
 export interface JournalEntry {
+  usage?: TokenUsage;
   version: 1;
   state: "intent" | "submitted" | "done";
   submissionId?: string;

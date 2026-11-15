@@ -373,7 +373,11 @@ function openaiProvider(opts: MediaVendorOptions): MediaProvider {
       done.push(await ctx.saveOutput(out));
     }
 
-    return { id: res.id ?? `openai-img-${res.created ?? Math.floor(Date.now() / 1000)}-${randomUUID().slice(0, 8)}`, done, ...(cost !== undefined ? { costUSD: cost } : {}) };
+    return { id: res.id ?? `openai-img-${res.created ?? Math.floor(Date.now() / 1000)}-${randomUUID().slice(0, 8)}`, done, ...(res.usage ? {usage:{
+      ...(res.usage.input_tokens === undefined ? {} : {inputTokens:res.usage.input_tokens}),
+      ...(res.usage.output_tokens === undefined ? {} : {outputTokens:res.usage.output_tokens}),
+      ...(res.usage.total_tokens === undefined ? {} : {totalTokens:res.usage.total_tokens}),
+    }} : {}), ...(cost !== undefined ? { costUSD: cost } : {}) };
   }
 
   return {

@@ -251,7 +251,7 @@ function buildMediaNode(spec: ModalitySpec) {
                 journal: createFileJournal({ workspace: ctx.workspace, scope: jobScope, nodeId, fingerprint }),
                 workspace: ctx.workspace,
                 timeout: config.timeout ?? spec.defaultTimeout,
-                ...(ctx.accounting ? { meter: (invoke: () => Promise<import("../media/run-job.js").MediaJobResult>, estimateUSD: number | undefined) => ctx.accounting!.call(ctx, invoke, { kind: "media", estimateUSD, usage: result => result.costKnown ? { costUSD: result.costUSD } : undefined, errorUsage: error => (error as {mediaNotBilled?:boolean}|null)?.mediaNotBilled ? {costUSD:0,totalTokens:0,inputTokens:0,outputTokens:0} : undefined }) } : {}),
+                ...(ctx.accounting ? { meter: (invoke: () => Promise<import("../media/run-job.js").MediaJobResult>, estimateUSD: number | undefined) => ctx.accounting!.call(ctx, invoke, { kind: "media", estimateUSD, usage: result => result.costKnown || result.usage ? { ...result.usage, ...(result.costKnown ? { costUSD: result.costUSD } : {}) } : undefined, errorUsage: error => (error as {mediaNotBilled?:boolean}|null)?.mediaNotBilled ? {costUSD:0,totalTokens:0,inputTokens:0,outputTokens:0} : undefined }) } : {}),
                 emit: (phase, data) => ctx.emit("custom.media.job", { nodeId, modality, fingerprint, phase, ...data }),
               });
             }),

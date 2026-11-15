@@ -132,13 +132,7 @@ export const shellNode = defineNode<Config>({
         }
 
         const useShell = args === undefined;
-        ctx.logger.debug("shell exec", {
-          command,
-          args,
-          cwd,
-          shell: useShell,
-          timeoutMs,
-        });
+
 
         const runScope=runScopeOf((ctx as NodeRunContext&{_lgConfig?:unknown})._lgConfig);
         const replay=runScope?.replay??new ReplayStore(),key=replayNodeKey(runScope?.path??[],ctx.nodeId),slot=`shell:${ctx.attempt}`;
@@ -154,6 +148,13 @@ export const shellNode = defineNode<Config>({
         try {
           if(cached)proc=cached.result;
           else {
+        ctx.logger.debug("shell exec", {
+          command,
+          args,
+          cwd,
+          shell: useShell,
+          timeoutMs,
+        });
           replay.set(key,slot,pendingStep("shell",{identity}));await replay.flush(key);
           proc = await runProcess({
             command,

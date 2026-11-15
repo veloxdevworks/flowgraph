@@ -364,7 +364,12 @@ export const scriptNode = defineNode<Config>({
             runId: String(ctx.meta?.runId ?? ""),
             threadId: String(ctx.meta?.threadId ?? ""),
           },
-        );
+        ).catch(err=>{
+          const error=err instanceof Error?err:new Error(String(err));
+          error.message=`script node "${ctx.nodeId}": ${error.message}`;
+          if (/Illegal return statement|default.*function|default export/i.test(error.message)) error.message += ". Scripts are ESM modules; use export default async (input, ctx) => { ... }.";
+          throw error;
+        });
 
         ctx.emit("node.output", {
           result,

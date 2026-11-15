@@ -301,3 +301,9 @@ See [usage and budget boundaries](./07-runtime-and-execution.md#usage-and-budget
 for late results, legacy receipts and pricing limitations.
 
 Hosted `GET /runs/:threadId` includes `pendingInterruptIds` for interrupted/paused runs. This lookup is read-only and best-effort; if providers or graph state are unavailable, run detail still returns with an empty list. Use `/state` for full interrupt payloads. Invalid-resume 400 responses also include `pendingInterruptIds`; busy responses expose no host ownership details.
+
+### Paths and error events
+
+Relative checkpoint database paths are host settings resolved against the CLI working directory. Node workspaces and media journals resolve from the declaring graph directory, or `runtime.workspace`. Use absolute checkpoint paths when invoking the same graph from different directories; `media inspect` and `recover` resolve the graph workspace unless `--workspace` overrides it.
+
+`--json` failures include a `run.error` event with `data.code` and a one-line reason on stderr, including refusals before a run is admitted. Node errors retain their typed code in both `node.error` and `run.error`. Continuations and forks begin a new invocation with `run.start` followed by their resume/continue event. CLI startup loads graph/runtime packages and optional integrations lazily where supported; this can add about half a second before execution and is separate from node duration.
