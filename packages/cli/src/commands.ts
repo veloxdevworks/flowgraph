@@ -249,7 +249,7 @@ program
     if (fatalDiags.length > 0) {
       printError("Graph has errors:");
       printDiagnostics(fatalDiags, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(`Graph validation failed: ${fatalDiags[0]?.message ?? "invalid graph"}`), {code:"GRAPH_VALIDATION_FAILED",exitCode:2});
     }
 
     const preflight = await preflightGraphSkills(spec, {
@@ -258,9 +258,9 @@ program
     });
     if (!preflight.ok) {
       printError("Skill preflight failed — fix environment before running:");
-      if (preflight.report) console.log(preflight.report);
+      if (preflight.report) console.error(preflight.report);
       else printDiagnostics(preflight.diagnostics, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(preflight.diagnostics[0]?.message ?? "SKILL_PREFLIGHT_FAILED"), {code:"SKILL_PREFLIGHT_FAILED",exitCode:2});
     }
     const agentPreflight = await preflightGraphAgents(spec, {
       cwd: graphDir,
@@ -269,16 +269,16 @@ program
     if (!agentPreflight.ok) {
       printError("Agent preflight failed — fix agent definitions before running:");
       printDiagnostics(agentPreflight.diagnostics, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(agentPreflight.diagnostics[0]?.message ?? "AGENT_PREFLIGHT_FAILED"), {code:"AGENT_PREFLIGHT_FAILED",exitCode:2});
     }
     const reqPreflight = await preflightGraphRequires(spec, { cwd: graphDir });
     if (!reqPreflight.ok) {
       printError("Toolchain preflight failed — install missing binaries or set onMissingTool: skip:");
       printDiagnostics(reqPreflight.diagnostics, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(reqPreflight.diagnostics[0]?.message ?? "TOOLCHAIN_PREFLIGHT_FAILED"), {code:"TOOLCHAIN_PREFLIGHT_FAILED",exitCode:2});
     }
     for (const d of reqPreflight.diagnostics.filter((x) => x.severity === "warning")) {
-      printWarning(d.message);
+      if (opts.json) console.error(d.message); else printWarning(d.message);
     }
 
     // Parse --input flags and validate against declared `inputs` schema (fail fast)
@@ -290,8 +290,8 @@ program
     } catch (err) {
       if (isInputValidationError(err)) {
         printError(err.message);
-        printInfo("Pass values with --input key=value (or key=@file.json).");
-        process.exit(1);
+        console.error("Pass values with --input key=value (or key=@file.json).");
+        throw Object.assign(err,{code:"INPUT_INVALID",exitCode:1});
       }
       throw err;
     }
@@ -307,11 +307,11 @@ program
       spec,
       cwd,
       { json: opts.json, noMcpOauth: opts.noMcpOauth },
-      (msg) => printInfo(msg),
+      (msg) => opts.json ? console.error(msg) : printInfo(msg),
     );
     const providers = await buildProviders(spec, cwd);
     const localTools = await registerLocalTools(spec, cwd);
-    for (const w of localTools.warnings) printWarning(w);
+    for (const w of localTools.warnings) {if(opts.json)console.error(w);else printWarning(w);}
     let placement: Awaited<ReturnType<typeof placementCompileOptions>> | undefined;
     if (opts.targets) {
       const targets = await loadTargetsFile(opts.targets, cwd);
@@ -319,7 +319,7 @@ program
         printError(`Invalid --targets file ${opts.targets}:`);
         printDiagnostics(targets.diagnostics, opts.targets);
         await closeMcpHub(mcpOpt.mcp);
-        process.exit(2);
+        throw Object.assign(new Error("Invalid --targets file"),{code:"TARGETS_INVALID",exitCode:2});
       }
       placement = await placementCompileOptions(spec, targets.topology, {
         graphDir,
@@ -344,7 +344,7 @@ program
       if (err instanceof PlacementUnsatisfiedError) {
         printError(err.message);
         await closeMcpHub(mcpOpt.mcp);
-        process.exit(2);
+        throw Object.assign(err,{code:"PLACEMENT_UNSATISFIED",exitCode:2});
       }
       throw err;
     }
@@ -425,9 +425,9 @@ program
     });
     if (!preflight.ok) {
       printError("Skill preflight failed:");
-      if (preflight.report) console.log(preflight.report);
+      if (preflight.report) console.error(preflight.report);
       else printDiagnostics(preflight.diagnostics, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(preflight.diagnostics[0]?.message ?? "SKILL_PREFLIGHT_FAILED"), {code:"SKILL_PREFLIGHT_FAILED",exitCode:2});
     }
     const agentPreflight = await preflightGraphAgents(spec, {
       cwd: graphDir,
@@ -436,13 +436,13 @@ program
     if (!agentPreflight.ok) {
       printError("Agent preflight failed:");
       printDiagnostics(agentPreflight.diagnostics, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(agentPreflight.diagnostics[0]?.message ?? "AGENT_PREFLIGHT_FAILED"), {code:"AGENT_PREFLIGHT_FAILED",exitCode:2});
     }
     const reqPreflight = await preflightGraphRequires(spec, { cwd: graphDir });
     if (!reqPreflight.ok) {
       printError("Toolchain preflight failed:");
       printDiagnostics(reqPreflight.diagnostics, graphPath);
-      process.exit(2);
+      throw Object.assign(new Error(reqPreflight.diagnostics[0]?.message ?? "TOOLCHAIN_PREFLIGHT_FAILED"), {code:"TOOLCHAIN_PREFLIGHT_FAILED",exitCode:2});
     }
 
     let resumeValue: unknown;
@@ -461,11 +461,11 @@ program
       spec,
       cwd,
       { json: opts.json, noMcpOauth: opts.noMcpOauth },
-      (msg) => printInfo(msg),
+      (msg) => opts.json ? console.error(msg) : printInfo(msg),
     );
     const providers = await buildProviders(spec, cwd);
     const localTools = await registerLocalTools(spec, cwd);
-    for (const w of localTools.warnings) printWarning(w);
+    for (const w of localTools.warnings) {if(opts.json)console.error(w);else printWarning(w);}
     const continuations = continuationMailbox();
     const compiled = await compileGraph(spec, {
       cwd,
@@ -479,8 +479,8 @@ program
 
     const snap = await compiled.getState(opts.thread, { applyWaitTimeouts: false });
     if (!snap) {
-      printError(`No checkpoint found for thread "${opts.thread}". Is the checkpoint backend durable (runtime.checkpoint.backend: sqlite)?`);
-      process.exit(2);
+      await closeMcpHub(mcpOpt.mcp);
+      throw Object.assign(new Error(`No checkpoint found for thread "${opts.thread}". Use a durable checkpoint backend (sqlite or postgres).`), {code:"THREAD_NOT_FOUND",exitCode:2});
     }
 
     if (opts.list) {
