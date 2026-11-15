@@ -21,6 +21,18 @@ function graph(node: unknown, runtime = {}, concurrency = 1) {
 }
 
 describe("PLAT-388 / PLAT-396 / PLAT-397 map controls", () => {
+  it.each(["continue", "ignore"])("persists ordinary %s failures through the same issue journal as map items", async policy => {
+    registerFunction("round3OrdinaryFailure", () => { throw new Error("bad row"); });
+    const spec = graph({ type: "function", with: { fn: "round3OrdinaryFailure" } });
+    spec.nodes = [{ id: "bad", type: "function", on: { error: policy }, with: { fn: "round3OrdinaryFailure" } }] as typeof spec.nodes;
+    spec.edges = [{ from: "START", to: "bad" }, { from: "bad", to: "END" }];
+    const cwd = await workspace();
+    const result = await (await compileGraph(spec, { cwd })).run({ threadId: `ordinary-${policy}` });
+    expect(result.status).toBe("completed");
+    expect(result.issues).toHaveLength(1);
+    expect(readRunIssues(cwd, `ordinary-${policy}`)).toContainEqual(expect.objectContaining({ code: "ERROR_SWALLOWED", nodeId: "bad" }));
+  });
+
   it.each(["single", "keyed"])("shows one budget gate, allows one more call, and preserves finished items on %s decline", async mode => {
     let calls = 0;
     const provider = createScriptedProvider("round3-map", () => ({ output: `paid-${++calls}`, stopReason: "done", usage: { totalTokens: 100 } }));

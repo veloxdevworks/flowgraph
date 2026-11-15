@@ -1662,6 +1662,7 @@ async function assembleCompiledLangGraph(
           events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(err,"NODE_ERROR"), swallowed: true, policy }, scope);
           const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `node "${nodeSpec.id}" continued after an error: ${String(err)}`, impact: "The node produced no result; subsequent nodes and sibling branches continue." }, { nodeId: nodeSpec.id, nodeType: nodeSpec.type });
           events.emit("run.issue", issue, scope);
+          try { appendRunIssue(graphWorkspace, runIssuesKey(runMeta), issue); } catch { /* the issue is also checkpointed */ }
           return { [ISSUES_CHANNEL]: [issue] };
         }
         if (policy?.startsWith("route:")) {
