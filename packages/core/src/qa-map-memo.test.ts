@@ -114,7 +114,7 @@ describe("PLAT-340: map item memoization", () => {
       await compileGraph(spec(true, { output: { map: { value: "{{ result + state.round }}" } } }))
     ).run({ input: { items: [1] } });
     expect(result.status).toBe("completed");
-    expect(result.state.results).toEqual([5]);
+    expect(result.state.results).toEqual([{ value: 5 }]);
     expect(calls).toBe(1);
   });
   it("bounds entries and skips oversized results", async () => {

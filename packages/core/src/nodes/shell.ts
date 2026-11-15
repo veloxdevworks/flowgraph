@@ -65,7 +65,14 @@ export const shellNode = defineNode<Config>({
 
         const command = normalizeShellText(String(renderDeep(config.command, scope)));
         const args = config.args
-          ? config.args.map((a) => normalizeShellText(String(renderDeep(a, scope))))
+          ? config.args.map((a) => {
+              const value = renderDeep(a, scope);
+              if (value !== null && typeof value === "object") {
+                try { return JSON.stringify(value); }
+                catch { throw Object.assign(new Error(`shell node "${ctx.nodeId}": argument cannot be serialized as JSON`), { code: "SHELL_ARG_INVALID", retryable: false }); }
+              }
+              return normalizeShellText(String(value));
+            })
           : undefined;
         const cwd = config.cwd
           ? String(renderDeep(config.cwd, scope))

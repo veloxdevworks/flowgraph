@@ -298,7 +298,7 @@ describe("PLAT-311 / PLAT-312 / PLAT-325: map invocation semantics", () => {
       )
     ).run({ input: { items: [1, 2] } });
     expect(result.status).toBe("completed");
-    expect(result.state.results).toEqual([2, 4]);
+    expect(result.state.results).toEqual([{ value: 2 }, { value: 4 }]);
   });
 
   it("retains both item and result scopes during the output projection", async () => {
@@ -323,8 +323,8 @@ describe("PLAT-311 / PLAT-312 / PLAT-325: map invocation semantics", () => {
     ).run({ input: { items: ["a", "b"] } });
     expect(result.status).toBe("completed");
     expect(result.state.results).toEqual([
-      { item: "a", result: "done" },
-      { item: "b", result: "done" },
+      { value: { item: "a", result: "done" } },
+      { value: { item: "b", result: "done" } },
     ]);
   });
 
