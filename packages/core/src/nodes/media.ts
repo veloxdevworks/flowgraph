@@ -225,6 +225,7 @@ function buildMediaNode(spec: ModalitySpec) {
               const fingerprint = fingerprintRequest(provider.name, req, jobIndex, variant);
               const mctx: MediaCallContext = {
                 secrets: ctx.secrets,
+                submissionSignal: (ctx as NodeRunContext & { _lgConfig?: { signal?: AbortSignal } })._lgConfig?.signal,
                 signal: ctx.signal,
                 logger: ctx.logger,
                 fetch: callFetch,

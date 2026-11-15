@@ -339,7 +339,7 @@ async function constrainedOutput(model: ChatModelLike, req: AgentRequest, ctx: P
   const cached = ctx.replay?.get("llm:structured");
   if (cached && typeof cached === "object" && "output" in cached) return cached as { output: unknown; usage: TokenUsage };
   const invoke = async () => {
-    const result = await model.withStructuredOutput!(req.schema, { includeRaw: true }).invoke(messages, { signal: ctx.signal });
+    const result = await withHeartbeat(ctx, () => model.withStructuredOutput!(req.schema, { includeRaw: true, strict: false }).invoke(messages, { signal: ctx.signal }));
     const wrapped = result && typeof result === "object" && Object.hasOwn(result, "parsed") && Object.hasOwn(result, "raw")
       ? result as { parsed: unknown; raw: AIMessage; parsing_error?: unknown } : undefined;
     return { output: wrapped ? wrapped.parsed : result, usage: wrapped?.raw ? modelUsage(wrapped.raw) : undefined };
@@ -366,7 +366,7 @@ async function invokeModel(model: ChatModelLike, input: BaseMessage[], req: Agen
   let responseStarted = false;
   let partialUsage: TokenUsage | undefined;
   const invoke = async () => {
-    if (!req.streaming || !model.stream) return model.invoke(input, { signal: ctx.signal });
+    if (!req.streaming || !model.stream) return withHeartbeat(ctx, () => model.invoke(input, { signal: ctx.signal }));
     let combined: AIMessageChunk | undefined;
     for await (const chunk of await model.stream(input, { signal: ctx.signal })) {
       responseStarted = true;
@@ -388,4 +388,15 @@ function addUsage(total: TokenUsage, inc: TokenUsage): void {
   for (const key of ["inputTokens", "outputTokens", "totalTokens", "costUSD"] as const) {
     if (inc[key] !== undefined) total[key] = (total[key] ?? 0) + inc[key]!;
   }
+}
+
+/** Waiting on an SDK call should remain visible, including structured-output calls. */
+async function withHeartbeat<T>(ctx: ProviderRunContext, invoke: () => Promise<T>): Promise<T> {
+  const started = Date.now();
+  const timer = setInterval(() => ctx.node.emit("custom.agent.waiting", { phase: "model", elapsedMs: Date.now() - started }), 15000);
+  timer.unref();
+  const stop = () => clearInterval(timer);
+  ctx.signal?.addEventListener("abort", stop, { once: true });
+  if (ctx.signal?.aborted) stop();
+  try { return await invoke(); } finally { stop(); ctx.signal?.removeEventListener("abort", stop); }
 }

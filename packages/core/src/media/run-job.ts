@@ -53,6 +53,8 @@ export async function runMediaJob(opts: RunMediaJobOptions): Promise<MediaJobRes
 
 async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | undefined): Promise<MediaJobResult> {
   const { provider, req, mctx, journal } = opts;
+  mctx.signal?.throwIfAborted();
+  mctx.submissionSignal?.throwIfAborted();
   const deadline = Date.now() + parseDuration(opts.timeout);
   const estimate = provider.estimateCostUSD?.(req);
   let handle: JobHandle;
@@ -69,16 +71,23 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
     opts.emit("intent", { provider: provider.name, submissionId });
     let attempted=false,accepted=false;
     const trackedFetch:typeof fetch=async(input,init)=>{
+      mctx.signal?.throwIfAborted();
+      mctx.submissionSignal?.throwIfAborted();
       attempted=true;
       const response=await mctx.fetch(input,init);
       const method=(init?.method??(typeof input==="object"&&"method" in input?input.method:"GET")).toUpperCase();
       if(response.ok&&method!=="GET"&&method!=="HEAD")accepted=true;
       return response;
     };
-    try {handle = await provider.start(req, { ...mctx, submissionId,fetch:trackedFetch });}
+    let started = false;
+    try {
+      mctx.signal?.throwIfAborted(); mctx.submissionSignal?.throwIfAborted();
+      started = true;
+      handle = await provider.start(req, { ...mctx, submissionId,fetch:trackedFetch });
+    }
     catch(error){
       const explicit=(error as {mediaSubmissionRejected?:boolean}|null)?.mediaSubmissionRejected===true;
-      if(explicit||provider.submissionTransport==="fetch"&&!accepted&&(!attempted||unacceptedRequest(error))){
+      if(!started||explicit||provider.submissionTransport==="fetch"&&!accepted&&(!attempted||unacceptedRequest(error))){
         await journal.remove();
         throw Object.assign(error instanceof Error?error:new Error(String(error)),{mediaNotBilled:true});
       }

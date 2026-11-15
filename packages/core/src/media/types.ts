@@ -68,6 +68,8 @@ export type MediaOutput =
 export interface MediaCallContext {
   /** Durable submission identity. Use as a vendor idempotency key only when supported. */
   submissionId?: string;
+  /** Internal task cancellation applies only before a request is submitted. */
+  submissionSignal?: AbortSignal | undefined;
   secrets: SecretProvider;
   signal?: AbortSignal | undefined;
   logger: Logger;
