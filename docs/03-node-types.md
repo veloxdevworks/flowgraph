@@ -836,7 +836,9 @@ The tool raises a `question` or `choice` interrupt; the answer is returned to th
 
 ### Service tools (agent nodes)
 
-Agents can discover **and** start/stop background services in the current run/thread. Services started via tools share the same process-scoped registry as the `service` node — idempotent by name, survive HITL pauses, and auto-stop on run `completed`/`error` unless `keepAlive` or `runtime.services.terminateOnEnd: false`.
+Agents can discover **and** start/stop background services in the current run/thread. Services started via tools share the same process-scoped registry as the `service` node. Identical starts reuse the same process; changing a running service's command, arguments, working directory, environment or lifecycle options returns `SERVICE_START_CONFLICT`. Use `restart_service` to apply changes. Services survive HITL pauses and auto-stop on run `completed`/`error` unless `keepAlive` or `runtime.services.terminateOnEnd: false`.
+
+Stopping a service signals its process tree, waits for shutdown, and escalates to a forced kill after `stopTimeout`. A successful stop reports `stopped` only after the owned process has closed; cleanup failures retain the registry entry and return `SERVICE_STOP_FAILED`.
 
 ```yaml
 - id: planner
