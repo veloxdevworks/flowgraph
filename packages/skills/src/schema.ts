@@ -6,8 +6,7 @@ import { ContractSchemaSchema, contractSchemaProblem, type PropertyDef } from "@
 // ---------------------------------------------------------------------------
 
 /**
- * Skill kinds that run today. `agent` and `composite` are reserved and rejected until the
- * runner supports them.
+ * Skill kinds the runner executes. `agent` and `composite` are reserved and rejected.
  */
 export const SkillKindSchema = z.enum(["executable", "command"], {
   errorMap: (issue, ctx) =>
@@ -15,7 +14,7 @@ export const SkillKindSchema = z.enum(["executable", "command"], {
       ? {
           message:
             issue.received === "agent" || issue.received === "composite"
-              ? `kind_of "${String(issue.received)}" is not supported yet; use "executable" or "command"`
+              ? `kind_of "${String(issue.received)}" is not supported; use "executable" or "command"`
               : `kind_of must be "executable" or "command"`,
         }
       : { message: ctx.defaultError },
@@ -32,8 +31,7 @@ export const SkillInputSchema = z
   .passthrough()
   .superRefine((decl, ctx) => {
     const schema = skillInputValueSchema(decl as SkillInputDecl);
-    if (JSON.stringify(schema).includes("{{")) return;
-    const problem = contractSchemaProblem(schema);
+    const problem = contractSchemaProblem(schema, { templates: true });
     if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
   }) as unknown as z.ZodType<SkillInputDecl, z.ZodTypeDef, unknown>;
 

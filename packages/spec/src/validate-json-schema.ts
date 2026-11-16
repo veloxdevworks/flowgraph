@@ -69,6 +69,11 @@ function legacyShapeProblems(schema: unknown): string[] {
     if (types.includes("any")) {
       problems.push(`${where}: type "any" is not JSON Schema; omit "type" to accept any value`);
     }
+    if (typeof s["$ref"] === "string" && !s["$ref"].startsWith("#")) {
+      problems.push(
+        `${where}: $ref "${s["$ref"]}" is not local; a $ref must point inside the same schema (for example "#/definitions/name")`,
+      );
+    }
     if (typeof s["required"] === "boolean") {
       problems.push(
         `${where}: "required" must be a list of property names on the parent object (for example required: [name]), not a boolean`,
@@ -155,11 +160,74 @@ export function compileContractSchema(
   return validate;
 }
 
+const isTemplate = (v: unknown): boolean => typeof v === "string" && v.includes("{{");
+const containsTemplate = (v: unknown): boolean => JSON.stringify(v)?.includes("{{") ?? false;
+
+/** Annotations: a template in their value never changes what is valid. */
+const ANNOTATION_KEYWORDS = new Set(["title", "description", "$comment", "examples", "default"]);
+/** Draft-07 keywords that constrain values (or locate subschemas) — known, so safe to drop when templated. */
+const VALUE_KEYWORDS = new Set([
+  "type", "enum", "const", "multipleOf", "maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum",
+  "maxLength", "minLength", "pattern", "maxItems", "minItems", "uniqueItems", "maxProperties",
+  "minProperties", "required", "format", "contentMediaType", "contentEncoding", "readOnly", "writeOnly",
+  "$ref", "$id", "$schema",
+]);
+
+/**
+ * A copy of `schema` that can be checked before `{{ … }}` templates are rendered. A
+ * template in a value that affects validation (an `enum`, a `type`, a whole subschema, …)
+ * removes just that keyword or subschema from the check; templates in annotations such as
+ * `description` are left as they are; and every other keyword, including unknown ones,
+ * is still checked.
+ */
+function checkableSchema(node: unknown): unknown {
+  if (isTemplate(node)) return {};
+  if (!isObj(node)) return node;
+  const out: Json = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (ANNOTATION_KEYWORDS.has(k)) out[k] = v;
+    else if ((SCHEMA_KEYWORDS as readonly string[]).includes(k)) out[k] = checkableSchema(v);
+    else if ((SCHEMA_MAP_KEYWORDS as readonly string[]).includes(k) || k === "dependencies") {
+      if (isTemplate(v)) continue;
+      if (!isObj(v)) {
+        out[k] = v;
+        continue;
+      }
+      const m: Json = {};
+      for (const [name, sub] of Object.entries(v)) {
+        if (Array.isArray(sub)) {
+          if (!containsTemplate(sub)) m[name] = sub;
+        } else m[name] = checkableSchema(sub);
+      }
+      out[k] = m;
+    } else if ((SCHEMA_LIST_KEYWORDS as readonly string[]).includes(k)) {
+      if (isTemplate(v)) continue;
+      out[k] = Array.isArray(v) ? v.map(checkableSchema) : v;
+    } else if (k === "items") {
+      out[k] = Array.isArray(v) ? v.map(checkableSchema) : checkableSchema(v);
+    } else if (VALUE_KEYWORDS.has(k)) {
+      if (!containsTemplate(v)) out[k] = v;
+    } else out[k] = v;
+  }
+  return out;
+}
+
+export type ContractSchemaProblemOptions = {
+  /**
+   * The schema is rendered with `{{ … }}` templates before use: skip only the parts a
+   * template would change, and check the rest now.
+   */
+  templates?: boolean;
+};
+
 /** Why `schema` is not a valid contract schema, or `undefined` when it is. */
-export function contractSchemaProblem(schema: unknown): string | undefined {
+export function contractSchemaProblem(
+  schema: unknown,
+  opts: ContractSchemaProblemOptions = {},
+): string | undefined {
   if (!isObj(schema)) return "schema must be an object";
   try {
-    compileContractSchema(schema);
+    compileContractSchema(opts.templates ? (checkableSchema(schema) as Json) : schema);
     return undefined;
   } catch (err) {
     return err instanceof Error ? err.message : String(err);

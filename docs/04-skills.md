@@ -97,7 +97,7 @@ When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 | `executable` | Calling a TS `handler(input, ctx)` exported from `handler.ts` | Most reusable logic; full typing & ctx (secrets, http, logger) |
 | `command` | Spawning a process (`command:`), passing input as JSON on stdin/env, parsing stdout | Wrapping existing CLIs/scripts in any language |
 
-`agent` and `composite` are reserved: a skill that declares either fails to load (`SKILL_SCHEMA_ERROR`: `kind_of "agent" is not supported yet`). For judgment tasks today, use an `agent` node with the skill's instructions as its prompt; for multi-step bundles, use a subgraph.
+`agent` and `composite` are reserved: a skill that declares either fails to load (`SKILL_SCHEMA_ERROR`: `kind_of "agent" is not supported`). For judgment tasks, use an `agent` node with the skill's instructions as its prompt; for multi-step bundles, use a subgraph.
 
 ### `executable` handler signature
 

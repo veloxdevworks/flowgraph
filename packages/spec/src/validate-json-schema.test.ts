@@ -126,6 +126,20 @@ describe("contract schema dialect", () => {
     expect(contractSchemaProblem({ $ref: "#/definitions/missing" })).toMatch(/missing/);
   });
 
+  it("rejects a $ref that leaves the schema, including the draft-07 meta-schema", () => {
+    const local = 'a $ref must point inside the same schema (for example "#/definitions/name")';
+    expect(contractSchemaProblem({ $ref: "http://json-schema.org/draft-07/schema#" })).toBe(
+      `/: $ref "http://json-schema.org/draft-07/schema#" is not local; ${local}`,
+    );
+    expect(contractSchemaProblem({ $ref: "http://json-schema.org/draft-07/schema" })).toContain("is not local");
+    expect(contractSchemaProblem({ $ref: "https://example.invalid/s.json" })).toContain("is not local");
+    expect(contractSchemaProblem({ type: "object", properties: { a: { $ref: "other.json#/x" } } })).toBe(
+      `/properties/a: $ref "other.json#/x" is not local; ${local}`,
+    );
+    expect(() => contractErrors(1, { $ref: "http://json-schema.org/draft-07/schema#" })).toThrow("is not local");
+    expect(contractSchemaProblem({ definitions: { x: { type: "string" } }, $ref: "#/definitions/x" })).toBeUndefined();
+  });
+
   it("explains the shapes earlier versions accepted", () => {
     expect(contractSchemaProblem({ type: "any" })).toBe('/: type "any" is not JSON Schema; omit "type" to accept any value');
     expect(contractSchemaProblem({ type: "object", properties: { a: { type: "string", required: true } } })).toBe(
@@ -151,10 +165,32 @@ describe("schemas in node config", () => {
     expect(AgentWithSchema.safeParse({ prompt: "p", schema: { type: "object", properties: { a: { tpye: "string" } } } }).success).toBe(false);
   });
 
-  it("checks a templated schema after rendering instead", () => {
+  it("leaves only templated values that affect validation for after rendering", () => {
+    const form = (schema: Record<string, unknown>) => HitlWithSchema.safeParse({ mode: "form", message: "m", schema });
+    expect(form({ type: "object", properties: { pick: { enum: "{{ state.options }}" } } }).success).toBe(true);
+    expect(form({ type: "object", properties: { pick: "{{ state.pickSchema }}" }, required: ["{{ state.key }}"] }).success).toBe(true);
+    expect(form({ type: "{{ state.kind }}", maxLength: "{{ state.max }}" }).success).toBe(true);
+  });
+
+  it("still checks the rest of a templated schema", () => {
+    const problem = (schema: Record<string, unknown>) => contractSchemaProblem(schema, { templates: true });
+    // A template in a description changes nothing.
+    expect(problem({ type: "object", description: "Use {{braces}}", properties: { a: { tpye: "string" } } })).toMatch(
+      /unknown keyword: "tpye"/,
+    );
+    // A templated enum does not hide a typo elsewhere.
+    expect(problem({ type: "object", properties: { pick: { enum: "{{ s.o }}" }, a: { type: "strng" } } })).toMatch(/type/);
+    // An unknown keyword is reported even when its value is templated.
+    expect(problem({ type: "string", placeholder: "{{ s.hint }}" })).toMatch(/unknown keyword: "placeholder"/);
+    expect(problem({ type: "any", title: "{{ s.t }}" })).toContain('type "any" is not JSON Schema');
+    expect(problem({ $ref: "http://json-schema.org/draft-07/schema#", description: "{{ x }}" })).toContain("is not local");
     expect(
-      HitlWithSchema.safeParse({ mode: "form", message: "m", schema: { type: "object", properties: { pick: { enum: "{{ state.options }}" } } } }).success,
-    ).toBe(true);
+      HitlWithSchema.safeParse({
+        mode: "form",
+        message: "m",
+        schema: { type: "object", description: "Answers for {{ state.topic }}", properties: { a: { tpye: "string" } } },
+      }).success,
+    ).toBe(false);
   });
 
   it("keeps form presentation hints in `ui`", () => {

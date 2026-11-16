@@ -15,7 +15,7 @@ describe("skill kinds", () => {
   it.each(["agent", "composite"])("rejects %s until it can run", (kind) => {
     const r = SkillFrontMatterSchema.safeParse({ ...base, kind_of: kind });
     expect(r.success).toBe(false);
-    expect(r.error?.issues[0]?.message).toBe(`kind_of "${kind}" is not supported yet; use "executable" or "command"`);
+    expect(r.error?.issues[0]?.message).toBe(`kind_of "${kind}" is not supported; use "executable" or "command"`);
   });
 
   it("fails at load time with a diagnostic", async () => {
@@ -25,7 +25,7 @@ describe("skill kinds", () => {
       const { skill, diagnostics } = await loadSkill(dir);
       expect(skill).toBeNull();
       expect(diagnostics).toEqual([
-        expect.objectContaining({ code: "SKILL_SCHEMA_ERROR", path: "kind_of", message: expect.stringContaining("not supported yet") }),
+        expect.objectContaining({ code: "SKILL_SCHEMA_ERROR", path: "kind_of", message: expect.stringContaining('kind_of "agent" is not supported;') }),
       ]);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
@@ -67,5 +67,9 @@ describe("skill input / output declarations", () => {
       expect(SkillFrontMatterSchema.safeParse({ ...base, inputs }).success).toBe(false);
     }
     expect(SkillFrontMatterSchema.safeParse({ ...base, outputs: { a: { type: "any" } } }).success).toBe(false);
+    // A templated description does not switch the check off.
+    expect(
+      SkillFrontMatterSchema.safeParse({ ...base, inputs: { a: { type: "strng", description: "{{ inputs.b }}" } } }).success,
+    ).toBe(false);
   });
 });

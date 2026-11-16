@@ -171,6 +171,7 @@ export {
   ContractSchemaError,
   CONTRACT_SCHEMA_DIALECT,
   type ValidateJsonSchemaOptions,
+  type ContractSchemaProblemOptions,
 } from "./validate-json-schema.js";
 export {
   checkWorkshopOutput,

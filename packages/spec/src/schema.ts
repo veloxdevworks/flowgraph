@@ -110,19 +110,17 @@ export const JsonSchemaTypeSchema = z.union([
   z.literal("null"),
 ]);
 
-const hasTemplate = (value: unknown): boolean => JSON.stringify(value)?.includes("{{") ?? false;
-
 /**
  * A data contract: a JSON Schema (draft-07) checked by Ajv. Used for hitl `form` /
  * `review` schemas, wait webhook payloads, workshop output, agent output, skill inputs /
  * outputs and channel item / property shapes. Unknown keywords and formats are rejected.
- * A schema containing `{{ … }}` templates is checked after it is rendered.
+ * A `{{ … }}` template in a value that affects validation is checked after rendering;
+ * the rest of the schema is checked when the graph is validated.
  */
 export const ContractSchemaSchema: z.ZodType<PropertyDef, z.ZodTypeDef, unknown> = z
   .record(z.unknown())
   .superRefine((schema, ctx) => {
-    if (hasTemplate(schema)) return;
-    const problem = contractSchemaProblem(schema);
+    const problem = contractSchemaProblem(schema, { templates: true });
     if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
   }) as unknown as z.ZodType<PropertyDef, z.ZodTypeDef, unknown>;
 
