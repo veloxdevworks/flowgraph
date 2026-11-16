@@ -8,14 +8,18 @@ This doc covers what happens when a compiled graph runs: compilation handoff, ch
 
 ```ts
 const result = await runGraph(compiled, {
-  input: { issue },             // initial state (validated against channels)
-  threadId: "issue-123",        // checkpoint/resume key; auto-generated if omitted
+  input: { issue },             // initial state (graph `input:` merged under it, validated against `inputs:`)
+  threadId: "issue-123",        // checkpoint/resume key; omitted = a new thread for this run only
   config: { /* per-run overrides */ },
   signal,                       // AbortSignal → run.aborted
   onInterrupt: "prompt",        // override env policy for this run
 });
 // result: { state, status: "completed" | "interrupted" | "paused" | "aborted" | "error", interrupts?, usage, runId }
 ```
+
+**Run and thread ids.** A start without `threadId`, or with an empty or whitespace-only one (`run()`, `stream()`, `prepare({ mode: "start" })`) is a new run on a new thread: it gets a fresh `runId` and the thread `thread-<runId>`, so calling `run()` twice on one compiled graph never shares checkpointed state, issues or budget between the two calls. Its events carry that `runId`. Pass the same `threadId` to continue one thread across calls. Invocations on a caller-supplied thread, and `resume()` / `continueRun()` / `step()`, report the compiled graph's `runId` (`compiled.runId`).
+
+**Input.** Start input is resolved before anything runs: the graph's `input:` values, overlaid by the caller's, then the `inputs:` defaults, coercion and required checks ([02 §2b](./02-graph-spec.md#2b-inputs-run-parameters)). A bad input rejects with `InputValidationError` (code `INPUT_INVALID`). The CLI and the server use the same `resolveGraphInput()`.
 
 Under the hood flowgraph calls LangGraph's `invoke`/`stream` with `{ configurable: { thread_id } }`, wraps each node in the middleware stack, and translates LangGraph stream chunks into flowgraph events.
 

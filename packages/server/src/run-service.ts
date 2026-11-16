@@ -10,7 +10,7 @@ import {
   assertResumeValue,
   createInMemoryMemoryBackend,
   startMemorySweeper,
-  resolveAndValidateInput,
+  resolveGraphInput,
   isInputValidationError,
   readRunIssues,
   createInMemoryGraphNameRegistry,
@@ -864,10 +864,7 @@ export class RunService {
 
       let resolvedInput: Record<string, unknown>;
       try {
-        resolvedInput = resolveAndValidateInput(spec.inputs, {
-          ...(spec.input ?? {}),
-          ...(runInput ?? {}),
-        });
+        resolvedInput = resolveGraphInput(spec, runInput);
       } catch (err) {
         this.registry.remove(req.threadId);
         if (isInputValidationError(err)) {
@@ -1038,7 +1035,7 @@ export class RunService {
     if (!principal.trusted) assertUntrustedUploadAllowed(yaml, spec, this.uploadOptions);
 
     try {
-      resolveAndValidateInput(spec.inputs, { ...(spec.input ?? {}), ...(req.input ?? {}) });
+      resolveGraphInput(spec, req.input);
     } catch (err) {
       if (!isInputValidationError(err)) throw err;
       diagnostics.push({ severity: "error", code: "INPUT_INVALID", message: err.message });

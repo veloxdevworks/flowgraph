@@ -356,7 +356,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 
 `json` is set when `stdout` parses as JSON.
 
-**Input:** optional `with.input` is rendered, JSON-stringified into the `FLOWGRAPH_INPUT` env var, and also written to the child's stdin — same convention as skill `kind_of: command` handlers.
+**Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kind_of: command` handlers. An explicit `with.input` is rendered and sent instead. When neither is set, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
 
 **Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"`. Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
 
@@ -530,6 +530,13 @@ registerFunction("dedupeFindings", (input, ctx) => {
 });
 ```
 
+The handler's first argument is the node's `input` (rendered), or the model's tool arguments when the node is exposed as a tool. `with.input`, when set, replaces it and can read it through `{{ input.* }}`. These two declarations pass the same object:
+
+```yaml
+- { id: a, type: function, input: { findings: "{{ state.findings }}" }, with: { fn: dedupeFindings } }
+- { id: b, type: function, with: { fn: dedupeFindings, input: { findings: "{{ state.findings }}" } } }
+```
+
 For substantial reusable logic, prefer a **skill** (portable, contract + env declared) over a `function` node.
 
 ---
@@ -542,7 +549,7 @@ The script **must** `export default` an async (or sync) function:
 
 ```js
 export default async function (input, ctx) {
-  // input  — rendered with.input object, or the model's tool arguments when omitted
+  // input  — rendered with.input object; when omitted, the node's input (or the model's tool arguments)
   // ctx    — { nodeId, runId, threadId }
   return { greeting: `Hello, ${input.name}!` };
 }
