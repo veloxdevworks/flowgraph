@@ -101,6 +101,10 @@ export {
   BranchSchema,
   ImportSpecSchema,
   PropertySchema,
+  ContractSchemaSchema,
+  JsonSchemaTypeSchema,
+  FormUiSchema,
+  FormFieldHintSchema,
   InputFieldSchema,
   InputFieldTypeSchema,
   isError,
@@ -155,8 +159,19 @@ export type {
   WorkshopTranscriptTurn,
   WorkshopResume,
   WorkshopResult,
+  WorkshopFormUi,
 } from "./workshop-contract.js";
-export { validateJsonSchema, type ValidateJsonSchemaOptions } from "./validate-json-schema.js";
+export {
+  validateJsonSchema,
+  compileContractSchema,
+  contractErrors,
+  contractSchemaProblem,
+  contractValidationAvailable,
+  formatContractErrors,
+  ContractSchemaError,
+  CONTRACT_SCHEMA_DIALECT,
+  type ValidateJsonSchemaOptions,
+} from "./validate-json-schema.js";
 export {
   checkWorkshopOutput,
   uncoveredAgendaItems,

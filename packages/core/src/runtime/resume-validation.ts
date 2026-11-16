@@ -46,6 +46,8 @@ export function interruptUntilValid<T>(
     try {
       return parse(resume);
     } catch (err) {
+      // A broken schema is the graph's fault, not the answer's: re-prompting cannot fix it.
+      if ((err as { code?: unknown } | null)?.code === "CONTRACT_SCHEMA_INVALID") throw err;
       rejected += 1;
       last = {
         validationError: err instanceof Error ? err.message : String(err),

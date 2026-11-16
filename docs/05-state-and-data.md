@@ -28,14 +28,62 @@ state:
 | `messages` | `BaseMessage[]` | special: uses LangGraph's message reducer (append + id-based update) |
 | `any` | unknown | escape hatch; loses type checking |
 
-A channel may also reference a named **schema** for richer validation:
+A channel may also describe its contents with `items` (arrays) or `properties` (objects). Both are [data contracts](#data-contracts-json-schema):
 
 ```yaml
 findings:
   type: array
-  items: { $ref: "#/schemas/Finding" }
+  items:
+    type: object
+    properties: { severity: { type: string, enum: [low, high] }, line: { type: integer } }
+    required: [severity]
   reducer: append
 ```
+
+### Data contracts (JSON Schema)
+
+Every schema that describes data uses one dialect: **JSON Schema draft-07**, checked by [Ajv](https://ajv.js.org). That covers:
+
+- hitl `with.schema` (`mode: form` answers and `mode: review` answers),
+- wait `with.webhook.schema` (callback payloads),
+- workshop `with.schema` (session output),
+- agent `with.schema` (structured output),
+- skill `inputs` / `outputs` ([04 §2](./04-skills.md#2-skillmd-front-matter)),
+- channel `items` / `properties` (above).
+
+Rules:
+
+- **Full draft-07.** `enum`, `const`, nested `properties`, `items`, `additionalProperties`, `minimum` / `maxLength` / `pattern`, `oneOf` / `anyOf` / `allOf`, `format` (`email`, `date-time`, `uri`, …) and local `$ref`s (`#/definitions/...`) are all enforced at every depth. A value is never coerced, given defaults, or stripped of extra fields.
+- **The schema itself is checked.** An unknown keyword (a typo such as `tpye`, or a presentation key such as `placeholder`), an unknown `format`, a malformed keyword, a `$ref` that does not resolve inside the schema, or a `$schema` other than draft-07 is an error. `flowgraph validate` reports it as `NODE_CONFIG_ERROR` (or `SKILL_SCHEMA_ERROR` for a skill). A schema with `{{ … }}` templates is checked after rendering, and an invalid one fails the node rather than re-prompting the human.
+- **Annotations are fine.** `title`, `description`, `default`, `examples`, `$comment`, `readOnly` and `writeOnly` are allowed; `default` is informational and is not inserted.
+- **Types** are `string`, `number`, `integer`, `boolean`, `object`, `array` and `null` (or a list of them). To accept any value, omit `type`.
+- **`required`** inside a schema is the JSON Schema list of property names on the object that has them: `required: [title]`. The only place a boolean `required` appears is a skill input's own flag (whether the caller must pass that input).
+
+Errors read the same everywhere — one `<path> <problem>` per failure, joined by `; `:
+
+```text
+hitl node "intake" form: does not match schema: / must have required property 'title'; /tags/0 must be string
+agent node "triage" output: output does not match schema: /decision must be equal to one of the allowed values: "approve", "reject"
+```
+
+`@flowgraph/spec` exports the validator (`validateJsonSchema`, `contractErrors`, `contractSchemaProblem`), so clients apply the engine's rule before submitting. Hosts that forbid runtime code generation (a Content-Security-Policy without `unsafe-eval`) cannot run Ajv; there `checkWorkshopOutput` returns `unverified: true` and the engine's check on resume is the one that counts.
+
+**Form presentation** is not part of the schema. hitl (`form` / `review`) and workshop nodes take a separate `with.ui` block, passed to clients on the interrupt as `data.ui`:
+
+```yaml
+with:
+  mode: form
+  schema:
+    type: object
+    properties: { title: { type: string }, notes: { type: string } }
+    required: [title]
+  ui:
+    order: [title, notes]
+    fields:
+      notes: { label: "Anything else?", widget: textarea, placeholder: "Optional", help: "Shown under the field" }
+```
+
+`widget` is one of `text`, `textarea`, `password`, `select`, `radio`, `checkbox`.
 
 ## 2. Reducers
 

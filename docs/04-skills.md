@@ -29,13 +29,14 @@ description: >
   Create a Jira bug ticket from a summary and return its key/url.
 labels: { domain: jira }
 
-kind_of: executable            # executable | command | agent | composite  (see §3)
+kind_of: executable            # executable | command  (see §3)
 
-# --- the contract: typed inputs and outputs ---
+# --- the contract: each input / output is a JSON Schema (draft-07) ---
 inputs:
   project:  { type: string, required: true, description: "Jira project key, e.g. PLAT" }
-  summary:  { type: string, required: true }
+  summary:  { type: string, required: true, maxLength: 255 }
   priority: { type: string, enum: [low, medium, high], default: medium }
+  labels:   { type: array, items: { type: string } }
 outputs:
   key: { type: string, description: "Created issue key, e.g. PLAT-123" }
   url: { type: string }
@@ -57,7 +58,6 @@ env:
 # --- execution config for this skill kind ---
 handler: ./handler.ts           # for kind_of: executable
 # command: ["python", "create.py"]   # for kind_of: command
-# provider: claude                   # for kind_of: agent
 
 timeout: 60s
 sideEffecting: true             # affects retry/replay safety
@@ -71,7 +71,7 @@ When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 `{{ inputs.summary }}`. Return the issue key and URL.
 
 > The Markdown body is human documentation **and** the instruction text passed
-> to the model when this skill is `kind_of: agent` or used as an agent tool.
+> to the model when this skill is used as an agent tool.
 ````
 
 ### Field reference
@@ -81,12 +81,12 @@ When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 | `name` | Skill identifier (unique within its package/namespace). |
 | `version` | Semver of the skill; enables pinning when published. |
 | `kind_of` | How the skill executes — see §3. |
-| `inputs` / `outputs` | The **contract**. Typed; validated at compile + runtime. Drives editor hints. |
+| `inputs` / `outputs` | The **contract**: a map of name → JSON Schema (draft-07), the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as hitl forms and agent output. Each input value is checked against its schema before the skill runs. An input's `required: true` means the caller must pass it (default `false`); a `required: [a, b]` list keeps its JSON Schema meaning for an object-typed input. |
 | `env.vars` | Required env vars; `secret: true` ⇒ resolved via SecretProvider + redacted. |
 | `env.bin` | Required executables on PATH (with `optional`). |
 | `env.network` | Whether outbound network is needed (preflight can fail in offline CI). |
 | `env.node` / `env.packages` | Engine + npm deps for executable skills. |
-| `handler` / `command` / `provider` | Execution target per `kind_of`. |
+| `handler` / `command` | Execution target per `kind_of`. |
 | `sideEffecting` | If true, the runtime treats retries/replays carefully (idempotency). |
 | `permissions` | Declared capability surface (informational; enforced where the runtime can). |
 
@@ -96,8 +96,8 @@ When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 |---|---|---|
 | `executable` | Calling a TS `handler(input, ctx)` exported from `handler.ts` | Most reusable logic; full typing & ctx (secrets, http, logger) |
 | `command` | Spawning a process (`command:`), passing input as JSON on stdin/env, parsing stdout | Wrapping existing CLIs/scripts in any language |
-| `agent` | Delegating to an intelligent provider, using the Markdown body as instructions and `inputs` as context, returning structured `outputs` | Fuzzy/judgment tasks expressed as a skill |
-| `composite` | Running an embedded mini-graph / sequence of other skills | Bundling a multi-step capability behind one contract |
+
+`agent` and `composite` are reserved: a skill that declares either fails to load (`SKILL_SCHEMA_ERROR`: `kind_of "agent" is not supported yet`). For judgment tasks today, use an `agent` node with the skill's instructions as its prompt; for multi-step bundles, use a subgraph.
 
 ### `executable` handler signature
 
@@ -125,13 +125,14 @@ export default handler;
 
 ## 4. Contracts & validation
 
-The `inputs`/`outputs` blocks are JSON-Schema-compatible (a friendly subset, same dialect as node `schema:`). They are enforced at three points:
+Each entry under `inputs` / `outputs` is a JSON Schema (draft-07) — the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as node `schema:` blocks. They are checked at two points:
 
-1. **Compile time** — the graph's `input:` mapping into a `skill` node is type-checked against the skill's declared `inputs`; the `output:` mapping is checked against declared `outputs` and the target channel types. Mismatches are **errors**.
-2. **Runtime (pre)** — the resolved `input` object is validated before the skill runs; invalid input ⇒ node error (no side effects).
-3. **Runtime (post)** — the skill's return value is validated against `outputs` before being written to state.
+1. **Load time** — every declaration must be a valid contract schema. An unknown keyword, an unknown `format`, `type: any` or a boolean `required` nested inside a schema fails the skill with `SKILL_SCHEMA_ERROR`.
+2. **Runtime (pre)** — before the skill runs, a missing `required: true` input is an error, and each input that is present is validated against its schema; invalid input ⇒ node error (no side effects).
 
-This is the "declared contract to indicate the output" requirement: a skill's outputs are a typed promise the graph can rely on, and the compiler verifies the wiring.
+`outputs` describe the result for readers, editors and agent tools; the return value is not validated against them.
+
+A skill's declared `outputs` are its documented promise to the graph; keep them accurate, since agent tools and editors read them.
 
 ## 5. Preflight & environment checks
 
@@ -193,5 +194,5 @@ This is the hub-and-spoke pattern in practice: the agent is the hub, skills/node
 - Keep a skill **single-purpose** and **idempotent** where possible; declare `sideEffecting: true` honestly.
 - Declare **every** env dependency — this is what makes preflight trustworthy.
 - Prefer **typed `outputs`** over free-form text so downstream nodes/routers can rely on structure.
-- Write the Markdown body as if instructing a capable teammate; for `agent` skills it *is* the instruction.
+- Write the Markdown body as if instructing a capable teammate; when the skill is an agent tool it *is* the instruction.
 - Version skills; treat the contract (`inputs`/`outputs`) as a public API — breaking changes bump the major.

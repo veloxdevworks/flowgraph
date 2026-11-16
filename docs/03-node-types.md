@@ -99,7 +99,7 @@ An LLM-driven agent that runs a tool-calling loop. **This is the hub in hub-and-
       - mcp: "@acme/mcp-jira"      # an MCP server's tools
 
     # --- structured output contract (optional) ---
-    schema:                        # JSON-schema-ish; enforces/parses structured result
+    schema:                        # JSON Schema draft-07 data contract (docs/05); enforced on the result
       type: object
       properties:
         filesChanged: { type: array, items: { type: string } }
@@ -757,6 +757,8 @@ For `approve`, `choice` and `review`, the human's answer *is* the routing decisi
 - For logic over state or model-based choices, keep using a [`router`](#3-router--intelligent--rule-based-routing).
 - A `router` right after a gate that only compares the gate's answer is flagged by lint as `HITL_ROUTER_MERGEABLE` (an `info` recommendation). Fold it in by moving its routes onto the gate — the desktop Builder does this with **Merge into HITL** (node right-click menu, or the Lint tab). Routers that test anything beyond the answer, take several routes, or write state are left alone.
 
+`with.schema` is a [data contract](./05-state-and-data.md#data-contracts-json-schema) (JSON Schema draft-07, enforced at every depth). Labels, placeholders, widgets and field order go in `with.ui`, not in the schema.
+
 **Invalid answers re-prompt.** If a resume value fails validation (unknown choice, unknown review decision, or a `form`/`review` answer that fails `with.schema`), the node re-issues its interrupt with `validationError`, `attempt` and `maxAttempts` attached instead of failing. After `with.maxResumeAttempts` rejected answers (default `3`) the run reports `status: "error"` (`ResumeAttemptsExhaustedError`) but the interrupt stays pending, so the thread can still be inspected and resumed with a valid answer. See [07 — Invalid answers](./07-runtime-and-execution.md#invalid-answers-re-prompt-dont-brick).
 
 ```yaml
@@ -766,6 +768,7 @@ For `approve`, `choice` and `review`, the human's answer *is* the routing decisi
     mode: form
     message: "Describe the request"
     schema: { type: object, required: [title], properties: { title: { type: string } } }
+    ui: { fields: { title: { label: "Title", placeholder: "One line" } } }   # optional presentation hints
     maxResumeAttempts: 5            # default 3
     output: { to: intakeResult }
 ```
@@ -876,7 +879,7 @@ A specialized HITL node for a **bounded conversation** that produces a structure
 { output, transcript, coverage, endedReason }
 ```
 
-`output` is validated against `with.schema` before the node completes. An invalid output re-issues the workshop interrupt with `validationError` / `attempt` / `maxAttempts` so the client can show the error and try again; after `with.maxResumeAttempts` rejections (default `3`) the run fails with `ResumeAttemptsExhaustedError` while the interrupt stays pending and resumable (see [07](./07-runtime-and-execution.md#invalid-answers-re-prompt-dont-brick)). Voice, text chat, and a plain JSON form are all valid facilitators of the same contract — that is what keeps CI honest.
+`output` is validated against `with.schema` (a [data contract](./05-state-and-data.md#data-contracts-json-schema); presentation hints for the fallback form go in `with.ui`) before the node completes. An invalid output re-issues the workshop interrupt with `validationError` / `attempt` / `maxAttempts` so the client can show the error and try again; after `with.maxResumeAttempts` rejections (default `3`) the run fails with `ResumeAttemptsExhaustedError` while the interrupt stays pending and resumable (see [07](./07-runtime-and-execution.md#invalid-answers-re-prompt-dont-brick)). Voice, text chat, and a plain JSON form are all valid facilitators of the same contract — that is what keeps CI honest.
 
 ```yaml
 - id: feature-workshop
@@ -912,7 +915,7 @@ The node writes `{ output, transcript, coverage, endedReason, complete }`, so th
 
 **Sessions that end early.** By default every accepted output satisfies `with.schema`, however the session ended, so later nodes can rely on it. A client should not submit an output that would be rejected: `checkWorkshopOutput` in `@flowgraph/spec` is the same rule the engine applies. The `finish` facilitator tool uses it and stays open with an error naming what is missing, and the desktop opens the form prefilled with the draft when the human ends early or time runs out.
 
-With `allowPartial: true`, an output with `endedReason` of `human_ended`, `timeout` or `skipped` may omit required fields (property types are still checked). The node then writes `complete: false`, so route on it instead of assuming a finished deliverable:
+With `allowPartial: true`, an output with `endedReason` of `human_ended`, `timeout` or `skipped` may omit required fields at any depth (every other rule in the schema is still checked). The node then writes `complete: false`, so route on it instead of assuming a finished deliverable:
 
 ```yaml
 edges:
@@ -980,7 +983,7 @@ Inbound webhook example:
 
 When a `webhook` wait interrupts, the runtime starts (or reuses) an embedded HTTP server and attaches a generated URL on the interrupt payload as `data.webhookUrl` (e.g. `http://127.0.0.1:8878/webhooks/<threadId>/<nodeId>/<interruptId>`). `POST` a JSON object to that exact URL to resume the intended interrupt; `GET` returns `{ waiting: true, threadId, nodeId, interruptId }`. Configure host/port via `runtime.webhookServer` (default `127.0.0.1:8878`; on `EADDRINUSE` falls back to an ephemeral port). Optional per-graph `runtime.webhookServer.token` guards GET/POST via `Authorization: Bearer <token>` or `x-flowgraph-token`. Routes are in memory: after restart, compile with the same durable checkpointer and call `compiled.getState(threadId)` to restore the thread's unanswered webhook routes and discover their current URLs. Compilation alone does not restore listeners.
 
-`with.webhook.schema` checks required keys and the primitive types of top-level properties, using the same lightweight validator as HITL (not a full JSON Schema engine). HTTP callbacks are validated before the route is claimed or a resume value is saved. A rejected payload returns HTTP 422 with `error: "invalid_payload"` and `status: "interrupted"`; the route, pending waiter, checkpoint, and original deadline remain usable. POST a corrected value to the same URL to complete the wait. This also works after restoring the interrupted thread from a durable checkpoint. Scalars and arrays retain their existing `{ value: payload }` normalization before validation. Malformed JSON returns HTTP 400 without consuming the route. This preflight contract applies to the embedded HTTP ingress; direct API/CLI resumes still pass through the wait node's validation.
+`with.webhook.schema` is a [data contract](./05-state-and-data.md#data-contracts-json-schema): full JSON Schema draft-07, enforced at every depth by the same validator as hitl, workshop and agent output. HTTP callbacks are validated before the route is claimed or a resume value is saved. A rejected payload returns HTTP 422 with `error: "invalid_payload"` and `status: "interrupted"`; the route, pending waiter, checkpoint, and original deadline remain usable. POST a corrected value to the same URL to complete the wait. This also works after restoring the interrupted thread from a durable checkpoint. Scalars and arrays retain their existing `{ value: payload }` normalization before validation. Malformed JSON returns HTTP 400 without consuming the route. This preflight contract applies to the embedded HTTP ingress; direct API/CLI resumes still pass through the wait node's validation.
 
 Parallel gates have independent routes and resume values, including equally named gates inside different subgraphs. Answering one leaves its siblings and any human gates pending; the response is HTTP 200 with `status: interrupted` until the remaining gates finish. Callbacks within one thread are serialized in-process to preserve checkpoint progress. State inspection and restart recovery do not recreate answered gates. Legacy `/webhooks/<threadId>/<nodeId>` URLs still work for a single matching registration; ambiguous node-only URLs return HTTP 409/`ambiguous_interrupt`. Prefer the exact generated URLs. The CLI prints all pending callback URLs and keeps listening after a partial answer.
 

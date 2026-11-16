@@ -478,7 +478,7 @@ async function runForm(controller: WorkshopController, io: WorkshopIO): Promise<
     }
     const check = controller.check();
     const failing = props.filter(
-      (p) => check.missing.includes(p.key) || r.error.includes(`field "${p.key}"`),
+      (p) => check.missing.includes(p.key) || errorNamesField(r.error, p.key),
     );
     const coverageBlocks = Boolean(contract.requireCoverage) && check.uncovered.length > 0;
     if (coverageBlocks) {
@@ -566,4 +566,10 @@ async function readArray(io: WorkshopIO, prop: Prop, first: string): Promise<Par
     line = await io.ask("  + ");
   }
   return { ok: true, value: out };
+}
+
+/** Whether a contract error message (`… /<key> must be …; /<key>/0 must be …`) points at top-level `key`. */
+function errorNamesField(message: string, key: string): boolean {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/~/g, "~0").replace(/\//g, "~1");
+  return new RegExp(`(?:^|: |; )/${escaped}(?:/| )`).test(message);
 }

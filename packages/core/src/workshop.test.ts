@@ -108,7 +108,7 @@ describe("workshop allowPartial", () => {
       onInterrupt: "fail",
     });
     expect(r.status).toBe("interrupted");
-    expect(r.interrupts?.[0]?.validationError).toMatch(/missing required field/);
+    expect(r.interrupts?.[0]?.validationError).toMatch(/must have required property 'title'/);
   });
 });
 
@@ -183,7 +183,7 @@ describe("mapWorkshopResume", () => {
 
   it("rejects missing required fields", () => {
     expect(() => mapWorkshopResume({ output: {} }, { schema, nodeId: "w" })).toThrow(
-      /missing required field/,
+      /must have required property 'title'/,
     );
   });
 
@@ -195,7 +195,7 @@ describe("mapWorkshopResume", () => {
   it("rejects an unfinished output that ended early unless the node allows it", () => {
     for (const endedReason of ["human_ended", "timeout", "skipped"]) {
       expect(() => mapWorkshopResume({ output: {}, endedReason }, { schema, nodeId: "w" })).toThrow(
-        /missing required field/,
+        /must have required property 'title'/,
       );
     }
   });
@@ -212,7 +212,7 @@ describe("mapWorkshopResume", () => {
   it("does not let allowPartial excuse a session reported as completed", () => {
     for (const resume of [{ output: {}, endedReason: "completed" }, { output: {}, endedReason: "form" }, { output: {} }]) {
       expect(() => mapWorkshopResume(resume, { schema, nodeId: "w", allowPartial: true })).toThrow(
-        /missing required field/,
+        /must have required property 'title'/,
       );
     }
   });
@@ -223,7 +223,7 @@ describe("mapWorkshopResume", () => {
         { output: { title: 7 }, endedReason: "human_ended" },
         { schema, nodeId: "w", allowPartial: true },
       ),
-    ).toThrow(/field "title" expected type string/);
+    ).toThrow(/\/title must be string/);
   });
 });
 
@@ -322,7 +322,7 @@ describe("workshop node", () => {
     });
     expect(r2.status).toBe("interrupted");
     expect(r2.interrupts?.[0]?.kind).toBe("workshop");
-    expect(r2.interrupts?.[0]?.validationError).toContain("expected type string");
+    expect(r2.interrupts?.[0]?.validationError).toContain("/title must be string");
     expect(r2.interrupts?.[0]).toMatchObject({ attempt: 1, maxAttempts: 3 });
     expect(r2.interrupts?.[0]?.exhausted).toBeUndefined();
   });

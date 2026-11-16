@@ -18,6 +18,7 @@ import { applyOutput } from "./output.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
 import { assertHostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
+import { assertContractSchema } from "../runtime/json-schema.js";
 
 const configSchema = WorkshopWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -71,7 +72,11 @@ export const workshopNode = defineNode<Config>({
           agenda,
           fallback,
         };
-        if (schema) data.schema = schema;
+        if (schema) {
+          assertContractSchema(schema, `workshop node "${ctx.nodeId}" output`);
+          data.schema = schema;
+        }
+        if (config.ui) data.ui = renderDeep(config.ui, scope) as WorkshopContract["ui"];
         if (config.allowPartial) data.allowPartial = true;
         if (config.requireCoverage) data.requireCoverage = true;
         if (context !== undefined) data.context = context;

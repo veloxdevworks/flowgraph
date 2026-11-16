@@ -11,7 +11,7 @@ import { renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { InterruptKind, NodeRunContext } from "../context.js";
 import { applyOutput } from "./output.js";
-import { validateJsonSchema } from "../runtime/json-schema.js";
+import { assertContractSchema, validateJsonSchema } from "../runtime/json-schema.js";
 import { collectGitDiff } from "../runtime/git-diff.js";
 import { assertHostExecAllowed, hostExecAllowed, nodePolicyOf } from "../node-policy.js";
 import { interruptUntilValid } from "../runtime/resume-validation.js";
@@ -75,7 +75,13 @@ export const hitlNode = defineNode<Config>({
           const schema = config.schema
             ? (renderDeep(config.schema, scope) as Record<string, unknown>)
             : undefined;
-          if (schema) data["schema"] = schema;
+          if (schema) {
+            assertContractSchema(schema, `hitl node "${String(nodeSpec["id"])}" form`);
+            data["schema"] = schema;
+          }
+        }
+        if ((config.mode === "form" || config.mode === "review") && config.ui) {
+          data["ui"] = renderDeep(config.ui, scope);
         }
 
         // Artifacts to preview (and optionally pick from) in the modes with a closed answer.
@@ -101,7 +107,11 @@ export const hitlNode = defineNode<Config>({
           const decisions = config.decision?.length ? config.decision : DEFAULT_REVIEW_DECISIONS;
           data["decision"] = decisions;
           data["choices"] = decisions;
-          if (config.schema) data["schema"] = renderDeep(config.schema, scope);
+          if (config.schema) {
+            const schema = renderDeep(config.schema, scope) as Record<string, unknown>;
+            assertContractSchema(schema, `hitl node "${String(nodeSpec["id"])}" review`);
+            data["schema"] = schema;
+          }
           if (config.diff?.before != null || config.diff?.after != null) {
             const before = config.diff.before ? String(renderDeep(config.diff.before, scope)) : "";
             const after = config.diff.after ? String(renderDeep(config.diff.after, scope)) : "";

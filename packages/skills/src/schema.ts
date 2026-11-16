@@ -1,33 +1,64 @@
 import { z } from "zod";
-import { PropertySchema } from "@flowgraph/spec";
+import { ContractSchemaSchema, contractSchemaProblem, type PropertyDef } from "@flowgraph/spec";
 
 // ---------------------------------------------------------------------------
 // Skill front-matter schema
 // ---------------------------------------------------------------------------
 
-export const SkillKindSchema = z.union([
-  z.literal("executable"),
-  z.literal("command"),
-  z.literal("agent"),
-  z.literal("composite"),
-]);
-
-export const SkillInputSchema = z.object({
-  type: z.string().optional(),
-  description: z.string().optional(),
-  required: z.boolean().optional().default(false),
-  enum: z.array(z.unknown()).optional(),
-  default: z.unknown().optional(),
-  items: PropertySchema.optional(),
-  properties: z.record(PropertySchema).optional(),
+/**
+ * Skill kinds that run today. `agent` and `composite` are reserved and rejected until the
+ * runner supports them.
+ */
+export const SkillKindSchema = z.enum(["executable", "command"], {
+  errorMap: (issue, ctx) =>
+    issue.code === z.ZodIssueCode.invalid_enum_value
+      ? {
+          message:
+            issue.received === "agent" || issue.received === "composite"
+              ? `kind_of "${String(issue.received)}" is not supported yet; use "executable" or "command"`
+              : `kind_of must be "executable" or "command"`,
+        }
+      : { message: ctx.defaultError },
 });
 
-export const SkillOutputSchema = z.object({
-  type: z.string().optional(),
-  description: z.string().optional(),
-  items: PropertySchema.optional(),
-  properties: z.record(PropertySchema).optional(),
-});
+/**
+ * A named skill input: a JSON Schema (draft-07, the same dialect as every other data
+ * contract) for its value. `required: true` / `false` is the input-level flag — whether
+ * the caller must pass it (default false). A `required` list keeps its JSON Schema meaning:
+ * the properties an object-typed input must have.
+ */
+export const SkillInputSchema = z
+  .object({ required: z.union([z.boolean(), z.array(z.string())]).optional().default(false) })
+  .passthrough()
+  .superRefine((decl, ctx) => {
+    const schema = skillInputValueSchema(decl as SkillInputDecl);
+    if (JSON.stringify(schema).includes("{{")) return;
+    const problem = contractSchemaProblem(schema);
+    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
+  }) as unknown as z.ZodType<SkillInputDecl, z.ZodTypeDef, unknown>;
+
+export type SkillInputDecl = {
+  required: boolean | string[];
+  type?: PropertyDef["type"];
+  description?: string;
+  enum?: unknown[];
+  default?: unknown;
+  [keyword: string]: unknown;
+};
+
+/** Whether the caller must pass this input. */
+export function isRequiredSkillInput(decl: SkillInputDecl): boolean {
+  return decl.required === true;
+}
+
+/** The JSON Schema an input's value must satisfy (the declaration minus the input-level flag). */
+export function skillInputValueSchema(decl: SkillInputDecl): Record<string, unknown> {
+  const { required, ...schema } = decl;
+  return Array.isArray(required) ? { ...schema, required } : schema;
+}
+
+/** A named skill output: a JSON Schema (draft-07) describing its value. */
+export const SkillOutputSchema = ContractSchemaSchema;
 
 export const EnvVarDeclSchema = z.object({
   name: z.string(),
