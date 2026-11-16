@@ -404,6 +404,17 @@ describe("remote execution of placed nodes", () => {
       expect(err.decisions[0].kind).toBe("queued");
     });
 
+    it("runsOn.wait throws even when the node would otherwise run locally", async () => {
+      const g = fnParent();
+      (g.nodes[0] as { runsOn: unknown }).runsOn = { labels: ["os:macos"], wait: "30m" };
+      const err = await compileGraph(g, { placement: { localLabels: LOCAL_MAC } }).catch((e) => e);
+      expect(err).toBeInstanceOf(PlacementUnsatisfiedError);
+      expect(err.message).toMatch(/runsOn\.wait/);
+      expect(err.message).toMatch(/not supported/);
+      expect(err.message).not.toMatch(/phase/i);
+      expect(err.decisions[0].kind).toBe("local");
+    });
+
     it("unsatisfied throws with each candidate's reason", async () => {
       const transport = createFakeTransport({ w1: { labels: { labels: ["os:linux"], flowgraphVersion: "0.42" } } });
       const err = await compileGraph(fnParent(), { placement: { localLabels: LOCAL_MAC, topology: topo("w1"), transport } }).catch((e) => e);
