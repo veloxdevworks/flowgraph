@@ -85,9 +85,11 @@ export const shellNode = defineNode<Config>({
               Object.entries(renderedEnvRaw).map(([k, v]) => [k, normalizeShellText(String(v))]),
             )
           : undefined;
+        // `with.input` wins; otherwise the node's `input` (or tool arguments) is passed.
+        // Nothing is sent when neither is set, so FLOWGRAPH_INPUT stays unset.
         const input = config.input
           ? (renderDeep(config.input, scope) as Record<string, unknown>)
-          : undefined;
+          : Object.keys(scope.input).length > 0 ? scope.input : undefined;
 
         const timeoutMs = config.timeout ? parseDuration(config.timeout) : DEFAULT_TIMEOUT_MS;
         const allowedExit = config.expect?.exitCode ?? [0];

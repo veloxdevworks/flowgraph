@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveAndValidateInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildRecoveryCommand } from "./recovery-command.js";
 import { buildMediaCommand } from "./media-command.js";
@@ -308,8 +308,8 @@ program
     let inputState: Record<string, unknown>;
     try {
       const rawInput = await parseInputFlags(opts.input ?? [], cwd);
-      // Merge graph-default `input` under CLI overrides, then apply schema defaults/validation
-      inputState = resolveAndValidateInput(spec.inputs, { ...(spec.input ?? {}), ...rawInput });
+      // Same resolution as compiled.run() and the server; checked here to fail before preflight work.
+      inputState = resolveGraphInput(spec, rawInput);
     } catch (err) {
       if (isInputValidationError(err)) {
         printError(err.message);

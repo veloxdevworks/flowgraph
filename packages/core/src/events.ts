@@ -1,11 +1,22 @@
 import { usageLedgerOf } from "./usage/ledger.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
-const eventThread = new AsyncLocalStorage<string>();
+interface EventAttribution {
+  threadId: string;
+  /** Per-invocation run id, applied only to the bus whose own run id is `from`. */
+  run?: { from: string; to: string } | undefined;
+}
 
-/** @internal Keep event attribution local to an invocation, including concurrent threads. */
-export function withEventThread<T>(threadId: string, run: () => T): T {
-  return eventThread.run(threadId, run);
+const eventThread = new AsyncLocalStorage<EventAttribution>();
+
+/**
+ * @internal Keep event attribution local to an invocation, including concurrent threads.
+ * `run` re-labels events of the bus created with run id `run.from` as `run.to`, so each
+ * invocation of one compiled graph reports its own run id. Other buses (embedded
+ * subgraphs, child graphs) keep their own.
+ */
+export function withEventThread<T>(threadId: string, run: () => T, runId?: { from: string; to: string }): T {
+  return eventThread.run({ threadId, ...(runId && runId.from !== runId.to ? { run: runId } : {}) }, run);
 }
 
 /**
@@ -105,17 +116,18 @@ export function createEventBus(opts: EventBusOptions): EventBus {
       data = { ...(data as Record<string, unknown>), usage: accounting.snapshot() };
     }
     if (opts.redact) data = opts.redact(data);
+    const attribution = eventThread.getStore();
     const event: FlowgraphEvent = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       type,
       ts: new Date().toISOString(),
-      runId: opts.runId,
+      runId: attribution?.run && attribution.run.from === opts.runId ? attribution.run.to : opts.runId,
       graph: opts.graph,
       scope,
       data,
       seq: _seq++,
     };
-    const threadId = opts.threadId ?? eventThread.getStore();
+    const threadId = opts.threadId ?? attribution?.threadId;
     if (threadId !== undefined) event.threadId = threadId;
 
     buffer.push(event);
