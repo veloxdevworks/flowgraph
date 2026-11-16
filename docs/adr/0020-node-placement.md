@@ -77,7 +77,7 @@ Validation rules:
 - `runsOn` on `map` or `router` is rejected (`PLACEMENT_NOT_SUPPORTED`), whether it would resolve local or remote.
 - A placed non-subgraph node whose `with` templates read `state.*`, `config.*` or `issues` is rejected (`PLACEMENT_STATE_REFERENCE`): on the worker they would render empty. The message suggests passing the value through `input:` or placing a subgraph with `stateMap.in`.
 - A placed non-subgraph node with an `input` key equal to its own id is rejected (`PLACEMENT_INPUT_ID_COLLISION`): input keys become child channels, and a channel cannot share a node's name.
-- A placed subgraph that contains a gate (`hitl`, `workshop`, `wait` with `until`/`signal`/`webhook`, or an agent with `ask_human`) gets a `PLACEMENT_GATE_PHASE2` warning until gate forwarding ships; in phase 1 such a gate fails the node with `PLACEMENT_GATE_UNSUPPORTED`.
+- A placed subgraph that contains a gate (`hitl`, `workshop`, `wait` with `until`/`signal`/`webhook`, or an agent with `ask_human`) gets a `PLACEMENT_GATE_NOT_FORWARDED` warning until gate forwarding ships; until then such a gate fails the node with `PLACEMENT_GATE_UNSUPPORTED`.
 - The graph never names hosts or URLs. `target` is a name resolved by the topology.
 
 **Older engines.** An engine older than this ADR strips `runsOn` silently (see Context) and would run a placed step on the coordinator. Inside one installation the coordinator and its bundled engine ship together, and §7's worker preflight checks the worker's `flowgraph:` version, so the exposure is a graph opened by an older CLI, desktop or server. Released engines are not changed for this; a new `apiVersion` token for an additive field is not worth the friction.

@@ -948,10 +948,10 @@ export function placementDiagnostics(spec: GraphSpec): Diagnostic[] {
         warnedGate.add(node.id);
         diagnostics.push({
           severity: "warning",
-          code: "PLACEMENT_GATE_PHASE2",
+          code: "PLACEMENT_GATE_NOT_FORWARDED",
           message:
-            `Placed node "${node.id}" contains ${gate}. Gates inside placed subgraphs are forwarded in phase 2 (ADR-0020); ` +
-            `until then the run fails with PLACEMENT_GATE_UNSUPPORTED if the gate is reached on the worker. ` +
+            `Placed node "${node.id}" contains ${gate}. Gates inside placed subgraphs are not forwarded (ADR-0020); ` +
+            `the run fails with PLACEMENT_GATE_UNSUPPORTED if the gate is reached on the worker. ` +
             `Move the gate out of the placed subgraph, onto the coordinator.`,
           path: `${path}.runsOn`,
         });
