@@ -277,6 +277,7 @@ export {
 } from "./providers/index.js";
 export type {
   ProviderAdapter,
+  ProviderValidateNode,
   ProviderCapabilities,
   ProviderRunContext,
   AgentRequest,
@@ -309,6 +310,7 @@ export {
 } from "./providers/langchain/index.js";
 export type {
   ChatModelLike,
+  LangChainModelOverrides,
   LangChainProviderOptions,
   LangChainProviderConfigInput,
   LangChainProviderFromConfigOptions,

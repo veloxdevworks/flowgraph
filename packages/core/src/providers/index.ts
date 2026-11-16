@@ -1,6 +1,7 @@
 export {
   defineProvider,
   type ProviderAdapter,
+  type ProviderValidateNode,
   type ProviderCapabilities,
   type ProviderRunContext,
   type AgentRequest,
@@ -47,3 +48,4 @@ export {
   requireToolApproval,
   type GovernanceCtx,
 } from "./governance.js";
+export { providerConfigDiagnostics, offlineProviderValidations, type ProviderValidation } from "./diagnostics.js";
