@@ -43,28 +43,124 @@ export interface ChatModelLike {
   invoke(input: BaseMessage[], options?: unknown): Promise<AIMessage>;
   stream?(input: BaseMessage[], options?: unknown): AsyncIterable<AIMessageChunk> | Promise<AsyncIterable<AIMessageChunk>>;
   bindTools?(tools: unknown[], kwargs?: unknown): ChatModelLike;
-  /** LangChain BaseChatModel.bind — used to apply a node model override and maxTokens. */
+  /** Legacy LangChain `bind`; used only for models that cannot be rebuilt with new fields. */
   bind?(kwargs: Record<string, unknown>): ChatModelLike;
   withStructuredOutput?(schema: unknown, config?: unknown): { invoke(input: BaseMessage[], options?: unknown): Promise<unknown> };
 }
 
+/** A node model override and `with.maxTokens` for one agent call. */
+export interface LangChainModelOverrides {
+  model?: string;
+  maxTokens?: number;
+}
+
 /** Call options for a node model override and `maxTokens`. */
-export function langchainCallOptions(req: AgentRequest): Record<string, unknown> {
-  const options: Record<string, unknown> = {};
+export function langchainCallOptions(req: AgentRequest): LangChainModelOverrides {
+  const options: LangChainModelOverrides = {};
   if (req.model) options.model = req.model;
   if (req.maxTokens !== undefined) options.maxTokens = req.maxTokens;
   return options;
 }
 
-function modelForRequest(model: ChatModelLike, req: AgentRequest): ChatModelLike {
-  const options = langchainCallOptions(req);
-  if (Object.keys(options).length === 0) return model;
-  if (typeof model.bind === "function") return model.bind(options);
-  return model;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function invokeOptions(req: AgentRequest, signal: AbortSignal): Record<string, unknown> {
-  return { signal, ...langchainCallOptions(req) };
+// Constructor fields that would win over `model` / `maxTokens` in vendor classes.
+const MODEL_ALIASES = ["modelName"] as const;
+const MAX_TOKEN_ALIASES = ["maxCompletionTokens", "maxTokensToSample"] as const;
+// Vendor classes that read the output-token limit from a differently named field.
+const MAX_TOKEN_FIELDS = ["maxOutputTokens", "numPredict"] as const;
+
+/**
+ * Constructor fields for a copy of `model` with the overrides applied.
+ * LangChain chat models read the model id and token limit from instance
+ * fields set in the constructor, so the copy is built from the fields the
+ * original was constructed with. Returns undefined when they are unknown.
+ */
+export function langchainOverrideFields(
+  model: unknown,
+  overrides: LangChainModelOverrides,
+): Record<string, unknown> | undefined {
+  if (!isRecord(model)) return undefined;
+  const recorded = isRecord(model["fields"]) ? model["fields"] : undefined;
+  const kwargs = isRecord(model["lc_kwargs"]) ? model["lc_kwargs"] : undefined;
+  if (!recorded && !kwargs) return undefined;
+  const fields: Record<string, unknown> = { ...kwargs, ...recorded };
+  if (overrides.model !== undefined) {
+    for (const key of MODEL_ALIASES) delete fields[key];
+    fields["model"] = overrides.model;
+  }
+  if (overrides.maxTokens !== undefined) {
+    for (const key of MAX_TOKEN_ALIASES) delete fields[key];
+    fields["maxTokens"] = overrides.maxTokens;
+    for (const key of MAX_TOKEN_FIELDS) if (key in model) fields[key] = overrides.maxTokens;
+  }
+  return fields;
+}
+
+/** Build a new instance of the model's own class with the overrides applied. */
+function rebuildWithOverrides(model: ChatModelLike, overrides: LangChainModelOverrides): ChatModelLike | undefined {
+  const fields = langchainOverrideFields(model, overrides);
+  if (!fields) return undefined;
+  const Ctor = (model as { constructor?: unknown }).constructor;
+  if (typeof Ctor !== "function" || Ctor === Object) return undefined;
+  return new (Ctor as new (fields: Record<string, unknown>) => ChatModelLike)(fields);
+}
+
+/**
+ * The models one agent call should use. Overrides are applied to a rebuilt
+ * instance, so tool binding and structured output start from a model that
+ * already carries them. `invokeOptions` is set only when the model could not
+ * be rebuilt and the overrides travel as call options instead.
+ */
+interface RequestModel {
+  /** Model for plain and tool-calling turns. */
+  chat: ChatModelLike;
+  /** Model whose withStructuredOutput serves schema-constrained calls. */
+  structured: ChatModelLike;
+  invokeOptions: Record<string, unknown>;
+}
+
+type OverrideBuilder = (model: ChatModelLike, overrides: LangChainModelOverrides) => ChatModelLike | undefined;
+
+/** One rebuilt model per distinct override pair, so each call does not construct a new client. */
+function cachedOverrideBuilder(build: OverrideBuilder): OverrideBuilder {
+  const cache = new Map<string, ChatModelLike | undefined>();
+  return (model, overrides) => {
+    const key = JSON.stringify([overrides.model ?? null, overrides.maxTokens ?? null]);
+    if (!cache.has(key)) cache.set(key, build(model, overrides));
+    return cache.get(key);
+  };
+}
+
+function modelForRequest(model: ChatModelLike, req: AgentRequest, withOverrides: OverrideBuilder): RequestModel {
+  const overrides = langchainCallOptions(req);
+  if (Object.keys(overrides).length === 0) return { chat: model, structured: model, invokeOptions: {} };
+  const rebuilt = withOverrides(model, overrides);
+  if (rebuilt) return { chat: rebuilt, structured: rebuilt, invokeOptions: {} };
+  const options = { ...overrides } as Record<string, unknown>;
+  if (typeof model.bind === "function") {
+    const bound = model.bind(options);
+    // A bound runnable may lack withStructuredOutput; the call options still carry the overrides.
+    return { chat: bound, structured: typeof bound.withStructuredOutput === "function" ? bound : model, invokeOptions: options };
+  }
+  return { chat: model, structured: model, invokeOptions: options };
+}
+
+/** Node `with` settings the LangChain provider cannot honor (no network, no model needed). */
+export function langchainConfigDiagnostics(config: unknown): Array<{ severity: "error" | "warning"; message: string }> {
+  const diags: Array<{ severity: "error" | "warning"; message: string }> = [];
+  const tools = (config as { tools?: Array<Record<string, unknown>> } | undefined)?.tools ?? [];
+  for (const t of tools) {
+    if (t && typeof t === "object" && "builtin" in t) {
+      diags.push({
+        severity: "warning",
+        message: `LangChain provider has no provider-native builtin tools; "${JSON.stringify(t.builtin)}" will not work.`,
+      });
+    }
+  }
+  return diags;
 }
 
 const REQUEST_TIMEOUT = Symbol("modelRequestTimeout");
@@ -74,6 +170,13 @@ export interface LangChainProviderOptions {
   name?: string;
   /** Known model ids for validation/autocomplete. */
   models?: string[];
+  /**
+   * Build the chat model for a node model override and `with.maxTokens`.
+   * Defaults to a new instance of the model's class built from its
+   * constructor fields (ChatOpenAI, ChatAnthropic and other LangChain chat
+   * models). Return undefined to pass the overrides as call options.
+   */
+  withModelOverrides?: OverrideBuilder;
 }
 
 async function modelMessage(message: ContextMessage, ctx: ProviderRunContext): Promise<BaseMessage> {
@@ -93,6 +196,8 @@ export function createLangChainProvider(
   const name = options.name ?? "langchain";
   if (options.requestTimeoutMs !== undefined && options.requestTimeoutMs !== null && (!Number.isFinite(options.requestTimeoutMs) || options.requestTimeoutMs <= 0)) throw new Error("requestTimeoutMs must be positive or null");
 
+  const overrideBuilder = cachedOverrideBuilder(options.withModelOverrides ?? rebuildWithOverrides);
+
   return redactProviderErrors({
     name,
     capabilities: {
@@ -105,38 +210,27 @@ export function createLangChainProvider(
       ...(options.models ? { models: options.models } : {}),
     },
 
-    validate(config: unknown) {
-      const diags: Array<{ severity: "error" | "warning"; message: string }> = [];
-      const tools = (config as { tools?: Array<Record<string, unknown>> } | undefined)?.tools ?? [];
-      for (const t of tools) {
-        if ("builtin" in t) {
-          diags.push({
-            severity: "warning",
-            message: `LangChain provider has no provider-native builtin tools; "${JSON.stringify(t.builtin)}" will not work.`,
-          });
-        }
-      }
-      return diags;
-    },
+    validate: langchainConfigDiagnostics,
 
     async run(req: AgentRequest, ctx: ProviderRunContext): Promise<AgentResult> {
       ctx = Object.assign({...ctx}, {[REQUEST_TIMEOUT]: options.requestTimeoutMs === undefined ? 120000 : options.requestTimeoutMs});
-      if (ctx.context) return runWithContext(model, req, ctx, ctx.context);
+      const rm = modelForRequest(model, req, overrideBuilder);
+      if (ctx.context) return runWithContext(rm, req, ctx, ctx.context);
       const messages: BaseMessage[] = [];
       if (req.system) messages.push(new SystemMessage(req.system));
       messages.push(await modelMessage({ role: "user", content: req.prompt, images: req.images }, ctx));
 
       // Structured output without tools → single constrained call.
-      if (req.schema && req.tools.length === 0 && typeof model.withStructuredOutput === "function") {
-        const { output, usage } = await constrainedOutput(model, req, ctx, messages);
+      if (req.schema && req.tools.length === 0 && typeof rm.structured.withStructuredOutput === "function") {
+        const { output, usage } = await constrainedOutput(rm, req, ctx, messages);
         return { output, usage, messages: [], steps: [], stopReason: "done" };
       }
 
       const lcTools = req.tools.map((spec) => buildTool(spec, ctx));
       const bound: ChatModelLike =
-        lcTools.length > 0 && typeof model.bindTools === "function"
-          ? model.bindTools(lcTools)
-          : model;
+        lcTools.length > 0 && typeof rm.chat.bindTools === "function"
+          ? rm.chat.bindTools(lcTools)
+          : rm.chat;
 
       const steps: AgentStep[] = [];
       const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -149,7 +243,7 @@ export function createLangChainProvider(
         const cached = ctx.replay?.get(llmIndex);
         const ai = cached instanceof AIMessage
           ? cached
-          : await invokeModel(bound, messages, req, ctx);
+          : await invokeModel(bound, messages, req, ctx, rm.invokeOptions);
         if (!(cached instanceof AIMessage)) await ctx.replay?.set(llmIndex, ai);
         final = ai;
         messages.push(ai);
@@ -182,8 +276,8 @@ export function createLangChainProvider(
       const content = extractText(final);
       let output: unknown = { text: content };
       if (req.schema && stopReason === "done") {
-        if (model.withStructuredOutput) {
-          const result = await constrainedOutput(model, req, ctx, messages);
+        if (rm.structured.withStructuredOutput) {
+          const result = await constrainedOutput(rm, req, ctx, messages);
           output = result.output;
           addUsage(usage, result.usage);
         } else {
@@ -205,7 +299,7 @@ export function createLangChainProvider(
  * messages keep their original LangChain objects; history is converted once.
  */
 async function runWithContext(
-  model: ChatModelLike,
+  rm: RequestModel,
   req: AgentRequest,
   ctx: ProviderRunContext,
   cm: ProviderContextManager,
@@ -232,14 +326,14 @@ async function runWithContext(
     return out;
   };
 
-  if (req.schema && req.tools.length === 0 && typeof model.withStructuredOutput === "function") {
-    const { output, usage } = await constrainedOutput(model, req, ctx, await build());
+  if (req.schema && req.tools.length === 0 && typeof rm.structured.withStructuredOutput === "function") {
+    const { output, usage } = await constrainedOutput(rm, req, ctx, await build());
     return { output, usage, messages: [], steps: [], stopReason: "done", turn: [] };
   }
 
   const lcTools = req.tools.map((spec) => buildTool(spec, ctx));
   const bound: ChatModelLike =
-    lcTools.length > 0 && typeof model.bindTools === "function" ? model.bindTools(lcTools) : model;
+    lcTools.length > 0 && typeof rm.chat.bindTools === "function" ? rm.chat.bindTools(lcTools) : rm.chat;
 
   const steps: AgentStep[] = [];
   const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -257,7 +351,7 @@ async function runWithContext(
     if (cached instanceof AIMessage) {
       ai = cached;
     } else {
-      ai = await invokeModel(bound, input, req, ctx);
+      ai = await invokeModel(bound, input, req, ctx, rm.invokeOptions);
       await ctx.replay?.set(llmIndex, ai);
     }
     final = ai;
@@ -300,8 +394,8 @@ async function runWithContext(
   const content = extractText(final);
   let output: unknown = { text: content };
   if (req.schema && stopReason === "done") {
-    if (model.withStructuredOutput) {
-      const result = await constrainedOutput(model, req, ctx, await build());
+    if (rm.structured.withStructuredOutput) {
+      const result = await constrainedOutput(rm, req, ctx, await build());
       output = result.output;
       addUsage(usage, result.usage);
       loop.push({ role: "assistant", content: JSON.stringify(output) });
@@ -361,11 +455,11 @@ function tryParseJson(text: string): unknown {
   }
 }
 
-async function constrainedOutput(model: ChatModelLike, req: AgentRequest, ctx: ProviderRunContext, messages: BaseMessage[]): Promise<{ output: unknown; usage: TokenUsage }> {
+async function constrainedOutput(rm: RequestModel, req: AgentRequest, ctx: ProviderRunContext, messages: BaseMessage[]): Promise<{ output: unknown; usage: TokenUsage }> {
   const cached = ctx.replay?.get("llm:structured");
   if (cached && typeof cached === "object" && "output" in cached) return cached as { output: unknown; usage: TokenUsage };
   const invoke = async () => {
-    const result = await withHeartbeat(ctx, signal => modelForRequest(model, req).withStructuredOutput!(req.schema, { includeRaw: true, strict: false }).invoke(messages, invokeOptions(req, signal)));
+    const result = await withHeartbeat(ctx, signal => rm.structured.withStructuredOutput!(req.schema, { includeRaw: true, strict: false }).invoke(messages, { ...rm.invokeOptions, signal }));
     const wrapped = result && typeof result === "object" && Object.hasOwn(result, "parsed") && Object.hasOwn(result, "raw")
       ? result as { parsed: unknown; raw: AIMessage; parsing_error?: unknown } : undefined;
     return { output: wrapped ? wrapped.parsed : result, usage: wrapped?.raw ? modelUsage(wrapped.raw) : undefined };
@@ -388,12 +482,11 @@ function modelUsage(ai: AIMessage): TokenUsage | undefined {
     ...(meta.total_tokens === undefined ? {} : { totalTokens: meta.total_tokens }),
   } : undefined;
 }
-async function invokeModel(model: ChatModelLike, input: BaseMessage[], req: AgentRequest, ctx: ProviderRunContext): Promise<AIMessage> {
+async function invokeModel(bound: ChatModelLike, input: BaseMessage[], req: AgentRequest, ctx: ProviderRunContext, callOptions: Record<string, unknown>): Promise<AIMessage> {
   let responseStarted = false;
   let partialUsage: TokenUsage | undefined;
-  const bound = modelForRequest(model, req);
   const invoke = () => withHeartbeat(ctx, async signal => {
-    const options = invokeOptions(req, signal);
+    const options = { ...callOptions, signal };
     if (!req.streaming || !bound.stream) return bound.invoke(input, options);
     let combined: AIMessageChunk | undefined;
     for await (const chunk of await bound.stream(input, options)) {

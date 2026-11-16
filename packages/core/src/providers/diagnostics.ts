@@ -1,5 +1,12 @@
 import type { Diagnostic, GraphSpec, NodeSpec } from "@flowgraph/spec";
 import type { ProviderAdapter } from "./types.js";
+import { getProvider } from "./registry.js";
+import { langchainConfigDiagnostics } from "./langchain/provider.js";
+
+/** The parts of a provider adapter that config diagnostics read. */
+export type ProviderValidation = Pick<ProviderAdapter, "name" | "validate"> & {
+  capabilities: Pick<ProviderAdapter["capabilities"], "models">;
+};
 
 function providerNameOf(spec: GraphSpec, node: NodeSpec): string | undefined {
   const withBlock = (node.with ?? {}) as { provider?: unknown };
@@ -18,15 +25,41 @@ function isModelNode(node: NodeSpec): boolean {
 }
 
 /**
+ * Validation-only adapters for offline checks (`flowgraph validate`), built
+ * without loading vendor packages, reading credentials or calling the network.
+ * LangChain entries in the graph's `providers:` block check builtin tools and
+ * the configured model, as the adapter built from them at compile would.
+ * Providers registered in this process answer with their own `validate()`.
+ */
+export function offlineProviderValidations(spec: GraphSpec): ProviderValidation[] {
+  const out = new Map<string, ProviderValidation>();
+  for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
+    if (cfg?.kind !== "langchain") continue;
+    out.set(name, {
+      name,
+      capabilities: typeof cfg.model === "string" && cfg.model ? { models: [cfg.model] } : {},
+      validate: langchainConfigDiagnostics,
+    });
+  }
+  for (const node of spec.nodes) {
+    const name = providerNameOf(spec, node);
+    if (!name || out.has(name) || spec.providers?.[name]) continue;
+    const registered = getProvider(name);
+    if (registered) out.set(name, registered);
+  }
+  return [...out.values()];
+}
+
+/**
  * Compile- and validate-time checks for provider options the runtime would
- * otherwise ignore. When `providers` is passed (compile), each adapter's
- * `validate()` runs and known model ids are checked. Without adapters
- * (offline `flowgraph validate`), LangChain builtin-tool warnings still apply
- * from the graph's `providers:` block.
+ * otherwise ignore. Each adapter's `validate()` runs and known model ids are
+ * checked. Compile passes the graph's adapters; offline validation passes
+ * `offlineProviderValidations(spec)`. A node on the built-in `langchain`
+ * provider with no adapter still gets the LangChain builtin-tool warnings.
  */
 export function providerConfigDiagnostics(
   spec: GraphSpec,
-  providers: readonly ProviderAdapter[] = [],
+  providers: readonly ProviderValidation[] = [],
 ): Diagnostic[] {
   const byName = new Map(providers.map((p) => [p.name, p]));
   const out: Diagnostic[] = [];
@@ -39,8 +72,7 @@ export function providerConfigDiagnostics(
     const langchain =
       declared?.kind === "langchain" ||
       adapter?.name === "langchain" ||
-      name === "langchain" ||
-      (!declared && !adapter && name === "langchain");
+      name === "langchain";
 
     if (adapter?.validate) {
       for (const diag of adapter.validate(node.with ?? {})) {
@@ -52,17 +84,13 @@ export function providerConfigDiagnostics(
         });
       }
     } else if (langchain) {
-      const tools =
-        (node.with as { tools?: Array<Record<string, unknown>> } | undefined)?.tools ?? [];
-      for (const t of tools) {
-        if ("builtin" in t) {
-          out.push({
-            severity: "warning",
-            code: "PROVIDER_CONFIG_UNSUPPORTED",
-            message: `LangChain provider has no provider-native builtin tools; "${JSON.stringify(t.builtin)}" will not work.`,
-            path: `nodes.${node.id}.with.tools`,
-          });
-        }
+      for (const diag of langchainConfigDiagnostics(node.with ?? {})) {
+        out.push({
+          severity: diag.severity,
+          code: diag.severity === "error" ? "PROVIDER_CONFIG_ERROR" : "PROVIDER_CONFIG_UNSUPPORTED",
+          message: diag.message,
+          path: `nodes.${node.id}.with.tools`,
+        });
       }
     }
 

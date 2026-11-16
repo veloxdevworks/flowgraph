@@ -46,7 +46,7 @@ function agentSpec(withBlock: Record<string, unknown>, model?: string): GraphSpe
 }
 
 describe("LangChain forwards model and maxTokens", () => {
-  it("binds and passes a node model override and with.maxTokens on the model call", async () => {
+  it("falls back to bind and call options for a model it cannot rebuild", async () => {
     const calls: Call[] = [];
     const provider = createLangChainProvider(recordingModel(calls));
     const compiled = await compileGraph(agentSpec({ maxTokens: 7 }, "gpt-override"), {
@@ -60,7 +60,7 @@ describe("LangChain forwards model and maxTokens", () => {
     expect(calls[0]!.options).toHaveProperty("signal");
   });
 
-  it("passes invoke options when the model has no bind method", async () => {
+  it("passes call options when the model can be neither rebuilt nor bound", async () => {
     const calls: Call[] = [];
     const model: ChatModelLike = {
       async invoke(input: BaseMessage[], options?: unknown) {

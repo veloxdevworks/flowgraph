@@ -24,7 +24,7 @@ import { registry } from "./registry.js";
 import { setGraphFile, subgraphAliases } from "./runtime/graph-files.js";
 import "./nodes/index.js";
 import { getMediaVendor } from "./media/registry.js";
-import { providerConfigDiagnostics } from "./providers/diagnostics.js";
+import { offlineProviderValidations, providerConfigDiagnostics } from "./providers/diagnostics.js";
 
 export {
   envExpansionCollisionDiagnostics,
@@ -337,6 +337,6 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
     } catch (err) { diagnostics.push({ severity: "error", code: "MEDIA_REQUEST_INVALID", path: `nodes.${node.id}.with`, message: `Media node "${node.id}": ${String(err)}` }); }
   });
 
-  diagnostics.push(...providerConfigDiagnostics(spec));
+  diagnostics.push(...providerConfigDiagnostics(spec, offlineProviderValidations(spec)));
   return diagnostics;
 }
