@@ -63,7 +63,7 @@ export async function planPlacements(spec: GraphSpec, opts: CompilePlacementOpti
         code: "PLACEMENT_UNSATISFIED",
         message:
           `PLACEMENT_UNSATISFIED: node "${d.nodeId}" sets runsOn.wait, which queues it until a matching worker appears. ` +
-          `\`wait\` arrives in phase 2 of ADR-0020; remove it or make a matching worker available now.\n` +
+          `Queueing for a matching worker is not supported; remove wait, or make a matching worker available now.\n` +
           placementUnsatisfiedMessage(d.nodeId, d.required, d.candidates).split("\n").slice(1).join("\n"),
         path: `nodes.${d.nodeId}.runsOn.wait`,
       });
