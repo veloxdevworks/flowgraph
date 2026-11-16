@@ -81,7 +81,7 @@ import {
 } from "./runtime/webhook-server.js";
 import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
 import { cleanupWorktrees } from "./nodes/worktree.js";
-import { registerProvider, type ProviderAdapter } from "./providers/index.js";
+import { registerProvider, providerConfigDiagnostics, type ProviderAdapter } from "./providers/index.js";
 import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
 import { GRAPH_MEDIA_PROVIDERS, deriveMediaProviders, type GraphMediaProviders } from "./media/registry.js";
 import type { MediaProvider } from "./media/types.js";
@@ -1449,6 +1449,12 @@ async function assembleCompiledLangGraph(
       const graphMedia: GraphMediaProviders = { byName: new Map(media.map((p) => [p.name, p])) };
       (baseCtx as Record<symbol, unknown>)[GRAPH_MEDIA_PROVIDERS] = graphMedia;
     }
+  }
+
+  const providerDiags = providerConfigDiagnostics(spec, opts.providers ?? []);
+  const providerErrors = providerDiags.filter((d) => d.severity === "error");
+  if (providerErrors.length > 0) {
+    throw new Error(providerErrors.map((d) => `${d.path ?? "providers"}: ${d.message}`).join("\n"));
   }
 
   const defaultRetry = spec.runtime?.retry;

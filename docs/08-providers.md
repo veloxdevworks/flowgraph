@@ -259,7 +259,7 @@ Local runs always set `local.trust: true` (same idea as Cursor CLI `--trust`): f
 
 ## 5. Adapter: LangChain (built into `@flowgraph/core`)
 
-The "works with any model" baseline. Wraps a LangChain `ChatModel` (`@langchain/anthropic`, `@langchain/openai`, etc.) and implements the agent loop with bound tools (`bindTools`) + a tool-execution cycle, or delegates to LangGraph's prebuilt ReAct agent. `schema` uses `withStructuredOutput`. No provider-native `builtin` tools (warns if requested); skills/nodes/MCP work as `StructuredTool`s.
+The "works with any model" baseline. Wraps a LangChain `ChatModel` (`@langchain/anthropic`, `@langchain/openai`, etc.) and implements the agent loop with bound tools (`bindTools`) + a tool-execution cycle, or delegates to LangGraph's prebuilt ReAct agent. `schema` uses `withStructuredOutput`. A node `model` override and `with.maxTokens` are forwarded to the chat model (`bind` when the model provides it, otherwise as invoke options). No provider-native `builtin` tools (`validate()` warns if requested); skills/nodes/MCP work as `StructuredTool`s.
 
 Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/openai`) and set the matching API key env var. The adapter itself ships with `@flowgraph/core` — no separate flowgraph provider package required.
 
@@ -278,7 +278,7 @@ Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/ope
 
 - Default provider/model come from `config.defaults` ([02 §config](./02-graph-spec.md#7-config)); per-node `provider:`/`model:` override. Retry and timeout are not part of `config.defaults`: use `runtime.retry` / `runtime.timeoutDefault`, or set `retry` / `timeout` on the node.
 - On `flowgraph run`, the CLI reads `providers:` from the graph YAML, constructs LangChain adapters from the built-in core provider, or lazy-loads `@flowgraph/provider-claude` / `@flowgraph/provider-cursor` by `kind`, and passes them to `compileGraph({ providers })`. Missing vendor packages or API keys fail fast with install/env hints.
-- `validate()` runs at compile time: unknown model, builtin tools unsupported by the provider, MCP requested where unsupported, or missing auth env ⇒ diagnostics before any model call.
+- `validate()` runs at compile time and during `flowgraph validate`: unknown model (when the provider lists known ids), builtin tools unsupported by the provider, or other options the provider cannot honor ⇒ diagnostics before any model call. A node `model` override and `with.maxTokens` are forwarded by the LangChain adapter; providers that cannot honor an option must report it from `validate()` instead of ignoring it.
 
 ## 7. Registering a custom provider
 
