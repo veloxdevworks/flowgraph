@@ -140,6 +140,39 @@ describe("contract schema dialect", () => {
     expect(contractSchemaProblem({ definitions: { x: { type: "string" } }, $ref: "#/definitions/x" })).toBeUndefined();
   });
 
+  it("rejects $ref cycles that never step into the value", () => {
+    const hint = "a recursive $ref must go through properties, items or similar";
+    expect(contractSchemaProblem({ $ref: "#" })).toBe(`$ref cycle never reaches a value: # → #; ${hint}`);
+    expect(
+      contractSchemaProblem({
+        definitions: { a: { allOf: [{ $ref: "#/definitions/b" }] }, b: { not: { $ref: "#/definitions/a" } } },
+        $ref: "#/definitions/a",
+      }),
+    ).toBe(
+      `$ref cycle never reaches a value: #/definitions/a → #/definitions/a/allOf/0 → #/definitions/b → #/definitions/b/not → #/definitions/a; ${hint}`,
+    );
+    expect(contractSchemaProblem({ definitions: { n: { $id: "#node", anyOf: [{ $ref: "#node" }] } } })).toContain(
+      "$ref cycle never reaches a value",
+    );
+    expect(() => contractErrors({}, { $ref: "#" })).toThrow(expect.objectContaining({ code: "CONTRACT_SCHEMA_INVALID" }));
+    expect(HitlWithSchema.safeParse({ mode: "form", message: "m", schema: { $ref: "#" } }).success).toBe(false);
+  });
+
+  it("allows recursion that steps into the value, and never crashes on deep or cyclic values", () => {
+    const tree = { type: "object", properties: { children: { type: "array", items: { $ref: "#" } } } };
+    expect(contractSchemaProblem(tree)).toBeUndefined();
+    expect(contractErrors({ children: [{ children: [] }] }, tree)).toBeUndefined();
+    expect(contractErrors({ children: [{ children: 1 }] }, tree)).toBe("/children/0/children must be array");
+    let deep: unknown = [];
+    for (let i = 0; i < 100_000; i++) deep = [deep];
+    expect(contractErrors(deep, { type: "array", items: { $ref: "#" } })).toBe("/ is nested too deeply to validate");
+    const cyclic: Record<string, unknown> = {};
+    cyclic["self"] = cyclic;
+    expect(() => validateJsonSchema(cyclic, { type: "object", additionalProperties: { $ref: "#" } }, "form")).toThrow(
+      "form: does not match schema: / is nested too deeply to validate",
+    );
+  });
+
   it("explains the shapes earlier versions accepted", () => {
     expect(contractSchemaProblem({ type: "any" })).toBe('/: type "any" is not JSON Schema; omit "type" to accept any value');
     expect(contractSchemaProblem({ type: "object", properties: { a: { type: "string", required: true } } })).toBe(

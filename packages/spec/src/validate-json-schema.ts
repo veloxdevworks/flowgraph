@@ -40,6 +40,9 @@ const SCHEMA_MAP_KEYWORDS = ["properties", "patternProperties", "definitions", "
 /** Keywords whose value is a list of subschemas. */
 const SCHEMA_LIST_KEYWORDS = ["allOf", "anyOf", "oneOf"] as const;
 
+/** Escape one JSON pointer segment. */
+const seg = (name: string): string => name.replace(/~/g, "~0").replace(/\//g, "~1");
+
 /** Visit `schema` and every nested subschema with its JSON pointer. */
 function walkSchema(schema: unknown, at: string, visit: (s: Json, at: string) => void): void {
   if (!isObj(schema)) return;
@@ -47,7 +50,7 @@ function walkSchema(schema: unknown, at: string, visit: (s: Json, at: string) =>
   for (const k of SCHEMA_KEYWORDS) walkSchema(schema[k], `${at}/${k}`, visit);
   for (const k of SCHEMA_MAP_KEYWORDS) {
     const m = schema[k];
-    if (isObj(m)) for (const [name, sub] of Object.entries(m)) walkSchema(sub, `${at}/${k}/${name}`, visit);
+    if (isObj(m)) for (const [name, sub] of Object.entries(m)) walkSchema(sub, `${at}/${k}/${seg(name)}`, visit);
   }
   for (const k of SCHEMA_LIST_KEYWORDS) {
     const l = schema[k];
@@ -57,7 +60,78 @@ function walkSchema(schema: unknown, at: string, visit: (s: Json, at: string) =>
   if (Array.isArray(items)) items.forEach((sub, i) => walkSchema(sub, `${at}/items/${i}`, visit));
   else walkSchema(items, `${at}/items`, visit);
   const deps = schema["dependencies"];
-  if (isObj(deps)) for (const [name, sub] of Object.entries(deps)) walkSchema(sub, `${at}/dependencies/${name}`, visit);
+  if (isObj(deps)) for (const [name, sub] of Object.entries(deps)) walkSchema(sub, `${at}/dependencies/${seg(name)}`, visit);
+}
+
+/** Keywords that apply their subschemas to the same value (they do not step into it). */
+const SAME_VALUE_KEYWORDS = ["not", "if", "then", "else"] as const;
+
+/**
+ * A `$ref` cycle that never steps into the value (for example a root `$ref: "#"`, or
+ * definitions that only refer to each other through `$ref` / `allOf` / `anyOf` / `oneOf`
+ * / `not` / `if`) would recurse forever on any input. Recursion through `properties`,
+ * `items` and the like is fine: each step goes one level into the (finite) value.
+ */
+function refCycleProblem(schema: Json): string | undefined {
+  const nodes = new Map<string, Json>();
+  const ids = new Map<string, string>();
+  walkSchema(schema, "", (s, at) => {
+    nodes.set(at, s);
+    if (typeof s["$id"] === "string" && s["$id"].startsWith("#")) ids.set(s["$id"], at);
+  });
+  const target = (ref: string): string | undefined => {
+    if (ref === "#") return "";
+    if (ref.startsWith("#/")) {
+      let pointer: string;
+      try {
+        pointer = decodeURIComponent(ref.slice(1));
+      } catch {
+        return undefined;
+      }
+      return nodes.has(pointer) ? pointer : undefined;
+    }
+    return ids.get(ref);
+  };
+  const next = (at: string): string[] => {
+    const s = nodes.get(at)!;
+    const out: string[] = [];
+    if (typeof s["$ref"] === "string") {
+      const t = target(s["$ref"]);
+      if (t !== undefined) out.push(t);
+    }
+    for (const k of SAME_VALUE_KEYWORDS) if (isObj(s[k])) out.push(`${at}/${k}`);
+    for (const k of SCHEMA_LIST_KEYWORDS) {
+      const l = s[k];
+      if (Array.isArray(l)) l.forEach((sub, i) => isObj(sub) && out.push(`${at}/${k}/${i}`));
+    }
+    const deps = s["dependencies"];
+    if (isObj(deps)) for (const [name, sub] of Object.entries(deps)) if (isObj(sub)) out.push(`${at}/dependencies/${seg(name)}`);
+    return out;
+  };
+  const state = new Map<string, "open" | "done">();
+  const stack: string[] = [];
+  const visit = (at: string): string[] | undefined => {
+    state.set(at, "open");
+    stack.push(at);
+    for (const n of next(at)) {
+      if (state.get(n) === "open") return [...stack.slice(stack.indexOf(n)), n];
+      if (!state.has(n)) {
+        const cycle = visit(n);
+        if (cycle) return cycle;
+      }
+    }
+    stack.pop();
+    state.set(at, "done");
+    return undefined;
+  };
+  for (const at of nodes.keys()) {
+    if (state.has(at)) continue;
+    const cycle = visit(at);
+    if (cycle) {
+      return `$ref cycle never reaches a value: ${cycle.map((p) => `#${p}`).join(" → ")}; a recursive $ref must go through properties, items or similar`;
+    }
+  }
+  return undefined;
 }
 
 /** Clear messages for shapes older flowgraph versions accepted. */
@@ -138,6 +212,8 @@ export function compileContractSchema(
   if (hit) return hit;
   const legacy = legacyShapeProblems(schema);
   if (legacy.length > 0) throw new ContractSchemaError(legacy.join("; "));
+  const cycle = refCycleProblem(schema);
+  if (cycle) throw new ContractSchemaError(cycle);
   const { $schema, ...rest } = schema;
   if ($schema !== undefined && $schema !== CONTRACT_SCHEMA_DIALECT && $schema !== "http://json-schema.org/draft-07/schema") {
     throw new ContractSchemaError(
@@ -258,7 +334,16 @@ export function contractErrors(
   opts: ValidateJsonSchemaOptions = {},
 ): string | undefined {
   const validate = compileContractSchema(schema, opts);
-  return validate(value) ? undefined : formatContractErrors(validate.errors);
+  let ok: boolean;
+  try {
+    ok = validate(value) as boolean;
+  } catch (err) {
+    // Deeply nested (or cyclic) values against a recursive schema can exhaust the stack.
+    // Treat that as a value that does not conform rather than crashing the caller.
+    if (err instanceof RangeError) return "/ is nested too deeply to validate";
+    throw err;
+  }
+  return ok ? undefined : formatContractErrors(validate.errors);
 }
 
 let codegen: boolean | undefined;
