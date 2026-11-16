@@ -97,6 +97,21 @@ describe("each start without a thread id is its own run", () => {
     expect(threads.has(third.threadId)).toBe(false);
   });
 
+  it("treats a whitespace-only thread id as absent", async () => {
+    const compiled = await compileGraph(logGraph(), { workspace: workspace() });
+    const first = await compiled.run({ threadId: "   ", input: { tag: "first" } });
+    const second = await compiled.run({ threadId: " \t\n", input: { tag: "second" } });
+    expect(first.status).toBe("completed");
+    expect(first.threadId).toBe(`thread-${first.runId}`);
+    expect(first.runId).not.toBe(compiled.runId);
+    expect(second.threadId).not.toBe(first.threadId);
+    expect(second.state.log).toEqual(["second"]);
+    const prepared = await compiled.prepare({ mode: "start", options: { threadId: "  ", input: { tag: "third" } } });
+    expect((await prepared.execute()).threadId).toBe(`thread-${prepared.runId}`);
+    const kept = await compiled.run({ threadId: " padded ", input: { tag: "kept" } });
+    expect(kept.threadId).toBe(" padded ");
+  });
+
   it("keeps the caller's thread, and continues its state, when a thread id is given", async () => {
     const compiled = await compileGraph(logGraph(), { workspace: workspace() });
     const first = await compiled.run({ threadId: "shared", input: { tag: "first" } });

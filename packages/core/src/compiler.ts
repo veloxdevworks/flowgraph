@@ -1149,8 +1149,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
    */
   const startInvocation = (runOpts: RunOptions): { options: RunOptions & { threadId: string }; input: Record<string, unknown>; runId: string } => {
     const input = resolveGraphInput(graphSpec, runOpts.input);
-    // An empty thread id names no thread: treat it like an omitted one.
-    const supplied = runOpts.threadId === "" ? undefined : runOpts.threadId;
+    // An empty or whitespace-only thread id names no thread: treat it like an omitted one.
+    const supplied = runOpts.threadId?.trim() ? runOpts.threadId : undefined;
     const runId = supplied === undefined ? newRunId() : assembled.runId;
     return { options: { ...runOpts, input, threadId: supplied ?? `thread-${runId}` }, input, runId };
   };
