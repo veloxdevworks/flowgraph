@@ -272,13 +272,13 @@ export function createRemoteNodeExecutor(deps: RemoteExecutorDeps): RemoteNodeEx
           if (cancelledByUs || signal?.aborted) throw abortReason(signal);
           throw new PlacementRuntimeError("REMOTE_NODE_CANCELLED", `the child run of node "${nodeId}" was cancelled on ${where}`);
         case "interrupted": {
-          // The child is paused, so cancelling it is safe (ADR phase 1: no gate forwarding).
+          // The child is paused, so cancelling it is safe: gates inside placed subgraphs are not forwarded.
           outcomeKnown = false;
           await requestCancel();
           outcomeKnown = true;
           throw new PlacementRuntimeError(
             "PLACEMENT_GATE_UNSUPPORTED",
-            `node "${nodeId}" paused for a human on ${where}; gates inside placed subgraphs are forwarded in phase 2 (ADR-0020 section 8), so the child run was cancelled`,
+            `node "${nodeId}" paused for a human on ${where}; gates inside placed subgraphs are not supported, so the child run was cancelled`,
             { retryable: false },
           );
         }
