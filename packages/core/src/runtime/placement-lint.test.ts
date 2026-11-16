@@ -20,23 +20,24 @@ describe("placementDiagnostics", () => {
     }
   });
 
-  it("allows gates without runsOn inside a placed inline subgraph, with a phase-2 warning", () => {
+  it("allows gates without runsOn inside a placed inline subgraph, with a not-forwarded warning", () => {
     const child = g([{ id: "ask", type: "hitl" }, sh("a")]);
     const d = placementDiagnostics(g([{ id: "sg", type: "subgraph", spec: child, runsOn: ["os:windows"] }]));
-    expect(d.map((x) => [x.severity, x.code])).toEqual([["warning", "PLACEMENT_GATE_PHASE2"]]);
+    expect(d.map((x) => [x.severity, x.code])).toEqual([["warning", "PLACEMENT_GATE_NOT_FORWARDED"]]);
+    expect(d[0]!.message).not.toMatch(/phase/i);
   });
 
-  it("warns PLACEMENT_GATE_PHASE2 for workshop, wait on until/signal/webhook, ask_human, and gates in a map inner", () => {
+  it("warns PLACEMENT_GATE_NOT_FORWARDED for workshop, wait on until/signal/webhook, ask_human, and gates in a map inner", () => {
     const placed = (inner: unknown) => placementDiagnostics(g([{ id: "sg", type: "subgraph", spec: g([inner]), runsOn: ["os:linux"] }]));
     const codes = (d: Array<{ code: string }>) => d.map((x) => x.code);
-    expect(codes(placed({ id: "w", type: "workshop" }))).toEqual(["PLACEMENT_GATE_PHASE2"]);
+    expect(codes(placed({ id: "w", type: "workshop" }))).toEqual(["PLACEMENT_GATE_NOT_FORWARDED"]);
     for (const k of ["until", "signal", "webhook"]) {
-      expect(codes(placed({ id: "w", type: "wait", with: { [k]: "x" } })), k).toEqual(["PLACEMENT_GATE_PHASE2"]);
+      expect(codes(placed({ id: "w", type: "wait", with: { [k]: "x" } })), k).toEqual(["PLACEMENT_GATE_NOT_FORWARDED"]);
     }
     expect(codes(placed({ id: "w", type: "wait", with: { duration: "1s" } }))).toEqual([]);
-    expect(codes(placed({ id: "a", type: "agent", with: { tools: [{ function: "ask_human" }] } }))).toEqual(["PLACEMENT_GATE_PHASE2"]);
+    expect(codes(placed({ id: "a", type: "agent", with: { tools: [{ function: "ask_human" }] } }))).toEqual(["PLACEMENT_GATE_NOT_FORWARDED"]);
     expect(codes(placed({ id: "a", type: "agent", with: { tools: [] } }))).toEqual([]);
-    expect(codes(placed({ id: "m", type: "map", with: { node: { id: "g", type: "hitl" } } }))).toEqual(["PLACEMENT_GATE_PHASE2"]);
+    expect(codes(placed({ id: "m", type: "map", with: { node: { id: "g", type: "hitl" } } }))).toEqual(["PLACEMENT_GATE_NOT_FORWARDED"]);
     // an unplaced subgraph with a gate is fine
     expect(placementDiagnostics(g([{ id: "sg", type: "subgraph", spec: g([{ id: "ask", type: "hitl" }]) }]))).toEqual([]);
   });

@@ -62,13 +62,12 @@ nodes:
       labels: [gpu:nvidia]
       target: render-01                    # optional: pin to one named target
       fallback: local                      # optional: run here if no worker matches
-      wait: 30m                            # optional: queue until a worker appears
 ```
 
 - `labels` is an all-of list. `anyOf` is deferred until a real case needs it.
 - `target` pins to a named target from the topology (§4). The graph still runs elsewhere if that name is missing and `fallback: local` is set; otherwise it is a preflight error.
 - `fallback` is `error` (default) or `local`. `local` is for steps that run *better* elsewhere, not steps that *can only* run elsewhere.
-- `wait` defaults to none (fail at preflight). With a duration, an unmatched placement queues until a matching worker connects or the duration passes.
+- `wait` is **not part of the v1 schema**. The field is rejected at validation (`runsOn.wait is not supported`). Queueing until a worker appears is not available; remove `wait`, or make a matching worker available now. The object form still accepts `labels`, `target`, and `fallback`.
 
 Validation rules:
 
@@ -78,7 +77,7 @@ Validation rules:
 - `runsOn` on `map` or `router` is rejected (`PLACEMENT_NOT_SUPPORTED`), whether it would resolve local or remote.
 - A placed non-subgraph node whose `with` templates read `state.*`, `config.*` or `issues` is rejected (`PLACEMENT_STATE_REFERENCE`): on the worker they would render empty. The message suggests passing the value through `input:` or placing a subgraph with `stateMap.in`.
 - A placed non-subgraph node with an `input` key equal to its own id is rejected (`PLACEMENT_INPUT_ID_COLLISION`): input keys become child channels, and a channel cannot share a node's name.
-- A placed subgraph that contains a gate (`hitl`, `workshop`, `wait` with `until`/`signal`/`webhook`, or an agent with `ask_human`) gets a `PLACEMENT_GATE_PHASE2` warning until gate forwarding ships; in phase 1 such a gate fails the node with `PLACEMENT_GATE_UNSUPPORTED`.
+- A placed subgraph that contains a gate (`hitl`, `workshop`, `wait` with `until`/`signal`/`webhook`, or an agent with `ask_human`) gets a `PLACEMENT_GATE_NOT_FORWARDED` warning until gate forwarding ships; until then such a gate fails the node with `PLACEMENT_GATE_UNSUPPORTED`.
 - The graph never names hosts or URLs. `target` is a name resolved by the topology.
 
 **Older engines.** An engine older than this ADR strips `runsOn` silently (see Context) and would run a placed step on the coordinator. Inside one installation the coordinator and its bundled engine ship together, and §7's worker preflight checks the worker's `flowgraph:` version, so the exposure is a graph opened by an older CLI, desktop or server. Released engines are not changed for this; a new `apiVersion` token for an additive field is not worth the friction.
@@ -184,7 +183,7 @@ Runtime failure cannot be ruled out (a license expires, the app crashes), so:
 - **Checkpoints** for the child live on the worker. `getStateHistory` on the parent returns the pointer; the child's history is fetched from the worker on demand.
 - **Credentials** resolve on the worker. Nothing from the coordinator's environment is sent (same rule as REQ-RT-006).
 
-**Durable waiting (phase 2).** In phase 1 the parent node stays in one long step while the child runs. Phase 2 parks the parent thread as `paused` while the child runs and reconnects on wake. This lets a laptop coordinator sleep through a long remote step, and keeps a long step from running into `activeTtl` on shared databases.
+**Durable waiting.** The parent node currently stays in one long step while the child runs. Parking the parent thread as `paused` while the child runs, and reconnecting on wake, is not available yet. That would let a laptop coordinator sleep through a long remote step, and keep a long step from running into `activeTtl` on shared databases.
 
 ### 9. Transports
 
@@ -210,13 +209,15 @@ State holds artifact references, never file contents. When a placed node runs on
 
 Only artifacts named by the state contract move. Files a step writes but does not return stay on the worker.
 
-Phase-1 limits: uploads are not resumable, the worker never evicts its content store, and transfers go through the coordinator (there is no shared store yet). Uploads are capped by `FLOWGRAPH_ARTIFACT_MAX_BYTES` (default 4 GiB).
+Current limits: uploads are not resumable, the worker never evicts its content store, and transfers go through the coordinator (there is no shared store yet). Uploads are capped by `FLOWGRAPH_ARTIFACT_MAX_BYTES` (default 4 GiB).
 
-## Phases
+## What is available now, and what is not yet
 
-1. **Placement core.** `runsOn` in the spec and validator; topology loading in CLI and desktop; local-host labels; built-in and custom labels with checks; two-stage matching; direct transport; deterministic dispatch with reconnect; event nesting; cancel; artifact stage-in and stage-out by `sha256`.
-2. **Long-running and interactive.** Gate forwarding; durable waiting (park and reconnect); `wait`; `WORKER_REJECTED` handling; the single-node shorthand.
-3. **Scale and cloud.** Connect transport through Platform; `ArtifactStore` with object storage; worker pools and per-worker concurrency limits; `map` fan-out across matching workers.
+**Available now.** `runsOn` in the spec and validator; topology loading in CLI and desktop; local-host labels; built-in and custom labels with checks; two-stage matching; direct transport; deterministic dispatch with reconnect; event nesting; cancel; artifact stage-in and stage-out by `sha256`.
+
+**Not yet: long-running and interactive.** Gate forwarding; durable waiting (park and reconnect); `wait`; `WORKER_REJECTED` handling; the single-node shorthand.
+
+**Not yet: scale and cloud.** Connect transport through Platform; `ArtifactStore` with object storage; worker pools and per-worker concurrency limits; `map` fan-out across matching workers.
 
 ## Out of scope
 

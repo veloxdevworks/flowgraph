@@ -14,11 +14,21 @@ describe("runsOn schema", () => {
     expect(NodeSpecSchema.safeParse(node({ runsOn: ["os:windows", "app:cc5"] })).success).toBe(true);
   });
 
-  it("accepts the object form", () => {
+  it("accepts the object form without wait", () => {
     const r = NodeSpecSchema.safeParse(
-      node({ runsOn: { labels: ["gpu:nvidia"], target: "render-01", fallback: "local", wait: "30m" } }),
+      node({ runsOn: { labels: ["gpu:nvidia"], target: "render-01", fallback: "local" } }),
     );
     expect(r.success).toBe(true);
+  });
+
+  it("rejects runsOn.wait and names that queueing is not available", () => {
+    const r = NodeSpecSchema.safeParse(
+      node({ runsOn: { labels: ["gpu:nvidia"], wait: "30m" } }),
+    );
+    expect(r.success).toBe(false);
+    const issue = r.error?.issues.find((i) => i.path.join(".").endsWith("wait"));
+    expect(issue?.message).toContain("runsOn.wait is not supported");
+    expect(issue?.message).toContain("matching worker");
   });
 
   it("is optional", () => {
@@ -44,12 +54,11 @@ describe("runsOn schema", () => {
     }
   });
 
-  it("rejects unknown keys, empty target, bad fallback and bad wait in the object form", () => {
+  it("rejects unknown keys, empty target and bad fallback in the object form", () => {
     const l = ["os:linux"];
     expect(NodeSpecSchema.safeParse(node({ runsOn: { labels: l, extra: 1 } })).success).toBe(false);
     expect(NodeSpecSchema.safeParse(node({ runsOn: { labels: l, target: "" } })).success).toBe(false);
     expect(NodeSpecSchema.safeParse(node({ runsOn: { labels: l, fallback: "retry" } })).success).toBe(false);
-    expect(NodeSpecSchema.safeParse(node({ runsOn: { labels: l, wait: "soon" } })).success).toBe(false);
   });
 
   it("parses inside a full graph and appears in the generated JSON Schema", () => {
@@ -62,6 +71,30 @@ describe("runsOn schema", () => {
     });
     expect(g.success).toBe(true);
     expect(JSON.stringify(generateJsonSchema())).toContain('"runsOn"');
+  });
+
+  it("does not offer runsOn.wait in the generated JSON Schema", () => {
+    const schema = generateJsonSchema();
+    const runsOnObjects: Array<Record<string, unknown>> = [];
+    const walk = (node: unknown): void => {
+      if (node == null || typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item);
+        return;
+      }
+      const rec = node as Record<string, unknown>;
+      const props = rec.properties;
+      if (props && typeof props === "object" && !Array.isArray(props)) {
+        const fields = props as Record<string, unknown>;
+        if ("labels" in fields && "fallback" in fields) runsOnObjects.push(fields);
+      }
+      for (const value of Object.values(rec)) walk(value);
+    };
+    walk(schema);
+    expect(runsOnObjects.length).toBeGreaterThan(0);
+    for (const fields of runsOnObjects) {
+      expect(fields).not.toHaveProperty("wait");
+    }
   });
 });
 

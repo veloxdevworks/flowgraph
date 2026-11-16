@@ -324,7 +324,8 @@ describe("remote execution of placed nodes", () => {
       const r = await compiled.run({ threadId: "t-gate" });
       expect(r.status).toBe("error");
       expect((r.error as { code?: string }).code).toBe("PLACEMENT_GATE_UNSUPPORTED");
-      expect(r.error?.message).toContain("phase 2");
+      expect(r.error?.message).toContain("gates inside placed subgraphs are not supported");
+      expect(r.error?.message).not.toMatch(/phase/i);
       expect(transport.cancelCalls).toEqual([{ target: "w1", childThreadId: "t-gate/dbl/1" }]);
       expect(transport.dispatchCalls).toHaveLength(1);
     });
@@ -392,14 +393,27 @@ describe("remote execution of placed nodes", () => {
   });
 
   describe("compile-time failures", () => {
-    it("queued (runsOn.wait) throws and says wait arrives in phase 2", async () => {
+    it("queued (runsOn.wait) throws and says queueing is not supported", async () => {
       const g = fnParent();
       (g.nodes[0] as { runsOn: unknown }).runsOn = { labels: ["os:windows"], wait: "30m" };
       const transport = createFakeTransport({ w1: { labels: { labels: ["os:linux"], flowgraphVersion: "0.42" } } });
       const err = await compileGraph(g, { placement: { localLabels: LOCAL_MAC, topology: topo("w1"), transport } }).catch((e) => e);
       expect(err).toBeInstanceOf(PlacementUnsatisfiedError);
-      expect(err.message).toMatch(/wait.*phase 2/);
+      expect(err.message).toMatch(/runsOn\.wait/);
+      expect(err.message).toMatch(/not supported/);
+      expect(err.message).not.toMatch(/phase/i);
       expect(err.decisions[0].kind).toBe("queued");
+    });
+
+    it("runsOn.wait throws even when the node would otherwise run locally", async () => {
+      const g = fnParent();
+      (g.nodes[0] as { runsOn: unknown }).runsOn = { labels: ["os:macos"], wait: "30m" };
+      const err = await compileGraph(g, { placement: { localLabels: LOCAL_MAC } }).catch((e) => e);
+      expect(err).toBeInstanceOf(PlacementUnsatisfiedError);
+      expect(err.message).toMatch(/runsOn\.wait/);
+      expect(err.message).toMatch(/not supported/);
+      expect(err.message).not.toMatch(/phase/i);
+      expect(err.decisions[0].kind).toBe("local");
     });
 
     it("unsatisfied throws with each candidate's reason", async () => {
