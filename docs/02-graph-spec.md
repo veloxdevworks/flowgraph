@@ -324,7 +324,7 @@ nodes:
 - `to` / `map` are optional overrides for shared/typed/reducer-backed channels (e.g. parallel fan-in into one `append` channel) or field projection.
 - **Exception — `subgraph`:** when `output` and `stateMap.out` are both omitted, channels that **share a name** merge back and the parent's reducer combines only the child's new values. Use `output: none` to write nothing, `output.to` / `output.map` for a normal node projection, or `stateMap.out` (`parentChannel: childChannel`) for an explicit mapping. See [05 — Subgraph merge-back](./05-state-and-data.md#subgraph-merge-back).
 - `raw: false` keeps large or sensitive results out of state and checkpoints while still passing on the fields you project. It needs `to` or `map`; to write nothing, use `output: none`. Anything that reads `state.outputs.<nodeId>` (for example a gate's `round`) then sees no previous value.
-- `none` cannot be combined with `to` / `map`, and the old `{ none: true }` object form is rejected; write `output: none`.
+- `none` cannot be combined with `to` / `map`, and a `none` key inside an output object is not supported, whatever its value (for example `{ none: true }`); write `output: none`.
 - Prefer not to declare your own `outputs` channel. If you do, its declared reducer is used as written (for example `mergeDeep` to deep-merge successive results).
 
 ## 9. `runtime` (graph-level defaults)
