@@ -277,6 +277,7 @@ export {
 } from "./providers/index.js";
 export type {
   ProviderAdapter,
+  ProviderValidateNode,
   ProviderCapabilities,
   ProviderRunContext,
   AgentRequest,

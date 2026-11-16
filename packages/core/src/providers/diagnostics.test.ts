@@ -126,7 +126,7 @@ describe("provider option diagnostics", () => {
   it("reports compile warnings on the compiled graph and on every run result", async () => {
     const provider = createLangChainProvider(
       { async invoke() { return new AIMessage({ content: "ok" }); } },
-      { models: ["gpt-4o"] },
+      { models: ["gpt-4o"], withModelOverrides: (model) => model },
     );
     const spec = graph([
       {

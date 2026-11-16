@@ -75,7 +75,9 @@ export function providerConfigDiagnostics(
       name === "langchain";
 
     if (adapter?.validate) {
-      for (const diag of adapter.validate(node.with ?? {})) {
+      const requested = typeof node.model === "string" ? node.model : spec.config?.defaults?.model;
+      const validateNode = { id: node.id, ...(typeof requested === "string" ? { model: requested } : {}) };
+      for (const diag of adapter.validate(node.with ?? {}, validateNode)) {
         out.push({
           severity: diag.severity,
           code: diag.severity === "error" ? "PROVIDER_CONFIG_ERROR" : "PROVIDER_CONFIG_UNSUPPORTED",
