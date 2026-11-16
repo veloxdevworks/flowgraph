@@ -43,7 +43,28 @@ export interface ChatModelLike {
   invoke(input: BaseMessage[], options?: unknown): Promise<AIMessage>;
   stream?(input: BaseMessage[], options?: unknown): AsyncIterable<AIMessageChunk> | Promise<AsyncIterable<AIMessageChunk>>;
   bindTools?(tools: unknown[], kwargs?: unknown): ChatModelLike;
+  /** LangChain BaseChatModel.bind — used to apply a node model override and maxTokens. */
+  bind?(kwargs: Record<string, unknown>): ChatModelLike;
   withStructuredOutput?(schema: unknown, config?: unknown): { invoke(input: BaseMessage[], options?: unknown): Promise<unknown> };
+}
+
+/** Call options for a node model override and `maxTokens`. */
+export function langchainCallOptions(req: AgentRequest): Record<string, unknown> {
+  const options: Record<string, unknown> = {};
+  if (req.model) options.model = req.model;
+  if (req.maxTokens !== undefined) options.maxTokens = req.maxTokens;
+  return options;
+}
+
+function modelForRequest(model: ChatModelLike, req: AgentRequest): ChatModelLike {
+  const options = langchainCallOptions(req);
+  if (Object.keys(options).length === 0) return model;
+  if (typeof model.bind === "function") return model.bind(options);
+  return model;
+}
+
+function invokeOptions(req: AgentRequest, signal: AbortSignal): Record<string, unknown> {
+  return { signal, ...langchainCallOptions(req) };
 }
 
 const REQUEST_TIMEOUT = Symbol("modelRequestTimeout");
@@ -344,7 +365,7 @@ async function constrainedOutput(model: ChatModelLike, req: AgentRequest, ctx: P
   const cached = ctx.replay?.get("llm:structured");
   if (cached && typeof cached === "object" && "output" in cached) return cached as { output: unknown; usage: TokenUsage };
   const invoke = async () => {
-    const result = await withHeartbeat(ctx, signal => model.withStructuredOutput!(req.schema, { includeRaw: true, strict: false }).invoke(messages, { signal }));
+    const result = await withHeartbeat(ctx, signal => modelForRequest(model, req).withStructuredOutput!(req.schema, { includeRaw: true, strict: false }).invoke(messages, invokeOptions(req, signal)));
     const wrapped = result && typeof result === "object" && Object.hasOwn(result, "parsed") && Object.hasOwn(result, "raw")
       ? result as { parsed: unknown; raw: AIMessage; parsing_error?: unknown } : undefined;
     return { output: wrapped ? wrapped.parsed : result, usage: wrapped?.raw ? modelUsage(wrapped.raw) : undefined };
@@ -370,10 +391,12 @@ function modelUsage(ai: AIMessage): TokenUsage | undefined {
 async function invokeModel(model: ChatModelLike, input: BaseMessage[], req: AgentRequest, ctx: ProviderRunContext): Promise<AIMessage> {
   let responseStarted = false;
   let partialUsage: TokenUsage | undefined;
+  const bound = modelForRequest(model, req);
   const invoke = () => withHeartbeat(ctx, async signal => {
-    if (!req.streaming || !model.stream) return model.invoke(input, { signal });
+    const options = invokeOptions(req, signal);
+    if (!req.streaming || !bound.stream) return bound.invoke(input, options);
     let combined: AIMessageChunk | undefined;
-    for await (const chunk of await model.stream(input, { signal })) {
+    for await (const chunk of await bound.stream(input, options)) {
       responseStarted = true;
       const text = extractText(chunk);
       if (text) ctx.emit("token", { text });

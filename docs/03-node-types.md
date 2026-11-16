@@ -238,7 +238,7 @@ Model-based routing:
       default:   { default: true, to: fallback }
 ```
 
-- `with.match: firstMatch` (default) selects the first matching route. `with.match: allMatches` fans out to every matching destination, deduplicates destinations, and writes an array of chosen route keys as the router output. The default route is used only when no condition matches. Model routers select one route.
+- `with.match: firstMatch` (default) selects the first matching route. `with.match: allMatches` fans out to every matching destination, deduplicates destinations, and writes an array of chosen route keys as the router output. The default route is used only when no condition matches. `allMatches` is only valid with `mode: rules`. A router with `mode: model` and `match: allMatches` is rejected; model routers select one route.
 - Model-based routers receive every declared route key and description, including the default as an explicit "none of the above" choice (enforced via structured output).
 - Routers are `routing: true` capability; they return a `Command{ goto }` rather than a state update.
 - In the desktop builder, dragging from a router node adds a route (not a parallel edge), and the canvas draws dashed edges from `with.routes`.
