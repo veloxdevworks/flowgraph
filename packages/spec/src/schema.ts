@@ -226,7 +226,7 @@ export const OutputMappingObjectSchema = z.object({
    * results are not stored in state or checkpoints.
    */
   raw: z.boolean().optional(),
-  /** Removed: `{ none: true }` is written `output: none`. Kept here only to reject it with a clear message. */
+  /** Not supported: write `output: none`. Declared only so any `none` key is rejected with a clear message. */
   none: z.undefined().optional(),
 });
 
@@ -241,7 +241,7 @@ function outputMappingFormError(data: unknown): string | undefined {
   if (m["to"] !== undefined || m["map"] !== undefined) {
     return 'output "none" writes nothing, so it cannot be combined with to or map. Use output: none to write nothing, or keep to / map (with raw: false to skip state.outputs.<nodeId>).';
   }
-  return 'the { none: true } form was removed; write output: none instead.';
+  return 'the none key is not supported inside an output object; write output: none to write nothing.';
 }
 
 export const OutputMappingSchema = z

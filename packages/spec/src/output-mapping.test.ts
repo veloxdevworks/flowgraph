@@ -26,7 +26,16 @@ describe("output mapping forms", () => {
     const m = messages({ none: true });
     expect(m).toHaveLength(1);
     expect(m[0]).toContain("output: none");
-    expect(messages({ none: false })[0]).toContain("output: none");
+    expect(m[0]).toContain("the none key is not supported");
+  });
+
+  it("rejects any none key with the same message, whatever its value", () => {
+    for (const value of [false, true, null, "yes", 0]) {
+      const m = messages({ none: value });
+      expect(m, JSON.stringify(value)).toHaveLength(1);
+      expect(m[0]).toBe("the none key is not supported inside an output object; write output: none to write nothing.");
+      expect(m[0]).not.toContain("none: true");
+    }
   });
 
   it("rejects none together with to or map", () => {
