@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { validateSpec } from "./loader.js";
@@ -20,6 +20,9 @@ function graph(over: Record<string, unknown> = {}): GraphSpec {
 }
 
 describe("canonical retry and timeout take effect", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
   it("validateSpec rejects http with.retry and with.timeout, naming the canonical fields", () => {
     const retrySpec = graph({
       nodes: [
@@ -113,7 +116,12 @@ describe("canonical retry and timeout take effect", () => {
   });
 
   it("runtime.timeoutDefault times out a node that has no timeout of its own", async () => {
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     registerFunction("policyTimeoutDefault", async () => {
+      entered();
       await new Promise((resolve) => setTimeout(resolve, 200));
       return { ok: true };
     });
@@ -122,14 +130,30 @@ describe("canonical retry and timeout take effect", () => {
         nodes: [{ id: "a", type: "function", with: { fn: "policyTimeoutDefault" } }],
         runtime: { checkpoint: { enabled: false }, timeoutDefault: "20ms" },
       }),
+      { store: "none" },
     );
-    const r = await compiled.run();
+    vi.useFakeTimers();
+    const running = compiled.run();
+    let settled = false;
+    void running.then(() => {
+      settled = true;
+    });
+    await ready;
+    await vi.advanceTimersByTimeAsync(19);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+    const r = await running;
     expect(r.status).toBe("error");
     expect(String(r.error?.message ?? r.error)).toMatch(/timed out/i);
   });
 
   it("node timeout overrides runtime.timeoutDefault", async () => {
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     registerFunction("policyTimeoutOverride", async () => {
+      entered();
       await new Promise((resolve) => setTimeout(resolve, 40));
       return { ok: true };
     });
@@ -145,8 +169,19 @@ describe("canonical retry and timeout take effect", () => {
         ],
         runtime: { checkpoint: { enabled: false }, timeoutDefault: "10ms" },
       }),
+      { store: "none" },
     );
-    const r = await compiled.run();
+    vi.useFakeTimers();
+    const running = compiled.run();
+    let settled = false;
+    void running.then(() => {
+      settled = true;
+    });
+    await ready;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(30);
+    const r = await running;
     expect(r.status).toBe("completed");
   });
 });
