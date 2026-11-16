@@ -33,6 +33,8 @@ const result = await compiled.run({
 console.log(result.status, result.state);
 ```
 
+`run()` without `threadId` starts a new thread for that call only, with a fresh `result.runId` and `result.threadId`; pass a `threadId` to continue one thread across calls. Input is validated against the graph's `inputs:` (defaults applied, the graph's `input:` merged under yours) and a bad value rejects with `InputValidationError` (`code: "INPUT_INVALID"`). `resolveGraphInput(spec, input)` returns the same resolved input without running, for hosts that want to check first.
+
 ## Custom logic: prefer `shell` / `script`, or register `function`
 
 For graph authors, the zero-setup option is a [`shell` node](./03-node-types.md#5-shell--run-a-local-command) — no TypeScript registration required:

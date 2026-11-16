@@ -17,6 +17,7 @@ import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
+import { resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { SecretRedaction, SECRET_REDACTION, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
 import { createEnvSecretProvider, DEFAULT_REDACT_PATTERNS } from "./secrets.js";
@@ -358,11 +359,17 @@ interface InvokeOverrides {
   singleStep?: boolean;
   /** An HTTP callback targets one interrupt; leave sibling route registrations intact. */
   preserveWebhookRoutes?: boolean;
+  /** Run id for this invocation; defaults to the compile-time id (caller-supplied thread). */
+  runId?: string;
 }
 
 /** Raw LangGraph compiled graph for embedding inside a parent subgraph node. */
 export interface EmbeddedCompiledGraph {
   compiledLg: ReturnType<StateGraph<unknown>["compile"]>;
+}
+
+function newRunId(): string {
+  return `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export async function compileGraphForEmbedding(
@@ -496,6 +503,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     overrides: InvokeOverrides = {},
   ): Promise<RunResult> => {
     const startMs = Date.now();
+    const runId = overrides.runId ?? assembled.runId;
     const threadId = runOpts.threadId ?? `thread-${runId}`;
     const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
     if (overrides.singleStep) cfg["interruptAfter"] = "*";
@@ -1110,6 +1118,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     mode: ExecuteMode,
     overrides: InvokeOverrides = {},
   ): Promise<RunResult> => {
+    const runId = overrides.runId ?? assembled.runId;
     const threadId = runOpts.threadId ?? `thread-${runId}`;
     return withEventThread(threadId, async () => {
       let claim = overrides.threadClaim;
@@ -1129,15 +1138,29 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         const accounting = await UsageLedger.open(checkpointer ?? compiledLg, threadId, graphSpec.runtime?.budget);
         return await withSecretRedaction((baseCtx as Record<symbol, unknown>)[SECRET_REDACTION] as SecretRedaction, () => withUsageLedger(accounting, () => invokeOwned(payload, runOpts, mode, overrides)));
       } finally { await claim.release(); }
-    });
+    }, { from: assembled.runId, to: runId });
+  };
+
+  /**
+   * A start without a thread id is a new run on a new thread: fresh run and
+   * thread ids per call, never the compile-time pair (which would make
+   * unrelated calls share checkpointed state and budget). The input is
+   * resolved against the graph's `input:` and `inputs:` like the CLI and server.
+   */
+  const startInvocation = (runOpts: RunOptions): { options: RunOptions & { threadId: string }; input: Record<string, unknown>; runId: string } => {
+    const input = resolveGraphInput(graphSpec, runOpts.input);
+    const runId = runOpts.threadId === undefined ? newRunId() : assembled.runId;
+    return { options: { ...runOpts, input, threadId: runOpts.threadId ?? `thread-${runId}` }, input, runId };
   };
 
   const prepare = async (request: PrepareInvocationOptions, supplied?: ThreadRunClaim): Promise<PreparedInvocation> => {
-    const runOpts = { ...request.options };
+    const started = request.mode === "start" ? startInvocation(request.options) : undefined;
+    const runOpts = started ? started.options : { ...request.options };
+    const runId = started?.runId ?? assembled.runId;
     const threadId = runOpts.threadId ?? `thread-${runId}`;
     const claim = supplied ?? await acquireThreadRun(checkpointer ?? compiledLg, threadId, defaultThreadRunOwner({ runId, graph: graphSpec.metadata.name }));
     adoptThreadRunClaim(checkpointer ?? compiledLg, threadId, claim);
-    let payload: Record<string, unknown> | Command | null = request.mode === "start" ? (runOpts as RunOptions).input ?? {} : request.mode === "resume" ? new Command({ resume: (runOpts as ResumeOptions).resume }) : null;
+    let payload: Record<string, unknown> | Command | null = started ? started.input : request.mode === "resume" ? new Command({ resume: (runOpts as ResumeOptions).resume }) : null;
     try { payload = await validateAdmission(payload, runOpts, request.mode); }
     catch (err) { await claim.release(); throw err; }
     let state: "ready" | "running" | "released" = "ready";
@@ -1148,8 +1171,12 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         state = "running";
         const { signal, pauseSignal, sinks } = execution;
         const options = { ...runOpts, ...(signal ? { signal } : {}), ...(pauseSignal ? { pauseSignal } : {}), ...(sinks ? { sinks } : {}) };
-        const input = request.mode === "start" && execution.input !== undefined ? execution.input : payload;
-        try { return await executeInvoke(input, options, request.mode, { threadClaim: claim, prepared: true }); }
+        let input = payload;
+        if (request.mode === "start" && execution.input !== undefined) {
+          try { input = resolveGraphInput(graphSpec, execution.input); }
+          catch (err) { state = "ready"; throw err; }
+        }
+        try { return await executeInvoke(input, options, request.mode, { threadClaim: claim, prepared: true, runId }); }
         finally { state = "released"; }
       },
       async release() {
@@ -1261,7 +1288,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     events,
     placements: plan?.decisions ?? [],
     prepare,
-    run: (runOpts: RunOptions = {}) => executeInvoke(runOpts.input ?? {}, runOpts, "start"),
+    run: async (runOpts: RunOptions = {}) => {
+      const started = startInvocation(runOpts);
+      return executeInvoke(started.input, started.options, "start", { runId: started.runId });
+    },
     resume,
     continueRun: (opts: ContinueOptions) => continueRun(opts),
     getState: async (threadId: string, stateOpts?: { applyWaitTimeouts?: boolean }) => {
@@ -1309,12 +1339,13 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       return continueRun(opts, { singleStep: true });
     },
     stream: async function* (runOpts: RunOptions = {}) {
-      const threadId = runOpts.threadId ?? `thread-${runId}`;
-      const claim = await acquireThreadRun(checkpointer ?? compiledLg, threadId, defaultThreadRunOwner({ runId, graph: graphSpec.metadata.name }));
+      const started = startInvocation(runOpts);
+      const threadId = started.options.threadId;
+      const claim = await acquireThreadRun(checkpointer ?? compiledLg, threadId, defaultThreadRunOwner({ runId: started.runId, graph: graphSpec.metadata.name }));
       const stopped = new AbortController();
       const source = events.stream({ threadId, includeBuffered: false, signal: stopped.signal })[Symbol.asyncIterator]();
       let next = source.next(); // Subscribe before execution can emit its first event.
-      const running = executeInvoke(runOpts.input ?? {}, { ...runOpts, threadId }, "start", { threadClaim: claim });
+      const running = executeInvoke(started.input, started.options, "start", { threadClaim: claim, runId: started.runId });
       running.then(() => stopped.abort(), () => stopped.abort());
       try {
         for (;;) {
@@ -1354,7 +1385,7 @@ async function assembleCompiledLangGraph(
   const graphWorkspace = opts.workspace !== undefined
     ? path.resolve(cwd, opts.workspace)
     : opts.cwd !== undefined && !spec.runtime?.workspace ? path.resolve(cwd) : resolveGraphWorkspace(spec, graphDir);
-  const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const runId = newRunId();
   const redaction = new SecretRedaction([...DEFAULT_REDACT_PATTERNS, ...(spec.runtime?.secrets?.redact?.patterns ?? []).flatMap(p => { try { return [new RegExp(p, "gi")]; } catch { return []; } })], spec.runtime?.secrets?.redact?.headers);
   const events = createEventBus({ runId, graph: spec.metadata.name, redact: value => redactSecrets(value, redaction) });
   for (const sink of opts.sinks ?? []) events.subscribe(sink);

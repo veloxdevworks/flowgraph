@@ -57,10 +57,11 @@ export const functionNode = defineNode<Config>({
           run: ctx.meta,
         };
 
-        // Build the function input by rendering templates in config.input
+        // The handler receives the node's `input` (or, as a tool, the model's
+        // arguments). `with.input`, when set, replaces it and can read it as `{{ input.* }}`.
         const input = config.input
           ? (renderDeep(config.input, scope) as Record<string, unknown>)
-          : {};
+          : scope.input;
 
         const result = await fn(input, ctx);
 
