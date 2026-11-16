@@ -259,6 +259,8 @@ edges:
       - { default: true,                           to: needs-human }
 ```
 
+A guard that evaluates to false moves on to the next entry, and the `default` entry (or `END` when there is none) is taken when nothing matches. A guard that cannot be evaluated at run time, for example one that calls an unknown function, fails the run with error code `EDGE_GUARD_ERROR`. The run does not fall through to `default` or `END`. The error names the edge and the expression, and the run records an `EDGE_GUARD_ERROR` issue (severity `error`, `detail: { from, to, when }`). A path that does not exist, such as `state.review.approved` before `review` is written, evaluates to null and does not raise this error. `flowgraph validate` reports expressions that do not parse (`EXPR_PARSE_ERROR`) before the run starts.
+
 ### Fan-out (parallel) edges
 
 Listing multiple `to` targets (or multiple edges from the same node) fans out to parallel branches, which LangGraph executes concurrently and merges via channel reducers.
