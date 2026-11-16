@@ -33,7 +33,7 @@ const result = await compiled.run({
 console.log(result.status, result.state);
 ```
 
-`run()` without `threadId` starts a new thread for that call only, with a fresh `result.runId` and `result.threadId`; pass a `threadId` to continue one thread across calls. Input is validated against the graph's `inputs:` (defaults applied, the graph's `input:` merged under yours) and a bad value rejects with `InputValidationError` (`code: "INPUT_INVALID"`). `resolveGraphInput(spec, input)` returns the same resolved input without running, for hosts that want to check first.
+`run()` without `threadId` (or with an empty or whitespace-only one) starts a new thread for that call only, with a fresh `result.runId` and `result.threadId`; pass a `threadId` to continue one thread across calls. Run ids have the shape `run-<uuid>` (for example `run-3f2b8c1e-9d4a-4c2e-b7a1-5e6f7a8b9c0d`) and the default thread is `thread-<runId>`; `compiled.runId` has the same shape. Input is validated against the graph's `inputs:` (defaults applied, the graph's `input:` merged under yours) and a bad value rejects with `InputValidationError` (`code: "INPUT_INVALID"`). `resolveGraphInput(spec, input)` returns the same resolved input without running, for hosts that want to check first.
 
 ## Custom logic: prefer `shell` / `script`, or register `function`
 
