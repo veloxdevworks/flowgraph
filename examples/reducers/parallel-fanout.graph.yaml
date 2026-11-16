@@ -17,13 +17,13 @@ nodes:
     type: function
     with:
       fn: tagAlpha
-      output: { to: tags }
+      output: { to: tags, raw: false }   # only the tag list; no state.outputs.<id> copy
 
   - id: branch-beta
     type: function
     with:
       fn: tagBeta
-      output: { to: tags }
+      output: { to: tags, raw: false }   # only the tag list; no state.outputs.<id> copy
 
 edges:
   - { from: START, to: [branch-alpha, branch-beta] }

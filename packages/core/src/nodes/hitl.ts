@@ -153,6 +153,7 @@ export const hitlNode = defineNode<Config>({
         // (a loop back). The previous value is the one this node wrote to `state.outputs.<id>` last
         // time; state is as of the start of the node, so a resumed run re-reads the same value and
         // gets the same round. Rejected answers re-prompt inside interruptUntilValid and never get here.
+        // With `output: none` or `raw: false` there is no previous value, so every answer is round 1.
         const outputs = state["outputs"] as Record<string, { round?: unknown } | undefined> | undefined;
         const prevRound = outputs?.[String(nodeSpec["id"] ?? ctx.nodeId)]?.round;
         const round = (typeof prevRound === "number" && Number.isInteger(prevRound) && prevRound >= 1 ? prevRound : 0) + 1;

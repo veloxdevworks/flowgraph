@@ -7,7 +7,7 @@ import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
 import { templateRootRefs } from "../node-policy.js";
 import { childChannelRefsInMapping, stateMapOutEntries } from "../nodes/subgraph-merge.js";
-import { isOutputNone, OUTPUTS_CHANNEL } from "./apply-output.js";
+import { isOutputNone, keepsRawOutput, OUTPUTS_CHANNEL } from "./apply-output.js";
 import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
 import { RESERVED_STATE_CHANNELS } from "./state-annotation.js";
 import { memoryLintDiagnostics } from "../memory/validate.js";
@@ -194,7 +194,7 @@ export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
     const reducer = ch.reducer;
     const path = `state.channels.${name}`;
 
-    if (reducer === "append" || reducer === "concat") {
+    if (reducer === "append") {
       if (ch.type !== "array" && ch.type !== "any") {
         diagnostics.push({
           severity: "warning",
@@ -270,7 +270,7 @@ export function collectNodeWriteChannels(node: GraphSpec["nodes"][number]): stri
   if (node.type === "map") {
     const collect = withBlock["collect"];
     for (const c of channelsFromOutputMapping(collect)) names.add(c);
-    if (!isOutputNone(collect)) names.add(OUTPUTS_CHANNEL);
+    if (keepsRawOutput(collect)) names.add(OUTPUTS_CHANNEL);
     return [...names];
   }
 
@@ -283,9 +283,9 @@ export function collectNodeWriteChannels(node: GraphSpec["nodes"][number]): stri
       return [...names];
     }
     if (isOutputNone(output)) return [...names];
-    // Explicit to/map: outputs slug + projections. Omitted output: child-state merge
-    // (unknown channel set — do not auto-declare the outputs channel for merge).
-    if (hasExplicitProjection(output)) names.add(OUTPUTS_CHANNEL);
+    // Explicit to/map: outputs slug (unless raw: false) + projections. Omitted output:
+    // child-state merge (unknown channel set — do not auto-declare the outputs channel for merge).
+    if (hasExplicitProjection(output) && keepsRawOutput(output)) names.add(OUTPUTS_CHANNEL);
     return [...names];
   }
 
@@ -293,8 +293,8 @@ export function collectNodeWriteChannels(node: GraphSpec["nodes"][number]): stri
   const history = historyChannelOf(node);
   if (history) names.add(history);
 
-  // Ordinary nodes: always write state.outputs.<nodeId> unless output: none.
-  if (!isOutputNone(output)) names.add(OUTPUTS_CHANNEL);
+  // Ordinary nodes: write state.outputs.<nodeId> unless output: none or raw: false.
+  if (keepsRawOutput(output)) names.add(OUTPUTS_CHANNEL);
 
   return [...names];
 }
@@ -307,18 +307,23 @@ export function historyChannelOf(node: GraphSpec["nodes"][number]): string | und
   return typeof h === "string" && h.trim() ? h : undefined;
 }
 
-/** Channel def used when auto-declaring the reserved per-node outputs bag. */
+/**
+ * Channel def used when auto-declaring the reserved per-node outputs bag.
+ * `merge` is shallow: each write `{ [nodeId]: result }` replaces that node's
+ * whole previous result, so fields a later run no longer returns do not linger.
+ */
 export const OUTPUTS_CHANNEL_DEF = {
   type: "object" as const,
-  reducer: "mergeDeep" as const,
+  reducer: "merge" as const,
   default: {},
-  description: "Per-node results keyed by node id (auto-written when output is omitted).",
+  description: "Per-node results keyed by node id; each node's latest result replaces its previous one.",
 };
 
 /**
  * Ensure every channel written by nodes exists under `state.channels`.
  * Missing names are added as `{ type: "any" }` so LangGraph does not silently
- * drop updates. The reserved `outputs` channel is declared with mergeDeep.
+ * drop updates. The reserved `outputs` channel is declared with a shallow
+ * `merge`, so each node's latest result replaces its previous one.
  * Returns the same spec instance when nothing changes.
  */
 export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {

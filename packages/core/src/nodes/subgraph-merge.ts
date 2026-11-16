@@ -266,7 +266,7 @@ export function reducerInput(
   const reducer = channel?.reducer;
   const type = channel?.type;
 
-  if (reducer === "append" || reducer === "concat") {
+  if (reducer === "append") {
     if (Array.isArray(seed) && Array.isArray(next)) {
       const extra = appendExtra(seed, next);
       if (extra.length === 0) return { omit: true };

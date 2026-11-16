@@ -24,7 +24,7 @@ state:
 |---|---|---|
 | `string` `number` `boolean` | primitives | |
 | `object` | record | structured data; default reducer is last-write-wins |
-| `array` | list | pair with `append`/`concat` reducers to accumulate |
+| `array` | list | pair with the `append` reducer to accumulate |
 | `messages` | `BaseMessage[]` | special: uses LangGraph's message reducer (append + id-based update) |
 | `any` | unknown | escape hatch; loses type checking |
 
@@ -44,12 +44,13 @@ A reducer is `(current, incoming) => next`. They make parallel fan-in determinis
 | Reducer | Behavior | Typical use |
 |---|---|---|
 | `lastWrite` (default) | incoming replaces current | scalars, "current X" |
-| `append` | push incoming onto array | logs, findings, results from `map` |
-| `concat` | concatenate arrays | merging lists from parallel branches |
+| `append` | push incoming onto array (an incoming array is concatenated) | logs, findings, results from `map`, lists from parallel branches |
 | `merge` | shallow object merge | accumulating keyed data |
 | `mergeDeep` | deep object merge | nested config/state |
 | `messages` | LangGraph message reducer | chat history |
 | `custom:<name>` | a registered reducer fn | domain-specific merge |
+
+The reserved `outputs` channel uses a shallow `merge` keyed by node id, so a node's latest result replaces its previous one whole. Use `mergeDeep` on a channel you declare when you want nested fields from successive writes combined.
 
 ```ts
 registry.registerReducer("uniqueById", (cur: Item[] = [], inc: Item | Item[]) => {
@@ -88,7 +89,7 @@ Parallel subgraphs in one superstep merge in node-id order (map items merge in i
 ## 3. Reading & writing state
 
 - **Read** anywhere via expressions: `{{ state.summary }}`, `{{ state.issue.body }}`, `{{ state.outputs.summarize }}`.
-- **Write** — by default each node saves its raw result to `state.outputs.<nodeId>` (reserved `outputs` object channel, `mergeDeep`). Optional `output` projections (`to` / `map`) are additive. Nodes never mutate state directly; they return updates that the runtime applies through reducers.
+- **Write** — by default each node saves its raw result to `state.outputs.<nodeId>` (reserved `outputs` object channel keyed by node id). Each run of a node replaces its whole previous entry; fields are never merged across runs. Optional `output` projections (`to` / `map`) are written alongside it, or instead of it with `raw: false`. Nodes never mutate state directly; they return updates that the runtime applies through reducers.
 
 ```yaml
 # Default (no output block): node id "summarize" → state.outputs.summarize
@@ -96,8 +97,9 @@ Parallel subgraphs in one superstep merge in node-id order (map items merge in i
 with:
   output:
     to: summary                  # also write primary result to state.summary
-    map:                         # and project fields (additive with the slug)
+    map:                         # and project fields (alongside the slug)
       tokens: "{{ result.usage.totalTokens }}"
+    # raw: false                 # keep only to / map; skip state.outputs.<nodeId>
   # output: none                 # opt out — write nothing (side-effect only)
 ```
 

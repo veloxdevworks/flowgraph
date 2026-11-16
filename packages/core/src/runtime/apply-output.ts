@@ -3,8 +3,10 @@
  *
  * Default: every node writes its raw result under `state.outputs.<nodeId>`.
  * (LangGraph forbids a channel name equal to a node id, so we use a reserved
- * `outputs` object channel with mergeDeep.)
- * Optional `to` / `map` are additive projections. `none` opts out entirely.
+ * `outputs` object channel keyed by node id. Each write replaces that node's
+ * whole previous result.)
+ * Optional `to` / `map` are projections, written alongside the raw result
+ * unless `raw: false`. `none` opts out entirely.
  */
 
 import { renderDeep } from "@flowgraph/expr";
@@ -14,11 +16,17 @@ import type { OutputMapping } from "@flowgraph/spec";
 export const OUTPUTS_CHANNEL = "outputs";
 
 export function isOutputNone(output: unknown): boolean {
-  if (output === "none") return true;
-  if (output != null && typeof output === "object" && !Array.isArray(output)) {
-    return (output as { none?: unknown }).none === true;
-  }
-  return false;
+  return output === "none";
+}
+
+/**
+ * Whether the raw result is kept under `state.outputs.<nodeId>`: always, unless
+ * the mapping is `none` or sets `raw: false` next to a `to` / `map` projection.
+ */
+export function keepsRawOutput(output: unknown): boolean {
+  if (isOutputNone(output)) return false;
+  if (output == null || typeof output !== "object" || Array.isArray(output)) return true;
+  return (output as { raw?: unknown }).raw !== false;
 }
 
 export interface ApplyOutputOpts {
@@ -31,8 +39,9 @@ export interface ApplyOutputOpts {
  * Build a LangGraph state update from a node's raw result and optional mapping.
  *
  * - omitted / `{}` → `{ outputs: { [nodeId]: rawResult } }`
- * - `"none"` / `{ none: true }` → `{}`
+ * - `"none"` → `{}`
  * - `{ to }` and/or `{ map }` → those writes plus the outputs slug
+ * - `{ to } / { map }` with `raw: false` → only those writes
  */
 export function applyOutput(
   output: OutputMapping | undefined,
@@ -41,9 +50,9 @@ export function applyOutput(
 ): Record<string, unknown> {
   if (isOutputNone(output)) return {};
 
-  const update: Record<string, unknown> = {
-    [OUTPUTS_CHANNEL]: { [opts.nodeId]: rawResult },
-  };
+  const update: Record<string, unknown> = keepsRawOutput(output)
+    ? { [OUTPUTS_CHANNEL]: { [opts.nodeId]: rawResult } }
+    : {};
 
   if (output == null || typeof output !== "object") return update;
 

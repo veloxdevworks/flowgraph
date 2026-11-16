@@ -8,7 +8,7 @@ Regardless of type, every node:
 
 - has a unique `id`, optional `name`/`description`, and optional `notes` (freeform markdown for authors; ignored by the engine);
 - may declare an `input` mapping (state → node input object) and a `when` guard;
-- **auto-saves its result to `state.outputs.<nodeId>`** unless `with.output` is `none` (see [02 §8](./02-graph-spec.md#8-input--output-mapping)); optional `output.to` / `output.map` are additive projections for shared/typed channels;
+- **auto-saves its result to `state.outputs.<nodeId>`** unless `with.output` is `none` (see [02 §8](./02-graph-spec.md#8-input--output-mapping)); optional `output.to` / `output.map` are projections for shared/typed channels, written alongside the raw result unless `raw: false`; each run replaces the node's previous `state.outputs.<nodeId>`;
 - may set `retry`, `timeout`, and `on.error` behavior;
 - is wrapped by the runtime middleware (events, hooks, OTel, retry/timeout — see [01 §4](./01-architecture.md#4-runtime-composition));
 - returns a **NodeResult**: either a partial state update, or a `Command` (control-flow directive: go to node X, update state, or interrupt).
@@ -783,9 +783,9 @@ The interrupt payload (`payload.data`) then carries:
 
 Never file bytes: the payload is checkpointed.
 
-`with.select: none | one | many` (default `none`) lets the human choose from what was shown. The answer carries `selected` — a path, `{ path }`, or an array of those — and only artifacts **presented at this gate** are accepted; anything else is an invalid answer and re-prompts, so a client cannot inject an arbitrary path downstream. The node outputs `selected` as the matching `Artifact` (`one`) or `Artifact[]` (`many`); with `select: none` a client-sent `selected` is dropped. A selection is required on an approving answer (`approved: true` / review `approve`) and on every `choice` answer; a rejection may omit it, and then `selected` is `null` (`one`) or `[]` (`many`) so a previous round's pick does not linger in a merged `state.outputs` entry. With `select: one` and exactly one artifact shown, an approving answer without `selected` picks it.
+`with.select: none | one | many` (default `none`) lets the human choose from what was shown. The answer carries `selected` — a path, `{ path }`, or an array of those — and only artifacts **presented at this gate** are accepted; anything else is an invalid answer and re-prompts, so a client cannot inject an arbitrary path downstream. The node outputs `selected` as the matching `Artifact` (`one`) or `Artifact[]` (`many`); with `select: none` a client-sent `selected` is dropped. A selection is required on an approving answer (`approved: true` / review `approve`) and on every `choice` answer; a rejection may omit it, and then `selected` is `null` (`one`) or `[]` (`many`) so the result always says what this round picked. With `select: one` and exactly one artifact shown, an approving answer without `selected` picks it.
 
-Every gate output also has `round`: `1` for the first accepted answer at this gate in a thread, `+1` each time it is answered again (for example when a route loops back to it). Rejected answers re-prompt and do not count. `round` is read back from the node's previous `state.outputs.<id>.round`, so it survives checkpoint and resume; `output: none` opts out of that storage, and `round` is then always `1`.
+Every gate output also has `round`: `1` for the first accepted answer at this gate in a thread, `+1` each time it is answered again (for example when a route loops back to it). Rejected answers re-prompt and do not count. `round` is read back from the node's previous `state.outputs.<id>.round`, so it survives checkpoint and resume; `output: none` and `raw: false` opt out of that storage, and `round` is then always `1`.
 
 A worked loop: generate two images, pick one, or regenerate with a new vendor job (see `variant` under [`image` / `video`…](#9d-image--video--model3d--audio--generative-media)).
 
@@ -1181,7 +1181,7 @@ A gate that lists a failed capture in `with.artifacts` adds a "Capture problems"
 
 ### Result shape
 
-Every field is written on every run, `null` when it does not apply (`artifacts` is `[]`). The `outputs` channel is deep-merged, so a field left out would keep the value from an earlier run: a capture that failed on a loop-back used to show the first run's `path`. A graph can rely on `path: null` meaning there is no file.
+Every field is written on every run, `null` when it does not apply (`artifacts` is `[]`), so the result has the same shape whichever way the capture went. A graph can rely on `path: null` meaning there is no file.
 
 ```ts
 {

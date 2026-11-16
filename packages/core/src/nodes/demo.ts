@@ -21,8 +21,8 @@ import { currentEnvironment } from "../environment.js";
  * `ok` is derived from `status`. Failures return rather than throw unless
  * `with.strict: true`.
  *
- * Every field is written on every run, `null` when absent, because `outputs` is
- * deep-merged and a missing field would keep the previous run's value. Files go under
+ * Every field is written on every run, `null` when absent, so the result has the
+ * same shape whichever way the capture went. Files go under
  * `.flowgraph/artifacts/<threadKey>/<nodeId>/` and `artifacts` lists their records.
  */
 

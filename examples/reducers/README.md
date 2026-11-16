@@ -2,7 +2,7 @@
 
 Demonstrates **parallel fan-out** with accumulating reducers and **`imports[].reducers`**:
 
-- `parallel-fanout.graph.yaml` — `append` merges tags from parallel `code` branches
+- `parallel-fanout.graph.yaml` — `append` merges tags from parallel `code` branches; `output: { to: tags, raw: false }` writes only the tag list, not a `state.outputs.<id>` copy
 - `custom-reducer.graph.yaml` — `custom:uniqueById` dedupes findings by `id`
 
 Both graphs import `./register.ts`, which registers code functions (side effect) and exports `default: { uniqueById }`.

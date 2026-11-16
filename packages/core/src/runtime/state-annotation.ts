@@ -62,7 +62,7 @@ export function channelReducerAndDefault(
   ch: ChannelDef,
   warn?: ReducerWarn,
 ): ChannelReducerAndDefault {
-  if (ch.reducer === "append" || ch.reducer === "concat") {
+  if (ch.reducer === "append") {
     return {
       reducer: (cur: unknown, inc: unknown) => {
         const current = (cur as unknown[] | undefined) ?? [];

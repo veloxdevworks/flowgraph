@@ -120,7 +120,7 @@ describe("PLAT-296: concurrency preserves work", () => {
     const others = ["a", "b", "c"].map((id) => ({
       id,
       type: "function",
-      with: { fn: "qaUnrelated", output: { none: true } },
+      with: { fn: "qaUnrelated", output: "none" },
     }));
     const result = await (
       await compileGraph(
