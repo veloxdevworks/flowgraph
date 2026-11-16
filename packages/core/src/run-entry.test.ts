@@ -67,6 +67,36 @@ describe("each start without a thread id is its own run", () => {
     expect(events.filter((e) => e.runId === first.runId).every((e) => e.threadId === first.threadId)).toBe(true);
   });
 
+  it("uses a UUID run id and names the thread after it", async () => {
+    const compiled = await compileGraph(logGraph(), { workspace: workspace() });
+    const r = await compiled.run({ input: { tag: "first" } });
+    expect(r.runId).toMatch(/^run-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(compiled.runId).toMatch(/^run-[0-9a-f-]{36}$/);
+    expect(r.threadId).toBe(`thread-${r.runId}`);
+  });
+
+  it("treats an empty thread id as absent", async () => {
+    const compiled = await compileGraph(logGraph(), { workspace: workspace() });
+    const first = await compiled.run({ threadId: "", input: { tag: "first" } });
+    const second = await compiled.run({ threadId: "", input: { tag: "second" } });
+    expect(first.status).toBe("completed");
+    expect(first.threadId).toBe(`thread-${first.runId}`);
+    expect(first.runId).not.toBe(compiled.runId);
+    expect(second.threadId).not.toBe(first.threadId);
+    expect(second.state.log).toEqual(["second"]);
+    const prepared = await compiled.prepare({ mode: "start", options: { threadId: "", input: { tag: "third" } } });
+    const third = await prepared.execute();
+    expect(third.runId).toBe(prepared.runId);
+    expect(third.threadId).toBe(`thread-${prepared.runId}`);
+    const threads = new Set<string | undefined>();
+    for await (const event of compiled.stream({ threadId: "", input: { tag: "fourth" } })) {
+      if (event.type === "run.start") threads.add(event.threadId);
+    }
+    expect([...threads]).toHaveLength(1);
+    expect([...threads][0]).toMatch(/^thread-run-/);
+    expect(threads.has(third.threadId)).toBe(false);
+  });
+
   it("keeps the caller's thread, and continues its state, when a thread id is given", async () => {
     const compiled = await compileGraph(logGraph(), { workspace: workspace() });
     const first = await compiled.run({ threadId: "shared", input: { tag: "first" } });
@@ -179,5 +209,17 @@ describe("a node's input is the payload its handler receives", () => {
     expect(r.status).toBe("completed");
     expect(r.state.got).toEqual({ x: "hello" });
     expect(r.state.out).toEqual({ raw: "unset" });
+  });
+
+  it("writes node-level input to a shell command's stdin", async () => {
+    const readStdin = { command: process.execPath, args: ["-e", "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(d||'empty'))"] };
+    const spec = graph([
+      { id: "a", type: "shell", input: { x: "hello", n: "{{ state.out.n }}" }, with: { ...readStdin, output: { map: { got: "{{ result.json }}" } } } },
+      { id: "b", type: "shell", with: { ...readStdin, output: { map: { out: "{{ { raw: result.stdout } }}" } } } },
+    ]);
+    const r = await (await compileGraph(spec, { workspace: workspace() })).run({ input: { out: { n: 2 } } });
+    expect(r.status).toBe("completed");
+    expect(r.state.got).toEqual({ x: "hello", n: 2 });
+    expect(r.state.out).toEqual({ raw: "empty" });
   });
 });
