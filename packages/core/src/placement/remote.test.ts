@@ -324,7 +324,8 @@ describe("remote execution of placed nodes", () => {
       const r = await compiled.run({ threadId: "t-gate" });
       expect(r.status).toBe("error");
       expect((r.error as { code?: string }).code).toBe("PLACEMENT_GATE_UNSUPPORTED");
-      expect(r.error?.message).toContain("phase 2");
+      expect(r.error?.message).toContain("gates inside placed subgraphs are not supported");
+      expect(r.error?.message).not.toMatch(/phase/i);
       expect(transport.cancelCalls).toEqual([{ target: "w1", childThreadId: "t-gate/dbl/1" }]);
       expect(transport.dispatchCalls).toHaveLength(1);
     });

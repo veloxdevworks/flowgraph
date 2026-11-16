@@ -183,7 +183,7 @@ Runtime failure cannot be ruled out (a license expires, the app crashes), so:
 - **Checkpoints** for the child live on the worker. `getStateHistory` on the parent returns the pointer; the child's history is fetched from the worker on demand.
 - **Credentials** resolve on the worker. Nothing from the coordinator's environment is sent (same rule as REQ-RT-006).
 
-**Durable waiting (phase 2).** In phase 1 the parent node stays in one long step while the child runs. Phase 2 parks the parent thread as `paused` while the child runs and reconnects on wake. This lets a laptop coordinator sleep through a long remote step, and keeps a long step from running into `activeTtl` on shared databases.
+**Durable waiting.** The parent node currently stays in one long step while the child runs. Parking the parent thread as `paused` while the child runs, and reconnecting on wake, is not available yet. That would let a laptop coordinator sleep through a long remote step, and keep a long step from running into `activeTtl` on shared databases.
 
 ### 9. Transports
 
@@ -209,13 +209,15 @@ State holds artifact references, never file contents. When a placed node runs on
 
 Only artifacts named by the state contract move. Files a step writes but does not return stay on the worker.
 
-Phase-1 limits: uploads are not resumable, the worker never evicts its content store, and transfers go through the coordinator (there is no shared store yet). Uploads are capped by `FLOWGRAPH_ARTIFACT_MAX_BYTES` (default 4 GiB).
+Current limits: uploads are not resumable, the worker never evicts its content store, and transfers go through the coordinator (there is no shared store yet). Uploads are capped by `FLOWGRAPH_ARTIFACT_MAX_BYTES` (default 4 GiB).
 
-## Phases
+## What is available now, and what is not yet
 
-1. **Placement core.** `runsOn` in the spec and validator; topology loading in CLI and desktop; local-host labels; built-in and custom labels with checks; two-stage matching; direct transport; deterministic dispatch with reconnect; event nesting; cancel; artifact stage-in and stage-out by `sha256`.
-2. **Long-running and interactive.** Gate forwarding; durable waiting (park and reconnect); `wait`; `WORKER_REJECTED` handling; the single-node shorthand.
-3. **Scale and cloud.** Connect transport through Platform; `ArtifactStore` with object storage; worker pools and per-worker concurrency limits; `map` fan-out across matching workers.
+**Available now.** `runsOn` in the spec and validator; topology loading in CLI and desktop; local-host labels; built-in and custom labels with checks; two-stage matching; direct transport; deterministic dispatch with reconnect; event nesting; cancel; artifact stage-in and stage-out by `sha256`.
+
+**Not yet: long-running and interactive.** Gate forwarding; durable waiting (park and reconnect); `wait`; `WORKER_REJECTED` handling; the single-node shorthand.
+
+**Not yet: scale and cloud.** Connect transport through Platform; `ArtifactStore` with object storage; worker pools and per-worker concurrency limits; `map` fan-out across matching workers.
 
 ## Out of scope
 
