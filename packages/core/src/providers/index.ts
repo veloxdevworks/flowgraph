@@ -47,4 +47,4 @@ export {
   requireToolApproval,
   type GovernanceCtx,
 } from "./governance.js";
-export { providerConfigDiagnostics } from "./diagnostics.js";
+export { providerConfigDiagnostics, offlineProviderValidations, type ProviderValidation } from "./diagnostics.js";

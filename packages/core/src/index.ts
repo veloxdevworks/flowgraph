@@ -309,6 +309,7 @@ export {
 } from "./providers/langchain/index.js";
 export type {
   ChatModelLike,
+  LangChainModelOverrides,
   LangChainProviderOptions,
   LangChainProviderConfigInput,
   LangChainProviderFromConfigOptions,

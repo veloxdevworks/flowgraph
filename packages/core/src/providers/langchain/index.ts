@@ -1,6 +1,9 @@
 export {
   createLangChainProvider,
   langchainCallOptions,
+  langchainConfigDiagnostics,
+  langchainOverrideFields,
+  type LangChainModelOverrides,
   type ChatModelLike,
   type LangChainProviderOptions,
 } from "./provider.js";
