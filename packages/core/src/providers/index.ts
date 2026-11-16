@@ -1,6 +1,7 @@
 export {
   defineProvider,
   type ProviderAdapter,
+  type ProviderValidateNode,
   type ProviderCapabilities,
   type ProviderRunContext,
   type AgentRequest,

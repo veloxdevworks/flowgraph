@@ -6,6 +6,7 @@ import { ChatAnthropic } from "@langchain/anthropic";
 import { compileGraph, registerTool, type GraphSpec } from "../../index.js";
 import { createLangChainProvider, type ChatModelLike } from "./index.js";
 import { createLangChainProviderFromConfig } from "./factory.js";
+import { providerConfigDiagnostics } from "../diagnostics.js";
 
 // A local stand-in for the vendor HTTP APIs: it records each request body and
 // answers in the vendor's wire format. No request leaves 127.0.0.1.
@@ -192,5 +193,13 @@ describe("LangChain applies node model and maxTokens to real vendor clients", ()
       expect(stub.bodies).toHaveLength(1);
       expect(sent(stub.bodies[0]!)).toEqual({ model: "claude-override", maxTokens: 7 });
     });
+  });
+
+  it("does not warn that ChatOpenAI or ChatAnthropic cannot be rebuilt", () => {
+    const graph = spec([{ id: "a", model: "m", with: { maxTokens: 7 } }]);
+    for (const model of [new ChatOpenAI({ model: "gpt-4o-mini", apiKey: "sk-stub" }), new ChatAnthropic({ model: "claude-3-5-haiku-latest", apiKey: "sk-ant-stub" })]) {
+      const diags = providerConfigDiagnostics(graph, [createLangChainProvider(model as unknown as ChatModelLike)]);
+      expect(diags.filter((d) => d.message.includes("withModelOverrides"))).toEqual([]);
+    }
   });
 });

@@ -27,6 +27,7 @@ import type {
   AgentRequest,
   AgentResult,
   ProviderRunContext,
+  ProviderValidateNode,
   AgentStep,
   TokenUsage,
 } from "../types.js";
@@ -97,6 +98,12 @@ export function langchainOverrideFields(
     for (const key of MAX_TOKEN_FIELDS) if (key in model) fields[key] = overrides.maxTokens;
   }
   return fields;
+}
+
+/** Whether the model records the constructor fields and class a rebuild needs. */
+function canRebuild(model: ChatModelLike): boolean {
+  const Ctor = (model as { constructor?: unknown }).constructor;
+  return typeof Ctor === "function" && Ctor !== Object && langchainOverrideFields(model, {}) !== undefined;
 }
 
 /** Build a new instance of the model's own class with the overrides applied. */
@@ -210,7 +217,21 @@ export function createLangChainProvider(
       ...(options.models ? { models: options.models } : {}),
     },
 
-    validate: langchainConfigDiagnostics,
+    validate(config: unknown, node?: ProviderValidateNode) {
+      const diags = langchainConfigDiagnostics(config);
+      const maxTokens = (config as { maxTokens?: unknown } | undefined)?.maxTokens;
+      const overridden = [
+        ...(node?.model ? ["model"] : []),
+        ...(maxTokens !== undefined ? ["maxTokens"] : []),
+      ];
+      if (overridden.length > 0 && !options.withModelOverrides && !canRebuild(model)) {
+        diags.push({
+          severity: "warning",
+          message: `Node "${node?.id ?? "unknown"}": the LangChain chat model has neither lc_kwargs nor fields, so it cannot be rebuilt with ${overridden.join(" and ")}. They are passed as call options, which chat model clients may ignore. Pass withModelOverrides to createLangChainProvider to apply them.`,
+        });
+      }
+      return diags;
+    },
 
     async run(req: AgentRequest, ctx: ProviderRunContext): Promise<AgentResult> {
       ctx = Object.assign({...ctx}, {[REQUEST_TIMEOUT]: options.requestTimeoutMs === undefined ? 120000 : options.requestTimeoutMs});

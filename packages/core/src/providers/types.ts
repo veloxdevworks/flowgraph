@@ -137,12 +137,22 @@ export interface ProviderRunContext {
   context?: ProviderContextManager;
 }
 
+/** The node a provider `validate()` call is checking. */
+export interface ProviderValidateNode {
+  id: string;
+  model?: string | undefined;
+}
+
 export interface ProviderAdapter {
   name: string;
   capabilities: ProviderCapabilities;
   run(req: AgentRequest, ctx: ProviderRunContext): Promise<AgentResult>;
   stream?(req: AgentRequest, ctx: ProviderRunContext): AsyncIterable<AgentEvent>;
-  validate?(config: unknown): Array<{ severity: "error" | "warning"; message: string }>;
+  /**
+   * Options the provider cannot honor. `node` names the node and the model it
+   * asks for (node `model`, else `config.defaults.model`).
+   */
+  validate?(config: unknown, node?: ProviderValidateNode): Array<{ severity: "error" | "warning"; message: string }>;
 }
 
 export function defineProvider(adapter: ProviderAdapter): ProviderAdapter {
