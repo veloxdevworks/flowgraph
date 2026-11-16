@@ -41,7 +41,7 @@ metadata:
 
 ## 2a. `triggers` (auto-start conditions)
 
-Optional list of **host-interpreted** conditions that should start a run of this graph. The engine validates and round-trips the field but does **not** schedule or listen for these itself — desktop/server hosts own execution. Missed schedules while a host is offline are not replayed (Flowgraph is not a durable DAG/ETL scheduler).
+Optional list of **host-interpreted** conditions that should start a run of this graph. The engine validates and round-trips the field but does **not** schedule or listen for these itself — Flowgraph Desktop interprets them. The CLI, the server, and `compiled.run()` emit a `TRIGGERS_HOST_UNSUPPORTED` warning and ignore them. Missed schedules while a host is offline are not replayed (Flowgraph is not a durable DAG/ETL scheduler).
 
 ```yaml
 triggers:
@@ -221,7 +221,6 @@ nodes:
       labels: [gpu:nvidia]               # required, at least one
       target: render-01                  # optional: pin to one named target
       fallback: local                    # optional: error (default) | local
-      wait: 30m                          # optional: queue for a worker, up to this long
     with: { command: ./upscale.sh }
 ```
 
@@ -232,7 +231,7 @@ nodes:
 - Only top-level nodes are placed. `runsOn` on a node inside an unplaced subgraph (inline, through `uses:`, or a `map` inner node) is an error (`PLACEMENT_NOT_TOP_LEVEL`): it would be ignored and the node run on the coordinator. Set `runsOn` on the top-level subgraph node instead.
 - Two directly connected nodes with the same labels and `target` produce the warning `PLACEMENT_ADJACENT_HOPS`: each is its own round trip through the coordinator, so group them in a subgraph.
 
-A node whose labels the local host satisfies runs in-process as usual. Otherwise the engine dispatches it to a matching worker from the host's topology, or fails before the run starts with `PLACEMENT_UNSATISFIED`. How placed nodes are resolved, named, reconnected and reported is in [07 — Runtime §6a](./07-runtime-and-execution.md#6a-node-placement); the design is [ADR-0020](./adr/0020-node-placement.md). Phase 1 does not forward gates inside a placed subgraph (`PLACEMENT_GATE_PHASE2` warns), does not support `wait`, and does not stage artifacts.
+A node whose labels the local host satisfies runs in-process as usual. Otherwise the engine dispatches it to a matching worker from the host's topology, or fails before the run starts with `PLACEMENT_UNSATISFIED`. How placed nodes are resolved, named, reconnected and reported is in [07 — Runtime §6a](./07-runtime-and-execution.md#6a-node-placement); the design is [ADR-0020](./adr/0020-node-placement.md). `runsOn.wait` is rejected: queueing for a matching worker is not available. Gates inside a placed subgraph are not forwarded (`PLACEMENT_GATE_PHASE2` warns), and artifacts are not staged.
 
 ## 6. `edges`
 

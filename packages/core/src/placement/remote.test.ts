@@ -392,13 +392,15 @@ describe("remote execution of placed nodes", () => {
   });
 
   describe("compile-time failures", () => {
-    it("queued (runsOn.wait) throws and says wait arrives in phase 2", async () => {
+    it("queued (runsOn.wait) throws and says queueing is not supported", async () => {
       const g = fnParent();
       (g.nodes[0] as { runsOn: unknown }).runsOn = { labels: ["os:windows"], wait: "30m" };
       const transport = createFakeTransport({ w1: { labels: { labels: ["os:linux"], flowgraphVersion: "0.42" } } });
       const err = await compileGraph(g, { placement: { localLabels: LOCAL_MAC, topology: topo("w1"), transport } }).catch((e) => e);
       expect(err).toBeInstanceOf(PlacementUnsatisfiedError);
-      expect(err.message).toMatch(/wait.*phase 2/);
+      expect(err.message).toMatch(/runsOn\.wait/);
+      expect(err.message).toMatch(/not supported/);
+      expect(err.message).not.toMatch(/phase/i);
       expect(err.decisions[0].kind).toBe("queued");
     });
 

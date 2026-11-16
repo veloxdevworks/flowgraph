@@ -62,13 +62,12 @@ nodes:
       labels: [gpu:nvidia]
       target: render-01                    # optional: pin to one named target
       fallback: local                      # optional: run here if no worker matches
-      wait: 30m                            # optional: queue until a worker appears
 ```
 
 - `labels` is an all-of list. `anyOf` is deferred until a real case needs it.
 - `target` pins to a named target from the topology (§4). The graph still runs elsewhere if that name is missing and `fallback: local` is set; otherwise it is a preflight error.
 - `fallback` is `error` (default) or `local`. `local` is for steps that run *better* elsewhere, not steps that *can only* run elsewhere.
-- `wait` defaults to none (fail at preflight). With a duration, an unmatched placement queues until a matching worker connects or the duration passes.
+- `wait` is **not part of the v1 schema**. The field is rejected at validation (`runsOn.wait is not supported`). Queueing until a worker appears is not available; remove `wait`, or make a matching worker available now. The object form still accepts `labels`, `target`, and `fallback`.
 
 Validation rules:
 

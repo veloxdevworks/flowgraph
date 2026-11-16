@@ -84,6 +84,7 @@ import {
 import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
 import { cleanupWorktrees } from "./nodes/worktree.js";
 import { registerProvider, providerConfigDiagnostics, type ProviderAdapter } from "./providers/index.js";
+import { hostSupportDiagnostics } from "./runtime/host-support.js";
 import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
 import { GRAPH_MEDIA_PROVIDERS, deriveMediaProviders, type GraphMediaProviders } from "./media/registry.js";
 import type { MediaProvider } from "./media/types.js";
@@ -205,6 +206,11 @@ export interface CompileOptions {
    * subgraphs; run/interrupt lifecycle hooks remain at the root invocation.
    */
   hooks?: Hook[];
+  /**
+   * When true, this host starts runs from `triggers` and compiled.run() will
+   * not warn that it ignores them. Default: false (CLI, server, programmatic).
+   */
+  interpretsTriggers?: boolean;
   /** MCP hub for mcp nodes and intelligent MCP tools (built from mcpServers by CLI). */
   mcp?: McpHub;
   /**
@@ -762,6 +768,15 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     events.emit(startEvent, {
       graphName: graphSpec.metadata.name,
     });
+
+    if (mode === "start") {
+      for (const d of hostSupportDiagnostics(graphSpec, {
+        hostName: "compiled.run()",
+        ...(opts.interpretsTriggers ? { interpretsTriggers: true } : {}),
+      })) {
+        events.emit("run.issue", { code: d.code, severity: d.severity, message: d.message, path: d.path });
+      }
+    }
 
     const requestedCheckpoint = (runOpts as ResumeOptions).checkpointId;
     if (requestedCheckpoint && checkpointer) {

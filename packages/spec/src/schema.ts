@@ -1322,7 +1322,9 @@ export const RunsOnObjectSchema = z
       .enum(["error", "local"])
       .optional()
       .describe("`local` runs the node here when no worker matches (default: error)"),
-    wait: DurationSchema.optional().describe("Queue for a matching worker for up to this long"),
+    wait: relocatedField(
+      "runsOn.wait is not supported; queueing for a matching worker is not available. Remove wait, or make a matching worker available now.",
+    ),
   })
   .strict();
 
@@ -1879,7 +1881,8 @@ export const GraphSpecSchema = z.object({
   metadata: MetadataSchema,
   /**
    * Host-interpreted auto-start conditions (cron, startup, flow-complete, …).
-   * The engine does not schedule these; desktop/server hosts do.
+   * The engine does not schedule these. Flowgraph Desktop interprets them;
+   * the CLI, server, and compiled.run() warn that they ignore them.
    */
   triggers: z.array(TriggerSchema).optional(),
   imports: z.array(ImportSpecSchema).optional(),

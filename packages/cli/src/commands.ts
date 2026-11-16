@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, hostSupportDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildRecoveryCommand } from "./recovery-command.js";
 import { buildMediaCommand } from "./media-command.js";
@@ -179,6 +179,7 @@ program
       const imported = await loadGraphImports(spec, { cwd });
       allDiags.push(...validateSpec(spec));
       allDiags.push(...memoryHostDiagnostics(spec, { memoryBackends: CLI_MEMORY_BACKENDS, hostName: "flowgraph CLI" }));
+      allDiags.push(...hostSupportDiagnostics(spec, { hostName: "flowgraph CLI" }));
 
       if (opts.preflight) {
         const pf = await preflightGraphSkills(spec, {
@@ -267,6 +268,7 @@ program
     const lintDiags = [
       ...validateSpec(spec),
       ...memoryHostDiagnostics(spec, { memoryBackends: CLI_MEMORY_BACKENDS, hostName: "flowgraph CLI" }),
+      ...hostSupportDiagnostics(spec, { hostName: "flowgraph CLI" }),
     ];
     const fatalDiags = [...loadDiags, ...lintDiags].filter(isError);
     if (fatalDiags.length > 0) {
@@ -274,6 +276,8 @@ program
       printDiagnostics(fatalDiags, graphPath);
       throw Object.assign(new Error(`Graph validation failed: ${fatalDiags[0]?.message ?? "invalid graph"}`), {code:"GRAPH_VALIDATION_FAILED",exitCode:2});
     }
+    const hostWarnings = lintDiags.filter((d) => d.severity === "warning" && d.code === "TRIGGERS_HOST_UNSUPPORTED");
+    if (hostWarnings.length) printDiagnostics(hostWarnings, graphPath);
 
     const preflight = await preflightGraphSkills(spec, {
       cwd: graphDir,
