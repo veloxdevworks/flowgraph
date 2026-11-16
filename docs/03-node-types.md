@@ -283,6 +283,8 @@ See `examples/mcp/` for a runnable walkthrough.
 ```yaml
 - id: fetch-prs
   type: http
+  retry: { maxAttempts: 3, retryOn: [429, 502, 503] }   # on the node, not under with
+  timeout: 30s                                          # on the node; overrides runtime.timeoutDefault
   with:
     method: GET
     url: "https://api.github.com/repos/{{ config.vars.repo }}/pulls?state=closed"
@@ -291,10 +293,11 @@ See `examples/mcp/` for a runnable walkthrough.
     query: { per_page: 100 }
     # body: { ... }          # for POST/PUT/PATCH; supports {{ }} interpolation
     expect: { status: [200] }            # assert; non-match ⇒ node error
-    retry: { maxAttempts: 3, retryOn: [429, 502, 503] }
     output:
       map: { prs: "{{ result.body }}" }   # parse JSON by default; result.body/status/headers
 ```
+
+`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.retry` and `with.timeout` on `http` are rejected, with an error that names those fields. Other node types that take a `with.timeout` (for example `shell`, `script`, `wait`, `demo`, and media) still enforce that setting as their operation deadline, inside the node's own `timeout`.
 
 ### `webhook` — outbound HTTP notification
 

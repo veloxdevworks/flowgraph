@@ -190,8 +190,8 @@ nodes:
     with:                         # type-specific config block (validated per type)
       prompt: "Summarize:\n{{ input.issue.body }}"
       output: { to: summary }
-    retry: { maxAttempts: 3, backoff: exponential }   # optional; overrides runtime default
-    timeout: 120s                 # optional
+    retry: { maxAttempts: 3, backoff: exponential }   # optional; overrides runtime.retry
+    timeout: 120s                 # optional; overrides runtime.timeoutDefault
     when: "{{ state.issue != null }}"                  # optional; guard (skip if false)
     on:                           # optional; per-node hook bindings (see docs/06)
       error: continue             # continue | fail | route:<nodeId>
@@ -286,6 +286,8 @@ config:
     jiraProject: "PLAT"
 ```
 
+`config.defaults` may set `provider` and `model` for agent nodes. Retry and timeout are not set here: the graph defaults are `runtime.retry` and `runtime.timeoutDefault`, and a node's own `retry` / `timeout` override those. `config.defaults.retry` and `config.defaults.timeout` are rejected, with an error that names the field to use instead.
+
 Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars. Expansion runs after YAML parsing, so environment values cannot inject YAML structure. `$${VAR}` escapes interpolation in those sections. Node bodies, inputs, state defaults, metadata and keys remain literal; shell `${VAR}` syntax is left for the child shell and its allowed environment. Use `{{ secret.NAME }}` for credentials instead of embedding them in config variables. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
 
 ## 8. Input / output mapping
@@ -341,10 +343,10 @@ runtime:
     terminateOnEnd: true          # stop non-keepAlive `service` processes on completed/error (default)
   hitl:
     onInterrupt: prompt           # prompt | fail | approve | webhook  (per-environment overridable)
-  retry:
+  retry:                          # default for every node that omits retry
     maxAttempts: 2
     backoff: exponential
-  timeoutDefault: 300s
+  timeoutDefault: 300s            # default for every node that omits timeout
   recursionLimit: 50            # max supersteps for graph-level loops (default: 25)
   concurrency: 4                # max parallel branches per superstep
   hooks:

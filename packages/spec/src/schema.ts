@@ -193,6 +193,21 @@ export const RetrySchema = z.object({
 // Duration string: "30s", "5m", "2h"
 export const DurationSchema = z.string().regex(/^\d+(\.\d+)?(ms|s|m|h|d)$/, "Invalid duration");
 
+
+/**
+ * A setting that is not part of the contract. If present, validation fails
+ * with `message`, which should name the canonical field to use instead.
+ */
+function relocatedField(message: string) {
+  return z
+    .any()
+    .superRefine((_value, ctx) => {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    })
+    .optional();
+}
+
+
 // ---------------------------------------------------------------------------
 // Output mapping
 // ---------------------------------------------------------------------------
@@ -470,8 +485,12 @@ export const HttpWithSchema = BaseWithSchema.extend({
   query: z.record(z.unknown()).optional(),
   body: z.unknown().optional(),
   expect: z.object({ status: z.array(z.number()) }).optional(),
-  timeout: DurationSchema.optional(),
-  retry: RetrySchema.optional(),
+  timeout: relocatedField(
+    "http with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
+  ),
+  retry: relocatedField(
+    "http with.retry is not supported; set retry on the node, or runtime.retry as a graph default",
+  ),
 });
 
 const DemoHttpMethodSchema = z.union([
@@ -1374,8 +1393,12 @@ export const ConfigSchema = z.object({
     .object({
       provider: z.string().optional(),
       model: z.string().optional(),
-      retry: RetrySchema.optional(),
-      timeout: DurationSchema.optional(),
+      retry: relocatedField(
+        "config.defaults.retry is not supported; set retry on the node, or runtime.retry as a graph default",
+      ),
+      timeout: relocatedField(
+        "config.defaults.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
+      ),
     })
     .optional(),
   vars: z.record(z.unknown()).optional(),

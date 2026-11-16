@@ -276,7 +276,7 @@ Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/ope
 
 ## 6. Selection, defaults, and validation
 
-- Default provider/model come from `config.defaults` ([02 §config](./02-graph-spec.md#7-config)); per-node `provider:`/`model:` override.
+- Default provider/model come from `config.defaults` ([02 §config](./02-graph-spec.md#7-config)); per-node `provider:`/`model:` override. Retry and timeout are not part of `config.defaults`: use `runtime.retry` / `runtime.timeoutDefault`, or set `retry` / `timeout` on the node.
 - On `flowgraph run`, the CLI reads `providers:` from the graph YAML, constructs LangChain adapters from the built-in core provider, or lazy-loads `@flowgraph/provider-claude` / `@flowgraph/provider-cursor` by `kind`, and passes them to `compileGraph({ providers })`. Missing vendor packages or API keys fail fast with install/env hints.
 - `validate()` runs at compile time: unknown model, builtin tools unsupported by the provider, MCP requested where unsupported, or missing auth env ⇒ diagnostics before any model call.
 
