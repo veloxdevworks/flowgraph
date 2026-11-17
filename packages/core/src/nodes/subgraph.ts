@@ -29,6 +29,7 @@ import { childRunConfig } from "../providers/replay-cache.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
 import { ensureDeclaredOutputChannels } from "../runtime/validate-graph.js";
+import { subgraphHostOptions } from "../runtime/subgraph-host-context.js";
 import { applyOutput, isOutputNone } from "./output.js";
 import {
   projectExplicitOutput,
@@ -265,6 +266,7 @@ async function loadChild(
   };
 
   const { compiledLg } = await compileGraphForEmbedding(spec, {
+    ...subgraphHostOptions(ctx),
     cwd,
     workspace: resolveGraphWorkspace(spec, ctx.workspace),
     sinks: [forwardSink],

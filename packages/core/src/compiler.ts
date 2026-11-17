@@ -99,6 +99,7 @@ import { wrapperSpecForNode } from "./placement/remote.js";
 import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { acquireThreadRun, adoptThreadRunClaim, defaultThreadRunOwner, threadAdmissionError, type ThreadRunClaim } from "./checkpoint/execution-claim.js";
 import { flowFailure } from "./runtime/failure.js";
+import { captureSubgraphHostContext, SUBGRAPH_HOST_CONTEXT } from "./runtime/subgraph-host-context.js";
 import { exclusiveRouting, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
 
 import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
@@ -130,6 +131,7 @@ export interface CompileOptions {
   /** Graph file path — `imports` specifiers resolve relative to this file's directory. */
   graphPath?: string;
   sinks?: EventSink[];
+  /** Only host vars/defaults overrides propagate into in-process subgraphs; other fields stay graph-local. */
   runConfig?: RunConfig;
   checkpointer?: "memory" | "none" | BaseCheckpointSaver;
   /**
@@ -194,7 +196,11 @@ export interface CompileOptions {
   mediaProviders?: MediaProvider[];
   interruptBefore?: string[];
   interruptAfter?: string[];
-  /** Programmatic hooks registered in addition to YAML-bound + default hooks. */
+  /**
+   * Programmatic hooks registered in addition to YAML-bound + default hooks.
+   * Node/agent/skill/router/state/checkpoint hooks also apply to in-process
+   * subgraphs; run/interrupt lifecycle hooks remain at the root invocation.
+   */
   hooks?: Hook[];
   /** MCP hub for mcp nodes and intelligent MCP tools (built from mcpServers by CLI). */
   mcp?: McpHub;
@@ -1430,6 +1436,7 @@ async function assembleCompiledLangGraph(
     store,
   };
   (baseCtx as Record<symbol, unknown>)[SECRET_REDACTION] = redaction;
+  (baseCtx as Record<symbol, unknown>)[SUBGRAPH_HOST_CONTEXT] = captureSubgraphHostContext(opts);
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
   if (opts.nodePolicy) (baseCtx as Record<symbol, unknown>)[NODE_POLICY] = opts.nodePolicy;
   if (opts.providers?.length || opts.nodePolicy) {
