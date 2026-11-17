@@ -249,6 +249,46 @@ for the verified restart procedure and current delivery/validation limitations.
 - A global `runtime.concurrency` caps simultaneous node executions (protects rate limits / resources).
 - Intelligent-node tool calls run within the node; their concurrency is provider-governed.
 
+### Embedded subgraph host capabilities
+
+An in-process `subgraph` borrows the parent's exposed MCP hub, providers and
+node policy. Deterministic `mcp` nodes, resource reads and agent MCP tools work
+at every embedded level without creating or closing another connection. A host
+policy that withholds MCP continues to withhold it in children; a child's
+`mcpServers` declaration cannot create additional host connections.
+
+Host `compileGraph` options have an explicit inheritance boundary:
+
+- `runConfig.vars` and `runConfig.defaults` apply throughout the embedded run
+  tree. These host overrides win over each child's `config.vars/defaults`, just
+  as they do at the root. Parent YAML variables/defaults are not copied into a
+  child; pass graph-specific data through `stateMap.in` or node input instead.
+  Plain records and arrays (including JSON values) are deeply copied into an
+  owned host snapshot and separately for each child, so nested data mutations
+  cannot reach caller, parent or sibling configuration. Opaque host values such
+  as functions and class instances retain their identity and remain shared;
+  accessors are preserved without invoking them during capture. This data copy
+  is not an isolation boundary for opaque capabilities supplied by the host.
+- Programmatic `hooks` for node, agent, skill, router, state and checkpoint
+  phases are registered in each child alongside its own YAML/default hooks,
+  retaining their priority and selectors. Selectors use the child's local node
+  ids, and any routing directive must name a destination in that child. Parent
+  YAML hooks and hooks registered dynamically on a node's hook bus remain local
+  to that graph.
+- Run and interrupt lifecycle hooks belong to the root invocation and are not
+  re-registered in children. Child hooks still receive the root run/thread
+  identity through the existing RunnableConfig scope.
+- Graph directories, execution workspace resolution, channel definitions,
+  skill/agent/subgraph alias maps and other `runConfig` fields remain scoped to
+  their declaring graph. In particular, parent-relative aliases are not
+  reinterpreted against a child's directory.
+
+The root checkpoint/replay scope continues to own nested execution and resume.
+Hosts must supply the approved hub, hooks and overrides again when recompiling
+to resume; those live host objects are not serialized into checkpoints. Remote
+placement has its own worker capability boundary and does not forward these
+in-process objects to another machine.
+
 ## 7. Abortion & cancellation
 
 `runGraph({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written (so the run is resumable), and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this.
