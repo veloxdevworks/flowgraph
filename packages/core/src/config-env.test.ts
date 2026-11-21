@@ -115,6 +115,29 @@ describe("${VAR} expansion in config and runtime", () => {
     expect(run.error?.message).toContain('reads secret "FGQA_CFG_PARENT", which the graph does not declare');
   });
 
+  it("names the file on each file subgraph's diagnostics, so identical ones from two files both show", async () => {
+    const d = await write({});
+    const { mkdir } = await import("node:fs/promises");
+    for (const dir of ["a", "b"]) {
+      await mkdir(join(d, dir));
+      await writeFile(join(d, dir, "child.yaml"), JSON.stringify(graph({ config: { vars: { c: "${FGQA_CFG_PARENT}" } } })));
+    }
+    await writeFile(
+      join(d, "g.yaml"),
+      JSON.stringify(
+        graph({}, [
+          { id: "first", type: "subgraph", uses: "./a/child.yaml" },
+          { id: "second", type: "subgraph", uses: "./b/child.yaml" },
+        ]),
+      ),
+    );
+    const r = await loadGraph(join(d, "g.yaml"));
+    expect(r.diagnostics.map((x) => [x.file, x.code, x.path])).toEqual([
+      [join(d, "a", "child.yaml"), "SECRET_UNDECLARED", "config.vars.c"],
+      [join(d, "b", "child.yaml"), "SECRET_UNDECLARED", "config.vars.c"],
+    ]);
+  });
+
   it("redacts expanded values like other declared secrets, but not graph-authored fallbacks", async () => {
     vi.stubEnv("FGQA_CFG_TOKEN", "config-token-value-1234");
     const d = await write({

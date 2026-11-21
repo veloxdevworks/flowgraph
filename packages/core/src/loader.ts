@@ -132,7 +132,7 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
     const childPath = path.resolve(dir, ref);
     usedFiles.add(childPath);
     const child = await loadGraphFile(childPath, { seen }, cache);
-    diagnostics.push(...child.diagnostics);
+    diagnostics.push(...inFile(child.diagnostics, childPath));
     if (!child.spec) { fatal = true; continue; }
     if (site.out) diagnostics.push(...unknownSubgraphOutputDiagnostics(site, child.spec));
     if (graphHasPlacement(child.spec) || filePlacement.has(child.spec)) {
@@ -148,11 +148,16 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
     const childPath = path.resolve(dir, imp.subgraph);
     if (usedFiles.has(childPath)) continue;
     const child = await loadGraphFile(childPath, { seen }, cache);
-    diagnostics.push(...child.diagnostics);
+    diagnostics.push(...inFile(child.diagnostics, childPath));
     if (!child.spec) fatal = true;
   }
-  const unique = [...new Map(diagnostics.map((d) => [`${d.code}:${d.path}:${d.message}`, d])).values()];
+  const unique = [...new Map(diagnostics.map((d) => [`${d.file}:${d.code}:${d.path}:${d.message}`, d])).values()];
   return { spec: fatal ? null : spec, diagnostics: unique };
+}
+
+/** A file subgraph's diagnostics name its file; ones from deeper files keep theirs. */
+function inFile(diagnostics: Diagnostic[], file: string): Diagnostic[] {
+  return diagnostics.map((d) => (d.file ? d : { ...d, file }));
 }
 
 function isGraphFileRef(ref: string): boolean {

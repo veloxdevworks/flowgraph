@@ -24,7 +24,7 @@ import { printDiagnostics, printBanner, printSuccess, printError, printInfo, pri
 
 /** `loadGraph` and `validateSpec` both report an undeclared `${NAME}` in config; show it once. */
 function uniqueDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
-  return [...new Map(diagnostics.map((d) => [`${d.severity}:${d.code}:${d.path}:${d.message}`, d])).values()];
+  return [...new Map(diagnostics.map((d) => [`${d.file}:${d.severity}:${d.code}:${d.path}:${d.message}`, d])).values()];
 }
 
 function printFailedUsage(result: RunResult): void {
