@@ -174,4 +174,57 @@ describe("http node transcript headers", () => {
       "X-Custom": "visible",
     });
   });
+
+  it("masks the URL and sensitive response headers in the event and registers response secrets", async () => {
+    global.fetch = vi.fn(async () => {
+      const headers = new Headers({
+        "content-type": "application/json",
+        "x-service-token": "custom-response-token",
+        "x-request-id": "req-1",
+      });
+      headers.append("set-cookie", "sid=s3cr3tid; HttpOnly");
+      headers.append("set-cookie", "theme=default; Path=/");
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers,
+        json: async () => ({
+          sid: "s3cr3tid",
+          token: "custom-response-token",
+          pair: "theme=default",
+          text: "use default settings",
+        }),
+      };
+    }) as unknown as typeof fetch;
+    const spec = httpGraph({ url: "https://user:pass@example.com/api?token=query-token&q=1", output: { to: "res" } });
+    spec.state = { channels: { res: { type: "object" } } };
+    spec.runtime = { ...spec.runtime, secrets: { redact: { headers: ["x-service-token"] } } } as GraphSpec["runtime"];
+    const events: FlowgraphEvent[] = [];
+    const r = await (await compileGraph(spec, { sinks: [(e) => { events.push(e); }] })).run({});
+    expect(r.status).toBe("completed");
+
+    const data = events.find((e) => e.type === "node.output")?.data as {
+      request: { url: string };
+      response: { headers: Record<string, string> };
+    };
+    expect(data.request.url).toBe("https://[REDACTED]:[REDACTED]@example.com/api?token=[REDACTED]&q=1");
+    expect(data.response.headers).toEqual({
+      "content-type": "application/json",
+      "set-cookie": "[REDACTED]",
+      "x-service-token": "[REDACTED]",
+      "x-request-id": "req-1",
+    });
+
+    const res = r.state["res"] as { body: Record<string, string>; headers: Record<string, string> };
+    expect(res.body).toEqual({ sid: "[REDACTED]", token: "[REDACTED]", pair: "[REDACTED]", text: "use default settings" });
+    // result.headers is not masked by name: every header stays, and only registered values are redacted.
+    expect(Object.keys(res.headers).sort()).toEqual(["content-type", "set-cookie", "x-request-id", "x-service-token"]);
+    expect(res.headers["content-type"]).toBe("application/json");
+    expect(res.headers["x-request-id"]).toBe("req-1");
+    const text = JSON.stringify({ state: r.state, events });
+    expect(text).not.toContain("s3cr3tid");
+    expect(text).not.toContain("custom-response-token");
+    expect(text).not.toContain("query-token");
+  });
 });

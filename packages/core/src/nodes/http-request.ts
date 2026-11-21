@@ -70,6 +70,8 @@ export type PerformHttpRequestResult = {
   status: number;
   body: unknown;
   headers: Record<string, string>;
+  /** Each Set-Cookie header separately; `headers` joins several into one entry. */
+  setCookies: string[];
   /** Full URL including query string. */
   url: string;
   method: string;
@@ -143,6 +145,7 @@ export async function performHttpRequest(
     status: response.status,
     body: responseBody,
     headers: responseHeaders,
+    setCookies: response.headers.getSetCookie?.() ?? [],
     url: fullUrl,
     method,
     requestHeaders,
