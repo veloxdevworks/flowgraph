@@ -234,4 +234,39 @@ describe("webhook node response headers", () => {
       "x-request-id": "req-1",
     });
   });
+
+  function cookieFetch(cookies: string[], body: Record<string, unknown>) {
+    global.fetch = vi.fn(async () => {
+      const headers = new Headers({ "content-type": "application/json" });
+      for (const c of cookies) headers.append("set-cookie", c);
+      return { ok: true, status: 200, statusText: "OK", headers, json: async () => body };
+    }) as unknown as typeof fetch;
+  }
+
+  it("leaves output alone that only matches a short or ordinary cookie value", async () => {
+    cookieFetch(["theme=default; Path=/", "consent=true", "n=1"], {
+      text: "use default settings",
+      flag: "true",
+      count: "1",
+      pairs: ["theme=default", "consent=true"],
+    });
+    const r = await (await compileGraph(spec(), { checkpointer: "none" })).run({ input: { token: "service-token-789" } });
+    expect(r.status).toBe("completed");
+    expect(r.state["notifyResult"]).toMatchObject({
+      body: { text: "use default settings", flag: "true", count: "1", pairs: ["[REDACTED]", "[REDACTED]"] },
+    });
+  });
+
+  it("masks a long session value and an 8+ character value under a credential-like name", async () => {
+    cookieFetch(["prefs=abcdefghijklmnop; Path=/", "sid=s3cr3tid; HttpOnly", "lang=en-GB-x-a"], {
+      long: "token abcdefghijklmnop here",
+      sid: "s3cr3tid",
+      lang: "en-GB-x-a",
+    });
+    const r = await (await compileGraph(spec(), { checkpointer: "none" })).run({ input: { token: "service-token-789" } });
+    expect(r.status).toBe("completed");
+    expect(r.state["notifyResult"]).toMatchObject({
+      body: { long: "token [REDACTED] here", sid: "[REDACTED]", lang: "en-GB-x-a" },
+    });
+  });
 });

@@ -13,13 +13,23 @@ const DEFAULT_SENSITIVE_HEADERS = [
   "x-auth-token",
 ];
 
-/** `name=value` and the bare value of a Set-Cookie header, without its attributes. */
-function setCookieParts(header: string): string[] {
+const CREDENTIAL_COOKIE_NAME = /sess|sid|token|auth|jwt|secret|key|csrf|xsrf|login|remember|refresh|access/i;
+
+/**
+ * The parts of a Set-Cookie header to redact: `name=value` whenever the value is non-empty, and the
+ * bare value only when it is long enough to be a credential rather than an ordinary word or flag
+ * (16+ characters, or 8+ under a credential-like cookie name). Masking `default` or `true` would
+ * corrupt unrelated run data.
+ */
+export function setCookieRedactions(header: string): string[] {
   const pair = header.split(";", 1)[0]!.trim();
   const eq = pair.indexOf("=");
-  if (eq < 0) return [pair];
-  const value = pair.slice(eq + 1).trim().replace(/^"(.*)"$/, "$1");
-  return value ? [pair, value] : [pair];
+  const name = eq < 0 ? "" : pair.slice(0, eq).trim();
+  const value = (eq < 0 ? pair : pair.slice(eq + 1)).trim().replace(/^"(.*)"$/, "$1");
+  if (!value) return [];
+  const out = eq < 0 ? [] : [pair];
+  if (value.length >= 16 || (value.length >= 8 && CREDENTIAL_COOKIE_NAME.test(name))) out.push(value);
+  return out;
 }
 
 /** Shared by embedded graphs during an invocation; never enumerates the host environment. */
@@ -42,7 +52,7 @@ export class SecretRedaction {
       if (this.isSensitiveHeader(key) && typeof value === "string" && value !== "***" && value !== REDACTED) {
         this.observe(value);
         if (/^Bearer\s+/i.test(value)) this.observe(value.replace(/^Bearer\s+/i, ""));
-        if (key.toLowerCase() === "set-cookie") for (const part of setCookieParts(value)) this.observe(part);
+        if (key.toLowerCase() === "set-cookie") for (const part of setCookieRedactions(value)) this.observe(part);
       }
   }
   fork(): SecretRedaction {

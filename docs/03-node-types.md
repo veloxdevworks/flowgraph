@@ -298,6 +298,8 @@ See `examples/mcp/` for a runnable walkthrough.
       map: { prs: "{{ result.body }}" }   # parse JSON by default; result.body/status/headers
 ```
 
+The request in the `node.output` event shows sensitive headers, and any header listed in `runtime.secrets.redact.headers`, as `[REDACTED]`.
+
 `retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.retry` and `with.timeout` on `http` are rejected, with an error that names those fields. Other node types that take a `with.timeout` (for example `shell`, `script`, `wait`, `demo`, and media) still enforce that setting as their operation deadline, inside the node's own `timeout`.
 
 ### `webhook` — outbound HTTP notification
@@ -312,7 +314,7 @@ See `examples/mcp/` for a runnable walkthrough.
     output: { to: notifyResult }
 ```
 
-Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). A `{{ secret.X }}` in a webhook needs `X` in the graph's top-level `secrets:`, as in `http`. Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. Sensitive response headers such as `Set-Cookie` show as `[REDACTED]` in `result.headers`, and their values are redacted elsewhere too. For each `Set-Cookie`, the cookie's `name=value` and its bare value are redacted as well, so a body that echoes only the session token is masked. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well; a listed header shows as `[REDACTED]` in `result.headers`, the same as a built-in one. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
+Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). A `{{ secret.X }}` in a webhook needs `X` in the graph's top-level `secrets:`, as in `http`. Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. Sensitive response headers such as `Set-Cookie` show as `[REDACTED]` in `result.headers`, and their values are redacted elsewhere too. For each `Set-Cookie`, the cookie's `name=value` is redacted as well. Its bare value is redacted on its own only when it is at least 16 characters, or at least 8 under a credential-like cookie name (one containing `sess`, `sid`, `token`, `auth`, `jwt`, `secret`, `key`, `csrf`, `xsrf`, `login`, `remember`, `refresh` or `access`), so a body that echoes only a session token is masked while values such as `default` from `theme=default` or `true` from `consent=true` stay readable elsewhere in the run. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well; a listed header shows as `[REDACTED]` in `result.headers`, the same as a built-in one. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
@@ -1215,7 +1217,7 @@ A gate that lists a failed capture in `with.artifacts` adds a "Capture problems"
 
 ### What transcripts mask
 
-`http` transcripts, and the `request` / `response` in the result, mask sensitive headers, sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. This is best effort: a secret under an innocent name in a response body stays visible. `steps` results mask the same way: a `fill` value holding a secret is recorded as `[REDACTED]` whatever its length, and steps, assertions, console messages and Playwright's own errors all pass through the same masking, including percent-encoded forms of a secret, though a secret shorter than 6 characters is only masked in `fill`. A `label` or `objective` is masked in every mode, including in the file names a label produces. Screenshots and videos are not masked.
+`http` transcripts, and the `request` / `response` in the result, mask sensitive headers (including names in `runtime.secrets.redact.headers`), sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. Every masked value shows as `[REDACTED]`, the same marker `http` events and `webhook` results use. This is best effort: a secret under an innocent name in a response body stays visible. `steps` results mask the same way: a `fill` value holding a secret is recorded as `[REDACTED]` whatever its length, and steps, assertions, console messages and Playwright's own errors all pass through the same masking, including percent-encoded forms of a secret, though a secret shorter than 6 characters is only masked in `fill`. A `label` or `objective` is masked in every mode, including in the file names a label produces. Screenshots and videos are not masked.
 
 ### Result shape
 

@@ -2,35 +2,20 @@
  * Shared outbound HTTP request helper used by the `http` and `demo` nodes.
  */
 
-import { observeSensitiveHeaders } from "../runtime/secret-redaction.js";
+import { maskSensitiveHeaders, observeSensitiveHeaders, REDACTED } from "../runtime/secret-redaction.js";
 import { guardedFetch, type OutboundHttpPolicy } from "../outbound-http.js";
 
-/** Header names whose values must never appear in event telemetry. */
-const SENSITIVE_HEADERS = new Set([
-  "authorization",
-  "cookie",
-  "set-cookie",
-  "x-api-key",
-  "api-key",
-  "proxy-authorization",
-  "x-auth-token",
-]);
-
-/** Mask sensitive header values before emitting them in events. */
-export function redactHeaders(
-  headers: Record<string, string> | undefined,
-): Record<string, string> {
-  if (!headers) return {};
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    out[key] = SENSITIVE_HEADERS.has(key.toLowerCase()) ? "***" : value;
-  }
-  return out;
+/** Mask sensitive header values, including names in `runtime.secrets.redact.headers`, before emitting them in events. */
+export function redactHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  return maskSensitiveHeaders(headers);
 }
 
 /** Field and query-parameter names whose values are masked in saved transcripts. */
 const SENSITIVE_NAME =
   /pass(word|wd|phrase)?$|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|^auth$|authorization|credential|cookie|session|signature|^sig$|^code$/i;
+
+/** URL serialization percent-encodes the brackets in {@link REDACTED}; this stand-in survives it. */
+const URL_PLACEHOLDER = "FLOWGRAPHREDACTEDURLPART";
 
 /** Mask credentials in a URL (user info, sensitive query parameters), keeping the rest readable. */
 export function redactUrlSecrets(url: string): string {
@@ -40,12 +25,12 @@ export function redactUrlSecrets(url: string): string {
   } catch {
     return url;
   }
-  if (u.username) u.username = "***";
-  if (u.password) u.password = "***";
+  if (u.username) u.username = URL_PLACEHOLDER;
+  if (u.password) u.password = URL_PLACEHOLDER;
   for (const name of [...u.searchParams.keys()]) {
-    if (SENSITIVE_NAME.test(name)) u.searchParams.set(name, "***");
+    if (SENSITIVE_NAME.test(name)) u.searchParams.set(name, URL_PLACEHOLDER);
   }
-  return u.toString();
+  return u.toString().replaceAll(URL_PLACEHOLDER, REDACTED);
 }
 
 /**
@@ -58,7 +43,7 @@ export function redactSensitiveFields(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, v]) => [
         key,
-        typeof v === "string" && SENSITIVE_NAME.test(key) ? "***" : redactSensitiveFields(v),
+        typeof v === "string" && SENSITIVE_NAME.test(key) ? REDACTED : redactSensitiveFields(v),
       ]),
     );
   }

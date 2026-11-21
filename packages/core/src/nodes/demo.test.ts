@@ -61,6 +61,43 @@ describe("demo node", () => {
     vi.restoreAllMocks();
   });
 
+  it("http mode masks the transcript with the shared marker", async () => {
+    const workspace = mkWorkspace();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ session: "server-session", note: "ok" }), {
+            status: 200,
+            headers: { "content-type": "application/json", "set-cookie": "sid=cookie-session-value; HttpOnly" },
+          }),
+      ),
+    );
+    const spec = demoGraph({
+      http: {
+        url: "https://user:pass@example.com/api?token=query-token&q=1",
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "X-Service-Token": "custom-token-value" },
+        body: { password: "hunter2", name: "n" },
+      },
+      output: { to: "demo" },
+    });
+    spec.runtime = { ...spec.runtime, secrets: { redact: { headers: ["x-service-token"] } } } as GraphSpec["runtime"];
+    const result = await (await compileGraph(spec, { cwd: workspace })).run({ threadId: "demo-marker" });
+    expect(result.status).toBe("completed");
+    const out = result.state["demo"] as { path: string };
+    const transcript = JSON.parse(fs.readFileSync(out.path, "utf8")) as {
+      request: { url: string; headers: Record<string, string>; body: Record<string, string> };
+      response: { headers: Record<string, string>; body: Record<string, string> };
+    };
+    expect(transcript.request.url).toBe("https://[REDACTED]:[REDACTED]@example.com/api?token=[REDACTED]&q=1");
+    expect(transcript.request.headers).toMatchObject({ Authorization: "[REDACTED]", "X-Service-Token": "[REDACTED]" });
+    expect(transcript.request.body).toEqual({ password: "[REDACTED]", name: "n" });
+    expect(transcript.response.headers["set-cookie"]).toBe("[REDACTED]");
+    expect(transcript.response.body).toEqual({ session: "[REDACTED]", note: "ok" });
+    expect(JSON.stringify(transcript)).not.toContain("***");
+  });
+
   it("http mode writes a transcript artifact and maps output", async () => {
     const workspace = mkWorkspace();
     const fetchMock = vi.fn(
@@ -107,7 +144,7 @@ describe("demo node", () => {
     expect(out.kind).toBe("http");
     expect(out.response.status).toBe(200);
     expect(out.response.body).toEqual({ hello: "world" });
-    expect(out.request.headers.Authorization).toBe("***");
+    expect(out.request.headers.Authorization).toBe("[REDACTED]");
     expect(fs.existsSync(out.path)).toBe(true);
     expect(out.path.startsWith(demoArtifactDir(workspace, "demo-http", "capture"))).toBe(true);
     expect(out.path).toContain(path.join(".flowgraph", "artifacts", "demo-http", "capture"));
@@ -115,7 +152,7 @@ describe("demo node", () => {
     const transcript = JSON.parse(fs.readFileSync(out.path, "utf8")) as {
       request: { headers: Record<string, string> };
     };
-    expect(transcript.request.headers.Authorization).toBe("***");
+    expect(transcript.request.headers.Authorization).toBe("[REDACTED]");
 
     const outputEvt = events.find((e) => e.type === "node.output");
     expect(outputEvt?.scope.nodeId).toBe("capture");
