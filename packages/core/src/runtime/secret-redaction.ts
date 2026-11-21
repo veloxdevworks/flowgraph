@@ -14,7 +14,11 @@ const DEFAULT_SENSITIVE_HEADERS = [
 ];
 
 /** Whole name segments that mark a credential cookie; `monkey` or `Access-Mode` do not qualify. */
-const CREDENTIAL_COOKIE_WORDS = new Set(["sess", "session", "sid", "token", "auth", "jwt", "secret", "key", "csrf", "xsrf", "login", "remember", "refresh"]);
+const CREDENTIAL_COOKIE_WORDS = new Set([
+  "sess", "session", "sid", "token", "auth", "jwt", "secret", "key", "csrf", "xsrf", "login", "remember", "refresh",
+  // Common names written as one word, which segmentation cannot split.
+  "sessionid", "sessid", "phpsessid", "jsessionid", "csrftoken", "apikey",
+]);
 
 /** Split a cookie name on `-`, `_`, `.` and case boundaries: `refreshToken` → refresh, token; `XSRFToken` → xsrf, token. */
 function cookieNameSegments(name: string): string[] {
