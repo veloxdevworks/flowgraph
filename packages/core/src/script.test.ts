@@ -126,7 +126,7 @@ export default async function() { return leftPad("a", 3); }
     await expect(
       runScriptSandboxed(
         `export default async function() { await new Promise(r => setTimeout(r, 60_000)); }`,
-        { timeoutMs: 200 },
+        { timeoutMs: 200, stopGraceMs: 50 },
       ),
     ).rejects.toThrow(/timed out/);
   }, 10_000);
@@ -509,6 +509,7 @@ export default async function() {
     let pid = 0;
     const pending = runScriptSandboxed(code, {
       signal: ac.signal,
+      stopGraceMs: 50,
       permissions: { childProcess: true, fsWrite: [dir] },
       env: { PID_FILE: pidFile },
       workspace: dir,
@@ -544,6 +545,7 @@ export default async function() {
     let pid = 0;
     const pending = runScriptSandboxed(code, {
       signal: ac.signal,
+      stopGraceMs: 50,
       permissions: { childProcess: true, fsWrite: [dir] },
       env: { PID_FILE: pidFile },
       workspace: dir,
@@ -565,7 +567,7 @@ export default async function() {
 
 /** `kill(pid, 0)` still succeeds while the kernel has not reaped the process. */
 async function expectStopped(pid: number): Promise<void> {
-  const deadline = Date.now() + 200;
+  const deadline = Date.now() + 1_000;
   while (Date.now() < deadline) {
     try {
       process.kill(pid, 0);

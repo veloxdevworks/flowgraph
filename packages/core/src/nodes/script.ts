@@ -46,6 +46,8 @@ export type RunScriptSandboxedOptions = {
   input?: unknown;
   env?: Record<string, string>;
   timeoutMs?: number;
+  /** How long a stop waits for the direct child before SIGKILL. Defaults to 2s. */
+  stopGraceMs?: number;
   permissions?: ScriptPermissions;
   signal?: AbortSignal;
   /**
@@ -119,6 +121,7 @@ export async function runScriptSandboxed(
       cwd,
       env,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
     });
 
@@ -387,11 +390,12 @@ export const scriptNode = defineNode<Config>({
 });
 
 /**
- * After SIGTERM, always SIGKILL the process group. The direct child often exits
- * on SIGTERM and would otherwise cancel this timer, leaving a grandchild that
- * ignores SIGTERM reparented to init.
+ * After SIGTERM, SIGKILL the process group. If the direct child is still
+ * running, wait this long so it can exit on its own. If it has already
+ * closed, SIGKILL immediately so a grandchild that ignores SIGTERM is not
+ * left reparented to init.
  */
-const STOP_GRACE_MS = 2_000;
+const DEFAULT_STOP_GRACE_MS = 2_000;
 
 function runProcess(opts: {
   command: string;
@@ -399,9 +403,11 @@ function runProcess(opts: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  stopGraceMs?: number;
   signal?: AbortSignal;
 }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const { command, args, cwd, env, timeoutMs, signal } = opts;
+  const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -458,15 +464,24 @@ function runProcess(opts: {
       resolve({ stdout, stderr, exitCode: closeResult?.exitCode ?? 1 });
     };
 
-    // A requested stop always reaches SIGKILL, even when `close` already ran.
+    const finishStop = () => {
+      if (grace) clearTimeout(grace);
+      grace = undefined;
+      killGroup("SIGKILL");
+      settle();
+    };
+
+    // Wait out the grace only while the direct child is still running.
     const requestStop = (reason: Error) => {
       if (stopReason) return;
       stopReason = reason;
       killGroup("SIGTERM");
-      grace = setTimeout(() => {
-        killGroup("SIGKILL");
-        settle();
-      }, STOP_GRACE_MS);
+      if (settled) return;
+      if (closeResult) {
+        finishStop();
+        return;
+      }
+      grace = setTimeout(finishStop, stopGraceMs);
     };
 
     const onAbort = () => {
@@ -484,8 +499,11 @@ function runProcess(opts: {
 
     const noteClose = (err?: Error, exitCode = 1) => {
       if (!closeResult?.err) closeResult = { ...(err ? { err } : {}), exitCode };
-      if (grace) return;
-      settle();
+      if (!stopReason) {
+        settle();
+        return;
+      }
+      finishStop();
     };
 
     const overflow = (which: "stdout" | "stderr") => {
