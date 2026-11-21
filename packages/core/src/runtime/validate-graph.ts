@@ -1307,7 +1307,7 @@ export interface GraphStructureOptions {
  *
  * - hook phases and directives are known
  * - node ids are unique; edges name known nodes; `END` is never a source and
- *   `START` never an edge target; there is an edge from `START`
+ *   `START` never an edge, router or hitl route target; there is an edge from `START`
  * - every node type is registered and its `with` matches that type's schema
  *
  * `compileGraph` refuses a spec with any error among these. `validateSpec`
@@ -1368,7 +1368,13 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
     if ("branch" in edge) for (const b of edge.branch) allTargets.add(b.to);
   }
   // A router's or routing hitl's own `with.routes` also lead somewhere.
-  for (const node of nodes) for (const t of declaredRouteTargets(spec, node.id)) allTargets.add(t);
+  for (const node of nodes) {
+    const routeTargets = declaredRouteTargets(spec, node.id);
+    for (const t of routeTargets) allTargets.add(t);
+    if (routeTargets.includes("START")) {
+      push({ severity: "error", code: "ROUTE_TO_START", path: `nodes.${node.id}.with.routes`, message: `${node.type === "hitl" ? "Hitl" : "Router"} "${node.id}" has a route to "START". Route to the first node instead.` });
+    }
+  }
   for (const node of nodes) {
     if (!allTargets.has(node.id)) push({ severity: "warning", code: "NO_INBOUND_EDGE", message: `Node "${node.id}" has no inbound edges`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
   }

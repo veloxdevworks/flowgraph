@@ -124,6 +124,20 @@ describe("edges into START and out of END", () => {
     expect(found.map((d) => d.path)).toEqual(["edges[2]", "edges[3]"]);
     await expect(compileGraph(spec)).rejects.toMatchObject({ code: "EDGE_TO_START" });
   });
+
+  it("rejects START as a router route target", async () => {
+    const spec = graph([{ id: "r", type: "router", with: { mode: "rules", routes: { again: { default: true, to: "START" } } } }]);
+    expect(errors(validateSpec(spec))).toContainEqual(expect.objectContaining({ code: "ROUTE_TO_START", path: "nodes.r.with.routes" }));
+    await expect(compileGraph(spec)).rejects.toMatchObject({ code: "ROUTE_TO_START" });
+  });
+
+  it("rejects START as a hitl route target, including inside an inline spec", async () => {
+    const gate = { id: "h", type: "hitl", with: { message: "ok?", routes: { approved: "START", rejected: "END" } } };
+    expect(errors(validateSpec(graph([gate])))).toContainEqual(expect.objectContaining({ code: "ROUTE_TO_START", path: "nodes.h.with.routes" }));
+    const nestedSpec = graph([inline([gate])]);
+    expect(errors(validateSpec(nestedSpec))).toContainEqual(expect.objectContaining({ code: "ROUTE_TO_START", path: "nodes.sub.spec.nodes.h.with.routes" }));
+    await expect(compileGraph(nestedSpec)).rejects.toMatchObject({ code: "ROUTE_TO_START" });
+  });
 });
 
 describe("body lints have the same severity at compile time at every level", () => {
