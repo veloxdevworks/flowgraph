@@ -336,7 +336,7 @@ describe("async jobs and the journal", () => {
     expect(left).toHaveLength(1);
   });
 
-  it("does not cancel the vendor job on a node timeout, so a retry can re-attach", async () => {
+  it("does not cancel the vendor job on a job deadline, so a retry can re-attach", async () => {
     const calls = newCalls();
     const provider = asyncProvider(calls, [{ state: "running" }], { pollIntervalMs: 10_000 });
     const g = graph([
@@ -347,6 +347,35 @@ describe("async jobs and the journal", () => {
     expect(String(res.error?.message ?? res.error)).toMatch(/still running after 5s/);
     expect(calls.cancel).toBe(0);
     const left = await readdir(path.join(dir, ".flowgraph", "jobs", "tn"));
+    expect(left).toHaveLength(1);
+  });
+
+  it("does not cancel the vendor job when the node aborts during poll", async () => {
+    const calls = newCalls();
+    const provider = asyncProvider(calls, [], {
+      poll(_handle, ctx) {
+        calls.poll++;
+        return new Promise<JobStatus>((_resolve, reject) => {
+          const signal = ctx.signal;
+          if (!signal) {
+            reject(new Error("missing signal"));
+            return;
+          }
+          const fail = () => reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted"));
+          if (signal.aborted) {
+            fail();
+            return;
+          }
+          signal.addEventListener("abort", fail, { once: true });
+        });
+      },
+    });
+    const g = graph([{ id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x" } }]);
+    const res = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "ta-poll" });
+    expect(res.status).toBe("error");
+    expect(String(res.error?.message ?? res.error)).toMatch(/timed out/);
+    expect(calls.cancel).toBe(0);
+    const left = await readdir(path.join(dir, ".flowgraph", "jobs", "ta-poll"));
     expect(left).toHaveLength(1);
   });
 
