@@ -149,6 +149,8 @@ imports:
 - `nodes:` — load a plugin package that registers custom node `type`s into the registry.
 - `reducers:` — load a module that registers custom state reducers (`custom:<name>`). The module may call `registry.registerReducer` on load, or `export default` a record of `{ [name]: (cur, inc) => next }` (or an array of `{ name, reducer }`).
 
+`flowgraph validate` reads every import but does not load `nodes`, `providers` or `reducers` modules. Those modules load when the graph runs. A node type that is not already registered is an error (`UNKNOWN_NODE_TYPE`). Once the graph declares a `nodes` import, that same type — including a typo — is a warning, `PLUGIN_TYPE_UNRESOLVED`, because validate does not load the module and cannot tell a plugin type from a misspelling. A `custom:` reducer is an error unless the graph declares a `reducers` import, in which case it is a warning, `UNREGISTERED_REDUCER`. `flowgraph validate --strict` treats those warnings as errors.
+
 Resolution order for path/package specifiers: relative path → workspace alias → node module. See [04 — Skills](./04-skills.md) for skill resolution details and [16 — Agents](./16-agents.md) for agent definitions.
 
 ## 4. `state`

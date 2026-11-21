@@ -113,7 +113,7 @@ registry.registerReducer("uniqueById", (cur: Item[] = [], inc: Item | Item[]) =>
 findings: { type: array, reducer: "custom:uniqueById" }
 ```
 
-`custom:<name>` reducers must be registered before `compileGraph` / `flowgraph run` — via `registry.registerReducer` in app bootstrap or `imports: [{ reducers: "./my-reducers.ts" }]` in the graph YAML. An unregistered name is an error at validate/compile time (no silent fallback to last-write-wins).
+`custom:<name>` reducers must be registered before `compileGraph` / `flowgraph run` — via `registry.registerReducer` in app bootstrap or `imports: [{ reducers: "./my-reducers.ts" }]` in the graph YAML. `flowgraph validate` does not load that module. With a `reducers` import declared, the name is a warning (`UNREGISTERED_REDUCER`); without one it is an error. An unregistered name is also an error when the graph runs (no silent fallback to last-write-wins).
 
 `flowgraph validate` also reports fan-in `lastWrite` risks, reducer/type mismatches, undeclared output channels (`UNDECLARED_OUTPUT_CHANNEL`), and reachability warnings offline.
 

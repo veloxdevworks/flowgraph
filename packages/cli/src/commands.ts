@@ -2,7 +2,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, hostSupportDiagnostics, compileGraph, consoleSink, loadGraphImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, hostSupportDiagnostics, compileGraph, consoleSink, loadGraphImports, readGraphImportAliases, withUnresolvedImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema } from "@flowgraph/spec";
 import { buildRecoveryCommand } from "./recovery-command.js";
 import { buildMediaCommand } from "./media-command.js";
@@ -176,10 +176,13 @@ program
     const allDiags = [...loadDiags];
 
     if (spec) {
-      const imported = await loadGraphImports(spec, { cwd });
-      allDiags.push(...validateSpec(spec));
-      allDiags.push(...memoryHostDiagnostics(spec, { memoryBackends: CLI_MEMORY_BACKENDS, hostName: "flowgraph CLI" }));
-      allDiags.push(...hostSupportDiagnostics(spec, { hostName: "flowgraph CLI" }));
+      // Aliases only. nodes/providers/reducers modules stay unloaded.
+      const imported = readGraphImportAliases(spec);
+      allDiags.push(...withUnresolvedImports(spec, [
+        ...validateSpec(spec),
+        ...memoryHostDiagnostics(spec, { memoryBackends: CLI_MEMORY_BACKENDS, hostName: "flowgraph CLI" }),
+        ...hostSupportDiagnostics(spec, { hostName: "flowgraph CLI" }),
+      ]));
 
       if (opts.preflight) {
         const pf = await preflightGraphSkills(spec, {

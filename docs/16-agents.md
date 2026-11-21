@@ -14,6 +14,8 @@ agents/
 
 ## 2. `AGENT.md` front-matter
 
+Front matter is YAML only. The opening fence is `---`, or `---yaml` / `---yml`. Any other engine, including `---js`, is rejected when the file is loaded (`AGENT_FRONT_MATTER_ERROR`) and is not evaluated.
+
 ````markdown
 ---
 apiVersion: flowgraph/v1

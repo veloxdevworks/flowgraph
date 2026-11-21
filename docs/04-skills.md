@@ -19,6 +19,8 @@ A skill can also be a **single `SKILL.md`** with everything inline. Directory fo
 
 ## 2. `SKILL.md` front-matter
 
+Front matter is YAML only. The opening fence is `---`, or `---yaml` / `---yml`. Any other engine, including `---js`, is rejected when the skill is loaded (`SKILL_FRONT_MATTER_ERROR`) and is not evaluated.
+
 ````markdown
 ---
 apiVersion: flowgraph/v1
@@ -83,7 +85,7 @@ When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 | `kind_of` | How the skill executes — see §3. |
 | `inputs` / `outputs` | The **contract**: a map of name → JSON Schema (draft-07), the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as hitl forms and agent output. Each input value is checked against its schema before the skill runs. An input's `required: true` means the caller must pass it (default `false`); a `required: [a, b]` list keeps its JSON Schema meaning for an object-typed input. |
 | `env.vars` | Required env vars; `secret: true` ⇒ resolved via SecretProvider + redacted. |
-| `env.bin` | Required executables on PATH (with `optional`). |
+| `env.bin` | Required executables on PATH (with `optional`). `name` is one executable name — letters, digits, `.`, `_`, `+` or `-` — not a path or a shell command. Preflight looks it up with `which` / `where` and no shell. |
 | `env.network` | Whether outbound network is needed (preflight can fail in offline CI). |
 | `env.node` / `env.packages` | Engine + npm deps for executable skills. |
 | `handler` / `command` | Execution target per `kind_of`. |
@@ -138,7 +140,7 @@ A skill's declared `outputs` are its documented promise to the graph; keep them 
 
 Because skills declare `env`, flowgraph can answer **"is this environment set up to run this node?"** before (and independently of) execution.
 
-- `flowgraph skills doctor` / `flowgraph validate --preflight` walks every referenced skill and checks: required env vars present, secret vars resolvable, `bin` on PATH, `node` engine satisfied, network availability (if required), and `packages` installed (for executable skills).
+- `flowgraph skills doctor` / `flowgraph validate --preflight` walks every referenced skill and checks: required env vars present, secret vars resolvable, `bin` on PATH (one executable name, looked up with `which` / `where` and no shell), `node` engine satisfied, network availability (if required), and `packages` installed (for executable skills).
 - Results are reported as a table; missing **required** deps are errors, missing **optional** deps are warnings.
 - Preflight runs automatically at compile time (cheap checks) and is **deep-checked at run start** so a graph fails fast — *before* doing partial work — if the environment can't satisfy a downstream skill.
 - The check is also exposed programmatically (`checkSkillEnv(skill, ctx) => Diagnostics`) so the future GUI can show green/red readiness per node.

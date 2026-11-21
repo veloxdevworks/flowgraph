@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import * as esbuild from "esbuild";
-import type { GraphSpec } from "@flowgraph/spec";
+import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { registry, type NodeFactory, type ReducerFn } from "../registry.js";
 import { registerProvider, type ProviderAdapter } from "../providers/index.js";
 
@@ -115,7 +115,10 @@ async function importResolvedPath(resolved: string): Promise<Record<string, unkn
   return (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;
 }
 
-async function importModuleSpecifier(specifier: string, cwd: string): Promise<Record<string, unknown>> {
+async function importModuleSpecifier(
+  specifier: string,
+  cwd: string,
+): Promise<Record<string, unknown>> {
   if (specifier.startsWith(".") || specifier.startsWith("/") || /^[a-zA-Z]:\\/.test(specifier)) {
     const resolved = path.resolve(cwd, specifier);
     return importResolvedPath(resolved);
@@ -162,17 +165,66 @@ async function loadReducerImport(specifier: string, cwd: string): Promise<void> 
 }
 
 /**
- * Load all imports from a graph spec. Must run before validateSpec (for custom
- * reducers) and before buildStateAnnotation / node compilation.
+ * Read skill, agent and subgraph aliases from `imports`.
+ * Does not read or execute modules.
+ */
+export function readGraphImportAliases(spec: GraphSpec): LoadGraphImportsResult {
+  const skillAliases: Record<string, string> = {};
+  const agentAliases: Record<string, string> = {};
+  const subgraphAliases: Record<string, string> = {};
+
+  for (const imp of spec.imports ?? []) {
+    if ("skill" in imp) skillAliases[imp.as ?? imp.skill] = imp.skill;
+    else if ("agent" in imp) agentAliases[imp.as ?? imp.agent] = imp.agent;
+    else if ("subgraph" in imp) subgraphAliases[imp.as ?? imp.subgraph] = imp.subgraph;
+  }
+
+  return { skillAliases, agentAliases, subgraphAliases };
+}
+
+/**
+ * Rewrite static diagnostics for types and reducers that only an import module
+ * would register. Validate does not load those modules, so a declared `nodes`
+ * or `reducers` import turns the matching diagnostic into a warning. An unknown
+ * type or reducer with no matching import stays an error. A typo is a warning
+ * once a `nodes` import exists, because validate cannot tell it from a plugin type.
+ */
+export function withUnresolvedImports(spec: GraphSpec, diagnostics: Diagnostic[]): Diagnostic[] {
+  const imports = spec.imports ?? [];
+  const hasNodes = imports.some((imp) => "nodes" in imp);
+  const hasReducers = imports.some((imp) => "reducers" in imp);
+  if (!hasNodes && !hasReducers) return diagnostics;
+  return diagnostics.map((d) => {
+    if (hasNodes && d.code === "UNKNOWN_NODE_TYPE") {
+      return {
+        ...d,
+        severity: "warning",
+        code: "PLUGIN_TYPE_UNRESOLVED",
+        message: `${d.message}. Validate does not load imports, so this type stays unresolved.`,
+      };
+    }
+    if (hasReducers && d.code === "UNREGISTERED_REDUCER") {
+      return {
+        ...d,
+        severity: "warning",
+        message: `${d.message.replace("before validating or compiling.", "before the graph runs.")} Validate does not load reducer imports, so this reducer stays unresolved.`,
+      };
+    }
+    return d;
+  });
+}
+
+/**
+ * Load and execute `nodes`, `providers` and `reducers` modules.
+ * `flowgraph validate` and other static checks must use `readGraphImportAliases`
+ * instead. Run and compile call this because the graph is about to execute.
  */
 export async function loadGraphImports(
   spec: GraphSpec,
   opts: LoadGraphImportsOptions = {},
 ): Promise<LoadGraphImportsResult> {
   const cwd = opts.cwd ?? process.cwd();
-  const skillAliases: Record<string, string> = {};
-  const agentAliases: Record<string, string> = {};
-  const subgraphAliases: Record<string, string> = {};
+  const aliases = readGraphImportAliases(spec);
 
   for (const imp of spec.imports ?? []) {
     if ("nodes" in imp) {
@@ -187,16 +239,10 @@ export async function loadGraphImports(
       for (const p of provs) registerProvider(p);
     } else if ("reducers" in imp) {
       await loadReducerImport(imp.reducers, cwd);
-    } else if ("skill" in imp) {
-      skillAliases[imp.as ?? imp.skill] = imp.skill;
-    } else if ("agent" in imp) {
-      agentAliases[imp.as ?? imp.agent] = imp.agent;
-    } else if ("subgraph" in imp) {
-      subgraphAliases[imp.as ?? imp.subgraph] = imp.subgraph;
     }
   }
 
-  return { skillAliases, agentAliases, subgraphAliases };
+  return aliases;
 }
 
 function normalizeDefaultExport<T>(value: unknown): T[] {
