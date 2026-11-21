@@ -272,7 +272,9 @@ nodes:
     with: { prompt: "Summarize {{ state.issue.title }}" }     # {{ }} = expr, per run
 ```
 
-> **Shell bodies:** load-time `${ENV}` expansion touches only `config` and `runtime`, so `${SLUG}` or `${SPEC_SLUG:-}` in a `shell` node's `command` / `args` / `env` is left for the child shell, which sees only its allowed environment and `with.env`. An undeclared `${NAME}` in `config` or `runtime` is not expanded and is reported as `SECRET_UNDECLARED` ([02 §7](./02-graph-spec.md#7-config)).
+`${ENV}` follows one rule, described in [02 §7](./02-graph-spec.md#7-config), and it is the same in the CLI and on the hosted server (for trusted authors; untrusted uploads may not contain placeholders). The server stores and returns the YAML as uploaded and fills placeholders only into the graph it builds for each run.
+
+> **Shell bodies:** load-time `${ENV}` expansion touches only `config` and `runtime`, so `${SLUG}` or `${SPEC_SLUG:-}` in a `shell` node's `command` / `args` / `env` is left for the child shell, which sees only its allowed environment and `with.env`. An undeclared `${NAME}` in `config` or `runtime` is not expanded and is reported as `SECRET_UNDECLARED`.
 
 ## 6. Expression scope objects
 
