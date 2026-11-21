@@ -37,6 +37,7 @@ import {
   parseGraphYaml,
   persistGraph,
   loadPersistedGraph,
+  redactExpandedError,
   redactExpandedValues,
   readPersistedGraphYaml,
   readGraphMeta,
@@ -1493,22 +1494,4 @@ export class RunService {
       return [];
     }
   }
-}
-
-/**
- * `err` with every value expanded from the server environment into `spec`
- * replaced in its message and diagnostics, keeping its class, status and code.
- */
-function redactExpandedError(spec: GraphSpec, err: unknown): unknown {
-  if (!(err instanceof Error)) return typeof err === "string" ? redactExpandedValues(spec, err) : err;
-  err.message = redactExpandedValues(spec, err.message);
-  const diagnostics = (err as { diagnostics?: unknown }).diagnostics;
-  if (Array.isArray(diagnostics)) {
-    for (const d of diagnostics) {
-      if (d && typeof d === "object" && typeof (d as { message?: unknown }).message === "string") {
-        (d as { message: string }).message = redactExpandedValues(spec, (d as { message: string }).message);
-      }
-    }
-  }
-  return err;
 }

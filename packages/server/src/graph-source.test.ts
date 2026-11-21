@@ -2,7 +2,16 @@ import { describe, expect, it } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { persistGraph, listPersistedGraphs, loadPersistedGraph, parseGraphYaml, appendEventJournal, loadEventJournal } from "./graph-source.js";
+import {
+  persistGraph,
+  listPersistedGraphs,
+  loadPersistedGraph,
+  parseGraphYaml,
+  appendEventJournal,
+  loadEventJournal,
+  redactExpandedError,
+  redactExpandedValues,
+} from "./graph-source.js";
 import { SessionRegistry } from "./session-registry.js";
 import type { ServerEvent } from "./types.js";
 
@@ -280,6 +289,52 @@ describe("stored graph YAML", () => {
     } finally {
       delete process.env["FG_GS_TEST_VALUE"];
     }
+  });
+
+  it("masks short expanded values only where quoted or whole, never inside paths or words", () => {
+    const withEnv = <T>(env: Record<string, string>, run: () => T): T => {
+      Object.assign(process.env, env);
+      try {
+        return run();
+      } finally {
+        for (const name of Object.keys(env)) delete process.env[name];
+      }
+    };
+    for (const value of ["e", "on", "1"]) {
+      const parsed = withEnv({ FG_GS_SHORT: value }, () =>
+        parseGraphYaml(
+          MINIMAL.replace("state:", () => 'secrets: [FG_GS_SHORT]\nruntime:\n  checkpoint: { backend: "${FG_GS_SHORT}" }\nstate:'),
+          { expandEnv: true },
+        ),
+      );
+      expect(parsed.spec).toBeNull();
+      const schema = parsed.diagnostics.find((d) => d.path === "runtime.checkpoint.backend");
+      expect(schema).toEqual({
+        severity: "error",
+        code: "SCHEMA_ERROR",
+        path: "runtime.checkpoint.backend",
+        message: 'runtime.checkpoint.backend: must be one of memory | sqlite | postgres (got "[REDACTED]")',
+      });
+    }
+
+    const graph = MINIMAL.replace("state:", () => 'secrets: [FG_GS_ON, FG_GS_PREFIXED, FG_GS_LONG]\nconfig:\n  vars: { a: "${FG_GS_ON}", b: "x-${FG_GS_PREFIXED}", c: "${FG_GS_LONG}" }\nstate:');
+    const { spec } = withEnv({ FG_GS_ON: "on", FG_GS_PREFIXED: "zq", FG_GS_LONG: "long-host-value" }, () => parseGraphYaml(graph, { expandEnv: true }));
+    expect(spec).not.toBeNull();
+    const redact = (text: string) => redactExpandedValues(spec, text);
+    expect(redact('Unknown checkpoint backend "on".')).toBe('Unknown checkpoint backend "[REDACTED]".');
+    expect(redact("on")).toBe("[REDACTED]");
+    expect(redact("one option on runtime.checkpoint")).toBe("one option on runtime.checkpoint");
+    expect(redact('got "x-zq" and \'zq\'')).toBe('got "[REDACTED]" and \'[REDACTED]\'');
+    expect(redact("plain zq and long-host-value here")).toBe("plain zq and [REDACTED] here");
+
+    const cause = new Error('Unknown checkpoint backend "on".');
+    const err = new Error("on", { cause });
+    expect(redactExpandedError(spec!, err)).toBe(err);
+    expect(err.message).toBe("[REDACTED]");
+    expect(err.stack?.split("\n")[0]).toBe("Error: [REDACTED]");
+    expect(err.stack).not.toContain('"on"');
+    expect(cause.message).toBe('Unknown checkpoint backend "[REDACTED]".');
+    expect(cause.stack?.split("\n")[0]).toBe('Error: Unknown checkpoint backend "[REDACTED]".');
   });
 
   it("stores raw YAML and expands declared config values only when asked", async () => {

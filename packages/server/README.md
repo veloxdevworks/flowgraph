@@ -46,7 +46,7 @@ The server identifies callers in one of three modes. None of this applies to the
 
 ### Trusted authors
 
-A trusted author's uploads may use host access (`shell`, `script`, `service` and the other node types and settings listed under [untrusted authors](#uploaded-graphs-from-untrusted-authors)), `{{ secret.* }}`, and `${VAR}` placeholders, which expand by the [one `${VAR}` rule](../../docs/02-graph-spec.md#7-config): after parsing, only in `config` and `runtime`, and only for names the graph declares under `secrets:`. An expanded value shows as `[REDACTED]` in the diagnostics and errors returned for an upload, preflight or compile, whatever its length. Anyone else gets the untrusted-author checks. Who is trusted depends on the auth mode:
+A trusted author's uploads may use host access (`shell`, `script`, `service` and the other node types and settings listed under [untrusted authors](#uploaded-graphs-from-untrusted-authors)), `{{ secret.* }}`, and `${VAR}` placeholders, which expand by the [one `${VAR}` rule](../../docs/02-graph-spec.md#7-config): after parsing, only in `config` and `runtime`, and only for names the graph declares under `secrets:`. In the diagnostics and errors returned for an upload, preflight or compile, an expanded value shows as `[REDACTED]` wherever it is quoted or is the whole message, and, at 8 or more characters, anywhere else in the text. Anyone else gets the untrusted-author checks. Who is trusted depends on the auth mode:
 
 | Mode | Trusted |
 |---|---|

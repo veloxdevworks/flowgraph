@@ -16,6 +16,8 @@ export interface GraphEnvExpansion {
   escapes: Array<{ at: Segment[]; value: string; offsets: number[] }>;
   /** Non-empty host values substituted for declared names (not `:-default` text), for hosts that must keep them out of error text. */
   values: string[];
+  /** Each whole string that one or more of those values were substituted into. */
+  fields: string[];
 }
 
 /** `$${` escapes a placeholder; matched first so an escaped one is never read. */
@@ -81,7 +83,7 @@ function forEachGraph(
  * Source text, keys and node bodies are never expanded.
  */
 export function expandGraphEnv(parsed: unknown): GraphEnvExpansion {
-  const out: GraphEnvExpansion = { diagnostics: [], escapes: [], values: [] };
+  const out: GraphEnvExpansion = { diagnostics: [], escapes: [], values: [], fields: [] };
   const env = currentEnvironment();
   forEachGraph(parsed, (graph, prefix, graphAt) => {
     const declared = declaredSecrets(graph);
@@ -90,6 +92,7 @@ export function expandGraphEnv(parsed: unknown): GraphEnvExpansion {
         let result = "";
         let last = 0;
         const offsets: number[] = [];
+        let substituted = false;
         for (const m of value.matchAll(PLACEHOLDER)) {
           const [match, name, fallback] = m;
           result += value.slice(last, m.index);
@@ -102,11 +105,15 @@ export function expandGraphEnv(parsed: unknown): GraphEnvExpansion {
             result += match;
           } else {
             const hostValue = Object.hasOwn(env, name) ? env[name] : undefined;
-            if (hostValue) out.values.push(hostValue);
+            if (hostValue) {
+              out.values.push(hostValue);
+              substituted = true;
+            }
             result += hostValue ?? fallback ?? "";
           }
         }
         result += value.slice(last);
+        if (substituted) out.fields.push(result);
         if (offsets.length > 0) out.escapes.push({ at, value: result, offsets });
         return result;
       }
