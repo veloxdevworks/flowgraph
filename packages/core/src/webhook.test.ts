@@ -152,7 +152,7 @@ describe("webhook node response headers", () => {
       runtime,
     }) as unknown as GraphSpec;
 
-  function echoFetch() {
+  function echoFetch(extra: (headers: Headers) => Record<string, unknown> = () => ({})) {
     global.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
       const sent = (init?.headers as Record<string, string>)["X-Service-Token"];
       const headers = new Headers({ "content-type": "application/json", "x-request-id": "req-1" });
@@ -163,7 +163,7 @@ describe("webhook node response headers", () => {
         status: 200,
         statusText: "OK",
         headers,
-        json: async () => ({ echoed: sent, cookies: headers.getSetCookie() }),
+        json: async () => ({ echoed: sent, cookies: headers.getSetCookie(), ...extra(headers) }),
       };
     }) as unknown as typeof fetch;
   }
@@ -175,7 +175,7 @@ describe("webhook node response headers", () => {
     const r = await compiled.run({ input: { token: "service-token-789" } });
     expect(r.status).toBe("completed");
     const result = r.state["notifyResult"] as { headers: Record<string, string>; body: { cookies: string[] } };
-    expect(result.headers["set-cookie"]).toBe("***");
+    expect(result.headers["set-cookie"]).toBe("[REDACTED]");
     expect(result.headers["x-request-id"]).toBe("req-1");
     expect(result.body.cookies).toEqual(["[REDACTED]", "[REDACTED]"]);
     const text = JSON.stringify({ result, output: events.filter((e) => e.type === "node.output") });
@@ -192,5 +192,46 @@ describe("webhook node response headers", () => {
       await compileGraph(spec({ secrets: { redact: { headers: ["x-service-token"] } } }), { checkpointer: "none" })
     ).run({ input: { token: "service-token-789" } });
     expect(listed.state["notifyResult"]).toMatchObject({ body: { echoed: "[REDACTED]" } });
+  });
+
+  it("redacts a body that echoes only a cookie's name=value or its bare value", async () => {
+    echoFetch(() => ({
+      pair: "session=first-session-cookie",
+      token: "first-session-cookie",
+      sentence: "your session is second-session-cookie, keep it",
+    }));
+    const events: FlowgraphEvent[] = [];
+    const compiled = await compileGraph(spec(), { checkpointer: "none", sinks: [(e) => { events.push(e); }] });
+    const r = await compiled.run({ input: { token: "service-token-789" } });
+    expect(r.status).toBe("completed");
+    expect(r.state["notifyResult"]).toMatchObject({
+      body: { pair: "[REDACTED]", token: "[REDACTED]", sentence: "your session is [REDACTED], keep it" },
+    });
+    const text = JSON.stringify({ state: r.state, output: events.filter((e) => e.type === "node.output") });
+    expect(text).not.toContain("session-cookie");
+  });
+
+  it("uses the same marker in result.headers for built-in and custom sensitive headers", async () => {
+    global.fetch = vi.fn(async () => {
+      const headers = new Headers({
+        "content-type": "application/json",
+        authorization: "Bearer response-bearer-value",
+        "x-service-token": "custom-response-token",
+        "x-request-id": "req-1",
+      });
+      headers.append("set-cookie", "session=header-session-cookie; HttpOnly");
+      return { ok: true, status: 200, statusText: "OK", headers, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+    const r = await (
+      await compileGraph(spec({ secrets: { redact: { headers: ["X-Service-Token"] } } }), { checkpointer: "none" })
+    ).run({ input: { token: "service-token-789" } });
+    expect(r.status).toBe("completed");
+    expect((r.state["notifyResult"] as { headers: Record<string, string> }).headers).toEqual({
+      "content-type": "application/json",
+      authorization: "[REDACTED]",
+      "set-cookie": "[REDACTED]",
+      "x-service-token": "[REDACTED]",
+      "x-request-id": "req-1",
+    });
   });
 });
