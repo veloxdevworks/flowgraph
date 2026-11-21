@@ -23,6 +23,7 @@ import {
   type ServiceStartSpec,
 } from "../runtime/service-manager.js";
 import { SERVICES_CHANNEL } from "../runtime/state-annotation.js";
+import { secretScope } from "../runtime/secret-scope.js";
 
 const configSchema = ServiceWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -100,6 +101,7 @@ export const serviceNode = defineNode<Config>({
           input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
           config: ctx.config,
           run: ctx.meta,
+          secret: secretScope(ctx),
         };
 
         const name = String(renderDeep(config.name, scope));

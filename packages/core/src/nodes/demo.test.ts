@@ -375,15 +375,34 @@ describe("demo node under a node policy", () => {
     vi.stubEnv("FG_DEMO_POLICY_SECRET", "demo-policy-secret-value");
     const fetchMock = okFetch();
     const compiled = await compileGraph(
-      demoGraph({
-        http: { url: "https://example.com/api", headers: { "X-Token": "{{ secret.FG_DEMO_POLICY_SECRET }}" } },
-        output: { to: "demo" },
-      }),
+      {
+        ...demoGraph({
+          http: { url: "https://example.com/api", headers: { "X-Token": "{{ secret.FG_DEMO_POLICY_SECRET }}" } },
+          output: { to: "demo" },
+        }),
+        secrets: ["FG_DEMO_POLICY_SECRET"],
+      },
       { cwd: mkWorkspace(), nodePolicy: { blockSecrets: true } },
     );
     const result = await compiled.run({ threadId: "demo-block-secrets" });
     expect(result.status).toBe("error");
     expect(String((result.error as Error)?.message ?? result.error)).toMatch(/secret\.FG_DEMO_POLICY_SECRET reads the host environment/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails the run on a computed secret name the graph does not declare", async () => {
+    vi.stubEnv("FG_DEMO_POLICY_SECRET", "demo-policy-secret-value");
+    const fetchMock = okFetch();
+    const spec = demoGraph({
+      http: { url: "https://example.com/api", headers: { "X-Token": "{{ secret[config.vars.key] }}" } },
+      output: { to: "demo" },
+    });
+    spec.config = { vars: { key: "FG_DEMO_POLICY_SECRET" } };
+    const result = await (await compileGraph(spec, { cwd: mkWorkspace() })).run({ threadId: "demo-undeclared" });
+    expect(result.status).toBe("error");
+    expect(String((result.error as Error)?.message ?? result.error)).toContain(
+      'demo node "capture" reads secret "FG_DEMO_POLICY_SECRET", which the graph does not declare',
+    );
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

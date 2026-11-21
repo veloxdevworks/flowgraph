@@ -61,6 +61,20 @@ describe("secretReferenceDiagnostics", () => {
     expect(secretReferenceDiagnostics(parent)).toMatchObject([{ path: "nodes.sub.spec.nodes.inner.with.url" }]);
   });
 
+  it("makes compileGraph refuse the graph, including names in mcpServers and map inner nodes", async () => {
+    const mapped = graph({}, [
+      {
+        id: "each",
+        type: "map",
+        with: { over: "{{ state.items }}", node: { id: "inner", type: "http", with: { url: "http://x/{{ secret.INNER }}" } } },
+      },
+    ]);
+    await expect(compileGraph(mapped)).rejects.toThrow('reads secret "INNER", which the graph does not declare');
+    const mcp = graph({ mcpServers: { gh: { transport: "stdio", command: "gh-mcp", env: { T: "{{ secret.GH }}" } } } });
+    await expect(compileGraph(mcp)).rejects.toThrow('mcpServers.gh.env.T: MCP server "gh" reads secret "GH"');
+    await expect(compileGraph({ ...mcp, secrets: ["GH"] })).resolves.toBeDefined();
+  });
+
   it("is part of validateSpec", () => {
     const spec = graph({}, [{ id: "call", type: "http", with: { url: "http://x/{{ secret.TOKEN }}" } }]);
     expect(undeclared(validateSpec(spec))).toHaveLength(1);

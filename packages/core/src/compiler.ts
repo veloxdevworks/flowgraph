@@ -21,6 +21,7 @@ import { resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { SecretRedaction, SECRET_REDACTION, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
 import { DECLARED_SECRETS } from "./runtime/secret-scope.js";
+import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
 import { createEnvSecretProvider, DEFAULT_REDACT_PATTERNS } from "./secrets.js";
 import {
   createLogger,
@@ -1573,6 +1574,10 @@ async function assembleCompiledLangGraph(
   const providerErrors = providerDiags.filter((d) => d.severity === "error");
   if (providerErrors.length > 0) {
     throw new Error(providerErrors.map((d) => `${d.path ?? "providers"}: ${d.message}`).join("\n"));
+  }
+  const secretErrors = secretReferenceDiagnostics(spec);
+  if (secretErrors.length > 0) {
+    throw new Error(secretErrors.map((d) => `${d.path}: ${d.message}`).join("\n"));
   }
   const compileWarnings = providerDiags.filter((d) => d.severity === "warning");
 

@@ -43,7 +43,7 @@ import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { NodePolicyError, nodePolicyOf } from "../node-policy.js";
-import { secretScope } from "../runtime/secret-scope.js";
+import { secretScope, UndeclaredSecretError } from "../runtime/secret-scope.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import {
@@ -292,8 +292,9 @@ function assertBrowserAllowed(ctx: NodeRunContext, kind: DemoKind, nodeId: strin
   );
 }
 
-/** Policy refusals fail the node; a refused capture is not a best-effort failure. */
+/** Policy refusals, including a secret the graph does not declare, fail the node; a refused capture is not a best-effort failure. */
 function isPolicyRefusal(err: unknown): boolean {
+  if (err instanceof UndeclaredSecretError) return true;
   return err instanceof NodePolicyError && err.code !== "OUTBOUND_TIMEOUT" && err.code !== "OUTBOUND_RESPONSE_TOO_LARGE";
 }
 

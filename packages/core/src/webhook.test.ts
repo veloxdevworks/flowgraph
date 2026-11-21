@@ -89,6 +89,7 @@ describe("webhook node secrets", () => {
       apiVersion: "flowgraph/v1",
       kind: "Graph",
       metadata: { name: "webhook-secrets" },
+      secrets: ["FG_WEBHOOK_TOKEN"],
       state: { channels: { apiKey: { type: "string" }, notifyResult: { type: "object" } } },
       nodes: [
         {

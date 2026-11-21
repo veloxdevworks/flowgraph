@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { DemoWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import type { NodeRunContext } from "../context.js";
+import { DECLARED_SECRETS } from "../runtime/secret-scope.js";
 import { demoToolExposureDiagnostics } from "../runtime/validate-graph.js";
 import { demoNode, type DemoResult } from "./demo.js";
 import { readDemoManifest } from "./demo-manifest.js";
@@ -183,6 +184,7 @@ async function run(
     emit() {},
     issue: (issue: Record<string, unknown>) => issues.push(issue),
     _input: {},
+    [DECLARED_SECRETS]: new Set(["TEST_PASSWORD", "TEST_SECRET", "TEST_PIN"]),
     ...(opts.signal ? { signal: opts.signal } : {}),
   } as unknown as NodeRunContext;
   const res = await compiled.run(opts.state ?? {}, ctx);
