@@ -68,7 +68,7 @@ function mcpChild(): GraphSpec {
       id: "lookup",
       type: "mcp",
       with: {
-        server: "jira",
+        server: "tracker",
         tool: "lookup",
         arguments: { project: "{{ config.vars.project }}" },
         output: { to: "toolResult" },
@@ -78,21 +78,21 @@ function mcpChild(): GraphSpec {
       id: "resource",
       type: "mcp",
       with: {
-        server: "jira",
-        resource: "jira://{{ config.vars.project }}",
+        server: "tracker",
+        resource: "tracker://{{ config.vars.project }}",
         output: { to: "resourceResult" },
       },
     },
   ]);
 }
 
-describe("PLAT-416: embedded host capabilities", () => {
+describe("embedded host capabilities", () => {
   it("uses the same approved hub for root, file, and deeply nested tool/resource calls", async () => {
     const child = mcpChild();
     const childPath = path.join(fixtureDir, "mcp-child.graph.yaml");
     await fs.writeFile(childPath, yaml.stringify(child));
     const hub = fakeHub();
-    const options = { mcp: hub, runConfig: { vars: { project: "VYB" } } };
+    const options = { mcp: hub, runConfig: { vars: { project: "DEMO" } } };
     const graphs = [
       child,
       chain("file-parent", [
@@ -112,14 +112,14 @@ describe("PLAT-416: embedded host capabilities", () => {
       expect(result.status, result.error?.message).toBe("completed");
       expect(result.state.toolResult).toEqual({
         label: "hub",
-        server: "jira",
+        server: "tracker",
         tool: "lookup",
-        args: { project: "VYB" },
+        args: { project: "DEMO" },
       });
       expect(result.state.resourceResult).toEqual({
         label: "hub",
-        server: "jira",
-        uri: "jira://VYB",
+        server: "tracker",
+        uri: "tracker://DEMO",
       });
     }
     expect(hub.callTool).toHaveBeenCalledTimes(3);
@@ -167,8 +167,8 @@ describe("PLAT-416: embedded host capabilities", () => {
   it("enforces host agent-tool hooks in a nested MCP agent without broadening its tool list", async () => {
     const hub = fakeHub();
     const guarded = createScriptedProvider("subgraph-host-guarded", async (request, ctx) => {
-      expect(request.tools.map((tool) => tool.name)).toEqual(["jira:lookup"]);
-      await ctx.invokeTool("jira:lookup", { project: "VYB" });
+      expect(request.tools.map((tool) => tool.name)).toEqual(["tracker:lookup"]);
+      await ctx.invokeTool("tracker:lookup", { project: "DEMO" });
       return { output: "unexpected", stopReason: "done" };
     });
     const hook = vi.fn<Hook["handler"]>(() => ({
@@ -182,7 +182,7 @@ describe("PLAT-416: embedded host capabilities", () => {
         provider: guarded.name,
         with: {
           prompt: "Look up the issue",
-          tools: [{ mcp: "jira", tools: ["lookup"] }],
+          tools: [{ mcp: "tracker", tools: ["lookup"] }],
         },
       },
     ]);
@@ -191,7 +191,7 @@ describe("PLAT-416: embedded host capabilities", () => {
       {
         mcp: hub,
         providers: [guarded],
-        hooks: [{ phase: "agent:beforeToolCall", where: { tool: "jira:lookup" }, handler: hook }],
+        hooks: [{ phase: "agent:beforeToolCall", where: { tool: "tracker:lookup" }, handler: hook }],
       },
     );
     const result = await compiled.run();
@@ -232,7 +232,7 @@ describe("PLAT-416: embedded host capabilities", () => {
       {
         config: {
           vars: { shared: "child", childOnly: true },
-          defaults: { provider: "child-provider", timeout: "2m" },
+          defaults: { provider: "child-provider" },
         },
       },
     );
@@ -243,7 +243,7 @@ describe("PLAT-416: embedded host capabilities", () => {
     const parent = chain("config-parent", [{ id: "embed", type: "subgraph", uses: childPath }], {
       config: {
         vars: { rootOnly: true, shared: "root" },
-        defaults: { provider: "root-provider", timeout: "1h" },
+        defaults: { provider: "root-provider" },
       },
       state: { channels: { rootOnlyChannel: { type: "string" }, result: { type: "object" } } },
       // Graph-bound hooks stay at the declaring graph; this must not veto the child.
@@ -266,7 +266,7 @@ describe("PLAT-416: embedded host capabilities", () => {
     expect(result.status, result.error?.message).toBe("completed");
     expect(result.state.result).toEqual({
       vars: { shared: "host", childOnly: true, hostOnly: true },
-      defaults: { provider: "child-provider", timeout: "2m", model: "host-model" },
+      defaults: { provider: "child-provider", model: "host-model" },
       graphDir: childDir,
       skills: {},
       agents: {},
@@ -296,10 +296,10 @@ describe("PLAT-416: embedded host capabilities", () => {
     );
     for (const [index, result] of results.entries()) {
       expect(result.status, result.error?.message).toBe("completed");
-      expect(hubs[index]?.callTool).toHaveBeenCalledExactlyOnceWith("jira", "lookup", {
+      expect(hubs[index]?.callTool).toHaveBeenCalledExactlyOnceWith("tracker", "lookup", {
         project: `P${index}`,
       });
-      expect(hubs[index]?.readResource).toHaveBeenCalledExactlyOnceWith("jira", `jira://P${index}`);
+      expect(hubs[index]?.readResource).toHaveBeenCalledExactlyOnceWith("tracker", `tracker://P${index}`);
     }
   });
 
@@ -348,7 +348,7 @@ describe("PLAT-416: embedded host capabilities", () => {
         with: { fn: "subgraphHostReadVariables", output: { to: "root" } },
       },
     ]);
-    const original = { project: "VYB", items: [{ label: "original" }] };
+    const original = { project: "DEMO", items: [{ label: "original" }] };
     const options = { runConfig: { vars: { nested: structuredClone(original) } } };
     const result = await (await compileGraph(parent, options)).run();
     expect(result.status, result.error?.message).toBe("completed");
@@ -395,7 +395,7 @@ describe("PLAT-416: embedded host capabilities", () => {
           id: "lookup",
           type: "mcp",
           with: {
-            server: "jira",
+            server: "tracker",
             tool: "lookup",
             arguments: { project: "{{ config.vars.project }}", item: "{{ state.itemId }}" },
             output: { to: "toolResult" },
@@ -429,7 +429,7 @@ describe("PLAT-416: embedded host capabilities", () => {
     );
     const compiled = await compileGraph(spec, {
       mcp: hub,
-      runConfig: { vars: { project: "VYB" } },
+      runConfig: { vars: { project: "DEMO" } },
       hooks: [
         {
           phase: "node:before",
@@ -445,9 +445,9 @@ describe("PLAT-416: embedded host capabilities", () => {
     expect(result.state.results).toEqual(
       [1, 2].map((item) => ({
         label: "hub",
-        server: "jira",
+        server: "tracker",
         tool: "lookup",
-        args: { project: "VYB", item },
+        args: { project: "DEMO", item },
       })),
     );
     expect(seen.sort()).toEqual([1, 2]);
@@ -463,15 +463,15 @@ describe("PLAT-416: embedded host capabilities", () => {
       {
         id: "lookup",
         type: "mcp",
-        with: { server: "jira", tool: "lookup", output: { to: "toolResult" } },
+        with: { server: "tracker", tool: "lookup", output: { to: "toolResult" } },
       },
       { id: "approval", type: "hitl", with: { mode: "approve", message: "Continue?" } },
       {
         id: "resource",
         type: "mcp",
         with: {
-          server: "jira",
-          resource: "jira://{{ config.vars.project }}",
+          server: "tracker",
+          resource: "tracker://{{ config.vars.project }}",
           output: { to: "resourceResult" },
         },
       },
@@ -485,20 +485,20 @@ describe("PLAT-416: embedded host capabilities", () => {
       await compileGraph(spec, {
         checkpointer: saver,
         mcp: after,
-        runConfig: { vars: { project: "VYB" } },
+        runConfig: { vars: { project: "DEMO" } },
         hooks: [{ phase: "node:before", where: { nodeId: "resource" }, handler: resumedHook }],
       })
     ).resume({ threadId: "host-resume", resume: true });
     expect(resumed.status, resumed.error?.message).toBe("completed");
     expect(before.callTool).toHaveBeenCalledOnce();
     expect(after.callTool).not.toHaveBeenCalled();
-    expect(after.readResource).toHaveBeenCalledExactlyOnceWith("jira", "jira://VYB");
+    expect(after.readResource).toHaveBeenCalledExactlyOnceWith("tracker", "tracker://DEMO");
     expect(resumedHook).toHaveBeenCalledOnce();
     expect(resumedHook.mock.calls[0]?.[0].run.threadId).toBe("host-resume");
     expect(resumed.state.resourceResult).toEqual({
       label: "after",
-      server: "jira",
-      uri: "jira://VYB",
+      server: "tracker",
+      uri: "tracker://DEMO",
     });
   });
 });
