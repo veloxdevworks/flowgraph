@@ -12,6 +12,7 @@ export function generateJsonSchema(): Record<string, unknown> {
     $refStrategy: "none",
   }) as Record<string, unknown>;
   omitRunsOnWait(schema);
+  markBarrierFromUnique(schema);
   return schema;
 }
 
@@ -38,6 +39,39 @@ function omitRunsOnWait(node: unknown): void {
     }
   }
   for (const value of Object.values(rec)) omitRunsOnWait(value);
+}
+
+/**
+ * The list form of an edge `from` is a barrier. Zod records `minItems` but
+ * not `uniqueItems`; editors should still reject repeated ids.
+ */
+function markBarrierFromUnique(node: unknown): void {
+  if (node == null || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const item of node) markBarrierFromUnique(item);
+    return;
+  }
+  const rec = node as Record<string, unknown>;
+  const props = rec.properties;
+  if (props && typeof props === "object" && !Array.isArray(props)) {
+    const from = (props as Record<string, unknown>).from;
+    if (from) markFromArrayUnique(from);
+  }
+  for (const value of Object.values(rec)) markBarrierFromUnique(value);
+}
+
+function markFromArrayUnique(schema: unknown): void {
+  if (schema == null || typeof schema !== "object") return;
+  const rec = schema as Record<string, unknown>;
+  if (rec.type === "array") {
+    rec.uniqueItems = true;
+    return;
+  }
+  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+    const branches = rec[key];
+    if (!Array.isArray(branches)) continue;
+    for (const branch of branches) markFromArrayUnique(branch);
+  }
 }
 
 /**

@@ -1470,11 +1470,32 @@ export const BranchSchema = z.object({
   description: z.string().optional(),
 });
 
+const edgeFromSchema = z.union([
+  z.string(),
+  z.array(z.string()).min(2, "from must list at least two node ids"),
+]).describe(
+  "Source node id, or a list of node ids. A list is a barrier: to runs once, after every listed source finishes.",
+);
+
 export const EdgeSpecSchema = z.union([
-  // static edge
+  // static edge. `from` as a list compiles to one multi-source barrier.
   z.object({
-    from: z.string(),
+    from: edgeFromSchema,
     to: z.union([z.string(), z.array(z.string())]),
+  }).superRefine((edge, ctx) => {
+    if (!Array.isArray(edge.from)) return;
+    const seen = new Set<string>();
+    edge.from.forEach((id, index) => {
+      if (seen.has(id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate node id "${id}" in from`,
+          path: ["from", index],
+        });
+        return;
+      }
+      seen.add(id);
+    });
   }),
   // conditional edge
   z.object({

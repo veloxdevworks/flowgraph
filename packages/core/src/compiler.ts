@@ -65,7 +65,7 @@ import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { sharedHistoryChannels } from "./context/shared.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { graphFile } from "./runtime/graph-files.js";
-import { nodeRouteTargets, nodeToolTargets, topologyDiagnostics } from "./runtime/validate-graph.js";
+import { barrierEdgeDiagnostics, nodeRouteTargets, nodeToolTargets, topologyDiagnostics } from "./runtime/validate-graph.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
 
 /**
@@ -1447,6 +1447,16 @@ async function assembleCompiledLangGraph(
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
   // does not silently drop node updates when authors omit state.channels entries.
   spec = ensureDeclaredOutputChannels(spec);
+  // Reject a short list, END, a self-target, and a recovery source here, before
+  // LangGraph sees the edge. A one-id list, END as a start, or a barrier aimed
+  // at itself would otherwise fail inside addEdge.
+  const barrierErrors = barrierEdgeDiagnostics(spec, opts.hooks).filter((d) => d.severity === "error");
+  if (barrierErrors.length) {
+    throw Object.assign(new Error(barrierErrors.map((d) => d.message).join("; ")), {
+      code: barrierErrors[0]!.code,
+      retryable: false,
+    });
+  }
   const policyEdges = spec.nodes.flatMap(node => recoveryTargets(spec, node, opts.hooks).map(to => ({ from: node.id, to })));
   const invalidTopology = topologyDiagnostics({ ...spec, edges: [...spec.edges, ...policyEdges] }).filter((d) => d.severity === "error");
   if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
@@ -1936,19 +1946,32 @@ async function assembleCompiledLangGraph(
     }, Object.fromEntries([...spec.nodes.map(n => n.id), END].map(id => [id, id])) as Record<string, typeof END>);
   }
   for (const edge of spec.edges) {
-    if (routerIds.has(edge.from)) continue;
-    let from = edge.from === "START" ? START : edge.from;
-    if (typeof from === "string" && mapJoinById.has(from)) from = mapJoinById.get(from)!;
+    const sources = Array.isArray(edge.from) ? edge.from : [edge.from];
+    const barrier = Array.isArray(edge.from) && sources.length > 1;
+    if (!barrier && routerIds.has(sources[0] ?? "")) continue;
     if ("to" in edge) {
       const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      for (const t of tos) graph.addEdge(from as typeof START, (t === "END" ? END : t) as typeof END);
+      if (barrier) {
+        // Wait on a map's join node so the barrier sees the map finish, not its dispatch.
+        const starts = sources.map((id) => mapJoinById.get(id) ?? id);
+        // The cast is type-only. `starts` stays an array, which LangGraph compiles as a barrier.
+        for (const t of tos) graph.addEdge(starts as unknown as typeof START, (t === "END" ? END : t) as typeof END);
+      } else {
+        const source = sources[0] ?? "";
+        let from: string | typeof START = source === "START" ? START : source;
+        if (typeof from === "string" && mapJoinById.has(from)) from = mapJoinById.get(from)!;
+        for (const t of tos) graph.addEdge(from as typeof START, (t === "END" ? END : t) as typeof END);
+      }
     } else if ("branch" in edge) {
+      const source = sources[0] ?? "";
+      let from: string | typeof START = source === "START" ? START : source;
+      if (typeof from === "string" && mapJoinById.has(from)) from = mapJoinById.get(from)!;
       const branches = edge.branch;
       graph.addConditionalEdges(from as typeof START, (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
         try {
           for (const b of branches) {
             if (b.default || !b.when) continue;
-            if (evalBranchGuard(edge.from, { to: b.to, when: b.when }, state)) return b.to;
+            if (evalBranchGuard(source, { to: b.to, when: b.when }, state)) return b.to;
           }
         } catch (err) {
           throw recordGuardError(err, lgConfig);

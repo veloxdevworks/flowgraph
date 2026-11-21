@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json
+# The short branch is 2 hops from START and the long branch is 3.
+# { from: [short, long], to: join } waits for both, so join runs once.
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: uneven-join
+  description: >
+    Join two branches of different lengths once, after both have finished.
+
+nodes:
+  - id: split
+    type: shell
+    with: { command: "true" }
+  - id: short
+    type: shell
+    with: { command: "true" }
+  - id: mid
+    type: shell
+    with: { command: "true" }
+  - id: long
+    type: shell
+    with: { command: "true" }
+  - id: join
+    type: shell
+    with: { command: "true" }
+
+edges:
+  - { from: START, to: split }
+  - { from: split, to: short }
+  - { from: split, to: mid }
+  - { from: mid, to: long }
+  - { from: [short, long], to: join }
+  - { from: join, to: END }
+
+runtime:
+  checkpoint: { enabled: false }
