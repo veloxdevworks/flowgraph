@@ -248,6 +248,8 @@ export function normalizeNodeTypeAliases(parsed: unknown): unknown {
  */
 export function validateSpec(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = graphStructureDiagnostics(spec, { lints: true });
+  // The remaining passes walk nested graphs without a depth limit.
+  if (diagnostics.some((d) => d.code === "GRAPH_NESTING_TOO_DEEP")) return diagnostics;
 
   if (spec.runtime?.budget?.maxUSD !== undefined) walkNodes(spec, node => {
     const provider = typeof node.provider === "string" ? node.provider : spec.config?.defaults?.provider;

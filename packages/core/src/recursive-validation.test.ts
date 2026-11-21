@@ -6,6 +6,7 @@ import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { loadGraph, validateSpec } from "./loader.js";
 import { cronScheduleProblem, isKnownTimeZone } from "./runtime/cron-schedule.js";
+import { graphStructureDiagnostics, MAX_GRAPH_NESTING } from "./runtime/validate-graph.js";
 
 const head = { apiVersion: "flowgraph/v1", kind: "Graph" } as const;
 
@@ -285,6 +286,46 @@ describe("isKnownTimeZone", () => {
     for (const zone of ["EST", "+05:00", "america/denver", "AMERICA/DENVER", "utc", " UTC", "", "Mars/Olympus"]) {
       expect(isKnownTimeZone(zone), zone).toBe(false);
     }
+  });
+});
+
+describe("nesting depth", () => {
+  function nestedTo(levels: number): GraphSpec {
+    let spec = graph([{ id: "leaf", ...echo }]);
+    for (let level = 1; level < levels; level++) spec = graph([inline(spec.nodes, spec.edges)]);
+    return spec;
+  }
+
+  it(`accepts ${MAX_GRAPH_NESTING} levels and reports one more without throwing`, () => {
+    expect(validateSpec(nestedTo(MAX_GRAPH_NESTING)).filter((d) => d.code === "GRAPH_NESTING_TOO_DEEP")).toEqual([]);
+    const found = validateSpec(nestedTo(MAX_GRAPH_NESTING + 1));
+    expect(found).toEqual([expect.objectContaining({ severity: "error", code: "GRAPH_NESTING_TOO_DEEP" })]);
+    expect(found[0]!.path).toMatch(/^(nodes\.sub\.spec\.){31}nodes\.sub\.spec$/);
+  });
+
+  it("reports a programmatic inline spec that contains itself", async () => {
+    const spec = graph([{ id: "sub", type: "subgraph" }]);
+    (spec.nodes[0] as { spec?: unknown }).spec = spec;
+    expect(validateSpec(spec)).toEqual([expect.objectContaining({ code: "GRAPH_NESTING_TOO_DEEP" })]);
+    await expect(compileGraph(spec)).rejects.toMatchObject({ code: "GRAPH_NESTING_TOO_DEEP" });
+  });
+
+  it("reports a map body that contains itself", () => {
+    const map = { id: "m", type: "map", with: { over: "{{ state.items }}" } as Record<string, unknown> };
+    map.with.node = map;
+    expect(validateSpec(graph([map]))).toEqual([expect.objectContaining({ code: "GRAPH_NESTING_TOO_DEEP" })]);
+  });
+
+  it("walks a spec object shared by many nodes once per object", () => {
+    let shared = graph([{ id: "leaf", ...echo }]);
+    for (let level = 1; level < 20; level++) {
+      const child = { ...head, metadata: { name: `l${level}` }, nodes: shared.nodes, edges: shared.edges };
+      shared = graph([
+        { id: "a", type: "subgraph", spec: child },
+        { id: "b", type: "subgraph", spec: child },
+      ], { edges: [{ from: "START", to: "a" }, { from: "START", to: "b" }, { from: "a", to: "END" }, { from: "b", to: "END" }] });
+    }
+    expect(graphStructureDiagnostics(shared).filter((d) => d.code === "GRAPH_NESTING_TOO_DEEP")).toEqual([]);
   });
 });
 
