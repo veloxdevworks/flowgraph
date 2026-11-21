@@ -26,8 +26,8 @@ import { isIP } from "node:net";
 import type { GraphSpec } from "@flowgraph/spec";
 import { ServerRequestError } from "./errors.js";
 
-/** Node types an untrusted upload may not contain (host commands, processes, files). */
-export const UNTRUSTED_BLOCKED_NODE_TYPES: readonly string[] = ["shell", "script", "service", "worktree", "skill", "demo", "mcp"];
+/** Node types an untrusted upload may not contain (host commands, processes, files, ports). */
+export const UNTRUSTED_BLOCKED_NODE_TYPES: readonly string[] = ["shell", "script", "service", "worktree", "skill", "demo", "mcp", "port"];
 
 /**
  * Registered agent function tools an untrusted graph may call: asking the
@@ -208,7 +208,13 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
     const n = node as Record<string, unknown>;
     const type = String(n.type ?? "");
     if (UNTRUSTED_BLOCKED_NODE_TYPES.includes(type)) {
-      add("UPLOAD_NODE_TYPE_BLOCKED", path, `node type "${type}" runs host commands or processes`);
+      add(
+        "UPLOAD_NODE_TYPE_BLOCKED",
+        path,
+        type === "port"
+          ? `node type "port" reveals which ports are free on the server`
+          : `node type "${type}" runs host commands or processes`,
+      );
     }
     if (type === "subgraph" && typeof n.uses === "string" && n.uses) {
       add("UPLOAD_SUBGRAPH_FILE_BLOCKED", path, `subgraph uses "${n.uses}" loads a file from the server; embed it with spec: instead`);
@@ -302,6 +308,13 @@ function checkGraphLevel(
       add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}input.${key}`, `"${key}": ${RESERVED_WHY}`);
     }
   }
+  const fields = (graph as { inputs?: unknown }).inputs;
+  (Array.isArray(fields) ? fields : []).forEach((field, i) => {
+    const key = (field as { key?: unknown } | null)?.key;
+    if (typeof key === "string" && isReservedChannel(key)) {
+      add("UPLOAD_RESERVED_CHANNEL_BLOCKED", `${where}inputs[${i}].key`, `"${key}": ${RESERVED_WHY}`);
+    }
+  });
   // Parsing strips imports; a spec handed over some other way is checked here.
   const imports = (graph as { imports?: unknown }).imports;
   if (Array.isArray(imports) && imports.length > 0) {
