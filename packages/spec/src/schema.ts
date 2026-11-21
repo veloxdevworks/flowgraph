@@ -811,10 +811,16 @@ export const MemoryWithSchema = BaseWithSchema.extend({
 /** @deprecated Use FunctionWithSchema */
 export const CodeWithSchema = FunctionWithSchema;
 
-// shell node — run a command (argv-safe) or OS shell string
+// shell node — run a program with argv (no shell), or a fixed command line through the OS shell with `shell: true`
 export const ShellWithSchema = BaseWithSchema.extend({
-  command: z.string().describe("Binary/script, or full shell command when args is omitted"),
-  args: z.array(z.string()).optional().describe("Argv; when set, runs without a shell"),
+  command: z
+    .string()
+    .describe("Program to run. With shell: true, a fixed shell command line. Never a template: pass run data in args, or in env with shell: true"),
+  args: z.array(z.string()).optional().describe("Arguments, passed to the program without a shell; templates are rendered per argument"),
+  shell: z
+    .boolean()
+    .optional()
+    .describe("Run command through the OS shell (pipes, &&, globs). Pass run data in env and quote it in the command (\"$NAME\")"),
   cwd: z.string().optional(),
   env: z.record(z.string()).optional(),
   inheritEnv: z.array(z.string().min(1)).optional().describe("Host environment variable names to pass to the child, in addition to the default allowlist (PATH, HOME, TMPDIR, TEMP, TMP, LANG, LC_ALL, and Windows SystemRoot/WINDIR)"),
@@ -823,6 +829,30 @@ export const ShellWithSchema = BaseWithSchema.extend({
   expect: z.object({ exitCode: z.array(z.number()).optional() }).optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
+}).superRefine((v, ctx) => {
+  if (v.command.includes("{{")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["command"],
+      message: v.shell
+        ? "command cannot contain {{ }} templates, because rendered values would become shell syntax; pass them in env and quote them in the command (\"$NAME\")"
+        : "command cannot contain {{ }} templates; pass run data in args",
+    });
+  }
+  if (v.shell && v.args !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["args"],
+      message: "args cannot be combined with shell: true; pass values in env and quote them in the command (\"$NAME\")",
+    });
+  }
+  if (!v.shell && v.args === undefined && /\s/.test(v.command)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["command"],
+      message: "command runs without a shell, so it names one program: put its arguments in args, or set shell: true to run a shell command line (use args: [] for a program path that contains spaces)",
+    });
+  }
 });
 
 // service node — start/stop long-running background processes

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { compileGraph } from "./compiler.js";
+import { validateSpec } from "./loader.js";
 import { ShellWithSchema } from "@flowgraph/spec";
 import type { GraphSpec } from "@flowgraph/spec";
 import { normalizeShellText } from "./nodes/shell.js";
@@ -32,6 +33,11 @@ function shellSpec(nodeWith: Record<string, unknown>): GraphSpec {
   } as unknown as GraphSpec;
 }
 
+function issuesOf(nodeWith: Record<string, unknown>): string[] {
+  const r = ShellWithSchema.safeParse(nodeWith);
+  return r.success ? [] : r.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+}
+
 describe("ShellWithSchema", () => {
   it("requires command", () => {
     expect(ShellWithSchema.safeParse({}).success).toBe(false);
@@ -39,6 +45,97 @@ describe("ShellWithSchema", () => {
     expect(
       ShellWithSchema.safeParse({ command: "echo", args: ["hi"], timeout: "5s" }).success,
     ).toBe(true);
+    expect(ShellWithSchema.safeParse({ command: "echo hi | wc -c", shell: true }).success).toBe(true);
+  });
+
+  it("rejects templates in command, with or without a shell", () => {
+    expect(issuesOf({ command: "echo Hello {{ state.title }}", shell: true })).toEqual([
+      expect.stringMatching(/^command: command cannot contain \{\{ \}\} templates, because rendered values would become shell syntax/),
+    ]);
+    expect(issuesOf({ command: "{{ state.bin }}", args: [] })).toEqual([
+      expect.stringMatching(/^command: command cannot contain \{\{ \}\} templates; pass run data in args/),
+    ]);
+  });
+
+  it("asks for shell: true before running a command line", () => {
+    expect(issuesOf({ command: "echo one && echo two" })).toEqual([
+      expect.stringMatching(/^command: command runs without a shell.*set shell: true/),
+    ]);
+    expect(issuesOf({ command: "/opt/My Tools/run", args: [] })).toEqual([]);
+  });
+
+  it("rejects args with shell: true", () => {
+    expect(issuesOf({ command: "echo", args: ["{{ state.x }}"], shell: true })).toEqual([
+      expect.stringMatching(/^args: args cannot be combined with shell: true/),
+    ]);
+  });
+});
+
+describe("shell node: run data never becomes shell syntax", () => {
+  const hostile = "world; echo INJECTED-$(id -un) `id` && echo second";
+
+  it("refuses to compile a templated command", async () => {
+    await expect(
+      compileGraph(shellSpec({ command: "echo Hello {{ state.title }}", output: { to: "out" } }), {}),
+    ).rejects.toThrow(/config error: .*command cannot contain \{\{ \}\} templates/);
+    const diags = validateSpec(shellSpec({ command: "echo Hello {{ state.title }}", shell: true }));
+    expect(diags).toContainEqual(
+      expect.objectContaining({ severity: "error", message: expect.stringMatching(/command cannot contain \{\{ \}\} templates/) }),
+    );
+  });
+
+  it("passes rendered args to the program as argv", async () => {
+    const compiled = await compileGraph(
+      shellSpec({ command: "echo", args: ["Hello {{ state.text }}"], output: { to: "out" } }),
+      {},
+    );
+    const r = await compiled.run({ input: { text: hostile } });
+    expect(r.status).toBe("completed");
+    expect((r.state["out"] as { stdout: string }).stdout).toBe(`Hello ${hostile}\n`);
+  });
+
+  it("passes env values to a shell command line as data", async () => {
+    const compiled = await compileGraph(
+      shellSpec({
+        command: 'printf "%s|%s" "$TITLE" "$(printf ok)"',
+        shell: true,
+        env: { TITLE: "{{ state.text }}" },
+        output: { to: "out" },
+      }),
+      {},
+    );
+    const r = await compiled.run({ input: { text: hostile } });
+    expect(r.status).toBe("completed");
+    expect((r.state["out"] as { stdout: string }).stdout).toBe(`${hostile}|ok`);
+  });
+
+  it("keeps curly quotes in rendered args and env values", async () => {
+    const quoted = "\u201Cquoted\u201D and \u2018single\u2019";
+    const compiled = await compileGraph(
+      shellSpec({
+        command: "node",
+        args: ["-e", "process.stdout.write(process.argv[1] + '|' + process.env.Q)", "{{ state.text }}"],
+        env: { Q: "{{ state.text }}" },
+        output: { to: "out" },
+      }),
+      {},
+    );
+    const r = await compiled.run({ input: { text: quoted } });
+    expect(r.status).toBe("completed");
+    expect((r.state["out"] as { stdout: string }).stdout).toBe(`${quoted}|${quoted}`);
+  });
+});
+
+describe("shell node: stdin", () => {
+  it("completes when the program exits without reading a large stdin payload", async () => {
+    // Larger than a pipe buffer, so the write is still pending when the program exits.
+    const compiled = await compileGraph(
+      shellSpec({ command: "true", args: [], input: { blob: "x".repeat(100_000) }, output: { to: "out" } }),
+      {},
+    );
+    const r = await compiled.run({ input: {} });
+    expect(r.status).toBe("completed");
+    expect((r.state["out"] as { exitCode: number }).exitCode).toBe(0);
   });
 });
 
@@ -70,6 +167,7 @@ describe("shell node", () => {
     const compiled = await compileGraph(
       shellSpec({
         command: "echo one && echo two",
+        shell: true,
         output: { to: "out" },
       }),
       {},
@@ -87,6 +185,7 @@ describe("shell node", () => {
       shellSpec({
         // Curly open + curly close — same failure mode as macOS smart quotes.
         command: "echo \u201C$HELLO world!\u201D",
+        shell: true,
         env: { HELLO: "Hello" },
         output: { to: "out" },
       }),
@@ -226,6 +325,7 @@ describe("shell node", () => {
           type: "shell",
           with: {
             command: 'echo "Hello world!"',
+            shell: true,
             output: { to: "shell" },
           },
         },

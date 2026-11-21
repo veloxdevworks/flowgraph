@@ -1,4 +1,3 @@
-import { currentEnvironment } from "../environment.js";
 /**
  * Built-in node type: `webhook`
  *
@@ -11,8 +10,10 @@ import { WebhookWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
-import { assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
+import { nodePolicyOf } from "../node-policy.js";
 import { guardedFetch } from "../outbound-http.js";
+import { observeSensitiveHeaders } from "../runtime/secret-redaction.js";
+import { secretScope } from "../runtime/secret-scope.js";
 import { applyOutput } from "./output.js";
 
 const configSchema = WebhookWithSchema;
@@ -35,15 +36,7 @@ export const webhookNode = defineNode<Config>({
           input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
           config: ctx.config,
           run: ctx.meta,
-          secret: new Proxy({} as Record<string, string>, {
-            getOwnPropertyDescriptor: (_t, prop) =>
-              typeof prop === "string" ? { configurable: true, enumerable: false } : undefined,
-            get: (_t, prop) => {
-              if (typeof prop === "string") assertSecretAllowed(nodePolicyOf(ctx), prop, `webhook node "${ctx.nodeId}"`);
-              const val = currentEnvironment()[String(prop)];
-              return val ?? "";
-            },
-          }),
+          secret: secretScope(ctx),
         };
 
         return runEmit(nodeSpec, config, scope, ctx);
@@ -69,6 +62,7 @@ async function runEmit(
     const headers = config.headers
       ? (renderDeep(config.headers, scope) as Record<string, string>)
       : {};
+    observeSensitiveHeaders(headers);
     const body =
       config.body != null ? JSON.stringify(renderDeep(config.body, scope)) : undefined;
 
