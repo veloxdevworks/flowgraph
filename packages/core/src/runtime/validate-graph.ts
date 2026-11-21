@@ -2,7 +2,7 @@
  * Offline graph lint helpers used by validateSpec.
  */
 
-import { findMergeableRouters, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
+import { findMergeableRouters, hookVerbMessage, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
 import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
 import { templateRootRefs } from "../node-policy.js";
@@ -1452,7 +1452,7 @@ export interface GraphStructureOptions {
  *
  * - nesting and expanded size stay within {@link MAX_GRAPH_NESTING} and
  *   {@link MAX_GRAPH_NODES} (otherwise only that is reported)
- * - hook phases and directives are known
+ * - hook events and verbs are known
  * - node ids are unique; edges name known nodes; `END` is never a source and
  *   `START` never an edge, router or hitl route target; there is an edge from `START`
  * - every node type is registered and its `with` matches that type's schema
@@ -1475,10 +1475,10 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
   const edges = Array.isArray(spec.edges) ? spec.edges : [];
 
   for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
-    if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook phase "${hook.on}". Allowed phases: ${[...KNOWN_PHASES].join(", ")}` });
+    if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook event "${hook.on}".` });
   }
   for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
-    if (!knownHookDirective(hook.do)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Unknown hook directive "${hook.do}". Use retry, continue, ignore, interrupt, fail, redact or route:<node>.` });
+    if (!knownHookDirective(hook.do, hook.on)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Hook directive "${hook.do}" is not valid for ${hook.on}. ${hookVerbMessage(hook.on)}` });
   }
 
   const nodeIds = new Set(nodes.map((n) => n.id));
