@@ -62,6 +62,7 @@ import {
   collectNodeWriteChannels,
   demoToolExposureDiagnostics,
   ensureDeclaredOutputChannels,
+  graphStructureDiagnostics,
   provesObjective,
 } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
@@ -1517,6 +1518,16 @@ async function assembleCompiledLangGraph(
       assertNodeSpecAllowed(opts.nodePolicy, n as { type?: unknown; with?: unknown }, `node "${String((n as { id?: unknown }).id ?? "?")}"`);
     });
     assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
+  }
+  // The errors validateSpec reports for the graph, its map bodies and inline subgraphs.
+  // After imports and extra factories, so plugin types resolve.
+  const invalid = graphStructureDiagnostics(spec).filter((d) => d.severity === "error");
+  if (invalid.length) {
+    throw Object.assign(new Error(`Invalid graph: ${invalid.map((d) => `${d.code}${d.path ? ` at ${d.path}` : ""}: ${d.message}`).join("; ")}`), {
+      code: invalid[0]!.code,
+      diagnostics: invalid,
+      retryable: false,
+    });
   }
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
   const exposed = demoToolExposureDiagnostics(spec)[0];

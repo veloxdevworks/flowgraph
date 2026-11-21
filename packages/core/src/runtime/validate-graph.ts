@@ -20,7 +20,9 @@ import {
   normalizeHitlRoutes,
 } from "../nodes/hitl-routes.js";
 import type { Hook } from "../hooks/types.js";
+import { KNOWN_PHASES, knownHookDirective } from "../hooks/builtin.js";
 import { recoveryTargets } from "./routing-policy.js";
+import { cronScheduleProblem, isKnownTimeZone } from "./cron-schedule.js";
 
 /** Node ids on an edge `from`: one source, or every source of a barrier. */
 function edgeFromIds(from: string | readonly string[]): string[] {
@@ -369,9 +371,9 @@ export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {
 }
 
 /**
- * LangGraph drops node-update keys that are not declared in the state annotation.
  * Flag any output/collect/stateMap.out target that is missing from state.channels.
- * (compileGraph auto-declares these; this lint still catches the authoring mistake.)
+ * compileGraph declares these as `type: any` with last-write-wins, so the write is
+ * kept; this is a warning that the channel's type and reducer are not stated.
  */
 export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
@@ -382,12 +384,11 @@ export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[
     // Reserved per-node bag — always auto-declared by ensureDeclaredOutputChannels.
     if (channel === OUTPUTS_CHANNEL) return;
     diagnostics.push({
-      severity: "error",
+      severity: "warning",
       code: "UNDECLARED_OUTPUT_CHANNEL",
       message:
-        `Node "${nodeId}" writes to channel "${channel}" but it is not declared in state.channels — ` +
-        `the write will be silently dropped at runtime unless the channel is declared ` +
-        `(or auto-declared by the runtime/compiler)`,
+        `Node "${nodeId}" writes to channel "${channel}", which is not declared in state.channels. ` +
+        `The channel is declared for you as type any with last-write-wins; declare it to set its type and reducer.`,
       path,
     });
   };
@@ -1256,6 +1257,219 @@ export function barrierEdgeDiagnostics(spec: GraphSpec, hooks: Hook[] = []): Dia
       });
     }
   });
+  return diagnostics;
+}
+
+/**
+ * Lints that read only one graph's own nodes, edges and channels. Run on each
+ * nested graph (inline subgraph `spec`); the top level gets them, and the lints
+ * that walk the whole tree, from {@link graphLintDiagnostics}.
+ */
+export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+  return [
+    ...hitlRouteDiagnostics(spec),
+    ...hitlSelectDiagnostics(spec),
+    ...topologyDiagnostics(spec),
+    ...channelReducerDiagnostics(spec),
+    ...undeclaredOutputChannelDiagnostics(spec),
+    ...nodeChannelNameCollisionDiagnostics(spec),
+    ...fanInLastWriteDiagnostics(spec),
+    ...unevenFanInDiagnostics(spec),
+    ...barrierEdgeDiagnostics(spec),
+    ...unconditionalFanOutDiagnostics(spec),
+    ...subgraphRefDiagnostics(spec),
+  ];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** A nested graph's diagnostic, with its path under the node that holds it. */
+function nested(d: Diagnostic, prefix: string): Diagnostic {
+  return { ...d, path: d.path ? `${prefix}${d.path}` : prefix.replace(/\.$/, "") };
+}
+
+/**
+ * The checks a graph must pass before it compiles, applied to the graph and
+ * to every graph nested in it at any depth: each inline subgraph `spec` and
+ * each `map` body (`with.node`, including a subgraph body's own `spec`).
+ *
+ * - hook phases and directives are known
+ * - node ids are unique; edges name known nodes; `END` is never a source and
+ *   `START` never a target; there is an edge from `START`
+ * - every node type is registered and its `with` matches that type's schema
+ * - graph `inputs` and `triggers` are well formed
+ *
+ * Nested graphs also get {@link graphBodyLintDiagnostics}. `validateSpec`
+ * reports these with the other lints, `compileGraph` refuses a spec with any
+ * error among them, and `loadGraph` applies `validateSpec` to `uses` files.
+ */
+export function graphStructureDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  graphStructure(spec, "", out);
+  return out;
+}
+
+function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[]): void {
+  const push = (...items: Diagnostic[]) => out.push(...(prefix ? items.map((d) => nested(d, prefix)) : items));
+  const nodes = Array.isArray(spec.nodes) ? spec.nodes : [];
+  const edges = Array.isArray(spec.edges) ? spec.edges : [];
+
+  for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
+    if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook phase "${hook.on}". Allowed phases: ${[...KNOWN_PHASES].join(", ")}` });
+  }
+  for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
+    if (!knownHookDirective(hook.do)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Unknown hook directive "${hook.do}". Use retry, continue, ignore, interrupt, fail, redact or route:<node>.` });
+  }
+
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const seen = new Set<string>();
+  for (const node of nodes) {
+    if (seen.has(node.id)) push({ severity: "error", code: "DUPLICATE_NODE_ID", message: `Duplicate node id: "${node.id}"`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
+    seen.add(node.id);
+  }
+
+  for (const [index, edge] of edges.entries()) {
+    const check = (ref: string) => {
+      if (ref === "START" || ref === "END") return;
+      if (!nodeIds.has(ref)) push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"`, ...(prefix ? { path: `edges[${index}]` } : {}) });
+    };
+    const targets = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : edge.branch.map((b) => b.to);
+    // A `from` list is checked in barrierEdgeDiagnostics, including unknown ids, START and END.
+    if (!Array.isArray(edge.from)) {
+      check(edge.from);
+      if (edge.from === "END") {
+        push({ severity: "error", code: "EDGE_FROM_END", path: `edges[${index}].from`, message: 'An edge cannot start at "END": the run has finished there. Start the edge at a node.' });
+      }
+    }
+    for (const target of targets) check(target);
+    if (targets.includes("START")) {
+      push({ severity: "error", code: "EDGE_TO_START", path: `edges[${index}]`, message: 'An edge cannot lead to "START". Point it at the first node instead.' });
+    }
+  }
+
+  if (!edges.some((e) => (Array.isArray(e.from) ? e.from : [e.from]).includes("START"))) {
+    push({ severity: "error", code: "NO_START_EDGE", message: 'Graph has no edge from "START"', ...(prefix ? { path: "edges" } : {}) });
+  }
+
+  const allTargets = new Set<string>();
+  for (const edge of edges) {
+    if ("to" in edge) for (const t of Array.isArray(edge.to) ? edge.to : [edge.to]) allTargets.add(t);
+    if ("branch" in edge) for (const b of edge.branch) allTargets.add(b.to);
+  }
+  // A router's or routing hitl's own `with.routes` also lead somewhere.
+  for (const node of nodes) for (const t of declaredRouteTargets(spec, node.id)) allTargets.add(t);
+  for (const node of nodes) {
+    if (!allTargets.has(node.id)) push({ severity: "warning", code: "NO_INBOUND_EDGE", message: `Node "${node.id}" has no inbound edges`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
+  }
+
+  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out);
+
+  push(...inputFieldDiagnostics(spec), ...triggerDiagnostics(spec));
+  if (prefix) push(...graphBodyLintDiagnostics(spec));
+}
+
+/** Type registration and `with` shape for one node, then the graphs nested in it. */
+function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[]): void {
+  const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
+  const factory = registry.get(node.type);
+  if (!factory) {
+    push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
+  } else {
+    const configResult = factory.configSchema.safeParse(node.with ?? {});
+    if (!configResult.success) {
+      for (const issue of configResult.error.issues) {
+        const fieldPath = issue.path.join(".");
+        push({
+          severity: "error",
+          code: "NODE_CONFIG_ERROR",
+          message: fieldPath ? `${fieldPath}: ${issue.message}` : issue.message,
+          path: fieldPath ? `${path}.with.${fieldPath}` : `${path}.with`,
+        });
+      }
+    }
+  }
+  if (node.type === "map") {
+    const body = (node.with as { node?: unknown } | undefined)?.node;
+    // A body without a type is already reported against the map's own `with`.
+    if (isRecord(body) && typeof body.type === "string") {
+      const id = typeof body.id === "string" ? body.id : undefined;
+      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out);
+    }
+  }
+  if (node.type === "subgraph" && isRecord(node.spec) && Array.isArray(node.spec.nodes)) {
+    graphStructure(node.spec, `${prefix}${path}.spec.`, out);
+  }
+}
+
+function inputDefaultProblem(field: NonNullable<GraphSpec["inputs"]>[number]): string | undefined {
+  const value = field.default;
+  if (value === undefined || value === null) return undefined;
+  switch (field.type ?? "string") {
+    case "string":
+    case "text":
+      return typeof value === "string" ? undefined : "must be a string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value) ? undefined : "must be a number";
+    case "boolean":
+      return typeof value === "boolean" ? undefined : "must be true or false";
+    case "select":
+      if (typeof value !== "string") return "must be a string";
+      return !field.options?.length || field.options.includes(value) ? undefined : `must be one of: ${field.options.join(", ")}`;
+    case "json":
+      if (typeof value !== "string") return undefined;
+      try {
+        JSON.parse(value);
+        return undefined;
+      } catch {
+        return "is a string, so it must be JSON text; write the value itself in YAML instead";
+      }
+    default:
+      return undefined;
+  }
+}
+
+/** Graph `inputs`: unique keys, options for each select, and defaults of the declared type. */
+export function inputFieldDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const seen = new Set<string>();
+  for (const [index, field] of (Array.isArray(spec.inputs) ? spec.inputs : []).entries()) {
+    const path = `inputs[${index}]`;
+    if (seen.has(field.key)) {
+      diagnostics.push({ severity: "error", code: "DUPLICATE_INPUT_KEY", path: `${path}.key`, message: `Input "${field.key}" is declared more than once` });
+    }
+    seen.add(field.key);
+    if (field.type === "select" && !field.options?.length) {
+      diagnostics.push({ severity: "error", code: "INPUT_OPTIONS_MISSING", path: `${path}.options`, message: `Input "${field.key}" has type select but no options; list the values it accepts` });
+    }
+    const problem = inputDefaultProblem(field);
+    if (problem) {
+      diagnostics.push({ severity: "error", code: "INPUT_DEFAULT_TYPE", path: `${path}.default`, message: `Input "${field.key}" (type ${field.type ?? "string"}): default ${problem}` });
+    }
+  }
+  return diagnostics;
+}
+
+/** Graph `triggers`: unique ids, and a valid schedule and time zone on each cron trigger. */
+export function triggerDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const seen = new Set<string>();
+  for (const [index, trigger] of (Array.isArray(spec.triggers) ? spec.triggers : []).entries()) {
+    const path = `triggers[${index}]`;
+    if (seen.has(trigger.id)) {
+      diagnostics.push({ severity: "error", code: "DUPLICATE_TRIGGER_ID", path: `${path}.id`, message: `Trigger id "${trigger.id}" is used more than once; hosts use it to tell triggers apart` });
+    }
+    seen.add(trigger.id);
+    if (trigger.type !== "cron") continue;
+    const problem = cronScheduleProblem(trigger.schedule);
+    if (problem) {
+      diagnostics.push({ severity: "error", code: "TRIGGER_CRON_INVALID", path: `${path}.schedule`, message: `Trigger "${trigger.id}" schedule "${trigger.schedule}": ${problem}` });
+    }
+    if (trigger.timezone !== undefined && !isKnownTimeZone(trigger.timezone)) {
+      diagnostics.push({ severity: "error", code: "TRIGGER_TIMEZONE_INVALID", path: `${path}.timezone`, message: `Trigger "${trigger.id}" timezone "${trigger.timezone}" is not a known IANA time zone, such as "America/Denver" or "UTC"` });
+    }
+  }
   return diagnostics;
 }
 
