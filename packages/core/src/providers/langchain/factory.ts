@@ -240,10 +240,9 @@ export async function createLangChainProviderFromConfig(
     cwd,
   );
 
+  // `cfg.model` is the default model, not the list of models the vendor accepts, so it
+  // is not advertised as `models`: a node may override it with any model the vendor serves.
   const providerOpts: LangChainProviderOptions = { name, ...options };
-  if (cfg.model) {
-    providerOpts.models = [cfg.model];
-  }
 
   return createLangChainProvider(model, providerOpts);
 }

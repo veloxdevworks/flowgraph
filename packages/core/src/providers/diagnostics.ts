@@ -37,7 +37,8 @@ export function offlineProviderValidations(spec: GraphSpec): ProviderValidation[
     if (cfg?.kind !== "langchain") continue;
     out.set(name, {
       name,
-      capabilities: typeof cfg.model === "string" && cfg.model ? { models: [cfg.model] } : {},
+      // The configured model is a default, not a list of known models (see factory.ts).
+      capabilities: {},
       validate: langchainConfigDiagnostics,
     });
   }

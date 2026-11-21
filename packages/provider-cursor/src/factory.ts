@@ -37,7 +37,8 @@ export async function createCursorProviderFromConfig(
     apiKey,
     cwd,
     runtime: (cfg.runtime ?? "local") as CursorRuntime,
-    ...(cfg.model ? { model: cfg.model, models: [cfg.model] } : {}),
+    apiKeyEnv,
+    ...(cfg.model ? { model: cfg.model } : {}),
     ...(cfg.options ?? {}),
   });
 }

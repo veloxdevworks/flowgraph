@@ -152,24 +152,21 @@ describe("provider option diagnostics", () => {
     }
   });
 
-  it("checks known models and builtin tools offline from the providers block", () => {
+  it("does not treat the providers block's default model as the list of known models", () => {
     const spec = graph(
       [
         {
           id: "agent",
           type: "agent",
           provider: "lc",
-          model: "mystery-model",
+          model: "override-model",
           with: { prompt: "Hi", tools: [{ builtin: "Bash" }] },
         },
       ],
       { providers: { lc: { kind: "langchain", vendor: "openai", model: "gpt-4o" } } },
     );
     const diags = validateSpec(spec);
-    const unknown = diags.find((d) => d.code === "PROVIDER_MODEL_UNKNOWN");
-    expect(unknown?.severity).toBe("warning");
-    expect(unknown?.message).toContain("mystery-model");
-    expect(unknown?.message).toContain("gpt-4o");
+    expect(diags.filter((d) => d.code === "PROVIDER_MODEL_UNKNOWN")).toEqual([]);
     expect(diags.filter((d) => d.code === "PROVIDER_CONFIG_UNSUPPORTED")).toHaveLength(1);
   });
 

@@ -62,6 +62,8 @@ export interface ClaudeProviderOptions {
   cwd?: string;
   permissionMode?: ClaudePermissionMode;
   apiKey?: string;
+  /** Environment variable that holds the API key when `apiKey` is not given (default ANTHROPIC_API_KEY). */
+  apiKeyEnv?: string;
   models?: string[];
   deps?: ClaudeSdkDeps;
 }
@@ -221,8 +223,9 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Provi
           }
         }
       }
-      const apiKeyEnv = (config as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? "ANTHROPIC_API_KEY";
-      if (!process.env[apiKeyEnv]?.trim()) {
+      // A key passed in directly needs no environment variable; otherwise check the configured name.
+      const apiKeyEnv = options.apiKeyEnv ?? "ANTHROPIC_API_KEY";
+      if (!options.apiKey?.trim() && !process.env[apiKeyEnv]?.trim()) {
         diags.push({
           severity: "warning",
           message: `Missing ${apiKeyEnv}. Set it before running Claude provider nodes.`,
