@@ -13,7 +13,22 @@ const DEFAULT_SENSITIVE_HEADERS = [
   "x-auth-token",
 ];
 
-const CREDENTIAL_COOKIE_NAME = /sess|sid|token|auth|jwt|secret|key|csrf|xsrf|login|remember|refresh|access/i;
+/** Whole name segments that mark a credential cookie; `monkey` or `Access-Mode` do not qualify. */
+const CREDENTIAL_COOKIE_WORDS = new Set(["sess", "session", "sid", "token", "auth", "jwt", "secret", "key", "csrf", "xsrf", "login", "remember", "refresh"]);
+
+/** Split a cookie name on `-`, `_`, `.` and case boundaries: `refreshToken` → refresh, token; `XSRFToken` → xsrf, token. */
+function cookieNameSegments(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .split(/[-_.\s]+/)
+    .filter(Boolean)
+    .map((segment) => segment.toLowerCase());
+}
+
+export function isCredentialCookieName(name: string): boolean {
+  return cookieNameSegments(name).some((segment) => CREDENTIAL_COOKIE_WORDS.has(segment));
+}
 
 /**
  * The parts of a Set-Cookie header to redact: `name=value` whenever the value is non-empty, and the
@@ -28,7 +43,7 @@ export function setCookieRedactions(header: string): string[] {
   const value = (eq < 0 ? pair : pair.slice(eq + 1)).trim().replace(/^"(.*)"$/, "$1");
   if (!value) return [];
   const out = eq < 0 ? [] : [pair];
-  if (value.length >= 16 || (value.length >= 8 && CREDENTIAL_COOKIE_NAME.test(name))) out.push(value);
+  if (value.length >= 16 || (value.length >= 8 && isCredentialCookieName(name))) out.push(value);
   return out;
 }
 
@@ -55,8 +70,11 @@ export class SecretRedaction {
         if (key.toLowerCase() === "set-cookie") for (const part of setCookieRedactions(value)) this.observe(part);
       }
   }
+  /** A per-invocation copy: values observed during one invocation never reach another. */
   fork(): SecretRedaction {
-    return new SecretRedaction([...this.patterns.values()], [...this.headers]);
+    const copy = new SecretRedaction([...this.patterns.values()], [...this.headers]);
+    for (const value of this.values) copy.values.add(value);
+    return copy;
   }
   absorb(other: SecretRedaction): void {
     for (const name of other.headers) this.headers.add(name);

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { persistGraph, listPersistedGraphs, loadPersistedGraph, parseGraphYaml, appendEventJournal, loadEventJournal } from "./graph-source.js";
 import { SessionRegistry } from "./session-registry.js";
+import { compileGraph } from "@flowgraph/core";
 import type { ServerEvent } from "./types.js";
 
 const MINIMAL = `
@@ -238,6 +239,16 @@ describe("stored graph YAML", () => {
       delete process.env["FG_GS_TEST_VALUE"];
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+describe("unexpanded config placeholders", () => {
+  it("compileGraph refuses an undeclared ${NAME} left in a server-parsed graph", async () => {
+    const yaml = MINIMAL.replace("state:", 'config:\n  vars: { token: "${FG_GS_UNDECLARED}" }\nstate:');
+    const parsed = parseGraphYaml(yaml, { expandEnv: false });
+    expect(parsed.spec?.config?.vars).toEqual({ token: "${FG_GS_UNDECLARED}" });
+    await expect(compileGraph(parsed.spec!, { checkpointer: "none" })).rejects.toThrow(
+      'config.vars.token: `${FG_GS_UNDECLARED}` reads secret "FG_GS_UNDECLARED", which the graph does not declare',
+    );
   });
 });
 describe("host-support triggers", () => {

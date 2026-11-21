@@ -19,7 +19,8 @@ import { evalGuard, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
 import { resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
-import { SecretRedaction, SECRET_REDACTION, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
+import { SecretRedaction, SECRET_REDACTION, observeSecret, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
+import { graphEnvExpansion, unexpandedEnvDiagnostics } from "./runtime/config-env.js";
 import { DECLARED_SECRETS } from "./runtime/secret-scope.js";
 import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
 import { createEnvSecretProvider, DEFAULT_REDACT_PATTERNS } from "./secrets.js";
@@ -1446,6 +1447,8 @@ async function assembleCompiledLangGraph(
   embedded = false,
 ): Promise<AssembledGraph> {
   const sourceFile = graphFile(spec);
+  const envExpansion = graphEnvExpansion(spec);
+  const unexpandedEnv = unexpandedEnvDiagnostics(spec);
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
   // does not silently drop node updates when authors omit state.channels entries.
   spec = ensureDeclaredOutputChannels(spec);
@@ -1473,6 +1476,11 @@ async function assembleCompiledLangGraph(
     : opts.cwd !== undefined && !spec.runtime?.workspace ? path.resolve(cwd) : resolveGraphWorkspace(spec, graphDir);
   const runId = newRunId();
   const redaction = new SecretRedaction([...DEFAULT_REDACT_PATTERNS, ...(spec.runtime?.secrets?.redact?.patterns ?? []).flatMap(p => { try { return [new RegExp(p, "gi")]; } catch { return []; } })], spec.runtime?.secrets?.redact?.headers);
+  // Values a loaded graph expanded from declared `${VAR}` placeholders are secrets like any other.
+  for (const value of envExpansion?.values ?? []) {
+    redaction.observe(value);
+    observeSecret(value);
+  }
   const events = createEventBus({ runId, graph: spec.metadata.name, redact: value => redactSecrets(value, redaction) });
   for (const sink of opts.sinks ?? []) events.subscribe(sink);
 
@@ -1575,7 +1583,7 @@ async function assembleCompiledLangGraph(
   if (providerErrors.length > 0) {
     throw new Error(providerErrors.map((d) => `${d.path ?? "providers"}: ${d.message}`).join("\n"));
   }
-  const secretErrors = secretReferenceDiagnostics(spec);
+  const secretErrors = [...unexpandedEnv, ...secretReferenceDiagnostics(spec)];
   if (secretErrors.length > 0) {
     throw new Error(secretErrors.map((d) => `${d.path}: ${d.message}`).join("\n"));
   }

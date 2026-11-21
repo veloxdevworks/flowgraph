@@ -304,20 +304,31 @@ A loop that runs only some of the listed sources again does not release the barr
 
 ## 7. `config`
 
-Graph-level configuration and reusable values. Supports environment interpolation and references.
+Graph-level configuration and reusable values. Supports interpolation of declared secrets and references.
 
 ```yaml
+secrets: [JIRA_TOKEN]
 config:
   defaults:
     provider: claude              # default provider for agent nodes
-    model: "${FLOWGRAPH_MODEL:-claude-sonnet-4.5}"   # env interpolation w/ fallback
+    model: claude-sonnet-4.5
   vars:                           # author-defined constants, referenced as {{ config.vars.* }}
     jiraProject: "PLAT"
+    jiraToken: "${JIRA_TOKEN}"    # expanded at load because JIRA_TOKEN is declared; redacted like any secret
 ```
 
 `config.defaults` may set `provider` and `model` for agent nodes. Retry and timeout are not set here: the graph defaults are `runtime.retry` and `runtime.timeoutDefault`, and a node's own `retry` / `timeout` override those. `config.defaults.retry` and `config.defaults.timeout` are rejected, with an error that names the field to use instead.
 
-Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars. Expansion runs after YAML parsing, so environment values cannot inject YAML structure. `$${VAR}` escapes interpolation in those sections. Node bodies, inputs, state defaults, metadata and keys remain literal; shell `${VAR}` syntax is left for the child shell and its allowed environment. Use `{{ secret.NAME }}` for credentials instead of embedding them in config variables. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
+Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars, and only for names the graph lists under its top-level `secrets:` ([§7a](#7a-secrets-declared-credentials)):
+
+- A placeholder whose name is not declared is left as written and reported as `SECRET_UNDECLARED`, with its path and the name to add, by `loadGraph` / `flowgraph validate`. A `:-default` does not make an undeclared name optional.
+- `compileGraph` checks any spec itself, whether loaded, copied, bundled, parsed by the server or built in code: it refuses an unexpanded `${NAME}` in `config` or `runtime` (or an inline subgraph's) whose name that graph does not declare. Only `loadGraph` expands placeholders, so in a spec built in code a declared `${NAME}` stays literal and `$${NAME}` stays as written.
+- An inline subgraph `spec:` and a file subgraph each expand only the names in their own `secrets:` list.
+- A declared name behaves as before: its value, else the `:-default`, else an empty string.
+- `$${VAR}` escapes a placeholder; the result is the literal text `${VAR}`, which is neither read nor checked, including by `compileGraph`.
+- A value read from the environment this way is a secret: it is registered for redaction like a `{{ secret.NAME }}` value and shows as `[REDACTED]` wherever it appears in results, events, logs and checkpoints. A `:-default` written in the graph is not redacted. Write settings that should stay readable, such as a model name, as plain values.
+
+Expansion runs after YAML parsing, so environment values cannot inject YAML structure. Node bodies, inputs, state defaults, metadata and keys remain literal; shell `${VAR}` syntax is left for the child shell and its allowed environment. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
 
 ## 7a. `secrets` (declared credentials)
 
@@ -341,7 +352,8 @@ nodes:
 - `{{ secret.NAME }}` reads only a declared name. `flowgraph validate` and `compileGraph` report `SECRET_UNDECLARED` for any literal `secret.NAME` / `secret["NAME"]` in a node or an `mcpServers` entry that the list does not name. A computed name (`secret[state.key]`) is checked when it is read, and the node fails with the same message. A declared name the host has not set renders as an empty string.
 - A provider `apiKeyEnv` must be declared. A provider with a `baseUrl` but no `apiKeyEnv` would send the vendor's default key (for example `OPENAI_API_KEY`) to that endpoint, so that default key must be declared too. A provider without `apiKeyEnv` or `baseUrl` reads its vendor's default key as before, without a declaration.
 - A `command` skill's `env.vars` entry marked `secret: true` reaches the skill's process only when the graph declares it; a required one that is not declared fails the skill, an `optional: true` one is left out.
-- An inline subgraph `spec:` and a file subgraph (`uses: ./child.graph.yaml`) each have their own `secrets` list. A child never reads a name only its parent declares.
+- `${NAME}` in `config` and `runtime` expands only a declared name ([§7](#7-config)); an undeclared one is reported as `SECRET_UNDECLARED`.
+- An inline subgraph `spec:` and a file subgraph (`uses: ./child.graph.yaml`) each have their own `secrets` list. A child never reads a name only its parent declares, through `{{ secret.X }}` or `${X}`.
 - `http`, `webhook`, `demo`, `service`, `shell`, `script`, skills and `mcpServers` all read `{{ secret.X }}` through the same declared list. A `demo` capture that reads an undeclared name fails the node rather than reporting `not_captured`.
 - Declaring a name does not pass it to child processes. `shell`, `script`, `service` and command skills start from a small default allowlist (`PATH`, `HOME`, temp and locale variables); pass a secret explicitly, for example `env: { TOKEN: "{{ secret.GITHUB_TOKEN }}" }`.
 - `secrets:` controls what templates and provider settings read; it is **not** an isolation boundary for `shell`, `script`, skill or `service` nodes. A shell `with.inheritEnv` entry, a skill's non-secret `env.vars`, and anything those processes read from their parent environment or the file system can still carry a host value that is not declared. Run graphs you do not trust under a node policy that blocks those node types.
@@ -398,7 +410,7 @@ runtime:
   webhookServer:                  # embedded HTTP ingress for wait.webhook
     host: "127.0.0.1"             # default
     port: 8878                    # default; 0 = ephemeral; EADDRINUSE → ephemeral fallback
-    # token: ${FLOWGRAPH_WEBHOOK_TOKEN} # optional shared secret for GET/POST
+    # token: "${FLOWGRAPH_WEBHOOK_TOKEN}" # optional shared secret for GET/POST; list FLOWGRAPH_WEBHOOK_TOKEN under secrets:
   services:
     terminateOnEnd: true          # stop non-keepAlive `service` processes on completed/error (default)
   hitl:
@@ -443,7 +455,7 @@ imports:
     as: notify
 
 config:
-  defaults: { provider: claude, model: "${FLOWGRAPH_MODEL:-claude-sonnet-4.5}" }
+  defaults: { provider: claude, model: claude-sonnet-4.5 }
   vars: { jiraProject: "PLAT" }
 
 state:

@@ -41,6 +41,7 @@ it("PLAT-361: expands only config/runtime values after YAML parsing and preserve
     type: "shell",
     with: { command: "printf '%s' '${FGQA_R2_DECOY:-fallback}'" },
   }) as unknown as Record<string, unknown>;
+  document.secrets = ["FGQA_R2_DECOY"];
   document.config = { vars: { value: "${FGQA_R2_DECOY}", escaped: "$${FGQA_R2_DECOY}" } };
   await writeFile(join(d, "flow.yaml"), JSON.stringify(document));
   const result = await loadGraph(join(d, "flow.yaml"));
@@ -156,6 +157,7 @@ it("PLAT-361: environment values cannot inject YAML structure", async () => {
     string,
     unknown
   >;
+  document.secrets = ["FGQA_R2_MULTILINE"];
   document.config = { vars: { multiline: "${FGQA_R2_MULTILINE}" } };
   await writeFile(join(d, "flow.yaml"), JSON.stringify(document));
   const loaded = await loadGraph(join(d, "flow.yaml"));
