@@ -122,11 +122,13 @@ export async function runMapItem(
 }
 
 /**
- * The inner node renders its config again with its own scope, which can hold
- * `secret`. Values the map already rendered may carry item data, so any string
- * that still contains `{{` becomes a quoted literal that renders to itself.
- * A field the inner node does not render would see the quoted form, so this
- * only touches strings that contain `{{`.
+ * The map renders the inner `with` once, with the item in scope and no
+ * `secret`, so `{{ secret.X }}` in a map body renders as null. The inner node
+ * then renders its config again with its own scope. Values the map rendered
+ * may carry item data, so any string that still contains `{{` becomes a
+ * quoted literal that renders to itself. A field the inner node does not
+ * render would see the quoted form, so this only touches strings that
+ * contain `{{`.
  */
 function inertTemplates(value: unknown): unknown {
   if (typeof value === "string") {

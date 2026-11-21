@@ -216,10 +216,12 @@ function normalizePermissionGrants(raw: string): string[] {
 
 function asPermissionGrants(p: string, workspace?: string): string[] {
   const absolute = resolveGrantPath(p, workspace);
+  // `resolve` and `realpath` drop a trailing `/`, which marks a directory grant.
+  const asWritten = (q: string) => (/[\\/]$/.test(p) && !/[\\/]$/.test(q) ? `${q}/` : q);
   return [
     ...new Set([
-      ...normalizePermissionGrants(absolute),
-      ...normalizePermissionGrants(resolvePermissionPath(absolute)),
+      ...normalizePermissionGrants(asWritten(absolute)),
+      ...normalizePermissionGrants(asWritten(resolvePermissionPath(absolute))),
     ]),
   ];
 }

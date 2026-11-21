@@ -312,7 +312,7 @@ See `examples/mcp/` for a runnable walkthrough.
     output: { to: notifyResult }
 ```
 
-Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). A `{{ secret.X }}` in a webhook needs `X` in the graph's top-level `secrets:`, as in `http`. Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
+Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). A `{{ secret.X }}` in a webhook needs `X` in the graph's top-level `secrets:`, as in `http`. Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. Sensitive response headers such as `Set-Cookie` show as `***` in `result.headers`, and their values are redacted elsewhere too. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
@@ -382,6 +382,16 @@ Declare toolchains with `requires` so missing binaries are caught at preflight a
 ```
 
 `onMissingTool: skip` returns `{ ok: false, skipped: true }` and records a `TOOL_NOT_FOUND` run issue so later agents can see that verification never ran. Even in `fail` mode, a missing binary (ENOENT / exit 127) is reported as `TOOL_NOT_FOUND` rather than a raw spawn error.
+
+Argv mode keeps data out of the shell, but the program still parses its own options: a value such as `--output=/etc/passwd` or `-rf` is read as a flag. When a program accepts `--` to end its options, put it before data-supplied arguments:
+
+```yaml
+- id: grep-term
+  type: shell
+  with:
+    command: grep
+    args: ["-n", "--", "{{ state.term }}", "notes.txt"]
+```
 
 **Run data in shell mode:** pass values through `env` and quote them in the command (`"$NAME"`), so the shell treats them as data. Typographic quotes (`“ ” ‘ ’`) in the authored command line are converted to ASCII quotes; rendered values are not touched. On Windows, `cmd.exe` expands `%NAME%` before it parses the line, so an env value can still change a `cmd.exe` command line — use argv mode there when values come from external input.
 
@@ -636,7 +646,13 @@ remain unsupported.
 | Third-party npm packages | Unreachable (no `node_modules`) | Not supported |
 | `node:*` builtins | Available (subject to the rows above) | — |
 
-Directory grants should end with `/` (or omit the trailing slash — the engine normalizes directories). A grant covers only the path it names. A path that does not exist yet is a file when it has an extension (`report.json`) and otherwise a directory the script may create, with everything under it; neither grants its parent, so a new file in a folder that does not exist yet needs a grant on the folder (`fsWrite: [out]`, not `fsWrite: [out/report.json]`). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
+A grant covers only the path it names, and never its parent. A path that already exists is granted as what it is: a directory covers everything under it, a file only itself. A path that does not exist yet is classified by its last name alone:
+
+- A name ending in a dot and letters or digits (`report.json`, `data.v2`) is an **exact-file** grant. The script may write that path but nothing under it, so `fsWrite: [data.v2]` cannot be used to fill a `data.v2` folder.
+- Any other name (`out`, `Makefile`) is a **directory** grant: the script may create that path, as a folder or a file, and anything under it. `fsWrite: [Makefile]` therefore also allows `Makefile/anything`.
+- A trailing `/` always means a directory: write `data.v2/` to grant a new folder whose name contains a dot.
+
+A new file in a folder that does not exist yet needs a grant on the folder (`fsWrite: [out]`, not `fsWrite: [out/report.json]`). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
 
 **Network caveat:** Node's permission model has **no** `--allow-net` flag. Scripts can open sockets / `fetch` unless the host environment (container network policy, OS firewall) blocks them. Treat network restriction as a deploy-time concern, same class of trust as `shell`.
 
