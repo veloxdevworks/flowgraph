@@ -36,7 +36,8 @@ export async function createClaudeProviderFromConfig(
     name,
     apiKey,
     cwd,
-    ...(cfg.model ? { model: cfg.model, models: [cfg.model] } : {}),
+    apiKeyEnv,
+    ...(cfg.model ? { model: cfg.model } : {}),
     ...(cfg.permissionMode ? { permissionMode: cfg.permissionMode as ClaudePermissionMode } : {}),
     ...(cfg.options ?? {}),
   };

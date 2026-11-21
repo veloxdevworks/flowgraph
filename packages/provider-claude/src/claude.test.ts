@@ -103,6 +103,25 @@ describe("@flowgraph/provider-claude", () => {
     expect(diags?.some((d) => d.message.includes("Unknown Claude builtin"))).toBe(true);
   });
 
+  it("validate checks the configured key, not a hardcoded variable name", () => {
+    const deps = { query: fakeQuery([]), createSdkMcpServer: () => ({}), tool: () => ({}) };
+    const missing = (p: ReturnType<typeof createClaudeProvider>) =>
+      (p.validate?.({}) ?? []).filter((d) => d.message.startsWith("Missing ")).map((d) => d.message);
+    const saved = { ...process.env };
+    try {
+      delete process.env["ANTHROPIC_API_KEY"];
+      delete process.env["FGQA_CLAUDE_KEY"];
+      expect(missing(createClaudeProvider({ apiKey: "configured-key", deps }))).toEqual([]);
+      expect(missing(createClaudeProvider({ apiKeyEnv: "FGQA_CLAUDE_KEY", deps }))).toEqual([
+        "Missing FGQA_CLAUDE_KEY. Set it before running Claude provider nodes.",
+      ]);
+      process.env["FGQA_CLAUDE_KEY"] = "set";
+      expect(missing(createClaudeProvider({ apiKeyEnv: "FGQA_CLAUDE_KEY", deps }))).toEqual([]);
+    } finally {
+      process.env = saved;
+    }
+  });
+
   it("canUseTool routes native tools through governance", async () => {
     let canUseTool: ((name: string, input: Record<string, unknown>) => Promise<unknown>) | undefined;
     const provider = createClaudeProvider({

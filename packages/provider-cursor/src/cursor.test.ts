@@ -80,6 +80,24 @@ describe("@flowgraph/provider-cursor", () => {
     );
   });
 
+  it("validate checks the configured key, not a hardcoded variable name", () => {
+    const missing = (p: ReturnType<typeof createCursorProvider>) =>
+      (p.validate?.({}) ?? []).filter((d) => d.message.startsWith("Missing ")).map((d) => d.message);
+    const saved = { ...process.env };
+    try {
+      delete process.env["CURSOR_API_KEY"];
+      delete process.env["FGQA_CURSOR_KEY"];
+      expect(missing(createCursorProvider({ apiKey: "configured-key", agentFactory: fakeAgentFactory([]) }))).toEqual([]);
+      expect(missing(createCursorProvider({ apiKeyEnv: "FGQA_CURSOR_KEY", agentFactory: fakeAgentFactory([]) }))).toEqual([
+        "Missing FGQA_CURSOR_KEY. Set it before running Cursor provider nodes.",
+      ]);
+      process.env["FGQA_CURSOR_KEY"] = "set";
+      expect(missing(createCursorProvider({ apiKeyEnv: "FGQA_CURSOR_KEY", agentFactory: fakeAgentFactory([]) }))).toEqual([]);
+    } finally {
+      process.env = saved;
+    }
+  });
+
   it("trusts the local workspace by default (no TTY after handoff)", async () => {
     let created: Record<string, unknown> | undefined;
     const inner = fakeAgentFactory([]);

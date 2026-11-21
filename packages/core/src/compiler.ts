@@ -10,7 +10,7 @@ import { resumeValidationInfo } from "./runtime/resume-validation.js";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createExecutionLimit, type ExecutionLimit } from "./runtime/concurrency.js";
-import type { GraphSpec, NodeSpec, OutputMapping } from "@flowgraph/spec";
+import type { Diagnostic, GraphSpec, NodeSpec, OutputMapping } from "@flowgraph/spec";
 import { applyOutput } from "./runtime/apply-output.js";
 import {mkdir, realpath} from "node:fs/promises";
 import { walkNodes } from "./discover-skills.js";
@@ -45,6 +45,7 @@ import {
 } from "./checkpoint/retention.js";
 import {
   appendRunIssue,
+  dedupeIssues,
   issueDedupeKey,
   readRunIssues,
   runIssuesKey,
@@ -82,7 +83,7 @@ import {
 } from "./runtime/webhook-server.js";
 import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
 import { cleanupWorktrees } from "./nodes/worktree.js";
-import { registerProvider, type ProviderAdapter } from "./providers/index.js";
+import { registerProvider, providerConfigDiagnostics, type ProviderAdapter } from "./providers/index.js";
 import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
 import { GRAPH_MEDIA_PROVIDERS, deriveMediaProviders, type GraphMediaProviders } from "./media/registry.js";
 import type { MediaProvider } from "./media/types.js";
@@ -352,6 +353,12 @@ export interface CompiledGraph {
   stream(opts?: RunOptions): AsyncIterable<FlowgraphEvent>;
   /** Where each `runsOn` node was placed at compile time (ADR-0020). Empty when the graph has none. */
   placements: import("./placement/resolve.js").PlacementDecision[];
+  /**
+   * Warnings found while compiling (for example provider options the
+   * provider cannot honor, or a model it does not list). Each run result
+   * also carries them in `issues`.
+   */
+  diagnostics: Diagnostic[];
 }
 
 type ExecuteMode = "start" | "resume" | "continue";
@@ -414,6 +421,20 @@ interface AssembledGraph {
   interruptBefore: string[];
   interruptAfter: string[];
   defaultPolicy: InterruptPolicy;
+  warnings: Diagnostic[];
+}
+
+/** A compile warning as a run issue, so run results report it with the run's own issues. */
+function compileWarningIssue(diag: Diagnostic, raisedAt: string): RunIssue {
+  const nodeId = /^nodes\.([^.]+)/.exec(diag.path ?? "")?.[1];
+  return {
+    code: diag.code,
+    severity: "warning",
+    message: diag.message,
+    ...(nodeId ? { nodeId } : {}),
+    ...(diag.path ? { detail: { path: diag.path } } : {}),
+    raisedAt,
+  };
 }
 
 export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): Promise<CompiledGraph> {
@@ -431,6 +452,8 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     interruptAfter,
     defaultPolicy,
   } = assembled;
+  const compiledAt = new Date().toISOString();
+  const compileIssues = assembled.warnings.map((d) => compileWarningIssue(d, compiledAt));
   const declaredInputKeys = new Set([...Object.keys(buildStateAnnotation(graphSpec).spec), ...(graphSpec.inputs ?? []).map(field => field.key)]);
 
   const authoredMapNames = new Map<string, string>();
@@ -565,7 +588,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         if (!r.error) { r.status = "error"; r.error = error instanceof Error ? error : new Error(String(error)); }
       }
       try {
-        const issues = readRunIssues(workspace, runIssuesKey({ threadId, runId }));
+        const issues = dedupeIssues([...compileIssues, ...readRunIssues(workspace, runIssuesKey({ threadId, runId }))]);
         if (issues.length > 0) r.issues = issues;
       } catch {
         /* ignore unreadable issue logs */
@@ -1306,6 +1329,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     runId,
     events,
     placements: plan?.decisions ?? [],
+    diagnostics: assembled.warnings,
     prepare,
     run: async (runOpts: RunOptions = {}) => {
       const started = startInvocation(runOpts);
@@ -1501,6 +1525,13 @@ async function assembleCompiledLangGraph(
       (baseCtx as Record<symbol, unknown>)[GRAPH_MEDIA_PROVIDERS] = graphMedia;
     }
   }
+
+  const providerDiags = providerConfigDiagnostics(spec, opts.providers ?? []);
+  const providerErrors = providerDiags.filter((d) => d.severity === "error");
+  if (providerErrors.length > 0) {
+    throw new Error(providerErrors.map((d) => `${d.path ?? "providers"}: ${d.message}`).join("\n"));
+  }
+  const compileWarnings = providerDiags.filter((d) => d.severity === "warning");
 
   const defaultRetry = spec.runtime?.retry;
   const defaultTimeout = spec.runtime?.timeoutDefault;
@@ -1897,7 +1928,9 @@ async function assembleCompiledLangGraph(
   }
 
   // Warn when parallel fan-out branches target the same lastWrite channel.
-  warnFanInLastWrite(spec, createLogger(events, spec.metadata.name));
+  const compileLogger = createLogger(events, spec.metadata.name);
+  warnFanInLastWrite(spec, compileLogger);
+  for (const d of compileWarnings) compileLogger.warn(`${d.path ?? "providers"}: ${d.message}`, { code: d.code });
 
   // Checkpointer + store
   const checkpointer = resolveCheckpointer(spec, opts);
@@ -1925,6 +1958,7 @@ async function assembleCompiledLangGraph(
     interruptBefore,
     interruptAfter,
     defaultPolicy,
+    warnings: compileWarnings,
   };
 }
 

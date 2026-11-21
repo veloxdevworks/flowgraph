@@ -525,15 +525,26 @@ export const RouterRouteSchema = z.object({
   description: z.string().optional(),
 });
 
-export const RouterWithSchema = z.object({
-  mode: z.union([z.literal("rules"), z.literal("model")]).default("rules"),
-  input: z.string().optional(),
-  instruction: z.string().optional(),
-  provider: z.string().optional(),
-  routes: z.record(RouterRouteSchema),
-  match: z.union([z.literal("firstMatch"), z.literal("allMatches")]).optional().default("firstMatch"),
-  output: OutputMappingSchema.optional(),
-});
+export const RouterWithSchema = z
+  .object({
+    mode: z.union([z.literal("rules"), z.literal("model")]).default("rules"),
+    input: z.string().optional(),
+    instruction: z.string().optional(),
+    provider: z.string().optional(),
+    routes: z.record(RouterRouteSchema),
+    match: z.union([z.literal("firstMatch"), z.literal("allMatches")]).optional().default("firstMatch"),
+    output: OutputMappingSchema.optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.mode === "model" && value.match === "allMatches") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["match"],
+        message:
+          "router mode: model cannot use match: allMatches; a model router selects one route. Use mode: rules for allMatches, or omit match.",
+      });
+    }
+  });
 
 // http node
 export const HttpWithSchema = BaseWithSchema.extend({

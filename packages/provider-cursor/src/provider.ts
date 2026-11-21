@@ -31,6 +31,8 @@ export interface CursorProviderOptions {
   model?: string;
   runtime?: CursorRuntime;
   apiKey?: string;
+  /** Environment variable that holds the API key when `apiKey` is not given (default CURSOR_API_KEY). */
+  apiKeyEnv?: string;
   cwd?: string;
   models?: string[];
   agentFactory?: CursorAgentFactory;
@@ -139,8 +141,9 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
         });
       }
 
-      const apiKeyEnv = (config as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? "CURSOR_API_KEY";
-      if (!process.env[apiKeyEnv]?.trim()) {
+      // A key passed in directly needs no environment variable; otherwise check the configured name.
+      const apiKeyEnv = options.apiKeyEnv ?? "CURSOR_API_KEY";
+      if (!options.apiKey?.trim() && !process.env[apiKeyEnv]?.trim()) {
         diags.push({
           severity: "warning",
           message: `Missing ${apiKeyEnv}. Set it before running Cursor provider nodes.`,
@@ -157,7 +160,7 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
 
       const runtime = options.runtime ?? "local";
       const model = req.model ?? options.model ?? "composer-2.5";
-      const apiKey = options.apiKey ?? process.env["CURSOR_API_KEY"];
+      const apiKey = options.apiKey ?? process.env[options.apiKeyEnv ?? "CURSOR_API_KEY"];
 
       const agentOptions: Record<string, unknown> = {
         apiKey,
