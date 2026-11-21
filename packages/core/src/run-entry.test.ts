@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
+import { resolveGraphInput } from "./inputs.js";
 import { createScriptedProvider } from "./providers/index.js";
 import type { FlowgraphEvent } from "./events.js";
 
@@ -236,5 +237,65 @@ describe("a node's input is the payload its handler receives", () => {
     expect(r.status).toBe("completed");
     expect(r.state.got).toEqual({ x: "hello", n: 2 });
     expect(r.state.out).toEqual({ raw: "empty" });
+  });
+});
+
+describe("a generated thread keeps its run id after a pause", () => {
+  const gateGraph = () => graph([{ id: "gate", type: "hitl", with: { mode: "approve", message: "ok?" } }]);
+
+  it("reports the same run id on run(), resume() and their events", async () => {
+    const compiled = await compileGraph(gateGraph(), { workspace: workspace(), checkpointer: "memory" });
+    const events: FlowgraphEvent[] = [];
+    compiled.events.subscribe((e) => { events.push(e); });
+    const started = await compiled.run();
+    expect(started.status).toBe("interrupted");
+    expect(started.runId).not.toBe(compiled.runId);
+    const resumed = await compiled.resume({ threadId: started.threadId!, resume: { approved: true } });
+    expect(resumed.status).toBe("completed");
+    expect(resumed.runId).toBe(started.runId);
+    expect(new Set(events.map((e) => e.runId))).toEqual(new Set([started.runId]));
+  });
+
+  it("reports the run id from a resume prepare()", async () => {
+    const ws = workspace();
+    const compiled = await compileGraph(gateGraph(), { workspace: ws, checkpointer: "memory" });
+    const started = await compiled.run();
+    const prepared = await compiled.prepare({ mode: "resume", options: { threadId: started.threadId!, resume: { approved: true } } });
+    expect(prepared.runId).toBe(started.runId);
+    await prepared.release();
+  });
+
+  it("keeps the compile-time run id for a caller-supplied thread", async () => {
+    const compiled = await compileGraph(gateGraph(), { workspace: workspace(), checkpointer: "memory" });
+    const started = await compiled.run({ threadId: "thread-run-not-a-uuid" });
+    const resumed = await compiled.resume({ threadId: "thread-run-not-a-uuid", resume: { approved: true } });
+    expect(started.runId).toBe(compiled.runId);
+    expect(resumed.runId).toBe(compiled.runId);
+  });
+});
+
+describe("graph inputs are resolved once", () => {
+  const jsonGraph = () => graph([{ id: "a", type: "function", with: { fn: "runEntryEcho", input: { cfg: "{{ state.cfg }}" }, output: { to: "got" } } }], {
+    state: { channels: { got: { type: "object" }, cfg: { type: "any" } } },
+    inputs: [{ key: "cfg", type: "json" }],
+  });
+
+  it.each([
+    ["42", 42],
+    ["true", true],
+    ['{"a":1}', { a: 1 }],
+  ])("accepts a json input %s whether or not the caller resolved it first", async (raw, value) => {
+    const compiled = await compileGraph(jsonGraph(), { workspace: workspace() });
+    const direct = await compiled.run({ input: { cfg: raw } });
+    expect(direct.status).toBe("completed");
+    expect(direct.state.cfg).toEqual(value);
+    const preResolved = await compiled.run({ input: resolveGraphInput(compiled.spec, { cfg: raw }) });
+    expect(preResolved.status).toBe("completed");
+    expect(preResolved.state.cfg).toEqual(value);
+  });
+
+  it("still rejects JSON text that does not parse", async () => {
+    const compiled = await compileGraph(jsonGraph(), { workspace: workspace() });
+    await expect(compiled.run({ input: { cfg: "{nope" } })).rejects.toMatchObject({ code: "INPUT_INVALID" });
   });
 });

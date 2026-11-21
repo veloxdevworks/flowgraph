@@ -71,7 +71,10 @@ function coerceValue(
   }
 
   if (type === "json") {
-    if (raw !== null && typeof raw === "object") return { ok: true, value: raw };
+    // Objects, arrays, numbers and booleans are already-parsed JSON values; only strings are JSON text.
+    if (raw !== null && (typeof raw === "object" || typeof raw === "number" || typeof raw === "boolean")) {
+      return { ok: true, value: raw };
+    }
     if (typeof raw === "string") {
       const trimmed = raw.trim();
       if (trimmed === "") return { ok: false, error: "expected JSON" };

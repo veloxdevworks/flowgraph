@@ -372,6 +372,17 @@ function newRunId(): string {
   return `run-${randomUUID()}`;
 }
 
+const GENERATED_THREAD = /^thread-(run-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/**
+ * Run id carried by a thread the engine generated for a start without a thread id
+ * (`thread-<runId>`), so resume and continue report the id the run started with, in
+ * this process or another. Any other thread id names no run id.
+ */
+function runIdOfGeneratedThread(threadId: string | undefined): string | undefined {
+  return threadId ? GENERATED_THREAD.exec(threadId)?.[1] : undefined;
+}
+
 export async function compileGraphForEmbedding(
   spec: GraphSpec,
   opts: CompileOptions = {},
@@ -503,7 +514,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     overrides: InvokeOverrides = {},
   ): Promise<RunResult> => {
     const startMs = Date.now();
-    const runId = overrides.runId ?? assembled.runId;
+    const runId = overrides.runId ?? runIdOfGeneratedThread(runOpts.threadId) ?? assembled.runId;
     const threadId = runOpts.threadId ?? `thread-${runId}`;
     const cfg = buildInvokeConfig(threadId, graphSpec, (runOpts as ResumeOptions).checkpointId);
     if (overrides.singleStep) cfg["interruptAfter"] = "*";
@@ -1118,7 +1129,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     mode: ExecuteMode,
     overrides: InvokeOverrides = {},
   ): Promise<RunResult> => {
-    const runId = overrides.runId ?? assembled.runId;
+    const runId = overrides.runId ?? runIdOfGeneratedThread(runOpts.threadId) ?? assembled.runId;
     const threadId = runOpts.threadId ?? `thread-${runId}`;
     return withEventThread(threadId, async () => {
       let claim = overrides.threadClaim;
@@ -1158,7 +1169,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   const prepare = async (request: PrepareInvocationOptions, supplied?: ThreadRunClaim): Promise<PreparedInvocation> => {
     const started = request.mode === "start" ? startInvocation(request.options) : undefined;
     const runOpts = started ? started.options : { ...request.options };
-    const runId = started?.runId ?? assembled.runId;
+    const runId = started?.runId ?? runIdOfGeneratedThread(runOpts.threadId) ?? assembled.runId;
     const threadId = runOpts.threadId ?? `thread-${runId}`;
     const claim = supplied ?? await acquireThreadRun(checkpointer ?? compiledLg, threadId, defaultThreadRunOwner({ runId, graph: graphSpec.metadata.name }));
     adoptThreadRunClaim(checkpointer ?? compiledLg, threadId, claim);

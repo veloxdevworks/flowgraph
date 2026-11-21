@@ -862,9 +862,9 @@ export class RunService {
         throw err;
       }
 
-      let resolvedInput: Record<string, unknown>;
       try {
-        resolvedInput = resolveGraphInput(spec, runInput);
+        // Fail before admitting the run; prepare({ mode: "start" }) resolves the raw input once.
+        resolveGraphInput(spec, runInput);
       } catch (err) {
         this.registry.remove(req.threadId);
         if (isInputValidationError(err)) {
@@ -873,7 +873,7 @@ export class RunService {
         throw err;
       }
 
-      const prepared = await this.prepareControl(compiled, { mode: "start", options: { threadId: req.threadId, input: resolvedInput, onInterrupt: "fail" } }, claim);
+      const prepared = await this.prepareControl(compiled, { mode: "start", options: { threadId: req.threadId, input: runInput ?? {}, onInterrupt: "fail" } }, claim);
       placeholder.runId = compiled.runId;
       this.registry.setStatus(req.threadId, "running");
       this.metrics.recordStart();

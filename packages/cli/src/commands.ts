@@ -305,11 +305,11 @@ program
     }
 
     // Parse --input flags and validate against declared `inputs` schema (fail fast)
-    let inputState: Record<string, unknown>;
+    let rawInput: Record<string, unknown>;
     try {
-      const rawInput = await parseInputFlags(opts.input ?? [], cwd);
-      // Same resolution as compiled.run() and the server; checked here to fail before preflight work.
-      inputState = resolveGraphInput(spec, rawInput);
+      rawInput = await parseInputFlags(opts.input ?? [], cwd);
+      // Checked here to fail before preflight work; compiled.run() resolves the raw input once.
+      resolveGraphInput(spec, rawInput);
     } catch (err) {
       if (isInputValidationError(err)) {
         printError(err.message);
@@ -390,7 +390,7 @@ program
     }
 
     const policy = opts.onInterrupt ?? "fail";
-    const runOpts: RunOptions = { input: inputState, onInterrupt: policy };
+    const runOpts: RunOptions = { input: rawInput, onInterrupt: policy };
     if (opts.thread !== undefined) runOpts.threadId = opts.thread;
     if (policy === "prompt") runOpts.resolveInterrupt = promptResolver;
     let result;
