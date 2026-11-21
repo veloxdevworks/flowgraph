@@ -208,6 +208,23 @@ export default async function() {
     }
   });
 
+  it("treats a missing dotted name as a file unless the grant ends with /", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-dotted-"));
+    try {
+      const r = await runScriptSandboxed(
+        `
+import { mkdirSync, writeFileSync } from "node:fs";
+const tryWrite = (dir) => { try { mkdirSync(dir); writeFileSync(dir + "/a.txt", "x"); return "written"; } catch (e) { return e.code; } };
+export default async function() { return { file: tryWrite("data.v2"), dir: tryWrite("data.v3") }; }
+`,
+        { workspace, permissions: { fsWrite: ["data.v2", "data.v3/"] } },
+      );
+      expect(r.result).toEqual({ file: "ERR_ACCESS_DENIED", dir: "written" });
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("grants a new file in a workspace reached through a symlink", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-link-"));
     try {

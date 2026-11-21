@@ -633,7 +633,13 @@ remain unsupported.
 | Third-party npm packages | Unreachable (no `node_modules`) | Not supported |
 | `node:*` builtins | Available (subject to the rows above) | — |
 
-Directory grants should end with `/` (or omit the trailing slash — the engine normalizes directories). A grant covers only the path it names. A path that does not exist yet is a file when it has an extension (`report.json`) and otherwise a directory the script may create, with everything under it; neither grants its parent, so a new file in a folder that does not exist yet needs a grant on the folder (`fsWrite: [out]`, not `fsWrite: [out/report.json]`). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
+A grant covers only the path it names, and never its parent. A path that already exists is granted as what it is: a directory covers everything under it, a file only itself. A path that does not exist yet is classified by its last name alone:
+
+- A name ending in a dot and letters or digits (`report.json`, `data.v2`) is an **exact-file** grant. The script may write that path but nothing under it, so `fsWrite: [data.v2]` cannot be used to fill a `data.v2` folder.
+- Any other name (`out`, `Makefile`) is a **directory** grant: the script may create that path, as a folder or a file, and anything under it. `fsWrite: [Makefile]` therefore also allows `Makefile/anything`.
+- A trailing `/` always means a directory: write `data.v2/` to grant a new folder whose name contains a dot.
+
+A new file in a folder that does not exist yet needs a grant on the folder (`fsWrite: [out]`, not `fsWrite: [out/report.json]`). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
 
 **Network caveat:** Node's permission model has **no** `--allow-net` flag. Scripts can open sockets / `fetch` unless the host environment (container network policy, OS firewall) blocks them. Treat network restriction as a deploy-time concern, same class of trust as `shell`.
 
