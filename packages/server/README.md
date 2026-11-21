@@ -46,19 +46,19 @@ The server identifies callers in one of three modes. None of this applies to the
 
 ### Trusted authors
 
-A trusted author's uploads may use host access (`shell`, `script`, `service` and the other node types and settings listed under [untrusted authors](#uploaded-graphs-from-untrusted-authors)), `{{ secret.* }}`, and `${VAR}` placeholders, which expand by the [one `${VAR}` rule](../../docs/02-graph-spec.md#7-config): after parsing, only in `config` and `runtime`, and only for names the graph declares under `secrets:`. Anyone else gets the untrusted-author checks. Who is trusted depends on the auth mode:
+A trusted author's uploads may use host access (`shell`, `script`, `service` and the other node types and settings listed under [untrusted authors](#uploaded-graphs-from-untrusted-authors)), `{{ secret.* }}`, and `${VAR}` placeholders, which expand by the [one `${VAR}` rule](../../docs/02-graph-spec.md#7-config): after parsing, only in `config` and `runtime`, and only for names the graph declares under `secrets:`. An expanded value shows as `[REDACTED]` in the diagnostics and errors returned for an upload, preflight or compile, whatever its length. Anyone else gets the untrusted-author checks. Who is trusted depends on the auth mode:
 
 | Mode | Trusted |
 |---|---|
 | `oidc` | Callers with a role in `FLOWGRAPH_OIDC_TRUSTED_ROLES` or a team in `FLOWGRAPH_OIDC_TRUSTED_TEAMS` |
 | `token` | Nobody by default. With `FLOWGRAPH_TRUST_TOKEN_CALLERS=1` (`trustTokenCallers: true` in `ServerConfig`), everyone holding the shared token |
-| `none` | The anonymous caller, only with `FLOWGRAPH_INSECURE_DEV=1` |
+| `none` | The anonymous caller, only with `FLOWGRAPH_INSECURE_DEV=1`, or when a programmatic `ServerConfig` sets `authDisabled` without an `auth` block (`defaultServerConfig` always sets `auth`) |
 
 | Env | Default | Purpose |
 |---|---|---|
 | `FLOWGRAPH_TRUST_TOKEN_CALLERS` | off | Make `token`-mode callers trusted authors. Anyone who has the token can then run host commands on the server and read the secrets graphs declare, so set it only when every token holder may do that. The server logs a warning at startup when it is on. Ignored in `oidc` and `none` mode |
 
-An embedded `RunService` whose config sets neither `auth` nor `authToken` cannot be reached with a token, so calls made in its own process are trusted.
+An embedded `RunService` whose config sets none of `auth`, `authToken` and `agentcore` cannot be reached with a token, so calls made in its own process are trusted. With `agentcore` set, `/invocations` callers reach that principal without a token, so it is untrusted unless `trustTokenCallers` is set.
 
 ### OIDC
 
@@ -179,7 +179,7 @@ These changes can stop an existing deployment or graph until you act:
 5. **Expressions no longer see `__` channels.** In every graph, `state` in a `{{ }}` expression or a `when` condition leaves out channels starting with `__` (`{{ state }}`, `keys(state)` and `state['_' + '_services']` included). Keys starting with `__` inside your own channels are unaffected.
 6. **Runs interrupted before the upgrade can be resumed.** An agent waiting for approval when you upgrade resumes with the model turns and tool results it saved, so calls it already made are not made again. Nothing needs to be done first. One exception: an agent inside a subgraph re-runs the tools it had already run, once, when its run is resumed after the upgrade (the earlier release saved its entries in a form this one does not load). Approve or finish such runs before upgrading if their tools must not run twice.
 7. **Thread owners move into the checkpoint store.** Start every replica once after upgrading so it copies the owners in its graph store's meta files (see *Runs* above); until a replica has done so, its pre-upgrade threads are refused on other replicas.
-8. **`token`-mode callers are untrusted authors.** Uploads made with `FLOWGRAPH_AUTH_TOKEN` now get every limit in [the untrusted-author section](#uploaded-graphs-from-untrusted-authors): `shell`, `script` and `service` nodes, `${VAR}` and `secret.*` are refused with a 403, and a stored graph that uses them is refused when it next runs. This includes placement workers that a coordinator reaches with a shared token. If every token holder may run host commands on the server, set `FLOWGRAPH_TRUST_TOKEN_CALLERS=1`; otherwise move those authors to `oidc` with a trusted role or team.
+8. **`token`-mode callers are untrusted authors.** Uploads made with `FLOWGRAPH_AUTH_TOKEN` now get every limit in [the untrusted-author section](#uploaded-graphs-from-untrusted-authors): `shell`, `script` and `service` nodes, `${VAR}` and `secret.*` are refused with a 403, and a stored graph that uses them is refused when it next runs. This includes placement workers that a coordinator reaches with a shared token, and `/invocations` callers on an AgentCore Runtime (`FLOWGRAPH_AGENTCORE=1`) in `token` mode, whom the edge authenticates but who act as the same principal. If every token holder (and, on AgentCore, every caller the edge admits) may run host commands on the server, set `FLOWGRAPH_TRUST_TOKEN_CALLERS=1`; otherwise move those authors to `oidc` with a trusted role or team.
 9. **`${VAR}` expands only declared names in `config` and `runtime`.** The server used to replace placeholders across the whole uploaded text from its entire environment. It now follows the [same rule as the CLI](../../docs/02-graph-spec.md#7-config): a placeholder in a node body, prompt or `metadata` stays literal; one in `config` or `runtime` must name a variable listed under `secrets:` or the upload is refused with `SECRET_UNDECLARED`; and `$${VAR}` stays the literal `${VAR}`. Add the names to `secrets:`, and pass values a node needs through `config.vars`, run input or `{{ secret.NAME }}`.
 
 Also: reusing a thread id for a different graph is a 409 `THREAD_ID_CONFLICT`, and stored graph YAML is now kept as uploaded (see *Stored graphs* above). The `flowgraph` CLI runs graphs locally and is unaffected by all of this.
