@@ -27,18 +27,12 @@ export const SkillKindSchema = z.enum(["executable", "command"], {
  * the properties an object-typed input must have.
  */
 export const SkillInputSchema = z
-  .object({
-    required: z
-      .union([z.boolean(), z.array(z.string())])
-      .optional()
-      .default(false),
-  })
+  .object({ required: z.union([z.boolean(), z.array(z.string())]).optional().default(false) })
   .passthrough()
   .superRefine((decl, ctx) => {
     const schema = skillInputValueSchema(decl as SkillInputDecl);
     const problem = contractSchemaProblem(schema, { templates: true });
-    if (problem)
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
+    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
   }) as unknown as z.ZodType<SkillInputDecl, z.ZodTypeDef, unknown>;
 
 export type SkillInputDecl = {

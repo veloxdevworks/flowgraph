@@ -64,6 +64,26 @@ describe("SKILL.md front matter", () => {
     });
   });
 
+  it("loads CRLF front matter whose last line is a command list", async () => {
+    const dir = await tempDir();
+    const source = [
+      "---",
+      "name: echo-skill",
+      "kind_of: command",
+      "command: [echo]",
+      "---",
+      "Run echo.",
+      "",
+    ].join("\r\n");
+    expect(source).toContain("command: [echo]\r\n");
+    await writeFile(join(dir, "SKILL.md"), source);
+    const { skill, diagnostics } = await loadSkill(dir);
+    expect(diagnostics.filter((d) => d.severity === "error")).toEqual([]);
+    expect(skill?.frontMatter.name).toBe("echo-skill");
+    expect(skill?.frontMatter.command).toEqual(["echo"]);
+    expect(skill?.body).toBe("Run echo.");
+  });
+
   it("loads a yaml fence and keeps the body", async () => {
     const dir = await tempDir();
     await writeFile(

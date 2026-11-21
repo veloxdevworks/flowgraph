@@ -111,7 +111,7 @@ flowgraph validate ./my.graph.yaml --strict --format json
 
 - Accepts a **single graph file path** (glob patterns not supported yet).
 - Loads and parses the graph, then lints it. It does not run the graph, call a model, or load `imports` modules (`nodes`, `providers`, `reducers`). Skill, agent and subgraph aliases are read as data.
-- A node type that is not already registered, on a graph that declares a `nodes` import, is reported as `PLUGIN_TYPE_UNRESOLVED`. A `custom:` reducer that would come from an import is reported as `UNREGISTERED_REDUCER`. `flowgraph run` loads those modules when the graph executes.
+- A node type that is not already registered is an error. On a graph that declares a `nodes` import, that type — including a typo — is a warning, `PLUGIN_TYPE_UNRESOLVED`, because validate does not load the module. A `custom:` reducer is an error unless a `reducers` import is declared, in which case it is a warning, `UNREGISTERED_REDUCER`. `flowgraph run` loads those modules when the graph executes.
 - `--strict` promotes warnings to errors.
 - `--format json` emits machine-readable diagnostics.
 - Exit `2` on errors; `0` on success.

@@ -14,7 +14,8 @@ export class YamlFrontMatterError extends Error {
 const YAML_ENGINES = new Set(["", "yaml", "yml"]);
 
 export function parseYamlFrontMatter(raw: string): { data: unknown; content: string } {
-  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  const withoutBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  const text = withoutBom.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!text.startsWith("---") || text.charAt(3) === "-") {
     return { data: {}, content: text };
   }

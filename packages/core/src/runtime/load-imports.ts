@@ -184,7 +184,10 @@ export function readGraphImportAliases(spec: GraphSpec): LoadGraphImportsResult 
 
 /**
  * Rewrite static diagnostics for types and reducers that only an import module
- * would register. Validate does not load those modules.
+ * would register. Validate does not load those modules, so a declared `nodes`
+ * or `reducers` import turns the matching diagnostic into a warning. An unknown
+ * type or reducer with no matching import stays an error. A typo is a warning
+ * once a `nodes` import exists, because validate cannot tell it from a plugin type.
  */
 export function withUnresolvedImports(spec: GraphSpec, diagnostics: Diagnostic[]): Diagnostic[] {
   const imports = spec.imports ?? [];
@@ -195,13 +198,15 @@ export function withUnresolvedImports(spec: GraphSpec, diagnostics: Diagnostic[]
     if (hasNodes && d.code === "UNKNOWN_NODE_TYPE") {
       return {
         ...d,
+        severity: "warning",
         code: "PLUGIN_TYPE_UNRESOLVED",
-        message: `${d.message} Validate does not load imports, so this type stays unresolved.`,
+        message: `${d.message}. Validate does not load imports, so this type stays unresolved.`,
       };
     }
     if (hasReducers && d.code === "UNREGISTERED_REDUCER") {
       return {
         ...d,
+        severity: "warning",
         message: `${d.message.replace("before validating or compiling.", "before the graph runs.")} Validate does not load reducer imports, so this reducer stays unresolved.`,
       };
     }

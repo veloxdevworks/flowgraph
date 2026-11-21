@@ -67,19 +67,88 @@ describe("flowgraph validate does not load imports", () => {
     expect(existsSync(join(dir, "import-executed.txt"))).toBe(false);
   });
 
-  it("reports a plugin type as unresolved and does not execute the module", () => {
+  it("reports a plugin type as a warning and does not execute the module", () => {
     const dir = fixture();
     writeFileSync(join(dir, "g.yaml"), JSON.stringify(pluginGraph));
     const result = validate(dir, "g.yaml", "--format", "json", "--preflight");
     const out = result.stdout + result.stderr;
-    expect(result.status, out).toBe(2);
+    expect(result.status, out).toBe(0);
     expect(existsSync(join(dir, "import-executed.txt"))).toBe(false);
-    const diags = JSON.parse(result.stdout) as Array<{ code?: string; message?: string }>;
+    const diags = JSON.parse(result.stdout) as Array<{
+      code?: string;
+      message?: string;
+      severity?: string;
+    }>;
     expect(diags).toContainEqual(
       expect.objectContaining({
         code: "PLUGIN_TYPE_UNRESOLVED",
+        severity: "warning",
         message: expect.stringMatching(/unresolved/),
       }),
+    );
+  });
+
+  it("exits 2 for an unresolved plugin type when --strict is set", () => {
+    const dir = fixture();
+    writeFileSync(join(dir, "g.yaml"), JSON.stringify(pluginGraph));
+    const result = validate(dir, "g.yaml", "--format", "json", "--strict");
+    const out = result.stdout + result.stderr;
+    expect(result.status, out).toBe(2);
+    expect(existsSync(join(dir, "import-executed.txt"))).toBe(false);
+  });
+
+  it("does not execute a reducers module and warns instead of failing", () => {
+    const dir = fixture();
+    writeFileSync(
+      join(dir, "reducers.mjs"),
+      [
+        'import { writeFileSync } from "node:fs";',
+        'writeFileSync(new URL("./reducer-executed.txt", import.meta.url), "executed\\n");',
+        "export default { uniqueById: (cur, inc) => inc ?? cur };",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, "g.yaml"),
+      JSON.stringify({
+        apiVersion: "flowgraph/v1",
+        kind: "Graph",
+        metadata: { name: "reducer-import" },
+        imports: [{ reducers: "./reducers.mjs" }],
+        state: { channels: { items: { type: "array", reducer: "custom:uniqueById" } } },
+        nodes: [{ id: "x", type: "shell", with: { command: "echo" } }],
+        edges: [
+          { from: "START", to: "x" },
+          { from: "x", to: "END" },
+        ],
+      }),
+    );
+    const result = validate(dir, "g.yaml", "--format", "json");
+    const out = result.stdout + result.stderr;
+    expect(result.status, out).toBe(0);
+    expect(existsSync(join(dir, "reducer-executed.txt"))).toBe(false);
+    const diags = JSON.parse(result.stdout) as Array<{ code?: string; severity?: string }>;
+    expect(diags).toContainEqual(
+      expect.objectContaining({ code: "UNREGISTERED_REDUCER", severity: "warning" }),
+    );
+  });
+
+  it("still errors on an unknown type when no nodes import is declared", () => {
+    const dir = fixture();
+    writeFileSync(
+      join(dir, "g.yaml"),
+      JSON.stringify({
+        ...shellGraph,
+        imports: undefined,
+        nodes: [{ id: "x", type: "not-a-real-type" }],
+      }),
+    );
+    const result = validate(dir, "g.yaml", "--format", "json");
+    const out = result.stdout + result.stderr;
+    expect(result.status, out).toBe(2);
+    const diags = JSON.parse(result.stdout) as Array<{ code?: string; severity?: string }>;
+    expect(diags).toContainEqual(
+      expect.objectContaining({ code: "UNKNOWN_NODE_TYPE", severity: "error" }),
     );
   });
 });

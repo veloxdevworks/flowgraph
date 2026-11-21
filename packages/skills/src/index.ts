@@ -14,11 +14,4 @@ export {
   isRequiredSkillInput,
   skillInputValueSchema,
 } from "./schema.js";
-export type {
-  SkillDef,
-  SkillFrontMatter,
-  SkillKind,
-  SkillInputDecl,
-  EnvVarDecl,
-  BinDecl,
-} from "./schema.js";
+export type { SkillDef, SkillFrontMatter, SkillKind, SkillInputDecl, EnvVarDecl, BinDecl } from "./schema.js";

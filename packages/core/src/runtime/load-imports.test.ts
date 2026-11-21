@@ -73,12 +73,20 @@ describe("loadGraphImports — reducers", () => {
       });
       const diags = withUnresolvedImports(spec, validateSpec(spec));
       expect(existsSync(marker)).toBe(false);
-      expect(
-        diags.some((d) => d.code === "PLUGIN_TYPE_UNRESOLVED" && /unresolved/.test(d.message)),
-      ).toBe(true);
-      expect(
-        diags.some((d) => d.code === "UNREGISTERED_REDUCER" && /unresolved/.test(d.message)),
-      ).toBe(true);
+      expect(diags).toContainEqual(
+        expect.objectContaining({
+          code: "PLUGIN_TYPE_UNRESOLVED",
+          severity: "warning",
+          message: expect.stringMatching(/\. Validate does not load imports/),
+        }),
+      );
+      expect(diags).toContainEqual(
+        expect.objectContaining({
+          code: "UNREGISTERED_REDUCER",
+          severity: "warning",
+          message: expect.stringMatching(/unresolved/),
+        }),
+      );
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -92,7 +100,45 @@ describe("loadGraphImports — reducers", () => {
       edges: [{ from: "START", to: "END" }],
     } as unknown as GraphSpec;
 
-    const diags = validateSpec(spec);
-    expect(diags.some((d) => d.code === "UNREGISTERED_REDUCER")).toBe(true);
+    const diags = withUnresolvedImports(spec, validateSpec(spec));
+    expect(diags.some((d) => d.code === "UNREGISTERED_REDUCER" && d.severity === "error")).toBe(
+      true,
+    );
+  });
+
+  it("warns on a mistyped node type when a nodes import is declared", () => {
+    const spec = {
+      metadata: { name: "typo" },
+      imports: [{ nodes: "./plugin.mjs" }],
+      nodes: [{ id: "x", type: "shel" }],
+      edges: [
+        { from: "START", to: "x" },
+        { from: "x", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const diags = withUnresolvedImports(spec, validateSpec(spec));
+    expect(diags).toContainEqual(
+      expect.objectContaining({
+        code: "PLUGIN_TYPE_UNRESOLVED",
+        severity: "warning",
+        path: "nodes.x.type",
+      }),
+    );
+    expect(diags.some((d) => d.code === "UNKNOWN_NODE_TYPE")).toBe(false);
+  });
+
+  it("keeps an unknown type an error when no nodes import is declared", () => {
+    const spec = {
+      metadata: { name: "typo" },
+      nodes: [{ id: "x", type: "shel" }],
+      edges: [
+        { from: "START", to: "x" },
+        { from: "x", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const diags = withUnresolvedImports(spec, validateSpec(spec));
+    expect(diags).toContainEqual(
+      expect.objectContaining({ code: "UNKNOWN_NODE_TYPE", severity: "error" }),
+    );
   });
 });

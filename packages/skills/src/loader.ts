@@ -1,15 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { SkillFrontMatterSchema, type SkillDef } from "./schema.js";
 import type { Diagnostic } from "@flowgraph/spec";
 import { parseYamlFrontMatter, YamlFrontMatterError } from "./front-matter.js";
-import { SkillFrontMatterSchema, type SkillDef } from "./schema.js";
 
 /**
  * Load and parse a SKILL.md file (or a directory containing one).
  */
-export async function loadSkill(
-  skillPath: string,
-): Promise<{ skill: SkillDef | null; diagnostics: Diagnostic[] }> {
+export async function loadSkill(skillPath: string): Promise<{ skill: SkillDef | null; diagnostics: Diagnostic[] }> {
   const diagnostics: Diagnostic[] = [];
 
   let resolvedPath = skillPath;

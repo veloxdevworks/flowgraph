@@ -46,6 +46,20 @@ describe("AGENT.md front matter", () => {
     expect(diagnostics[0]?.code).toBe("AGENT_FRONT_MATTER_ERROR");
   });
 
+  it("loads CRLF front matter", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "fg-agent-fm-"));
+    dirs.push(dir);
+    await writeFile(
+      join(dir, "AGENT.md"),
+      ["---", "name: reviewer", "description: Careful", "---", "Be specific.", ""].join("\r\n"),
+    );
+    const { agent, diagnostics } = await loadAgentDef(dir);
+    expect(diagnostics).toEqual([]);
+    expect(agent?.frontMatter.name).toBe("reviewer");
+    expect(agent?.frontMatter.description).toBe("Careful");
+    expect(agent?.body).toBe("Be specific.");
+  });
+
   it("loads a yaml fence", async () => {
     const dir = await mkdtemp(join(tmpdir(), "fg-agent-fm-"));
     dirs.push(dir);

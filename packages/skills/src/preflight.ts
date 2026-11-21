@@ -96,7 +96,7 @@ async function checkBin(name: string): Promise<boolean> {
   if (!BIN_NAME_PATTERN.test(name)) return false;
   const program = process.platform === "win32" ? "where" : "which";
   try {
-    await execFileAsync(program, [name], { windowsHide: true });
+    await execFileAsync(program, [name], { windowsHide: true, timeout: 5_000 });
     return true;
   } catch {
     return false;
