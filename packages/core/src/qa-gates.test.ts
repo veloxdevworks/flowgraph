@@ -87,7 +87,7 @@ describe("PLAT-319: independent gate deadlines", () => {
           id: "route",
           type: "router",
           with: {
-            routes: [ { name: "again", when: "{{ state.outputs.gate.round < 2 }}", to: "gate" }, { name: "done", default: true, to: "END" } ],
+            routes: [ { name: "again", when: "{{ state.outputs.gate.value.round < 2 }}", to: "gate" }, { name: "done", default: true, to: "END" } ],
           },
         },
       ],

@@ -80,7 +80,8 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
       } else if (entry.value && typeof entry.value === "object" && !seen.has(entry.value)) {
         seen.add(entry.value);
         for (const [key, child] of Object.entries(entry.value)) {
-          if (key === "when") continue;
+          // Router route guards are checked on their own. Any other `when` is a template.
+          if (key === "when" && /(?:^|\.)routes\.\d+$/.test(entry.at)) continue;
           stack.push({ value: child, at: `${entry.at}.${key}` });
         }
       }

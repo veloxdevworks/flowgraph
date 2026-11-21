@@ -559,7 +559,10 @@ export const RouterWithSchema = z
     input: z.string().optional(),
     instruction: z.string().optional(),
     provider: z.string().optional(),
-    routes: z.array(RouterRouteSchema).min(1),
+    routes: z.array(RouterRouteSchema, {
+      invalid_type_error: "routes must be a list of - name: entries",
+      required_error: "routes must be a list of - name: entries",
+    }).min(1),
     match: z.union([z.literal("firstMatch"), z.literal("allMatches")]).optional().default("firstMatch"),
     output: OutputMappingSchema.optional(),
   })
@@ -1527,11 +1530,21 @@ export const NodeSpecSchema = z.object({
   on: z
     .object({
       error: z
-        .union([
-          z.literal("fail"),
-          z.literal("continue"),
-          z.string().startsWith("route:"),
-        ])
+        .string()
+        .superRefine((value, ctx) => {
+          if (value === "ignore") {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: "on.error ignore was removed; use continue",
+            });
+            return;
+          }
+          if (value === "fail" || value === "continue" || value.startsWith("route:")) return;
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Unsupported on.error "${value}"`,
+          });
+        })
         .optional(),
     })
     .optional(),

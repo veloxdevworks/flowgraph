@@ -157,12 +157,14 @@ type HookResult =
 
 | Event | Can mutate / control |
 |---|---|
-| `node:before` | rewrite node `input`; `deny` skips the node; `interrupt` for approval |
-| `node:after` | rewrite the node's output; YAML may `redact` |
+| `node:before` | rewrite node `input`; `deny` skips the node; `interrupt` for approval. `route` was removed |
+| `node:after` | rewrite the node's output; YAML may `redact`. `route` was removed |
 | `node:error` | `continue` swallows, `fail` fails the node, `retry`, or `route:<node>` |
 | `agent:beforeToolCall` | `deny` blocks a tool call; `interrupt` asks for approval |
+| `agent:afterToolCall` | no YAML control verb |
 | `state:beforeUpdate` | `redact` a channel delta before it is committed |
-| `interrupt:beforeRaise` | programmatic hooks can observe the raise |
+| `run:before`, `run:after`, `run:error` | no YAML control verb |
+| `interrupt:beforeRaise`, `interrupt:beforeResume` | no YAML control verb |
 
 Hooks are **ordered** (priority) and **composable**; the first `veto`/`route`/`interrupt` wins, mutations chain. Built-in guardrails (redaction, secret-masking, cost ceilings, max-step limits) are themselves implemented as default hooks, so users can see and override them.
 

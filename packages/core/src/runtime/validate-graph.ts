@@ -82,7 +82,7 @@ export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
   const targets = declaredRouteTargets(spec, id);
   if (node?.on?.error?.startsWith("route:")) targets.push(node.on.error.slice(6));
   for (const hook of spec.runtime?.hooks ?? []) {
-    if (!hook.do.startsWith("route:") || !["node:before", "node:after", "node:error"].includes(hook.on)) continue;
+    if (!hook.do.startsWith("route:") || hook.on !== "node:error") continue;
     if (hook.where?.nodeId !== undefined && hook.where.nodeId !== id) continue;
     if (hook.where?.nodeType !== undefined && hook.where.nodeType !== node?.type) continue;
     targets.push(hook.do.slice(6));
@@ -495,6 +495,14 @@ export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
           message:
             `Node "${edge.from}" has ${edge.branch.length} branch targets with no when/default — ` +
             `this runs as parallel fan-out. Add conditions (or use a router) for exclusive routing.`,
+          path: `edges[${i}]`,
+        });
+      }
+      if (!edge.branch.some((entry) => entry.default === true)) {
+        diagnostics.push({
+          severity: "warning",
+          code: "BRANCH_NO_DEFAULT",
+          message: `Edge from "${edge.from}" has no default. A run with no matching when fails.`,
           path: `edges[${i}]`,
         });
       }
@@ -1258,8 +1266,20 @@ export function barrierEdgeDiagnostics(spec: GraphSpec, hooks: Hook[] = []): Dia
   return diagnostics;
 }
 
+export function defaultModelDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const defaults = spec.config?.defaults;
+  if (!defaults?.model || defaults.provider) return [];
+  return [{
+    severity: "warning",
+    code: "DEFAULT_MODEL_IGNORED",
+    message: "config.defaults.model is ignored unless config.defaults.provider is set",
+    path: "config.defaults.model",
+  }];
+}
+
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   return [
+    ...defaultModelDiagnostics(spec),
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
     ...hitlRouterMergeDiagnostics(spec),

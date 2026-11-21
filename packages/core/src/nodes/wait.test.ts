@@ -157,13 +157,16 @@ describe("wait node", () => {
       onInterrupt: "fail",
     });
     expect(r2.status).toBe("completed");
-    expect(r2.state["approval"]).toEqual({ deployFinished: true });
+    expect(r2.state["approval"]).toEqual({
+      value: { signal: "deploy-finished", deployFinished: true },
+    });
   });
 
   it("completes a signal wait only when the resume names that signal", async () => {
+    const events: FlowgraphEvent[] = [];
     const compiled = await compileGraph(
       waitGraph({ signal: "deploy-finished", output: { to: "approval" } }),
-      {},
+      { sinks: [(event) => { events.push(event); }] },
     );
     const started = await compiled.run({ threadId: "wait-sig-name", onInterrupt: "fail" });
     expect(started.status).toBe("interrupted");
@@ -175,6 +178,7 @@ describe("wait node", () => {
     });
     expect(wrong.status).toBe("interrupted");
     expect(interruptData(wrong.interrupts)["signal"]).toBe("deploy-finished");
+    expect(events.some((event) => event.type === "log" && (event.data as { level?: string; msg?: string }).level === "warn" && (event.data as { msg?: string }).msg?.includes('did not name signal "deploy-finished"'))).toBe(true);
 
     const named = await compiled.resume({
       threadId: "wait-sig-name",

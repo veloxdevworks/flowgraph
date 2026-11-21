@@ -315,7 +315,7 @@ See `examples/mcp/` for a runnable walkthrough.
 
 The `node.output` event and the debug log show the request URL with credentials and sensitive query parameters masked. In the event, request headers that are sensitive or listed in `runtime.secrets.redact.headers` show as `[REDACTED]`, and so do response headers that are sensitive, listed there, or auth/token-like by name (`Set-Cookie`, `X-Auth-Token`, `X-Session-Id`, …). The event's response body also masks those headers' values and each `Set-Cookie`'s `name=value` and credential-like bare value (the same cookie rule as `webhook`). This masking applies to the event only: `result.headers`, the response body and the node's output keep the real values, so a later node can forward a session cookie, for example `Cookie: "{{ split(state.login.headers['set-cookie'], ';')[0] }}"`.
 
-`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.timeout` on `http`, `webhook`, `shell`, `script`, and media is rejected, with an error that names the node `timeout`. `http`, `webhook`, `shell`, `script`, `skill`, `mcp`, and `service` stop when that timeout aborts. Media keeps the vendor job on a node timeout so a retry can re-attach, and still cancels it when the run itself is cancelled. `demo` keeps its own capture timing.
+`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.timeout` on `http`, `webhook`, `shell`, `script`, and media is rejected, with an error that names the node `timeout`. `http`, `webhook`, `shell`, `script`, `skill`, `mcp`, and `service` stop when that timeout aborts. An `mcp` node passes that abort signal into `callTool` / `readResource`, and the hub cancels the client request so a retry does not overlap it. Media uses the node `timeout` or `runtime.timeoutDefault` as the job deadline (otherwise the per-type default), keeps the vendor job on a node timeout so a retry can re-attach, and still cancels it when the run itself is cancelled. `demo` keeps its own capture timing. Shell and script with neither a node `timeout` nor `runtime.timeoutDefault` are unbounded.
 
 ### `webhook` — outbound HTTP notification
 
@@ -384,7 +384,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 
 **Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"` (with `MY_TOKEN` in the graph's top-level `secrets:`). Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
 
-**Defaults:** no timeout unless the node sets `timeout` or the graph sets `runtime.timeoutDefault`. `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
+**Defaults:** with no node `timeout` and no `runtime.timeoutDefault`, a shell command is unbounded. `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
 
 Declare toolchains with `requires` so missing binaries are caught at preflight and (optionally) skipped instead of failing the run:
 
@@ -644,7 +644,7 @@ file sources; untrusted server uploads retain their script restrictions.
 2. It spawns `node --permission … entry.mjs` in that temp directory (no `node_modules` on the resolution path).
 3. The wrapper calls your default export with the rendered `input` and writes the JSON-serialized return value to a result file, which is mapped via `output`.
 
-**Defaults:** no timeout unless the node sets `timeout` or the graph sets `runtime.timeoutDefault`. Stdout and stderr are capped at 10MB. Non-zero exit, a node timeout, or a missing/invalid result file fail the node (stderr excerpt included).
+**Defaults:** with no node `timeout` and no `runtime.timeoutDefault`, a script is unbounded. Stdout and stderr are capped at 10MB. Non-zero exit, a node timeout, or a missing/invalid result file fail the node (stderr excerpt included). A timeout or abort stops the script process group: the child and any grandchild get SIGTERM, then SIGKILL after a short grace.
 
 File sources remain self-contained modules: their contents run in the same temp
 sandbox as inline code. Loading a source file grants the child no access to its
@@ -756,7 +756,7 @@ The default FIFO cache retains at most 128 JSON-compatible results / 16 MiB per 
 
 ## 8. `hitl` — human gates (approve / question / choice)
 
-Deterministic pause points for human input. Unlike `wait` (duration/signal/condition), `hitl` is for explicit operator interaction with a typed resume value.
+Deterministic pause points for human input. Unlike `wait` (deadline/signal/condition), `hitl` is for explicit operator interaction with a typed resume value.
 
 ```yaml
 - id: approve-deploy
@@ -1047,7 +1047,7 @@ Malformed percent-encoded paths return HTTP 400. Each route registration is clai
 |---|---|---|
 | `deadline` | In-process sleep for the given duration | No — same as any in-flight node |
 | `until` | Interrupt if the guard is false; re-evaluate on resume | Yes (checkpointed interrupt) |
-| `signal` | Interrupt until resumed with the signal name (a string, or `{ signal }`) | Yes (checkpointed interrupt) |
+| `signal` | Interrupt until resumed with the signal name (a string, or `{ signal }`). A wrong resume warns and waits again. The output is `{ value: <resume> }` | Yes (checkpointed interrupt) |
 | `webhook` | Interrupt until inbound HTTP POST resumes (required keys and property types checked) | Interrupt yes; listening URL requires a live process and route rehydration |
 
 ### Observability
@@ -1415,7 +1415,7 @@ nodes:
 | `seed`, `negativePrompt` | all | Passed when the vendor supports them. |
 | `variant` | all | String or number (templated). Part of the job fingerprint, **never sent to the vendor**. Looping back to a media node with an unchanged request re-attaches to the finished job (no new call); change `variant`, for example `"{{ state.check.round }}"`, to force a new one. Unset, null or empty (such as before the first answer) keeps the fingerprint identical to a node without `variant`, so in-flight journal entries still match after an upgrade. |
 | `params` | all | Vendor passthrough options. |
-| `timeout` | all | Whole-job limit (defaults: image 5m, audio 10m, video/model3d 15m). On timeout the job is left running and a retry re-attaches. |
+| `timeout` | all | Whole-job limit. A node `timeout` or `runtime.timeoutDefault` is that deadline; otherwise image 5m, audio 10m, video/model3d 15m. On timeout the job is left running and a retry re-attaches. |
 
 **Output** (`state.outputs.<id>`, or per `output:`):
 

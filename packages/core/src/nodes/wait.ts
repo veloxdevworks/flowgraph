@@ -140,7 +140,10 @@ export const waitNode = defineNode<Config>({
               };
             }
             const taken = signalValue(payload, config.signal);
-            if (!taken.matched) continue;
+            if (!taken.matched) {
+              ctx.logger.warn(`wait "${nodeId}" ignored a resume that did not name signal "${config.signal}"`);
+              continue;
+            }
             return {
               update: applyOutput(config.output, taken.value, { nodeId, scope }),
             };
@@ -157,15 +160,14 @@ function deadlineIso(timeout: string): string {
   return new Date(Date.now() + parseDuration(timeout)).toISOString();
 }
 
-function signalValue(payload: unknown, name: string): { matched: true; value: unknown } | { matched: false } {
+function signalValue(payload: unknown, name: string): { matched: true; value: { value: unknown } } | { matched: false } {
   if (typeof payload === "string") {
     return payload === name ? { matched: true, value: { value: payload } } : { matched: false };
   }
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {
     const record = payload as Record<string, unknown>;
     if (record.signal !== name) return { matched: false };
-    const { signal: _signal, ...rest } = record;
-    return { matched: true, value: Object.keys(rest).length > 0 ? rest : { signal: name } };
+    return { matched: true, value: { value: payload } };
   }
   return { matched: false };
 }

@@ -32,7 +32,9 @@ describe("router route lists", () => {
       ],
     });
     expect(listed.success).toBe(true);
-    expect(RouterWithSchema.safeParse({ routes: { a: { to: "a", default: true } } }).success).toBe(false);
+    const mapped = RouterWithSchema.safeParse({ routes: { a: { to: "a", default: true } } });
+    expect(mapped.success).toBe(false);
+    expect(mapped.error?.issues.some((issue) => issue.message === "routes must be a list of - name: entries")).toBe(true);
   });
 
   it("requires a name on model routes and when or default on rule routes", () => {
@@ -69,11 +71,28 @@ describe("hook events and verbs", () => {
     expect(spec({ on: "node:error", do: "fail" }).success).toBe(true);
     expect(spec({ on: "agent:beforeToolCall", do: "allow" }).success).toBe(true);
     expect(spec({ on: "intelligent:beforeToolCall", do: "deny" }).success).toBe(true);
+    const rejected = spec({ on: "intelligent:beforeStep", do: "allow" });
+    expect(rejected.success).toBe(false);
+    expect(rejected.error?.issues.some((issue) => issue.message === 'Unknown hook event "intelligent:beforeStep".')).toBe(true);
   });
 
   it("rejects an unknown where key", () => {
     const parsed = spec({ on: "node:before", do: "deny", where: { nodeId: "a", typo: true } });
     expect(parsed.success).toBe(false);
+  });
+});
+
+describe("on.error", () => {
+  it("says ignore was removed", () => {
+    const parsed = GraphSpecSchema.safeParse({
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "ignore" },
+      nodes: [{ id: "a", type: "function", on: { error: "ignore" } }],
+      edges: [{ from: "START", to: "a" }],
+    });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues.some((issue) => issue.message === "on.error ignore was removed; use continue")).toBe(true);
   });
 });
 
