@@ -433,9 +433,9 @@ runtime:
     terminateOnEnd: true            # default — stop non-keepAlive services on completed/error
 ```
 
-### Lifecycle
 **Environment:** a service receives the same default host allowlist as `shell` (`PATH`, `HOME`, temp and locale variables) plus its `with.env`. Nothing else from the host environment is inherited; pass a credential explicitly, for example `env: { DATABASE_URL: "{{ secret.DATABASE_URL }}" }` with the name declared under `secrets:`.
 
+### Lifecycle
 
 | Event | Behavior |
 |---|---|

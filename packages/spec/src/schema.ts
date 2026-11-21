@@ -1865,7 +1865,6 @@ export type InputField = z.infer<typeof InputFieldSchema>;
 export type InputFieldType = z.infer<typeof InputFieldTypeSchema>;
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Declared secrets
 // ---------------------------------------------------------------------------
 
@@ -1885,6 +1884,7 @@ export const SecretsSchema = z
     });
   });
 
+// ---------------------------------------------------------------------------
 // Root Graph spec
 // ---------------------------------------------------------------------------
 
@@ -1913,9 +1913,9 @@ export const GraphSpecSchema = z.object({
   input: z.record(z.unknown()).optional(),
   nodes: z.array(NodeSpecSchema),
   edges: z.array(EdgeSpecSchema),
-  runtime: RuntimeSchema.optional(),
   /** Host environment variables this graph may read (see SecretsSchema). */
   secrets: SecretsSchema.optional(),
+  runtime: RuntimeSchema.optional(),
 }).strict();
 
 export type GraphSpec = Omit<z.infer<typeof GraphSpecSchema>, "nodes"> & {
