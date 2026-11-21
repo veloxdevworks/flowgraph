@@ -1,4 +1,3 @@
-import { currentEnvironment } from "../environment.js";
 /**
  * Built-in node type: `demo`
  *
@@ -43,6 +42,8 @@ import { DemoWithSchema, type Artifact, type DemoStatus } from "@flowgraph/spec"
 import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
+import { NodePolicyError, nodePolicyOf } from "../node-policy.js";
+import { secretScope } from "../runtime/secret-scope.js";
 import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import {
@@ -270,16 +271,30 @@ function buildScope(
     input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
     config: ctx.config,
     run: ctx.meta,
-    secret: new Proxy({} as Record<string, string>, {
-      getOwnPropertyDescriptor: (_t, prop) =>
-        typeof prop === "string" ? { configurable: true, enumerable: false } : undefined,
-      get: (_t, prop) => {
-        const value = currentEnvironment()[String(prop)] ?? "";
-        if (value) usedSecrets.add(value);
+    secret: new Proxy(secretScope(ctx), {
+      get: (target, prop) => {
+        const value: unknown = Reflect.get(target, prop);
+        if (typeof value === "string" && value) usedSecrets.add(value);
         return value;
       },
     }),
   };
+}
+
+const BROWSER_KINDS: ReadonlySet<DemoKind> = new Set(["screenshot", "video", "steps"]);
+
+/** A browser loads pages, scripts and redirects on its own, outside the outbound HTTP checks. */
+function assertBrowserAllowed(ctx: NodeRunContext, kind: DemoKind, nodeId: string): void {
+  if (!BROWSER_KINDS.has(kind) || !nodePolicyOf(ctx)?.outboundHttp) return;
+  throw new NodePolicyError(
+    "OUTBOUND_URL_BLOCKED",
+    `demo node "${nodeId}": ${kind} capture drives a browser, which the outbound HTTP policy cannot restrict; use http or file mode here`,
+  );
+}
+
+/** Policy refusals fail the node; a refused capture is not a best-effort failure. */
+function isPolicyRefusal(err: unknown): boolean {
+  return err instanceof NodePolicyError && err.code !== "OUTBOUND_TIMEOUT" && err.code !== "OUTBOUND_RESPONSE_TOO_LARGE";
 }
 
 async function captureHttp(
@@ -310,6 +325,7 @@ async function captureHttp(
       // Accept any status here so the transcript still records failures; `ok` is judged below.
       expectStatus: "any",
       signal: ctx.signal ? AbortSignal.any([ctx.signal, timeoutSignal]) : timeoutSignal,
+      outbound: nodePolicyOf(ctx)?.outboundHttp,
     });
   } catch (err) {
     // A cancelled run is not a timeout, even when both fired.
@@ -855,6 +871,7 @@ export const demoNode = defineNode<Config>({
           };
         }
 
+        assertBrowserAllowed(ctx, kind, nodeId);
         let result: DemoResult;
         let cause: unknown;
         let simulatorWarning: string | undefined;
@@ -931,6 +948,7 @@ export const demoNode = defineNode<Config>({
           // `strict` has nothing to turn into an error. The run reports itself as aborted. A
           // node `timeout` aborts the same way, and the engine reports that attempt as timed out.
           if (ctx.signal?.aborted) throw ctx.signal.reason instanceof Error ? ctx.signal.reason : err;
+          if (isPolicyRefusal(err)) throw err;
           const redact = secretRedactor(usedSecrets);
           cause = maskedError(err, redact);
           const reason = String(

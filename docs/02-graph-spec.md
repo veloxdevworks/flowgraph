@@ -276,7 +276,31 @@ edges:
   - { from: impl-c, to: gather }                    # fan-in; reducers merge writes
 ```
 
-> `flowgraph validate` checks schema errors, unknown edge refs, duplicate node ids, reachability from `START`, paths to `END`, reducer/type pairing, unregistered `custom:*` reducers, and parallel fan-in `lastWrite` risks on immediate branch nodes. Conditional branch targets must reference real nodes.
+Separate inbound edges fire the target once for each predecessor that finishes. When those predecessors are the same number of hops from `START`, they finish together and the target runs once. When the branches have different lengths, the target runs again for each later arrival.
+
+A static `from` list is a barrier. The target runs once, after every listed source has finished:
+
+```yaml
+edges:
+  - { from: START, to: split }
+  - { from: split, to: short }          # 2 hops from START
+  - { from: split, to: mid }
+  - { from: mid, to: long }             # long is 3 hops from START
+  - { from: [short, long], to: join }   # join runs once, after both
+  - { from: join, to: END }
+```
+
+`from` must be a node id or a list of at least two distinct node ids. The same syntax is in [examples/join-barrier](../examples/join-barrier/uneven-join.graph.yaml). A barrier cannot target `END`, cannot list `END` or `START` as a source, and cannot list its own target in `from` (`BARRIER_SELF_SOURCE`): the join would wait for itself to finish. Every source must be reachable by static edges. A source that can only be reached through a conditional branch, a router, or a `hitl` node that declares `with.routes` is an error (`BARRIER_CONDITIONAL_SOURCE`): the join waits for every listed source, so a path that is skipped would leave it waiting. Edges out of those nodes are not static. The compiler follows the declared route and does not install their `to` edges.
+
+A node listed in `from` cannot carry a recovery route (`BARRIER_RECOVERY_SOURCE`). That is `on.error: route:...` on the node, the same field on a `map` item, or a hook whose `do` is `route:...`. If that node failed, the barrier would still see it finish, and the join would run at the same time as the recovery route.
+
+A recovery route on a node that is not itself a barrier source stays allowed. Its ordinary `to` edges still run when the node succeeds. If that node fails before a downstream barrier source is reached, the source never finishes, so the join does not run. The run still reports completed when the recovery route reaches the end of the graph.
+
+Plain multi-inbound edges are unchanged. `flowgraph validate` warns (`UNEVEN_FAN_IN`) when a node has several plain inbound edges from parallel branches of uneven length and is not using a barrier. Exclusive routes are not parallel branches, so that warning does not apply to them.
+
+A loop that runs only some of the listed sources again does not release the barrier a second time. The join runs again only after every listed source has finished again.
+
+> `flowgraph validate` checks schema errors, unknown edge refs, duplicate node ids, reachability from `START`, paths to `END`, reducer/type pairing, unregistered `custom:*` reducers, parallel fan-in `lastWrite` risks on immediate branch nodes, and uneven fan-in that is not a barrier. Conditional branch targets must reference real nodes.
 
 ## 7. `config`
 

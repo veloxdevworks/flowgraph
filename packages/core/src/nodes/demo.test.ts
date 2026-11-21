@@ -358,3 +358,54 @@ describe("demo results across a loop-back", () => {
     expect(JSON.stringify(out)).not.toContain(path.basename(firstFile));
   });
 });
+
+describe("demo node under a node policy", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  function okFetch() {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("refuses secret references when the policy blocks secrets", async () => {
+    vi.stubEnv("FG_DEMO_POLICY_SECRET", "demo-policy-secret-value");
+    const fetchMock = okFetch();
+    const compiled = await compileGraph(
+      demoGraph({
+        http: { url: "https://example.com/api", headers: { "X-Token": "{{ secret.FG_DEMO_POLICY_SECRET }}" } },
+        output: { to: "demo" },
+      }),
+      { cwd: mkWorkspace(), nodePolicy: { blockSecrets: true } },
+    );
+    const result = await compiled.run({ threadId: "demo-block-secrets" });
+    expect(result.status).toBe("error");
+    expect(String((result.error as Error)?.message ?? result.error)).toMatch(/secret\.FG_DEMO_POLICY_SECRET reads the host environment/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("holds http captures to the outbound HTTP policy", async () => {
+    const fetchMock = okFetch();
+    const compiled = await compileGraph(
+      demoGraph({ http: { url: "http://127.0.0.1:9/admin" }, output: { to: "demo" } }),
+      { cwd: mkWorkspace(), nodePolicy: { outboundHttp: { publicOnly: true } } },
+    );
+    const result = await compiled.run({ threadId: "demo-outbound" });
+    expect(result.status).toBe("error");
+    expect(String((result.error as Error)?.message ?? result.error)).toMatch(/127\.0\.0\.1, a loopback address/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses browser captures under an outbound HTTP policy", async () => {
+    const compiled = await compileGraph(
+      demoGraph({ screenshot: { url: "http://127.0.0.1:9/" }, output: { to: "demo" } }),
+      { cwd: mkWorkspace(), nodePolicy: { outboundHttp: { publicOnly: true } } },
+    );
+    const result = await compiled.run({ threadId: "demo-outbound-browser" });
+    expect(result.status).toBe("error");
+    expect(String((result.error as Error)?.message ?? result.error)).toMatch(/screenshot capture drives a browser/);
+  });
+});

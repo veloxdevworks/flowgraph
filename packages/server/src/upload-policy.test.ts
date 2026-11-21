@@ -288,6 +288,14 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
       "UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.output",
     );
     expect(codesOf(graph(hitl, "input:\n  __future: 1\n"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED input.__future"]);
+    expect(codesOf(graph(hitl, "inputs:\n  - { key: topic, type: string }\n  - { key: __services, type: json }\n"))).toEqual([
+      "UPLOAD_RESERVED_CHANNEL_BLOCKED inputs[1].key",
+    ]);
+  });
+
+  it("refuses port nodes, which reveal the server's free ports", () => {
+    expect(codesOf(graph(`  - { id: a, type: port, with: { output: { to: out } } }`))).toEqual(["UPLOAD_NODE_TYPE_BLOCKED nodes.a"]);
+    expect(UNTRUSTED_NODE_POLICY.blockedTypes).toContain("port");
   });
 
   it("refuses with.agent, including on map inners and in inline subgraphs", () => {
@@ -393,7 +401,7 @@ state:
     approval: { type: object }
 nodes:
   - { id: gate, type: hitl, with: { mode: approve, message: "ok?", output: { to: approval } } }
-  - { id: a, type: shell, with: { command: "echo hi", output: { to: out } } }
+  - { id: a, type: shell, with: { command: echo, args: [hi], output: { to: out } } }
 edges:
   - { from: START, to: gate }
   - { from: gate, to: a }

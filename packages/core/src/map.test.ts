@@ -83,3 +83,75 @@ describe("map node — inner agent", () => {
     expect(r.state["summaries"]).toEqual([{ text: "seen:a" }, { text: "seen:b" }, { text: "seen:c" }]);
   });
 });
+
+describe("map node — item data is rendered once", () => {
+  const items = ["{{ 6 * 7 }}", "{{ state.private }}", 'say "{{" and \\ then }}', "plain"];
+
+  it("passes template text in items to the inner node verbatim", async () => {
+    registerFunction("map-echo-text", (input) => (input as { text: string }).text);
+    const spec = {
+      metadata: { name: "map-render-once" },
+      state: { channels: { items: { type: "array" }, private: { type: "string" }, out: { type: "array" } } },
+      nodes: [
+        {
+          id: "each",
+          type: "map",
+          with: {
+            over: "{{ state.items }}",
+            as: "t",
+            node: { type: "function", with: { fn: "map-echo-text", input: { text: "item: {{ item.t }}" } } },
+            collect: { to: "out" },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "each" },
+        { from: "each", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+
+    const compiled = await compileGraph(spec, {});
+    const r = await compiled.run({ input: { items, private: "not-for-items" } });
+    expect(r.status).toBe("completed");
+    expect(r.state["out"]).toEqual(items.map((t) => `item: ${t}`));
+  });
+
+  it("does not resolve secret references carried by item data", async () => {
+    process.env["FG_MAP_ITEM_SECRET"] = "map-item-secret-value";
+    try {
+      const spec = {
+        metadata: { name: "map-render-once-secret" },
+        state: { channels: { items: { type: "array" }, out: { type: "array" } } },
+        nodes: [
+          {
+            id: "each",
+            type: "map",
+            with: {
+              over: "{{ state.items }}",
+              as: "t",
+              node: {
+                type: "shell",
+                with: { command: "node", args: ["-e", "process.stdout.write(process.argv[1])", "{{ item.t }}"] },
+              },
+              collect: { to: "out" },
+            },
+          },
+        ],
+        edges: [
+          { from: "START", to: "each" },
+          { from: "each", to: "END" },
+        ],
+        runtime: { checkpoint: { enabled: false } },
+      } as unknown as GraphSpec;
+
+      const compiled = await compileGraph(spec, {});
+      const r = await compiled.run({ input: { items: ["{{ secret.FG_MAP_ITEM_SECRET }}"] } });
+      expect(r.status).toBe("completed");
+      const out = r.state["out"] as Array<{ stdout: string }>;
+      expect(out.map((o) => o.stdout)).toEqual(["{{ secret.FG_MAP_ITEM_SECRET }}"]);
+    } finally {
+      delete process.env["FG_MAP_ITEM_SECRET"];
+    }
+  });
+});

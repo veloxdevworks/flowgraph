@@ -120,6 +120,8 @@ findings: { type: array, reducer: "custom:uniqueById" }
 Channels with `type: messages` (or `reducer: messages`) use LangGraph's `messagesStateReducer` — append plus id-based message upsert, not last-write-wins.
 
 > Reducers are essential for **parallel branches** ([02 §Fan-out](./02-graph-spec.md#fan-out-parallel-edges)) and `map` nodes: when multiple branches write the same channel in one superstep, the reducer merges their writes. Without an accumulating reducer, the last write wins and data is lost — the compiler **warns** when immediate fan-out branch nodes (the direct `to` targets of a parallel edge) write the same channel with `lastWrite` or no reducer. The warning does not trace multi-hop paths before a join.
+>
+> A plain fan-in runs the target once per inbound edge that arrives. Branches of equal length arrive together, so the target runs once and reducers see one superstep. Branches of different lengths arrive separately, so the target runs again for each later branch (`UNEVEN_FAN_IN`). A barrier edge, `{ from: [a, b], to: join }`, waits until every listed source has finished and then runs the join once. Reducers still merge the writes those sources made along the way. A loop that sends the run back through only some of those sources does not run the join again; every listed source has to finish again first. See [02 §Fan-out](./02-graph-spec.md#fan-out-parallel-edges).
 
 ### Subgraph merge-back
 
@@ -248,6 +250,7 @@ The stdlib is intentionally small and pure. Anything more complex belongs in a `
 
 - No I/O, no clock-skew nondeterminism beyond explicit `now()`, no host access.
 - Evaluation is **total**: a missing path yields `null` (configurable to "strict" mode that errors), preventing crashes from optional fields.
+- Evaluation is **bounded**. One expression may take at most 1,000,000 steps: each evaluated node is a step (a callback body counts once per item), and each function call adds a step per array element, object key or 64 characters it receives or returns. `range()` returns at most 10,000 items, and `replace()` refuses a result longer than 16M characters before building it. Going past a bound fails the expression with an evaluation error.
 - Expressions are parsed at **compile time** so referenced channels/inputs can be validated (e.g. `state.sumary` typo ⇒ warning).
 
 ## 5. Two interpolation phases (don't confuse them)
@@ -491,7 +494,9 @@ The per-type subject cap and `similarSubjects` without tags read the covering in
 
 `format('{1}, {0}', 'Ada', 'Hello')` supports positional placeholders as well as sequential `{}` placeholders. `duration('1h 30m')` returns milliseconds (units: `ms`, `s`, `m`, `h`, `d`).
 
-Array callbacks in YAML use expression strings: `map(state.rows, 'item.price * state.factor')`, `filter(state.rows, 'item.active')`, and `find(state.rows, 'item.id == input.id')`. Each callback sees the current `item`, zero-based `index` and the outer scope, with the same own-property restrictions as other expressions. JavaScript arrow functions are not part of the expression grammar.
+Array callbacks in YAML use expression strings: `map(state.rows, 'item.price * state.factor')`, `filter(state.rows, 'item.active')`, and `find(state.rows, 'item.id == input.id')`. The pipe form takes the callback as its argument: `state.rows |> map('item.price')`. Each callback sees the current `item`, zero-based `index` and the outer scope, with the same own-property restrictions as other expressions. JavaScript arrow functions are not part of the expression grammar.
+
+`range(n)` returns `0` to `n - 1`; `range(start, end, step)` stops before `end`. Both return at most 10,000 items.
 
 Undeclared run input keys produce an `INPUT_UNKNOWN_KEY` warning when they would be discarded by state storage. Declare intended keys in `inputs` or `state.channels`. Unknown `runtime.hooks[].on` phases fail validation with the supported names.
 

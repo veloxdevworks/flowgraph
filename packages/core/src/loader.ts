@@ -260,13 +260,14 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
         diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"` });
       }
     };
-    check(edge.from);
+    // A `from` list is checked in barrierEdgeDiagnostics, including unknown ids.
+    if (!Array.isArray(edge.from)) check(edge.from);
     if ("to" in edge) { const tos = Array.isArray(edge.to) ? edge.to : [edge.to]; for (const t of tos) check(t); }
     if ("branch" in edge) { for (const b of edge.branch) check(b.to); }
   }
 
   // Must have START edge
-  if (!spec.edges.some((e) => e.from === "START")) {
+  if (!spec.edges.some((e) => (Array.isArray(e.from) ? e.from : [e.from]).includes("START"))) {
     diagnostics.push({ severity: "error", code: "NO_START_EDGE", message: 'Graph has no edge from "START"' });
   }
 

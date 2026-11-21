@@ -79,7 +79,8 @@ export function normalTargets(
 ): string[] {
   const targets = new Set<string>();
   for (const edge of spec.edges) {
-    if (edge.from !== id) continue;
+    const sources = Array.isArray(edge.from) ? edge.from : [edge.from];
+    if (!sources.includes(id)) continue;
     if ("to" in edge)
       for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) targets.add(to);
     else {

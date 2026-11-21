@@ -19,6 +19,18 @@ import {
   hitlRouteTargets,
   normalizeHitlRoutes,
 } from "../nodes/hitl-routes.js";
+import type { Hook } from "../hooks/types.js";
+import { recoveryTargets } from "./routing-policy.js";
+
+/** Node ids on an edge `from`: one source, or every source of a barrier. */
+function edgeFromIds(from: string | readonly string[]): string[] {
+  return typeof from === "string" ? [from] : [...from];
+}
+
+/** A static edge whose `from` lists more than one node waits for all of them. */
+function isJoinBarrier(from: string | readonly string[]): from is readonly string[] {
+  return Array.isArray(from) && from.length > 1;
+}
 
 /** Targets declared by a node's own `with.routes` (router or hitl); edges don't have to repeat them. */
 export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
@@ -39,7 +51,7 @@ export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
 function outgoingTargets(spec: GraphSpec, from: string): string[] {
   const targets: string[] = nodeRouteTargets(spec, from);
   for (const edge of spec.edges) {
-    if (edge.from !== from) continue;
+    if (!edgeFromIds(edge.from).includes(from)) continue;
     if ("to" in edge) {
       const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
       targets.push(...tos);
@@ -78,9 +90,12 @@ export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
 export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; label?: string }> {
   const edges: Array<{ from: string; to: string; label?: string }> = [];
   for (const edge of spec.edges) {
-    if (declaredRouteTargets(spec, edge.from).length) continue;
-    if ("to" in edge) for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) edges.push({ from: edge.from, to });
-    else for (const branch of edge.branch) edges.push({ from: edge.from, to: branch.to, ...(branch.when ? { label: branch.when } : branch.default ? { label: "default" } : {}) });
+    const sources = edgeFromIds(edge.from);
+    if (!Array.isArray(edge.from) && declaredRouteTargets(spec, edge.from).length) continue;
+    const barrier = isJoinBarrier(edge.from);
+    if ("to" in edge) {
+      for (const from of sources) for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) edges.push({ from, to, ...(barrier ? { label: "barrier" } : {}) });
+    } else for (const branch of edge.branch) edges.push({ from: edge.from, to: branch.to, ...(branch.when ? { label: branch.when } : branch.default ? { label: "default" } : {}) });
   }
   for (const node of spec.nodes) {
     const routes = node.type === "hitl" ? normalizeHitlRoutes(node.with?.routes) : node.type === "router" ? node.with?.routes as Record<string,{to?:string}> | undefined : undefined;
@@ -110,11 +125,11 @@ function incomingSources(spec: GraphSpec, to: string): string[] {
   for (const edge of spec.edges) {
     if ("to" in edge) {
       const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      if (tos.includes(to)) sources.push(edge.from);
+      if (tos.includes(to)) sources.push(...edgeFromIds(edge.from));
     }
     if ("branch" in edge) {
       for (const b of edge.branch) {
-        if (b.to === to) sources.push(edge.from);
+        if (b.to === to) sources.push(...edgeFromIds(edge.from));
       }
     }
   }
@@ -457,7 +472,7 @@ export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
   );
 
   for (const [i, edge] of spec.edges.entries()) {
-    if (routerIds.has(edge.from)) continue;
+    if (!Array.isArray(edge.from) && routerIds.has(edge.from)) continue;
     if ("branch" in edge && edge.branch) {
       const hasCondition = edge.branch.some((b) => b.when || b.default);
       if (edge.branch.length >= 2 && !hasCondition) {
@@ -479,7 +494,7 @@ export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
           severity: "warning",
           code: "UNCONDITIONAL_FANOUT",
           message:
-            `Node "${edge.from}" fans out to ${targets.length} targets with no conditions — ` +
+            `Node "${edgeFromIds(edge.from).join(", ")}" fans out to ${targets.length} targets with no conditions — ` +
             `all branches run in parallel. Click an edge in the builder to set when/default, ` +
             `or use a router node for exclusive routing.`,
           path: `edges[${i}]`,
@@ -696,7 +711,7 @@ export function hitlRouteDiagnostics(spec: GraphSpec): Diagnostic[] {
 
     const targets = new Set(Object.values(routes).map((r) => r.to));
     for (const [i, edge] of spec.edges.entries()) {
-      if (edge.from !== node.id) continue;
+      if (!edgeFromIds(edge.from).includes(node.id)) continue;
       const to = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : edge.branch.map((b) => b.to);
       if (to.some((t) => !targets.has(t))) {
         diagnostics.push({
@@ -984,21 +999,263 @@ export function placementAdjacentHopDiagnostics(spec: GraphSpec): Diagnostic[] {
   };
   for (const [i, edge] of spec.edges.entries()) {
     if (!("to" in edge)) continue;
-    const from = byId.get(edge.from);
-    if (!from || from.runsOn === undefined) continue;
-    for (const toId of Array.isArray(edge.to) ? edge.to : [edge.to]) {
-      const to = byId.get(toId);
-      if (!to || to.runsOn === undefined || key(from) !== key(to)) continue;
-      diagnostics.push({
-        severity: "warning",
-        code: "PLACEMENT_ADJACENT_HOPS",
-        message:
-          `Nodes "${from.id}" and "${to.id}" are adjacent and share the same runsOn, so each makes a round trip through the coordinator. ` +
-          `Group them in a subgraph and place the subgraph to run both in one hop.`,
-        path: `edges[${i}]`,
-      });
+    for (const fromId of edgeFromIds(edge.from)) {
+      const from = byId.get(fromId);
+      if (!from || from.runsOn === undefined) continue;
+      for (const toId of Array.isArray(edge.to) ? edge.to : [edge.to]) {
+        const to = byId.get(toId);
+        if (!to || to.runsOn === undefined || key(from) !== key(to)) continue;
+        diagnostics.push({
+          severity: "warning",
+          code: "PLACEMENT_ADJACENT_HOPS",
+          message:
+            `Nodes "${from.id}" and "${to.id}" are adjacent and share the same runsOn, so each makes a round trip through the coordinator. ` +
+            `Group them in a subgraph and place the subgraph to run both in one hop.`,
+          path: `edges[${i}]`,
+        });
+      }
     }
   }
+  return diagnostics;
+}
+
+/**
+ * Nodes whose `to` edges the compiler does not install.
+ * A router always declares routes. A `hitl` node does when `with.routes` names targets.
+ * Matches `declaresRoutes` in the compiler.
+ */
+function routeDeclaringIds(spec: GraphSpec): Set<string> {
+  return new Set(
+    spec.nodes
+      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id).length > 0))
+      .map((n) => n.id),
+  );
+}
+
+/**
+ * Static successors only. Conditional branches are omitted, and so are `to`
+ * edges out of a router or a `hitl` node that declares routes. The compiler
+ * skips those edges and follows the declared route, so they are not paths the
+ * run always takes.
+ *
+ * Error-recovery routes stay. On success the compiler still follows the node's
+ * static `to` edges (`normalTargets`). A recovery route replaces them only
+ * when the node fails, so the success path remains a static successor.
+ */
+function staticSuccessors(spec: GraphSpec): Map<string, string[]> {
+  const routed = routeDeclaringIds(spec);
+  const adj = new Map<string, string[]>();
+  const add = (from: string, to: string) => {
+    if (to === "END" || from === "END") return;
+    const next = adj.get(from) ?? [];
+    if (!next.includes(to)) next.push(to);
+    adj.set(from, next);
+  };
+  for (const edge of spec.edges) {
+    if (!("to" in edge)) continue;
+    const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
+    for (const from of edgeFromIds(edge.from)) {
+      if (routed.has(from)) continue;
+      for (const to of tos) add(from, to);
+    }
+  }
+  return adj;
+}
+
+/** Shortest static hop count from START. Absent when no static path exists. */
+function hopDistances(adj: Map<string, string[]>): Map<string, number> {
+  const dist = new Map<string, number>([["START", 0]]);
+  const queue = ["START"];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const d = dist.get(id)!;
+    for (const next of adj.get(id) ?? []) {
+      if (dist.has(next)) continue;
+      dist.set(next, d + 1);
+      queue.push(next);
+    }
+  }
+  return dist;
+}
+
+function reaches(adj: Map<string, string[]>, start: string, goal: string): boolean {
+  if (start === goal) return true;
+  const seen = new Set<string>();
+  const queue = [start];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (!seen.add(id)) continue;
+    for (const next of adj.get(id) ?? []) {
+      if (next === goal) return true;
+      if (!seen.has(next)) queue.push(next);
+    }
+  }
+  return false;
+}
+
+/**
+ * A node with several plain inbound edges from parallel branches of different
+ * lengths runs once per branch. A barrier edge (`from` as a list) waits for
+ * every source, so it is not warned about.
+ */
+export function unevenFanInDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const adj = staticSuccessors(spec);
+  const dist = hopDistances(adj);
+  const nodeIds = new Set(spec.nodes.map((n) => n.id));
+  const inbound = new Map<string, string[]>();
+
+  for (const edge of spec.edges) {
+    if (!("to" in edge) || isJoinBarrier(edge.from)) continue;
+    const source = edgeFromIds(edge.from)[0];
+    if (!source) continue;
+    for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) {
+      if (!nodeIds.has(to)) continue;
+      const list = inbound.get(to) ?? [];
+      if (!list.includes(source)) list.push(source);
+      inbound.set(to, list);
+    }
+  }
+
+  for (const [nodeId, sources] of inbound) {
+    if (sources.length < 2) continue;
+    const uneven: string[] = [];
+    for (let i = 0; i < sources.length; i++) {
+      for (let j = i + 1; j < sources.length; j++) {
+        const a = sources[i]!;
+        const b = sources[j]!;
+        // A source that can reach the other is a loop or a sequence, not a parallel branch.
+        if (reaches(adj, a, b) || reaches(adj, b, a)) continue;
+        const da = dist.get(a);
+        const db = dist.get(b);
+        if (da === undefined || db === undefined || da === db) continue;
+        if (!uneven.includes(a)) uneven.push(a);
+        if (!uneven.includes(b)) uneven.push(b);
+      }
+    }
+    if (uneven.length < 2) continue;
+    const detail = uneven.map((id) => `"${id}" (${dist.get(id)} hops from START)`).join(", ");
+    const listed = uneven.map((id) => JSON.stringify(id)).join(", ");
+    diagnostics.push({
+      severity: "warning",
+      code: "UNEVEN_FAN_IN",
+      message:
+        `Node "${nodeId}" has inbound edges from branches of uneven length (${detail}), so it runs once for each branch that finishes. ` +
+        `Use one barrier edge { from: [${listed}], to: ${JSON.stringify(nodeId)} } so it runs after every listed source finishes.`,
+      path: `nodes.${nodeId}`,
+    });
+  }
+  return diagnostics;
+}
+
+/**
+ * Errors for a static `from` list: fewer than two ids, unknown ids, duplicates,
+ * reserved ids, a barrier aimed at END or at one of its own sources, a source
+ * with a recovery route, and sources that are only reachable through a
+ * conditional branch or a declared route (the barrier would never fire).
+ */
+export function barrierEdgeDiagnostics(spec: GraphSpec, hooks: Hook[] = []): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const nodeIds = new Set(spec.nodes.map((n) => n.id));
+  const byId = new Map(spec.nodes.map((n) => [n.id, n]));
+  const adj = staticSuccessors(spec);
+  const dist = hopDistances(adj);
+  const reachable = nodesReachableFromStart(spec);
+
+  spec.edges.forEach((edge, index) => {
+    if (!Array.isArray(edge.from)) return;
+    if (edge.from.length < 2) {
+      diagnostics.push({
+        severity: "error",
+        code: "BARRIER_SOURCE_INVALID",
+        message: "Edge from must list at least two node ids.",
+        path: `edges[${index}].from`,
+      });
+    }
+
+    const seen = new Set<string>();
+    for (const id of edge.from) {
+      if (seen.has(id)) {
+        diagnostics.push({
+          severity: "error",
+          code: "DUPLICATE_EDGE_SOURCE",
+          message: `Edge from lists "${id}" more than once.`,
+          path: `edges[${index}].from`,
+        });
+        continue;
+      }
+      seen.add(id);
+      if (id !== "START" && id !== "END" && !nodeIds.has(id)) {
+        diagnostics.push({
+          severity: "error",
+          code: "UNKNOWN_NODE_REF",
+          message: `Edge references unknown node "${id}"`,
+          path: `edges[${index}].from`,
+        });
+      }
+    }
+
+    const targets = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : [];
+    for (const target of targets) {
+      if (target === "END" || !seen.has(target)) continue;
+      diagnostics.push({
+        severity: "error",
+        code: "BARRIER_SELF_SOURCE",
+        message: `Barrier edge lists "${target}" in from and also targets it. The join would wait for itself to finish.`,
+        path: `edges[${index}]`,
+      });
+    }
+    if (isJoinBarrier(edge.from) && targets.includes("END")) {
+      diagnostics.push({
+        severity: "error",
+        code: "BARRIER_TARGET_END",
+        message: "A barrier edge cannot target END. Point it at a join node, then add an edge from that node to END.",
+        path: `edges[${index}].to`,
+      });
+    }
+    const targetLabel = targets.filter((id) => id !== "END").join(", ") || "the join";
+    for (const id of seen) {
+      if (id === "END") {
+        diagnostics.push({
+          severity: "error",
+          code: "BARRIER_SOURCE_INVALID",
+          message: `"END" cannot be a barrier source. END is not a node that finishes, so the join would wait forever.`,
+          path: `edges[${index}].from`,
+        });
+        continue;
+      }
+      if (id === "START") {
+        diagnostics.push({
+          severity: "error",
+          code: "BARRIER_SOURCE_INVALID",
+          message: `"START" cannot be a barrier source. List node ids in from.`,
+          path: `edges[${index}].from`,
+        });
+        continue;
+      }
+      const node = byId.get(id);
+      const recovery = node ? recoveryTargets(spec, node, hooks) : [];
+      if (node && recovery.length > 0 && isJoinBarrier(edge.from)) {
+        diagnostics.push({
+          severity: "error",
+          code: "BARRIER_RECOVERY_SOURCE",
+          message:
+            `Barrier source "${id}" has a recovery route to ${recovery.map((to) => `"${to}"`).join(", ")}. ` +
+            "If it fails, the join still runs, at the same time as that route.",
+          path: `edges[${index}].from`,
+        });
+      }
+      if (!isJoinBarrier(edge.from) || !nodeIds.has(id) || dist.has(id) || !reachable.has(id)) continue;
+      diagnostics.push({
+        severity: "error",
+        code: "BARRIER_CONDITIONAL_SOURCE",
+        message:
+          `Barrier source "${id}" on the edge to "${targetLabel}" can only be reached through a conditional branch or a declared route. ` +
+          "The join waits for every listed source, so it would not run when that path is skipped.",
+        path: `edges[${index}].from`,
+      });
+    }
+  });
   return diagnostics;
 }
 
@@ -1014,6 +1271,8 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...undeclaredOutputChannelDiagnostics(spec),
     ...nodeChannelNameCollisionDiagnostics(spec),
     ...fanInLastWriteDiagnostics(spec),
+    ...unevenFanInDiagnostics(spec),
+    ...barrierEdgeDiagnostics(spec),
     ...unconditionalFanOutDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
     ...subgraphOutputMappingDiagnostics(spec),

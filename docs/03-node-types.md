@@ -312,7 +312,7 @@ See `examples/mcp/` for a runnable walkthrough.
     output: { to: notifyResult }
 ```
 
-Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
+Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
@@ -324,13 +324,15 @@ The primary escape hatch for custom logic: run any CLI, script, or shell pipelin
 
 | Config | How it runs | Use when |
 |---|---|---|
-| `args` set | `execFile(command, args)` — no shell, argv-safe | You have a discrete binary + arguments |
-| `args` omitted | OS shell (`/bin/sh -c` / `cmd.exe`) | You need pipes, `&&`, globs, or shell builtins |
+| default | `execFile(command, args)` — no shell; `command` names one program | You have a discrete binary + arguments |
+| `shell: true` | OS shell (`/bin/sh -c` / `cmd.exe`) runs `command` as a command line | You need pipes, `&&`, globs, or shell builtins |
 
-Each argument is one argv value. Whole-argument templates preserve their value until conversion: objects and arrays become JSON, while scalar values become text. Literal arguments in YAML must be strings. Use argv mode to pass structured data without shell quoting.
+`command` is never a template: a `{{ }}` in it is a config error in both modes, so run data cannot become shell syntax. Without `shell: true`, a `command` that contains whitespace needs `args` (use `args: []` for a program path with spaces); otherwise the graph fails validation and asks for `shell: true`. `args` cannot be combined with `shell: true`.
+
+Each argument is one argv value. Whole-argument templates preserve their value until conversion: objects and arrays become JSON, while scalar values become text. Literal arguments in YAML must be strings. Use argv mode to pass structured data without shell quoting. Rendered `args` and `env` values reach the child exactly as rendered.
 
 ```yaml
-# Safe argv mode (recommended)
+# Argv mode (default)
 - id: greet
   type: shell
   with:
@@ -338,10 +340,11 @@ Each argument is one argv value. Whole-argument templates preserve their value u
     args: ["Hello, {{ input.name }}!"]
     output: { to: message }
 
-# Shell-string mode (pipes / chaining)
+# Shell mode (pipes / chaining)
 - id: build
   type: shell
   with:
+    shell: true
     command: "npm run build && npm test"
     cwd: "{{ state.repoDir }}"
     timeout: 5m
@@ -380,14 +383,15 @@ Declare toolchains with `requires` so missing binaries are caught at preflight a
 
 `onMissingTool: skip` returns `{ ok: false, skipped: true }` and records a `TOOL_NOT_FOUND` run issue so later agents can see that verification never ran. Even in `fail` mode, a missing binary (ENOENT / exit 127) is reported as `TOOL_NOT_FOUND` rather than a raw spawn error.
 
-**Injection caveat:** shell-string mode interpolates templates into the command line. Treat untrusted state values the same way you would for `http` URL/body templates — prefer argv mode (`args`) when values come from external input.
+**Run data in shell mode:** pass values through `env` and quote them in the command (`"$NAME"`), so the shell treats them as data. Typographic quotes (`“ ” ‘ ’`) in the authored command line are converted to ASCII quotes; rendered values are not touched. On Windows, `cmd.exe` expands `%NAME%` before it parses the line, so an env value can still change a `cmd.exe` command line — use argv mode there when values come from external input.
 
-**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values. In argv mode there is no shell expansion; use a `{{ ... }}` template to supply a value.
+**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values. In argv mode there is no shell expansion; use a `{{ ... }}` template in `args` or `env` to supply a value.
 
 ```yaml
 - id: materialize
   type: shell
   with:
+    shell: true
     env:
       SLUG: "{{ state.specsDraft.slug }}"
     # $SLUG and ${SLUG} both expand when the child shell runs
@@ -632,7 +636,7 @@ remain unsupported.
 | Third-party npm packages | Unreachable (no `node_modules`) | Not supported |
 | `node:*` builtins | Available (subject to the rows above) | — |
 
-Directory grants should end with `/` (or omit the trailing slash — the engine normalizes directories). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
+Directory grants should end with `/` (or omit the trailing slash — the engine normalizes directories). A grant covers only the path it names. A path that does not exist yet is a file when it has an extension (`report.json`) and otherwise a directory the script may create, with everything under it; neither grants its parent, so a new file in a folder that does not exist yet needs a grant on the folder (`fsWrite: [out]`, not `fsWrite: [out/report.json]`). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
 
 **Network caveat:** Node's permission model has **no** `--allow-net` flag. Scripts can open sockets / `fetch` unless the host environment (container network policy, OS firewall) blocks them. Treat network restriction as a deploy-time concern, same class of trust as `shell`.
 
@@ -691,6 +695,8 @@ Run a node/subgraph once per item in a collection, concurrently, then fan-in. (S
 Each entry into a map has a separate collection round, in input order. Looping back replaces the internal collection bag; an explicitly append-reduced destination channel still follows its declared reducer. Inner `output.map` expressions run after execution with both `item` and `result` in scope. Inner retry/timeout settings override the map/default policy. Item IDs such as `views[0]` are stable across resume and are used by media journals and artifact writers. Older array-format collection checkpoints remain readable.
 
 An inner `output.map` always collects one object containing exactly its declared keys per item: `{value: "{{ result }}"}` produces `[{value: ...}, ...]`. Adding another key preserves that shape; the internal `outputs` wrapper is omitted. Inner `output.to` alone still collects the bare result. These item projections do not write separate parent channels; `collect` chooses the parent destination.
+
+The map renders the inner node's `with` and `input` once per item, with `state`, `input`, `config`, `run` and `item` in scope. Item data is never rendered a second time: an item whose text contains `{{ ... }}` reaches the inner node as that literal text, so it cannot evaluate expressions or read secrets. Map bodies have no `secret` scope.
 
 ```yaml
 - id: implement-all
@@ -1105,7 +1111,7 @@ Every result has a `status` that says what it shows ([ADR-0019](./adr/0019-demo-
 | `not_captured` | Nothing was captured: Playwright or its browser missing, connection refused, DNS error, source file not found, app did not launch, empty output, … | `false` | none |
 | `passed` | A `steps` flow ran to the end, every assertion held, at least one positive assertion ran, and evidence exists. No other mode can produce it | `true` | yes |
 
-Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
+Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. A host node policy refusal is not a capture failure and always fails the node: `{{ secret.X }}` when the policy blocks secrets, an `http` target outside the outbound HTTP policy, or a `screenshot`, `video` or `steps` capture while an outbound HTTP policy is set (a browser loads pages and redirects outside those checks). Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
 
 Use `expect` when a different status is the point, such as proving a 404 page:
 
@@ -1417,7 +1423,7 @@ OpenAI image dimensions are checked offline and again after rendering, before in
 | `demo` | Best-effort artifact capture (HTTP / screenshot / video / simulator / file) | side-effecting | core (+ optional `playwright`; simulators need Xcode/adb) |
 | `mcp` | MCP tool/resource call | side-effecting | core (+ `@flowgraph/mcp` at runtime) |
 | `webhook` | Outbound HTTP notify | side-effecting | core |
-| `shell` | Run a local command / shell string | side-effecting | core |
+| `shell` | Run a local program, or a shell command line with `shell: true` | side-effecting | core |
 | `service` | Start/stop long-running background processes | side-effecting | core |
 | `port` | Allocate free TCP port(s) at run time | — | core |
 | `script` | Sandboxed inline Node.js (ESM) | side-effecting | core |

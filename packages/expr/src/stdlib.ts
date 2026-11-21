@@ -20,6 +20,19 @@ function toArr(v: unknown): unknown[] {
   return Array.isArray(v) ? v : v == null ? [] : [v];
 }
 
+/** Most items `range()` returns. */
+export const MAX_RANGE_LENGTH = 10_000;
+
+/** Longest string `replace()` builds; checked before the string is built. */
+export const MAX_REPLACE_LENGTH = 16 * 1024 * 1024;
+
+function countOccurrences(text: string, search: string): number {
+  if (search === "") return text.length + 1;
+  let count = 0;
+  for (let at = text.indexOf(search); at >= 0; at = text.indexOf(search, at + search.length)) count++;
+  return count;
+}
+
 export const stdlib: Stdlib = {
   // String
   lower: (s) => toStr(s).toLowerCase(),
@@ -30,7 +43,15 @@ export const stdlib: Stdlib = {
     toArr(arr)
       .map(toStr)
       .join(toStr(sep ?? "")),
-  replace: (s, search, repl) => toStr(s).replaceAll(toStr(search), toStr(repl)),
+  replace: (s, search, repl) => {
+    const text = toStr(s);
+    const from = toStr(search);
+    const to = toStr(repl);
+    if (to.length > from.length && text.length + countOccurrences(text, from) * (to.length - from.length) > MAX_REPLACE_LENGTH) {
+      throw new Error(`replace: result would be longer than ${MAX_REPLACE_LENGTH} characters`);
+    }
+    return text.replaceAll(from, to);
+  },
   contains: (s, sub) => toStr(s).includes(toStr(sub)),
   startsWith: (s, prefix) => toStr(s).startsWith(toStr(prefix)),
   endsWith: (s, suffix) => toStr(s).endsWith(toStr(suffix)),
@@ -84,14 +105,17 @@ export const stdlib: Stdlib = {
   unique: (arr) => [...new Set(toArr(arr))],
   flatten: (arr) => toArr(arr).flat(Infinity),
   includes: (arr, item) => toArr(arr).includes(item),
+  /** `range(end)` counts from 0; `range(start, end, step)` stops before `end`. At most MAX_RANGE_LENGTH items. */
   range: (start, end, step) => {
-    const s = toNum(start);
+    const s = end == null ? 0 : toNum(start);
     const e = toNum(end ?? start);
     const st = toNum(step ?? 1);
-    const result: number[] = [];
-    if (st > 0) for (let i = s; i < e; i += st) result.push(i);
-    if (st < 0) for (let i = s; i > e; i += st) result.push(i);
-    return result;
+    if (!(st > 0 && e > s) && !(st < 0 && e < s)) return [];
+    const length = Math.ceil((e - s) / st);
+    if (!(length <= MAX_RANGE_LENGTH)) {
+      throw new Error(`range: at most ${MAX_RANGE_LENGTH} items (asked for ${Number.isFinite(length) ? length : "unbounded"})`);
+    }
+    return Array.from({ length }, (_, i) => s + i * st);
   },
   reverse: (arr) => [...toArr(arr)].reverse(),
   concat: (...arrays) => ([] as unknown[]).concat(...arrays.map(toArr)),

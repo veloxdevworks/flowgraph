@@ -185,6 +185,72 @@ export default async function() {
     }
   });
 
+  it("grants a file that does not exist yet without its folder", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-newfile-"));
+    try {
+      await fs.writeFile(path.join(workspace, "precious.txt"), "keep");
+      const r = await runScriptSandboxed(
+        `
+import { writeFileSync } from "node:fs";
+export default async function() {
+  writeFileSync("new-output.txt", "created");
+  try { writeFileSync("precious.txt", "overwritten"); return { sibling: "written" }; }
+  catch (e) { return { sibling: e.code }; }
+}
+`,
+        { workspace, permissions: { fsWrite: ["new-output.txt"] } },
+      );
+      expect(r.result).toEqual({ sibling: "ERR_ACCESS_DENIED" });
+      expect(await fs.readFile(path.join(workspace, "new-output.txt"), "utf8")).toBe("created");
+      expect(await fs.readFile(path.join(workspace, "precious.txt"), "utf8")).toBe("keep");
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("grants a new file in a workspace reached through a symlink", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-link-"));
+    try {
+      await fs.mkdir(path.join(root, "real"));
+      await fs.symlink(path.join(root, "real"), path.join(root, "link"));
+      const r = await runScriptSandboxed(
+        `
+import { writeFileSync } from "node:fs";
+export default async function() { writeFileSync("out.txt", "created"); return { ok: true }; }
+`,
+        { workspace: path.join(root, "link"), permissions: { fsWrite: ["out.txt"] } },
+      );
+      expect(r.result).toEqual({ ok: true });
+      expect(await fs.readFile(path.join(root, "real", "out.txt"), "utf8")).toBe("created");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("grants a folder that does not exist yet without its parent", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-newdir-"));
+    try {
+      await fs.writeFile(path.join(workspace, "precious.txt"), "keep");
+      const r = await runScriptSandboxed(
+        `
+import { mkdirSync, writeFileSync } from "node:fs";
+export default async function() {
+  mkdirSync("outputs/nested", { recursive: true });
+  writeFileSync("outputs/nested/report.md", "created");
+  const tryWrite = (p) => { try { writeFileSync(p, "overwritten"); return "written"; } catch (e) { return e.code; } };
+  return { sibling: tryWrite("precious.txt"), prefix: tryWrite("outputs-other.txt") };
+}
+`,
+        { workspace, permissions: { fsWrite: ["outputs"] } },
+      );
+      expect(r.result).toEqual({ sibling: "ERR_ACCESS_DENIED", prefix: "ERR_ACCESS_DENIED" });
+      expect(await fs.readFile(path.join(workspace, "outputs", "nested", "report.md"), "utf8")).toBe("created");
+      expect(await fs.readFile(path.join(workspace, "precious.txt"), "utf8")).toBe("keep");
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("resolves relative permissions.fsWrite against workspace", async () => {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-relperm-"));
     try {

@@ -28,7 +28,7 @@ function graph(nodes: unknown[]): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-const shellNode = { id: "sh", type: "shell", with: { command: "echo hi", output: { to: "out" } } };
+const shellNode = { id: "sh", type: "shell", with: { command: "echo", args: ["hi"], output: { to: "out" } } };
 
 async function runError(p: Promise<{ status: string; error?: unknown }>): Promise<string> {
   const r = await p;
