@@ -1548,7 +1548,7 @@ export const NodeSpecSchema = z.object({
               if (ctx.data === "ignore") {
                 return { message: "on.error ignore was removed; use continue" };
               }
-              return { message: ctx.defaultError };
+              return { message: "on.error must be fail | continue | route:<node>" };
             },
           }).startsWith("route:"),
         ])

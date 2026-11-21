@@ -95,11 +95,23 @@ describe("on.error", () => {
     expect(parsed.error?.issues.some((issue) => issue.message === "on.error ignore was removed; use continue")).toBe(true);
   });
 
+  it("lists fail, continue, and route for any other value", () => {
+    const parsed = GraphSpecSchema.safeParse({
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "bad-error" },
+      nodes: [{ id: "a", type: "function", on: { error: "nope" } }],
+      edges: [{ from: "START", to: "a" }],
+    });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues.some((issue) => issue.message === "on.error must be fail | continue | route:<node>")).toBe(true);
+  });
+
   it("keeps fail, continue, and route in the editor schema", () => {
     const encoded = JSON.stringify(generateJsonSchema());
     expect(encoded).toContain('"const":"fail"');
     expect(encoded).toContain('"const":"continue"');
-    expect(encoded).toContain("^route\\\\:");
+    expect(encoded).toContain('"pattern":"^route:"');
   });
 });
 
