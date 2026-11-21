@@ -218,6 +218,7 @@ export {
   assertSecretDeclared,
   declaredSecretsOf,
 } from "./runtime/secret-scope.js";
+export { expandGraphEnv, recordGraphEnvExpansion, type GraphEnvExpansion } from "./runtime/config-env.js";
 export {
   providerSecretDiagnostics,
   secretNamesIn,

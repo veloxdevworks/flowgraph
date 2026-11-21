@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -198,44 +198,86 @@ describe("event journal", () => {
   });
 });
 
-describe("stored graph YAML", () => {
-  const yaml = MINIMAL_WITH_ENV();
-  function MINIMAL_WITH_ENV(): string {
-    return MINIMAL.replace(/name: hello/, "name: hello\n  description: \"${FG_GS_TEST_VALUE}\"");
-  }
+describe("${VAR} expansion", () => {
+  const withEnv = (head: string, body = "") =>
+    MINIMAL.replace("state:", () => `${head}state:`).replace("      fn: missing\n", () => `      fn: missing\n${body}`);
+  const DECLARED = withEnv(
+    'secrets: [FG_GS_TEST_VALUE]\nconfig:\n  vars: { token: "${FG_GS_TEST_VALUE}", escaped: "$${FG_GS_TEST_VALUE}", other: "$${FG_GS_OTHER}" }\n',
+    '      args: { body: "${FG_GS_TEST_VALUE}", escaped: "$${FG_GS_TEST_VALUE}" }\n',
+  );
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
 
-  it("stores raw YAML and expands it only when asked", async () => {
+  it("never expands text outside config and runtime, even for a declared name", () => {
+    vi.stubEnv("FG_GS_TEST_VALUE", "expanded-value-1234");
+    const yaml = withEnv(
+      "secrets: [FG_GS_TEST_VALUE]\n",
+      '      args: { prompt: "say ${FG_GS_TEST_VALUE}" }\n',
+    ).replace("name: hello", () => 'name: hello\n  description: "${FG_GS_TEST_VALUE}"');
+    const parsed = parseGraphYaml(yaml, { expandEnv: true });
+    expect(parsed.diagnostics.filter((d) => d.severity === "error")).toEqual([]);
+    expect(parsed.spec?.metadata?.description).toBe("${FG_GS_TEST_VALUE}");
+    expect(parsed.spec?.nodes[0]?.with).toMatchObject({ args: { prompt: "say ${FG_GS_TEST_VALUE}" } });
+    expect(JSON.stringify(parsed.spec)).not.toContain("expanded-value-1234");
+  });
+
+  it("expands a declared config value, keeps $${X} as ${X}, and leaves node bodies literal", () => {
+    vi.stubEnv("FG_GS_TEST_VALUE", "expanded-value-1234");
+    vi.stubEnv("FG_GS_OTHER", "other-value-5678");
+    const parsed = parseGraphYaml(DECLARED, { expandEnv: true });
+    expect(parsed.diagnostics.filter((d) => d.severity === "error")).toEqual([]);
+    expect(parsed.spec?.config?.vars).toEqual({ token: "expanded-value-1234", escaped: "${FG_GS_TEST_VALUE}", other: "${FG_GS_OTHER}" });
+    expect(parsed.spec?.nodes[0]?.with).toMatchObject({ args: { body: "${FG_GS_TEST_VALUE}", escaped: "$${FG_GS_TEST_VALUE}" } });
+    expect(parsed.yaml).toBe(DECLARED);
+  });
+
+  it("refuses an undeclared config placeholder once, and never reads its value", () => {
+    vi.stubEnv("FG_GS_UNDECLARED", "must-not-appear-1234");
+    const yaml = withEnv('config:\n  vars: { token: "${FG_GS_UNDECLARED}" }\n');
+    for (const expandEnv of [true, false]) {
+      const parsed = parseGraphYaml(yaml, { expandEnv });
+      expect(parsed.spec).toBeNull();
+      expect(parsed.diagnostics.filter((d) => d.code === "SECRET_UNDECLARED").map((d) => d.path)).toEqual(["config.vars.token"]);
+      expect(JSON.stringify(parsed)).not.toContain("must-not-appear-1234");
+    }
+  });
+
+  it("does not read the environment unless asked", () => {
+    vi.stubEnv("FG_GS_TEST_VALUE", "expanded-value-1234");
+    expect(parseGraphYaml(DECLARED).spec?.config?.vars).toMatchObject({ token: "${FG_GS_TEST_VALUE}" });
+  });
+
+  it("stores raw YAML and expands it only into the loaded spec of a trusted author", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-graphs-raw-"));
-    process.env["FG_GS_TEST_VALUE"] = "expanded-value";
+    vi.stubEnv("FG_GS_TEST_VALUE", "expanded-value-1234");
     try {
-      const parsed = parseGraphYaml(yaml, { expandEnv: true });
-      expect(parsed.spec?.metadata?.description).toBe("expanded-value");
-      await persistGraph(dir, "t", yaml, parsed.spec!, { yamlFormat: "raw" });
-      expect(await fs.readFile(path.join(dir, "t.graph.yaml"), "utf-8")).not.toContain("expanded-value");
+      const parsed = parseGraphYaml(DECLARED, { expandEnv: true });
+      expect(parsed.spec?.config?.vars?.["token"]).toBe("expanded-value-1234");
+      await persistGraph(dir, "t", parsed.yaml, parsed.spec!, { yamlFormat: "raw" });
+      expect(await fs.readFile(path.join(dir, "t.graph.yaml"), "utf-8")).toBe(DECLARED);
       const plain = await loadPersistedGraph(dir, "t");
-      expect(plain?.spec.metadata?.description).toBe("${FG_GS_TEST_VALUE}");
-      expect(plain?.yaml).toBe(yaml);
+      expect(plain?.spec.config?.vars?.["token"]).toBe("${FG_GS_TEST_VALUE}");
+      expect(plain?.yaml).toBe(DECLARED);
       const trusted = await loadPersistedGraph(dir, "t", { expandEnv: true });
-      expect(trusted?.spec.metadata?.description).toBe("expanded-value");
-      expect(trusted?.yaml).toBe(yaml);
+      expect(trusted?.spec.config?.vars).toEqual({ token: "expanded-value-1234", escaped: "${FG_GS_TEST_VALUE}", other: "${FG_GS_OTHER}" });
+      expect(trusted?.yaml).toBe(DECLARED);
       expect(trusted?.meta?.yamlFormat).toBe("raw");
     } finally {
-      delete process.env["FG_GS_TEST_VALUE"];
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
 
   it("never expands files stored by older servers", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-graphs-legacy-"));
-    process.env["FG_GS_TEST_VALUE"] = "expanded-value";
+    vi.stubEnv("FG_GS_TEST_VALUE", "expanded-value-1234");
     try {
-      const parsed = parseGraphYaml(yaml, { expandEnv: false });
-      await persistGraph(dir, "t", yaml, parsed.spec!);
+      const parsed = parseGraphYaml(DECLARED, { expandEnv: false });
+      await persistGraph(dir, "t", DECLARED, parsed.spec!);
       const loaded = await loadPersistedGraph(dir, "t", { expandEnv: true });
       expect(loaded?.meta?.yamlFormat).toBeUndefined();
-      expect(loaded?.spec.metadata?.description).toBe("${FG_GS_TEST_VALUE}");
+      expect(loaded?.spec.config?.vars?.["token"]).toBe("${FG_GS_TEST_VALUE}");
     } finally {
-      delete process.env["FG_GS_TEST_VALUE"];
       await fs.rm(dir, { recursive: true, force: true });
     }
   });

@@ -11,9 +11,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
+  expandGraphEnv,
   normalizeNodeTypeAliases,
+  recordGraphEnvExpansion,
   validateSpec,
   hostSupportDiagnostics,
+  type GraphEnvExpansion,
 } from "@flowgraph/core";
 import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import { GraphStoreError, isSystemError, ServerRequestError } from "./errors.js";
@@ -22,16 +25,18 @@ import type { GraphMeta, PersistedGraph, RunStatus, ServerEvent, ThreadOwner } f
 
 export interface ParseGraphYamlResult {
   spec: GraphSpec | null;
+  /** The YAML text as given, never with environment values filled in. */
   yaml: string;
   diagnostics: Diagnostic[];
   /** True when the client YAML contained an `imports` block that was stripped. */
   importsStripped: boolean;
 }
 
-function expandEnvVars(yaml: string): string {
-  return yaml.replace(/\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => {
-    return process.env[name] ?? def ?? "";
-  });
+/** `diagnostics` plus the expansion's, leaving out ones already reported (validateSpec checks placeholders too). */
+function withExpansion(diagnostics: Diagnostic[], expansion: GraphEnvExpansion | undefined): Diagnostic[] {
+  const key = (d: Diagnostic) => `${d.code}:${d.path}:${d.message}`;
+  const seen = new Set(diagnostics.map(key));
+  return [...(expansion?.diagnostics ?? []).filter((d) => !seen.has(key(d))), ...diagnostics];
 }
 
 /**
@@ -59,8 +64,13 @@ function stripImports(graph: Record<string, unknown>, depth: number): boolean {
 
 /**
  * Parse uploaded YAML into a GraphSpec. Strips `imports` (on the graph and
- * on inline subgraphs at any depth) so client code modules are never loaded. `${VAR}` placeholders are filled from the server
- * environment unless `expandEnv` is false (untrusted uploads, stored graphs).
+ * on inline subgraphs at any depth) so client code modules are never loaded.
+ *
+ * With `expandEnv` (trusted authors only), `${VAR}` placeholders are filled
+ * the way the CLI loader fills them: after parsing, in `config` and `runtime`
+ * only, for names the graph lists under `secrets:`; `$${VAR}` stays `${VAR}`
+ * and an undeclared name is refused (SECRET_UNDECLARED). Only the returned
+ * `spec` holds the values; `yaml` is always the text as given.
  */
 export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}): ParseGraphYamlResult {
   return parseGraphSource(raw, opts);
@@ -71,10 +81,9 @@ function parseGraphSource(
   opts: { expandEnv?: boolean },
   legacyStored = false,
 ): ParseGraphYamlResult {
-  const expanded = opts.expandEnv === false ? raw : expandEnvVars(raw);
   let parsed: unknown;
   try {
-    parsed = parseYaml(expanded);
+    parsed = parseYaml(raw);
   } catch (err) {
     return {
       spec: null,
@@ -90,6 +99,7 @@ function parseGraphSource(
     };
   }
 
+  const expansion = opts.expandEnv === true ? expandGraphEnv(parsed) : undefined;
   parsed = normalizeNodeTypeAliases(parsed);
   let importsStripped = false;
 
@@ -116,27 +126,22 @@ function parseGraphSource(
     return {
       spec: null,
       yaml: raw,
-      diagnostics: diagnosticsFromZodIssues(result.error.issues, parsed),
+      diagnostics: withExpansion(diagnosticsFromZodIssues(result.error.issues, parsed), expansion),
       importsStripped,
     };
   }
+  if (expansion) recordGraphEnvExpansion(result.data, expansion);
 
-  const lint = [
+  const lint = withExpansion([
     ...validateSpec(result.data),
     ...hostSupportDiagnostics(result.data, { hostName: "flowgraph server" }),
-  ];
+  ], expansion);
   const errors = lint.filter((d) => d.severity === "error");
   if (errors.length > 0) {
-    return {
-      spec: null,
-      yaml: stringifyYaml(result.data),
-      diagnostics: lint,
-      importsStripped,
-    };
+    return { spec: null, yaml: raw, diagnostics: lint, importsStripped };
   }
 
-  const yaml = stringifyYaml(result.data);
-  return { spec: result.data, yaml, diagnostics: lint, importsStripped };
+  return { spec: result.data, yaml: raw, diagnostics: lint, importsStripped };
 }
 
 export async function ensureGraphStoreDir(dir: string): Promise<void> {
@@ -557,11 +562,11 @@ export async function updateGraphMeta(
 
 /**
  * Load a stored graph. `yaml` is the stored text (raw for current files, so
- * no environment value is ever returned). `${VAR}` placeholders are filled
- * into `spec` only when `expandEnv` is set (trusted authors) and the file was
- * stored raw; files from older servers already hold expanded YAML, and
- * expanding them again would read the environment for text that only looks
- * like a placeholder.
+ * no environment value is ever returned). Declared `${VAR}` placeholders are
+ * filled into `spec` (as {@link parseGraphYaml} does) only when `expandEnv`
+ * is set (trusted authors) and the file was stored raw; files from older
+ * servers already hold expanded YAML, and expanding them again would read the
+ * environment for text that only looks like a placeholder.
  */
 export async function loadPersistedGraph(
   dir: string,
@@ -579,7 +584,7 @@ export async function loadPersistedGraph(
     if (parsed.importsStripped) {
       log("warn", "stripped legacy imports from stored graph", { threadId });
     }
-    return { yaml: raw ? stored.yaml : parsed.yaml, spec: parsed.spec, meta: stored.meta };
+    return { yaml: raw ? stored.yaml : stringifyYaml(parsed.spec), spec: parsed.spec, meta: stored.meta };
   } catch (err) {
     if (err instanceof ServerRequestError) throw err;
     return null;

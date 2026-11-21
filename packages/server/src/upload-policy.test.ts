@@ -459,7 +459,7 @@ describe("RunService upload policy", () => {
     });
   });
 
-  it("never expands env placeholders for untrusted authors, and never stores expanded values", async () => {
+  it("never expands env placeholders for untrusted authors or in node bodies, and never stores expanded values", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-raw-"));
     cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
     const open = async (): Promise<RunService> => {
@@ -506,10 +506,11 @@ runtime:
       cleanup.push(() => first.close());
       const second = first;
 
-      // A trusted resume fills the placeholder at run time only.
+      // Node bodies are never expanded, even for a trusted author.
       await second.resumeRun({ threadId: "t3", resume: { approved: true } }, tina);
       expect(await settle(second, "t3", ["interrupted", "completed", "error"])).toBe("interrupted");
-      expect(JSON.stringify(second.registry.get("t3")?.events)).toContain("key=s3cr3t");
+      expect(JSON.stringify(second.registry.get("t3")?.events)).toContain("key=${FG_UPLOAD_TEST_SECRET}");
+      expect(JSON.stringify(second.registry.get("t3")?.events)).not.toContain("s3cr3t");
       expect(await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8")).not.toContain("s3cr3t");
       expect((await second.getRun("t3", tina))?.yaml).not.toContain("s3cr3t");
       // An author who lost trust cannot run the stored placeholder.
