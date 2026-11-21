@@ -14,6 +14,7 @@ import { nodePolicyOf } from "../node-policy.js";
 import { guardedFetch } from "../outbound-http.js";
 import { observeSensitiveHeaders } from "../runtime/secret-redaction.js";
 import { secretScope } from "../runtime/secret-scope.js";
+import { redactHeaders } from "./http-request.js";
 import { applyOutput } from "./output.js";
 
 const configSchema = WebhookWithSchema;
@@ -101,10 +102,14 @@ async function runEmit(
       responseBody = await response.text();
     }
 
+    const responseHeaders = Object.fromEntries(response.headers);
+    observeSensitiveHeaders(responseHeaders);
+    // Several Set-Cookie headers collapse to one entry above; register each value.
+    for (const cookie of response.headers.getSetCookie?.() ?? []) observeSensitiveHeaders({ "set-cookie": cookie });
     return {
       status: response.status,
       body: responseBody,
-      headers: Object.fromEntries(response.headers),
+      headers: redactHeaders(responseHeaders),
     };
   });
 

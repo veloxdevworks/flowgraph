@@ -311,7 +311,7 @@ See `examples/mcp/` for a runnable walkthrough.
     output: { to: notifyResult }
 ```
 
-Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
+Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. Sensitive response headers such as `Set-Cookie` show as `***` in `result.headers`, and their values are redacted elsewhere too. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
