@@ -154,6 +154,34 @@ describe("${VAR} expansion in config and runtime", () => {
     }
   });
 
+  it("leaves output alone for declared values the config does not contain or that are under 8 characters", async () => {
+    vi.stubEnv("FGQA_CFG_TRUE", "true");
+    vi.stubEnv("FGQA_CFG_ONE", "1");
+    vi.stubEnv("FGQA_CFG_ENV", "production");
+    vi.stubEnv("FGQA_CFG_MODE", "default");
+    const text = { env: "deploying to production now", mode: "defaults applied", flag: "true", count: "1" };
+    const d = await write({
+      "g.yaml": graph(
+        {
+          secrets: ["FGQA_CFG_TRUE", "FGQA_CFG_ONE", "FGQA_CFG_ENV", "FGQA_CFG_MODE"],
+          config: { vars: { mode: "${FGQA_CFG_MODE}", flag: "${FGQA_CFG_TRUE}" } },
+          state: { channels: { out: { type: "object" } } },
+        },
+        [{ id: "echo", type: "script", with: { code: "export default async input => input;", input: text, output: { to: "out" } } }],
+      ),
+    });
+    const r = await loadGraph(join(d, "g.yaml"));
+    expect(r.diagnostics).toEqual([]);
+    expect(r.spec?.config?.vars).toEqual({ mode: "default", flag: "true" });
+    for (const spec of [r.spec!, structuredClone(r.spec!)]) {
+      const events: FlowgraphEvent[] = [];
+      const run = await (await compileGraph(spec, { cwd: d, sinks: [(e) => { events.push(e); }] })).run({});
+      expect(run.status).toBe("completed");
+      expect(run.state["out"]).toEqual(text);
+      expect(JSON.stringify(events)).not.toContain("[REDACTED]");
+    }
+  });
+
   it("redacts a value expanded inside an inline subgraph in a copied spec", async () => {
     vi.stubEnv("FGQA_CFG_CHILD_TOKEN", "child-token-value-5678");
     const child = graph(

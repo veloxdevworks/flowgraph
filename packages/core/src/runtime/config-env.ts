@@ -144,19 +144,30 @@ export function unexpandedEnvDiagnostics(spec: GraphSpec): Diagnostic[] {
   return out;
 }
 
+/** Shorter expanded values are not redacted: masking `true` or `production` would corrupt unrelated run data. */
+export const MIN_REDACTED_CONFIG_VALUE = 8;
+
+function collectStrings(value: unknown, out: string[]): string[] {
+  if (typeof value === "string") out.push(value);
+  else if (isObject(value)) for (const child of Object.values(value)) collectStrings(child, out);
+  return out;
+}
+
 /**
- * Host values of the names each graph declares under `secrets:`, the root's
- * and every inline subgraph's. Loading expands placeholders only from these,
- * so registering them redacts every expanded value whatever copy of the spec
- * is compiled.
+ * Host values of names a graph declares under `secrets:` (the root's and each
+ * inline subgraph's) that appear in that graph's own `config` or `runtime`
+ * strings, the only place loading could have expanded them. Re-derived from
+ * the spec content, so it holds for any copy; values shorter than
+ * {@link MIN_REDACTED_CONFIG_VALUE} are left out.
  */
-export function declaredEnvValues(spec: GraphSpec): string[] {
+export function expandedConfigEnvValues(spec: GraphSpec): string[] {
   const env = currentEnvironment();
   const out = new Set<string>();
   forEachGraph(spec, (graph) => {
+    const strings = collectStrings([graph.config, graph.runtime], []);
     for (const name of declaredSecrets(graph)) {
       const value = Object.hasOwn(env, name) ? env[name] : undefined;
-      if (value) out.add(value);
+      if (value && value.length >= MIN_REDACTED_CONFIG_VALUE && strings.some((s) => s.includes(value))) out.add(value);
     }
   });
   return [...out];
