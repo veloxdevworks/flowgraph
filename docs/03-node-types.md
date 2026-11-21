@@ -382,6 +382,16 @@ Declare toolchains with `requires` so missing binaries are caught at preflight a
 
 `onMissingTool: skip` returns `{ ok: false, skipped: true }` and records a `TOOL_NOT_FOUND` run issue so later agents can see that verification never ran. Even in `fail` mode, a missing binary (ENOENT / exit 127) is reported as `TOOL_NOT_FOUND` rather than a raw spawn error.
 
+Argv mode keeps data out of the shell, but the program still parses its own options: a value such as `--output=/etc/passwd` or `-rf` is read as a flag. When a program accepts `--` to end its options, put it before data-supplied arguments:
+
+```yaml
+- id: grep-term
+  type: shell
+  with:
+    command: grep
+    args: ["-n", "--", "{{ state.term }}", "notes.txt"]
+```
+
 **Run data in shell mode:** pass values through `env` and quote them in the command (`"$NAME"`), so the shell treats them as data. Typographic quotes (`“ ” ‘ ’`) in the authored command line are converted to ASCII quotes; rendered values are not touched. On Windows, `cmd.exe` expands `%NAME%` before it parses the line, so an env value can still change a `cmd.exe` command line — use argv mode there when values come from external input.
 
 **Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values. In argv mode there is no shell expansion; use a `{{ ... }}` template in `args` or `env` to supply a value.
