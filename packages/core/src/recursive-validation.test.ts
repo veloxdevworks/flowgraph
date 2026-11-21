@@ -278,12 +278,13 @@ describe("cronScheduleProblem", () => {
 });
 
 describe("isKnownTimeZone", () => {
-  it("accepts canonical IANA names and UTC", () => {
-    for (const zone of ["America/Denver", "Europe/London", "Asia/Tokyo", "UTC"]) expect(isKnownTimeZone(zone)).toBe(true);
+  it("accepts IANA names, including ones ICU lists under an older name, and UTC", () => {
+    const zones = ["America/Denver", "Europe/London", "Asia/Tokyo", "UTC", "Etc/UTC", "Asia/Kolkata", "Europe/Kyiv", "America/Nuuk", "Asia/Ho_Chi_Minh", "Etc/GMT+5", "US/Mountain", "America/Argentina/Buenos_Aires", "America/Port-au-Prince"];
+    for (const zone of zones) expect(isKnownTimeZone(zone), zone).toBe(true);
   });
 
   it("rejects abbreviations, offsets, other spellings and unknown names", () => {
-    for (const zone of ["EST", "+05:00", "america/denver", "AMERICA/DENVER", "utc", " UTC", "", "Mars/Olympus"]) {
+    for (const zone of ["EST", "GMT", "+05:00", "america/denver", "AMERICA/DENVER", "America/DENVER", "utc", " UTC", "", "Mars/Olympus"]) {
       expect(isKnownTimeZone(zone), zone).toBe(false);
     }
   });

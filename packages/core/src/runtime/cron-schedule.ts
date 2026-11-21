@@ -78,15 +78,25 @@ export function cronScheduleProblem(schedule: string): string | undefined {
   return undefined;
 }
 
-let canonicalTimeZones: ReadonlySet<string> | undefined;
+/** `Area/Location` segments as IANA spells them, e.g. "America/Argentina/Buenos_Aires" or "Etc/GMT+5". */
+const IANA_NAME = /^[A-Z][A-Za-z]*(?:\/[A-Z][A-Za-z0-9_+-]*)+$/;
 
 /**
- * True when `timeZone` is a canonical IANA name such as "America/Denver", or
- * "UTC". Matched case-sensitively against `Intl.supportedValuesOf("timeZone")`,
- * so abbreviations ("EST"), offsets ("+05:00") and lowercase spellings, which
- * `Intl.DateTimeFormat` accepts on some Node versions, are rejected.
+ * True when `timeZone` is an IANA name the runtime knows, such as
+ * "America/Denver", "Asia/Kolkata", "Etc/GMT+5" or "UTC". Abbreviations
+ * ("EST"), offsets ("+05:00") and other spellings ("america/denver",
+ * "America/DENVER"), which `Intl.DateTimeFormat` also accepts, are rejected.
+ * Not matched against `Intl.supportedValuesOf`, which lists ICU's own names
+ * and leaves out valid IANA names such as "Asia/Kolkata" and "Etc/UTC".
  */
 export function isKnownTimeZone(timeZone: string): boolean {
-  canonicalTimeZones ??= new Set([...Intl.supportedValuesOf("timeZone"), "UTC"]);
-  return canonicalTimeZones.has(timeZone);
+  if (timeZone !== "UTC" && !IANA_NAME.test(timeZone)) return false;
+  let resolved: string;
+  try {
+    resolved = new Intl.DateTimeFormat("en-US", { timeZone }).resolvedOptions().timeZone;
+  } catch {
+    return false;
+  }
+  // The same zone in different letter case: Intl ignores case, IANA names do not.
+  return resolved === timeZone || resolved.toLowerCase() !== timeZone.toLowerCase();
 }
