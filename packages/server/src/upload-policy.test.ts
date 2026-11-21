@@ -459,6 +459,31 @@ describe("RunService upload policy", () => {
     });
   });
 
+  it("keeps expanded values out of the errors a trusted upload and preflight return", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-redact-"));
+    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50 });
+    await s.init();
+    cleanup.push(async () => {
+      await s.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    process.env["FG_UPLOAD_REDACT"] = "zq9-backend";
+    const yaml = SHELL.replace("NAME", "redact")
+      .replace("runtime:\n  checkpoint: { enabled: true, backend: memory }", () => 'secrets: [FG_UPLOAD_REDACT]\nruntime:\n  checkpoint: { enabled: true, backend: "${FG_UPLOAD_REDACT}" }');
+    try {
+      expect(yaml).toContain('backend: "${FG_UPLOAD_REDACT}"');
+      const err = await s.startRun({ threadId: "rd1", yaml }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ status: 400, code: "INVALID_GRAPH" });
+      expect((err as Error).message).toContain("[REDACTED]");
+      expect(JSON.stringify({ message: (err as Error).message, diagnostics: (err as { diagnostics: unknown }).diagnostics })).not.toContain("zq9-backend");
+      const preflight = await s.preflight({ yaml });
+      expect(preflight.ok).toBe(false);
+      expect(JSON.stringify(preflight)).not.toContain("zq9-backend");
+    } finally {
+      delete process.env["FG_UPLOAD_REDACT"];
+    }
+  });
+
   it("refuses shell nodes from token-mode callers by default and allows them with the opt-in", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-token-"));
     const open = async (extra: { trustTokenCallers?: boolean }): Promise<RunService> => {

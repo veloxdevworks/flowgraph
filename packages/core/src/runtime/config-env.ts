@@ -14,6 +14,8 @@ export interface GraphEnvExpansion {
   diagnostics: Diagnostic[];
   /** Strings where `$${` was unescaped, with the offset of each literal `${` that came from an escape. */
   escapes: Array<{ at: Segment[]; value: string; offsets: number[] }>;
+  /** Non-empty host values substituted for declared names (not `:-default` text), for hosts that must keep them out of error text. */
+  values: string[];
 }
 
 /** `$${` escapes a placeholder; matched first so an escaped one is never read. */
@@ -79,7 +81,7 @@ function forEachGraph(
  * Source text, keys and node bodies are never expanded.
  */
 export function expandGraphEnv(parsed: unknown): GraphEnvExpansion {
-  const out: GraphEnvExpansion = { diagnostics: [], escapes: [] };
+  const out: GraphEnvExpansion = { diagnostics: [], escapes: [], values: [] };
   const env = currentEnvironment();
   forEachGraph(parsed, (graph, prefix, graphAt) => {
     const declared = declaredSecrets(graph);
@@ -99,7 +101,9 @@ export function expandGraphEnv(parsed: unknown): GraphEnvExpansion {
             out.diagnostics.push(undeclared(path, name, match));
             result += match;
           } else {
-            result += (Object.hasOwn(env, name) ? env[name] : undefined) ?? fallback ?? "";
+            const hostValue = Object.hasOwn(env, name) ? env[name] : undefined;
+            if (hostValue) out.values.push(hostValue);
+            result += hostValue ?? fallback ?? "";
           }
         }
         result += value.slice(last);

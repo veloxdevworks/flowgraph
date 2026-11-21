@@ -75,7 +75,7 @@ function parseGraphSource(
 ): ParseGraphYamlResult {
   const expandEnv = opts.expandEnv !== false;
   let parsed: unknown;
-  let expansion: GraphEnvExpansion = { diagnostics: [], escapes: [] };
+  let expansion: GraphEnvExpansion = { diagnostics: [], escapes: [], values: [] };
   try {
     parsed = parseYaml(raw);
     if (expandEnv) expansion = expandGraphEnv(parsed);
@@ -115,28 +115,58 @@ function parseGraphSource(
     };
   }
 
+  const redact = (diagnostics: Diagnostic[]) => redactDiagnostics(diagnostics, expansion.values);
   const result = GraphSpecSchema.safeParse(parsed);
   if (!result.success) {
     return {
       spec: null,
       yaml: raw,
-      diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...expansion.diagnostics],
+      diagnostics: redact([...diagnosticsFromZodIssues(result.error.issues, parsed), ...expansion.diagnostics]),
       importsStripped,
     };
   }
 
   recordGraphEnvExpansion(result.data, expansion);
-  const lint = uniqueDiagnostics([
+  if (expansion.values.length > 0) expandedValues.set(result.data, expansion.values);
+  const lint = redact(uniqueDiagnostics([
     ...expansion.diagnostics,
     ...validateSpec(result.data),
     ...hostSupportDiagnostics(result.data, { hostName: "flowgraph server" }),
-  ]);
+  ]));
   // The spec may hold expanded values; the text handed back must not.
   const yaml = expandEnv ? raw : stringifyYaml(result.data);
   if (lint.some((d) => d.severity === "error")) {
     return { spec: null, yaml, diagnostics: lint, importsStripped };
   }
   return { spec: result.data, yaml, diagnostics: lint, importsStripped };
+}
+
+/** Host values expanded into each parsed spec's `config` / `runtime`. */
+const expandedValues = new WeakMap<GraphSpec, readonly string[]>();
+
+/**
+ * Replace every value expanded from the server environment into `spec` with
+ * `[REDACTED]`, at any length: error text goes back to the caller, unlike run
+ * output, where values under 8 characters are left alone.
+ */
+export function redactExpandedValues(spec: GraphSpec | null | undefined, text: string): string {
+  const values = spec ? expandedValues.get(spec) : undefined;
+  return values ? redactValues(text, values) : text;
+}
+
+function redactValues(text: string, values: readonly string[]): string {
+  // Longest first, so a value that contains a shorter one is replaced whole.
+  for (const value of [...values].sort((a, b) => b.length - a.length)) text = text.split(value).join("[REDACTED]");
+  return text;
+}
+
+function redactDiagnostics(diagnostics: Diagnostic[], values: readonly string[]): Diagnostic[] {
+  if (values.length === 0) return diagnostics;
+  return diagnostics.map((d) => ({
+    ...d,
+    message: redactValues(d.message, values),
+    ...(d.path !== undefined ? { path: redactValues(d.path, values) } : {}),
+  }));
 }
 
 /** Expansion and `validateSpec` both report an undeclared `${NAME}`; keep one. */

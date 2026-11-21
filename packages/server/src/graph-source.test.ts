@@ -260,6 +260,28 @@ describe("stored graph YAML", () => {
     }
   });
 
+  it("keeps expanded values of any length out of schema and validation diagnostics", () => {
+    const badBackend = (value: string) => {
+      process.env["FG_GS_TEST_VALUE"] = value;
+      return parseGraphYaml(
+        MINIMAL.replace("state:", () => 'secrets: [FG_GS_TEST_VALUE]\nruntime:\n  checkpoint: { backend: "${FG_GS_TEST_VALUE}" }\nstate:'),
+        { expandEnv: true },
+      );
+    };
+    try {
+      for (const value of ["leaky-backend-value", "zq9"]) {
+        const parsed = badBackend(value);
+        expect(parsed.spec).toBeNull();
+        const text = JSON.stringify(parsed.diagnostics);
+        expect(parsed.diagnostics.some((d) => d.path?.startsWith("runtime.checkpoint") && d.message.includes("[REDACTED]"))).toBe(true);
+        expect(text).not.toContain(value);
+        expect(parsed.yaml).not.toContain(value);
+      }
+    } finally {
+      delete process.env["FG_GS_TEST_VALUE"];
+    }
+  });
+
   it("stores raw YAML and expands declared config values only when asked", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-graphs-raw-"));
     process.env["FG_GS_TEST_VALUE"] = "declared-value";
