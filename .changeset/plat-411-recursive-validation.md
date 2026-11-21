@@ -5,7 +5,7 @@
 
 Map bodies and subgraphs are validated before a run starts. `validateSpec`, `loadGraph` and `flowgraph validate` run the same structural checks on a map's `with.node`, on an inline subgraph `spec`, and on each `uses:` subgraph file, with node type aliases normalised the same way. Nested diagnostics carry the path from the top-level graph (`nodes.each.with.node.with.command`, `nodes.child.spec.edges[0].to`); a file's diagnostics carry that file. A nested graph gets the same lints as the top level, with the same severity. `compileGraph` runs the structural checks at every depth and throws on any error instead of failing at run time; the other lints stay validate-time at every level.
 
-Graphs and map bodies may nest up to 32 levels. A deeper spec, or a programmatic spec whose inline `spec` or map body contains itself, gets one `GRAPH_NESTING_TOO_DEEP` error from `validateSpec` and `compileGraph` instead of a `RangeError`.
+Graphs and map bodies may nest up to 32 levels. A deeper spec, or a programmatic spec whose inline `spec` or map body contains itself, gets one `GRAPH_NESTING_TOO_DEEP` error from `validateSpec` and `compileGraph` instead of a `RangeError`. A programmatic spec that reuses inline `spec` objects may expand to at most 10,000 nodes, counting each nested graph and map body at every place it is used; past that it gets one `GRAPH_TOO_LARGE` error instead of taking exponential time.
 
 Also checked now:
 
@@ -23,6 +23,6 @@ The published JSON Schema has `$id` `https://veloxdevworks.com/flowgraph/schema/
 - `compileGraph` throws `Invalid graph: <CODE> at <path>: <message>; ...` for structural errors. The error's `code` is the first diagnostic's code and `diagnostics` lists them all. Code that matched the old `Node "<id>" config error` message should match the code or the new message.
 - Remove edges from `END` or into `START`, and point router and hitl routes at the first node instead of `START`.
 - For `flowgraph validate`: give each `select` input `options`, make input keys unique, and make each `default` match its type. Give triggers unique ids, and spell each time zone as an IANA name, such as `America/New_York` instead of `EST`. These do not affect `compileGraph`.
-- Flatten programmatic specs that nest graphs or map bodies more than 32 levels deep.
+- Flatten programmatic specs that nest graphs or map bodies more than 32 levels deep, or that expand past 10,000 nodes by reusing inline specs.
 - `flowgraph validate` without `--strict` no longer fails on `UNDECLARED_OUTPUT_CHANNEL`; with `--strict` it still does. Tools that filter diagnostics by severity should expect a warning.
 - Tools that read the JSON Schema should follow `$ref` into `definitions` for the root, nodes, map bodies and inline subgraph specs.

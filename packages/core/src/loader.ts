@@ -11,6 +11,7 @@ import {
 } from "./runtime/env-expansion-lint.js";
 import {
   graphLintDiagnostics,
+  GRAPH_SHAPE_CODES,
   graphStructureDiagnostics,
   graphHasPlacement,
   placementNestedMessage,
@@ -248,8 +249,8 @@ export function normalizeNodeTypeAliases(parsed: unknown): unknown {
  */
 export function validateSpec(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = graphStructureDiagnostics(spec, { lints: true });
-  // The remaining passes walk nested graphs without a depth limit.
-  if (diagnostics.some((d) => d.code === "GRAPH_NESTING_TOO_DEEP")) return diagnostics;
+  // The remaining passes walk every place a nested graph is used, without a depth limit.
+  if (diagnostics.some((d) => GRAPH_SHAPE_CODES.has(d.code))) return diagnostics;
 
   if (spec.runtime?.budget?.maxUSD !== undefined) walkNodes(spec, node => {
     const provider = typeof node.provider === "string" ? node.provider : spec.config?.defaults?.provider;

@@ -62,7 +62,7 @@ import {
   collectNodeWriteChannels,
   demoToolExposureDiagnostics,
   ensureDeclaredOutputChannels,
-  graphNestingDiagnostics,
+  graphShapeDiagnostics,
   graphStructureDiagnostics,
   provesObjective,
 } from "./runtime/validate-graph.js";
@@ -451,7 +451,7 @@ function compileWarningIssue(diag: Diagnostic, raisedAt: string): RunIssue {
 }
 
 export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): Promise<CompiledGraph> {
-  throwIfInvalid(graphNestingDiagnostics(spec));
+  throwIfInvalid(graphShapeDiagnostics(spec));
   const plan = await planPlacements(spec, opts.placement);
   const assembled = await assembleCompiledLangGraph(spec, opts, plan);
   const {
@@ -1459,8 +1459,9 @@ async function assembleCompiledLangGraph(
   plan?: PlacementPlan,
   embedded = false,
 ): Promise<AssembledGraph> {
-  // Before any other walk, so a cyclic programmatic spec fails here and not with a RangeError.
-  throwIfInvalid(graphNestingDiagnostics(spec));
+  // Before any other walk, so a cyclic or heavily shared programmatic spec fails here, not with a
+  // RangeError or after exponential work.
+  throwIfInvalid(graphShapeDiagnostics(spec));
   const sourceFile = graphFile(spec);
   const unexpandedEnv = unexpandedEnvDiagnostics(spec);
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph

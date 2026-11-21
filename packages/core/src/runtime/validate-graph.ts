@@ -1294,70 +1294,107 @@ function nested(d: Diagnostic, prefix: string): Diagnostic {
 export const MAX_GRAPH_NESTING = 32;
 
 /**
- * Path of the first nested graph or map body beyond {@link MAX_GRAPH_NESTING},
- * or undefined. Walks plain objects only, so a cyclic programmatic spec ends
- * here instead of overflowing the stack in a schema parse or a later lint.
+ * Most nodes one spec may expand to, counting a nested graph or map body once
+ * for each place it is used. Validation and compile visit every such place.
  */
-function nestingOverflowPath(spec: GraphSpec): string | undefined {
-  // Levels each object spans, counting its own; a shared object is walked once.
-  const heights = new WeakMap<object, number>();
+export const MAX_GRAPH_NODES = 10_000;
+
+interface GraphShape {
+  /** Path of the first nested graph or map body beyond {@link MAX_GRAPH_NESTING}. */
+  overflowPath?: string;
+  /** Nodes once each nested graph and map body is counted at every place it is used. */
+  nodes: number;
+}
+
+/**
+ * Nesting depth and expanded size of a spec. Walks plain objects only, once per
+ * object even when it is shared, so a cyclic or heavily shared programmatic
+ * spec ends here instead of overflowing the stack or taking exponential time
+ * in a schema parse or a later lint.
+ */
+function graphShape(spec: GraphSpec): GraphShape {
+  // Levels each object spans (counting its own) and the nodes it expands to.
+  const known = new WeakMap<object, { height: number; nodes: number }>();
   const open = new WeakSet<object>();
   class Overflow {
     constructor(readonly path: string) {}
   }
-  const enter = (value: object, path: string, level: number): number | undefined => {
+  const visit = (value: Record<string, unknown>, path: string, level: number, measure: () => { height: number; nodes: number }) => {
     if (level > MAX_GRAPH_NESTING || open.has(value)) throw new Overflow(path);
-    const known = heights.get(value);
-    if (known !== undefined && level + known - 1 > MAX_GRAPH_NESTING) throw new Overflow(path);
-    if (known === undefined) open.add(value);
-    return known;
-  };
-  const leave = (value: object, height: number): number => {
-    open.delete(value);
-    heights.set(value, height);
-    return height;
-  };
-  const graphHeight = (graph: Record<string, unknown>, path: string, level: number): number => {
-    const known = enter(graph, path, level);
-    if (known !== undefined) return known;
-    let height = 1;
-    for (const node of Array.isArray(graph.nodes) ? graph.nodes : []) {
-      if (isRecord(node)) height = Math.max(height, nodeHeight(node, `${path}nodes.${String(node.id)}`, level));
+    const seen = known.get(value);
+    if (seen) {
+      if (level + seen.height - 1 > MAX_GRAPH_NESTING) throw new Overflow(path);
+      return seen;
     }
-    return leave(graph, height);
+    open.add(value);
+    const result = measure();
+    open.delete(value);
+    known.set(value, result);
+    return result;
   };
-  const nodeHeight = (node: Record<string, unknown>, path: string, level: number): number => {
-    const known = enter(node, path, level);
-    if (known !== undefined) return known;
+  const graph = (value: Record<string, unknown>, path: string, level: number) => visit(value, path, level, () => {
     let height = 1;
-    if (isRecord(node.spec)) height = Math.max(height, 1 + graphHeight(node.spec, `${path}.spec.`, level + 1));
-    const body = isRecord(node.with) ? node.with.node : undefined;
-    if (isRecord(body)) height = Math.max(height, 1 + nodeHeight(body, `${path}.with.node`, level + 1));
-    return leave(node, height);
-  };
+    let nodes = 0;
+    for (const item of Array.isArray(value.nodes) ? value.nodes : []) {
+      if (!isRecord(item)) continue;
+      const child = node(item, `${path}nodes.${String(item.id)}`, level);
+      height = Math.max(height, child.height);
+      nodes += child.nodes;
+    }
+    return { height, nodes };
+  });
+  const node = (value: Record<string, unknown>, path: string, level: number): { height: number; nodes: number } => visit(value, path, level, () => {
+    let height = 1;
+    let nodes = 1;
+    if (isRecord(value.spec)) {
+      const inner = graph(value.spec, `${path}.spec.`, level + 1);
+      height = Math.max(height, 1 + inner.height);
+      nodes += inner.nodes;
+    }
+    const body = isRecord(value.with) ? value.with.node : undefined;
+    if (isRecord(body)) {
+      const inner = node(body, `${path}.with.node`, level + 1);
+      height = Math.max(height, 1 + inner.height);
+      nodes += inner.nodes;
+    }
+    return { height, nodes };
+  });
   try {
-    graphHeight(spec as unknown as Record<string, unknown>, "", 1);
-    return undefined;
+    return { nodes: graph(spec as unknown as Record<string, unknown>, "", 1).nodes };
   } catch (err) {
-    if (err instanceof Overflow) return err.path.replace(/\.$/, "") || "nodes";
+    if (err instanceof Overflow) return { overflowPath: err.path.replace(/\.$/, "") || "nodes", nodes: Number.NaN };
     throw err;
   }
 }
 
+/** Diagnostics that stop every other check, because those walk each place a nested graph is used. */
+export const GRAPH_SHAPE_CODES: ReadonlySet<string> = new Set(["GRAPH_NESTING_TOO_DEEP", "GRAPH_TOO_LARGE"]);
+
 /**
  * `GRAPH_NESTING_TOO_DEEP` when graphs and map bodies nest beyond
- * {@link MAX_GRAPH_NESTING} or refer back to themselves, else nothing. Run it
- * before any other walk of a programmatic spec.
+ * {@link MAX_GRAPH_NESTING} or refer back to themselves, `GRAPH_TOO_LARGE` when
+ * the spec expands to more than {@link MAX_GRAPH_NODES} nodes, else nothing.
+ * Run it before any other walk of a programmatic spec.
  */
-export function graphNestingDiagnostics(spec: GraphSpec): Diagnostic[] {
-  const path = nestingOverflowPath(spec);
-  if (path === undefined) return [];
-  return [{
-    severity: "error",
-    code: "GRAPH_NESTING_TOO_DEEP",
-    path,
-    message: `Graphs and map bodies nest more than ${MAX_GRAPH_NESTING} levels deep or refer back to themselves; flatten the nesting`,
-  }];
+export function graphShapeDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const shape = graphShape(spec);
+  if (shape.overflowPath !== undefined) {
+    return [{
+      severity: "error",
+      code: "GRAPH_NESTING_TOO_DEEP",
+      path: shape.overflowPath,
+      message: `Graphs and map bodies nest more than ${MAX_GRAPH_NESTING} levels deep or refer back to themselves; flatten the nesting`,
+    }];
+  }
+  if (shape.nodes > MAX_GRAPH_NODES) {
+    return [{
+      severity: "error",
+      code: "GRAPH_TOO_LARGE",
+      path: "nodes",
+      message: `The graph expands to ${shape.nodes} nodes, counting each nested graph and map body at every place it is used, more than ${MAX_GRAPH_NODES}; use the nested graphs in fewer places or flatten the nesting`,
+    }];
+  }
+  return [];
 }
 
 export interface GraphStructureOptions {
@@ -1375,7 +1412,8 @@ export interface GraphStructureOptions {
  * to every graph nested in it at any depth: each inline subgraph `spec` and
  * each `map` body (`with.node`, including a subgraph body's own `spec`).
  *
- * - nesting stays within {@link MAX_GRAPH_NESTING} (otherwise only that is reported)
+ * - nesting and expanded size stay within {@link MAX_GRAPH_NESTING} and
+ *   {@link MAX_GRAPH_NODES} (otherwise only that is reported)
  * - hook phases and directives are known
  * - node ids are unique; edges name known nodes; `END` is never a source and
  *   `START` never an edge, router or hitl route target; there is an edge from `START`
@@ -1386,8 +1424,8 @@ export interface GraphStructureOptions {
  * `loadGraph` applies `validateSpec` to `uses` files.
  */
 export function graphStructureDiagnostics(spec: GraphSpec, options: GraphStructureOptions = {}): Diagnostic[] {
-  const tooDeep = graphNestingDiagnostics(spec);
-  if (tooDeep.length) return tooDeep;
+  const shape = graphShapeDiagnostics(spec);
+  if (shape.length) return shape;
   const out: Diagnostic[] = [];
   graphStructure(spec, "", out, options.lints === true);
   return out;

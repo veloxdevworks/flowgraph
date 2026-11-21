@@ -6,7 +6,7 @@ import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { loadGraph, validateSpec } from "./loader.js";
 import { cronScheduleProblem, isKnownTimeZone } from "./runtime/cron-schedule.js";
-import { graphNestingDiagnostics, MAX_GRAPH_NESTING } from "./runtime/validate-graph.js";
+import { graphShapeDiagnostics, MAX_GRAPH_NESTING } from "./runtime/validate-graph.js";
 
 const head = { apiVersion: "flowgraph/v1", kind: "Graph" } as const;
 
@@ -318,8 +318,8 @@ describe("nesting depth", () => {
   });
 
   // Two nodes share each child spec, so there are 2^(levels-1) paths but only `levels` spec objects.
-  function sharedTo(levels: number): GraphSpec {
-    let shared = graph([{ id: "leaf", ...echo }]);
+  function sharedTo(levels: number, leaf: Record<string, unknown> = echo): GraphSpec {
+    let shared = graph([{ id: "leaf", ...leaf }]);
     for (let level = 1; level < levels; level++) {
       const child = { ...head, metadata: { name: `l${level}` }, nodes: shared.nodes, edges: shared.edges };
       shared = graph([
@@ -330,9 +330,23 @@ describe("nesting depth", () => {
     return shared;
   }
 
-  it("checks nesting once per shared spec object, not once per path", () => {
-    expect(graphNestingDiagnostics(sharedTo(MAX_GRAPH_NESTING))).toEqual([]);
-    expect(graphNestingDiagnostics(sharedTo(40))).toEqual([expect.objectContaining({ code: "GRAPH_NESTING_TOO_DEEP" })]);
+  it("reports fan-out 2 at depth 30 as too large from one walk per object, in validate and compile", async () => {
+    const spec = sharedTo(30);
+    expect(validateSpec(spec)).toEqual([expect.objectContaining({ severity: "error", code: "GRAPH_TOO_LARGE", path: "nodes" })]);
+    await expect(compileGraph(spec)).rejects.toMatchObject({ code: "GRAPH_TOO_LARGE" });
+  });
+
+  it("validates a shared spec within the limit at every place it is used", () => {
+    const found = errors(validateSpec(sharedTo(4, { type: "shell", with: {} }))).filter((d) => d.code === "NODE_CONFIG_ERROR");
+    expect(found).toHaveLength(8);
+    expect(found.map((d) => d.path)).toContain("nodes.a.spec.nodes.b.spec.nodes.a.spec.nodes.leaf.with.command");
+    // sharedTo(n) expands to 3 * 2^(n-1) - 2 nodes: 6142 at 12, 12286 at 13.
+    expect(graphShapeDiagnostics(sharedTo(12))).toEqual([]);
+    expect(graphShapeDiagnostics(sharedTo(13))).toEqual([expect.objectContaining({ code: "GRAPH_TOO_LARGE" })]);
+  });
+
+  it("reports nesting past the limit before size", () => {
+    expect(graphShapeDiagnostics(sharedTo(40))).toEqual([expect.objectContaining({ code: "GRAPH_NESTING_TOO_DEEP" })]);
   });
 });
 
