@@ -25,7 +25,7 @@ import "./nodes/index.js";
 import { getMediaVendor } from "./media/registry.js";
 import { offlineProviderValidations, providerConfigDiagnostics } from "./providers/diagnostics.js";
 import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
-import { expandGraphEnv, recordGraphEnvExpansion, type GraphEnvExpansion } from "./runtime/config-env.js";
+import { expandGraphEnv, recordGraphEnvExpansion, unexpandedEnvDiagnostics, type GraphEnvExpansion } from "./runtime/config-env.js";
 
 export {
   envExpansionCollisionDiagnostics,
@@ -325,6 +325,6 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
   });
 
   diagnostics.push(...providerConfigDiagnostics(spec, offlineProviderValidations(spec)));
-  diagnostics.push(...secretReferenceDiagnostics(spec));
+  diagnostics.push(...secretReferenceDiagnostics(spec), ...unexpandedEnvDiagnostics(spec));
   return diagnostics;
 }

@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { persistGraph, listPersistedGraphs, loadPersistedGraph, parseGraphYaml, appendEventJournal, loadEventJournal } from "./graph-source.js";
 import { SessionRegistry } from "./session-registry.js";
-import { compileGraph } from "@flowgraph/core";
 import type { ServerEvent } from "./types.js";
 
 const MINIMAL = `
@@ -242,15 +241,18 @@ describe("stored graph YAML", () => {
   });
 });
 describe("unexpanded config placeholders", () => {
-  it("compileGraph refuses an undeclared ${NAME} left in a server-parsed graph", async () => {
+  it("refuses an undeclared ${NAME} left in a server-parsed graph", () => {
     const yaml = MINIMAL.replace("state:", 'config:\n  vars: { token: "${FG_GS_UNDECLARED}" }\nstate:');
     const parsed = parseGraphYaml(yaml, { expandEnv: false });
-    expect(parsed.spec?.config?.vars).toEqual({ token: "${FG_GS_UNDECLARED}" });
-    await expect(compileGraph(parsed.spec!, { checkpointer: "none" })).rejects.toThrow(
-      'config.vars.token: `${FG_GS_UNDECLARED}` reads secret "FG_GS_UNDECLARED", which the graph does not declare',
-    );
+    expect(parsed.spec).toBeNull();
+    expect(parsed.diagnostics.map((d) => [d.code, d.path, d.message])).toContainEqual([
+      "SECRET_UNDECLARED",
+      "config.vars.token",
+      '`${FG_GS_UNDECLARED}` reads secret "FG_GS_UNDECLARED", which the graph does not declare. Add FG_GS_UNDECLARED to the top-level secrets: list.',
+    ]);
   });
 });
+
 describe("host-support triggers", () => {
   it("warns that the server ignores triggers and still returns the spec", () => {
     const yaml = `

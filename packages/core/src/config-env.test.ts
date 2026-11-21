@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadGraph } from "./loader.js";
+import { loadGraph, validateSpec } from "./loader.js";
 import { compileGraph } from "./compiler.js";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "./events.js";
@@ -139,12 +139,43 @@ describe("${VAR} expansion in config and runtime", () => {
     });
     const r = await loadGraph(join(d, "g.yaml"));
     expect(r.diagnostics).toEqual([]);
+    const copies: Array<[string, GraphSpec]> = [
+      ["loaded", r.spec!],
+      ["structuredClone", structuredClone(r.spec!)],
+      ["spread", { ...r.spec!, config: { ...r.spec!.config, vars: { ...r.spec!.config!.vars } } }],
+    ];
+    for (const [label, spec] of copies) {
+      const events: FlowgraphEvent[] = [];
+      const compiled = await compileGraph(spec, { cwd: d, sinks: [(e) => { events.push(e); }] });
+      const run = await compiled.run({});
+      expect(run.status, label).toBe("completed");
+      expect(run.state["out"], label).toEqual({ token: "[REDACTED]", label: "public-label-value" });
+      expect(JSON.stringify(events), label).not.toContain("config-token-value-1234");
+    }
+  });
+
+  it("redacts a value expanded inside an inline subgraph in a copied spec", async () => {
+    vi.stubEnv("FGQA_CFG_CHILD_TOKEN", "child-token-value-5678");
+    const child = graph(
+      {
+        secrets: ["FGQA_CFG_CHILD_TOKEN"],
+        config: { vars: { token: "${FGQA_CFG_CHILD_TOKEN}" } },
+        state: { channels: { out: { type: "object" } } },
+      },
+      [{ id: "echo", type: "script", with: { code: "export default async input => input;", input: { token: "{{ config.vars.token }}" }, output: { to: "out" } } }],
+    );
+    const d = await write({
+      "g.yaml": graph({ state: { channels: { out: { type: "object" } } } }, [
+        { id: "sub", type: "subgraph", spec: child },
+      ]),
+    });
+    const r = await loadGraph(join(d, "g.yaml"));
+    expect(r.diagnostics).toEqual([]);
     const events: FlowgraphEvent[] = [];
-    const compiled = await compileGraph(r.spec!, { cwd: d, sinks: [(e) => { events.push(e); }] });
-    const run = await compiled.run({});
+    const run = await (await compileGraph(structuredClone(r.spec!), { cwd: d, sinks: [(e) => { events.push(e); }] })).run({});
     expect(run.status).toBe("completed");
-    expect(run.state["out"]).toEqual({ token: "[REDACTED]", label: "public-label-value" });
-    expect(JSON.stringify(events)).not.toContain("config-token-value-1234");
+    expect(run.state["out"]).toEqual({ token: "[REDACTED]" });
+    expect(JSON.stringify(events)).not.toContain("child-token-value-5678");
   });
 });
 
@@ -179,5 +210,30 @@ describe("compileGraph refuses undeclared ${NAME} in any spec", () => {
     expect(escaped.spec?.config?.vars).toEqual({ a: "${FGQA_CFG_UNDECLARED}" });
     await expect(compileGraph(escaped.spec!, { cwd: d })).resolves.toBeDefined();
     await expect(compileGraph({ ...escaped.spec! }, { cwd: d })).resolves.toBeDefined();
+  });
+
+  it("exempts each escaped occurrence, not every use of the name in the field", async () => {
+    const d = await write({
+      "mixed.yaml": graph({ config: { vars: { a: "$${FGU}${FGU}", b: "${FGU}$${FGU}" } } }),
+      "escaped.yaml": graph({ config: { vars: { a: "$${FGU}-$${FGU}" } } }),
+    });
+    const mixed = await loadGraph(join(d, "mixed.yaml"));
+    expect(mixed.spec?.config?.vars).toEqual({ a: "${FGU}${FGU}", b: "${FGU}${FGU}" });
+    expect(mixed.diagnostics.map((x) => [x.code, x.path])).toEqual([
+      ["SECRET_UNDECLARED", "config.vars.a"],
+      ["SECRET_UNDECLARED", "config.vars.b"],
+    ]);
+    expect(validateSpec(mixed.spec!).filter((x) => x.code === "SECRET_UNDECLARED").map((x) => x.path)).toEqual(["config.vars.a", "config.vars.b"]);
+    await expect(compileGraph(mixed.spec!, { cwd: d })).rejects.toThrow('config.vars.a: `${FGU}` reads secret "FGU"');
+    const escaped = await loadGraph(join(d, "escaped.yaml"));
+    expect(escaped.diagnostics).toEqual([]);
+    await expect(compileGraph(escaped.spec!, { cwd: d })).resolves.toBeDefined();
+  });
+
+  it("validateSpec reports the same undeclared placeholders as compileGraph", async () => {
+    const spec = parse(graph({ secrets: ["FGQA_CFG_DECLARED"], config: { vars: { a: "${FGQA_CFG_CODE}", b: "$${FGQA_CFG_CODE}", c: "${FGQA_CFG_DECLARED}" } } }));
+    expect(validateSpec(spec).filter((x) => x.code === "SECRET_UNDECLARED").map((x) => [x.severity, x.path, x.message])).toEqual([
+      ["error", "config.vars.a", '`${FGQA_CFG_CODE}` reads secret "FGQA_CFG_CODE", which the graph does not declare. Add FGQA_CFG_CODE to the top-level secrets: list.'],
+    ]);
   });
 });
