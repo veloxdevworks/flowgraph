@@ -28,5 +28,3 @@ runtime:
   webhookServer:
     host: 127.0.0.1
     port: 8878
-  hitl:
-    onInterrupt: webhook

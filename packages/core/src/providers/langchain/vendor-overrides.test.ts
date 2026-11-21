@@ -161,6 +161,7 @@ describe("LangChain applies node model and maxTokens to real vendor clients", ()
       const provider = await createLangChainProviderFromConfig(
         "langchain",
         { kind: "langchain", vendor: "openai", model: "gpt-4o-mini", options: { maxTokens: 100 }, apiKeyEnv: "FG_STUB_OPENAI_KEY", baseUrl: `${stub.url}/v1` },
+        { secrets: ["FG_STUB_OPENAI_KEY"] },
       );
       const compiled = await compileGraph(spec([{ id: "a", model: "gpt-override", with: { maxTokens: 7 } }]), { providers: [provider] });
       const r = await compiled.run({ input: {} });

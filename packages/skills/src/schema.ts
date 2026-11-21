@@ -66,8 +66,16 @@ export const EnvVarDeclSchema = z.object({
   example: z.string().optional(),
 });
 
+/** A single executable name. Paths and shell syntax are rejected. */
+export const BIN_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
+
 export const BinDeclSchema = z.object({
-  name: z.string(),
+  name: z
+    .string()
+    .regex(
+      BIN_NAME_PATTERN,
+      "must be a single executable name (letters, digits, '.', '_', '+' or '-'), not a path or a shell command",
+    ),
   optional: z.boolean().optional().default(false),
   minVersion: z.string().optional(),
 });

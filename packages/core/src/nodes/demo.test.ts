@@ -61,6 +61,43 @@ describe("demo node", () => {
     vi.restoreAllMocks();
   });
 
+  it("http mode masks the transcript with the shared marker", async () => {
+    const workspace = mkWorkspace();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ session: "server-session", note: "ok" }), {
+            status: 200,
+            headers: { "content-type": "application/json", "set-cookie": "sid=cookie-session-value; HttpOnly" },
+          }),
+      ),
+    );
+    const spec = demoGraph({
+      http: {
+        url: "https://user:pass@example.com/api?token=query-token&q=1",
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "X-Service-Token": "custom-token-value" },
+        body: { password: "hunter2", name: "n" },
+      },
+      output: { to: "demo" },
+    });
+    spec.runtime = { ...spec.runtime, secrets: { redact: { headers: ["x-service-token"] } } } as GraphSpec["runtime"];
+    const result = await (await compileGraph(spec, { cwd: workspace })).run({ threadId: "demo-marker" });
+    expect(result.status).toBe("completed");
+    const out = result.state["demo"] as { path: string };
+    const transcript = JSON.parse(fs.readFileSync(out.path, "utf8")) as {
+      request: { url: string; headers: Record<string, string>; body: Record<string, string> };
+      response: { headers: Record<string, string>; body: Record<string, string> };
+    };
+    expect(transcript.request.url).toBe("https://[REDACTED]:[REDACTED]@example.com/api?token=[REDACTED]&q=1");
+    expect(transcript.request.headers).toMatchObject({ Authorization: "[REDACTED]", "X-Service-Token": "[REDACTED]" });
+    expect(transcript.request.body).toEqual({ password: "[REDACTED]", name: "n" });
+    expect(transcript.response.headers["set-cookie"]).toBe("[REDACTED]");
+    expect(transcript.response.body).toEqual({ session: "[REDACTED]", note: "ok" });
+    expect(JSON.stringify(transcript)).not.toContain("***");
+  });
+
   it("http mode writes a transcript artifact and maps output", async () => {
     const workspace = mkWorkspace();
     const fetchMock = vi.fn(
@@ -107,7 +144,7 @@ describe("demo node", () => {
     expect(out.kind).toBe("http");
     expect(out.response.status).toBe(200);
     expect(out.response.body).toEqual({ hello: "world" });
-    expect(out.request.headers.Authorization).toBe("***");
+    expect(out.request.headers.Authorization).toBe("[REDACTED]");
     expect(fs.existsSync(out.path)).toBe(true);
     expect(out.path.startsWith(demoArtifactDir(workspace, "demo-http", "capture"))).toBe(true);
     expect(out.path).toContain(path.join(".flowgraph", "artifacts", "demo-http", "capture"));
@@ -115,7 +152,7 @@ describe("demo node", () => {
     const transcript = JSON.parse(fs.readFileSync(out.path, "utf8")) as {
       request: { headers: Record<string, string> };
     };
-    expect(transcript.request.headers.Authorization).toBe("***");
+    expect(transcript.request.headers.Authorization).toBe("[REDACTED]");
 
     const outputEvt = events.find((e) => e.type === "node.output");
     expect(outputEvt?.scope.nodeId).toBe("capture");
@@ -356,5 +393,75 @@ describe("demo results across a loop-back", () => {
     // Nothing in the final result may point at the file the first run captured.
     expect(JSON.stringify(out)).not.toContain(firstFile);
     expect(JSON.stringify(out)).not.toContain(path.basename(firstFile));
+  });
+});
+
+describe("demo node under a node policy", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  function okFetch() {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("refuses secret references when the policy blocks secrets", async () => {
+    vi.stubEnv("FG_DEMO_POLICY_SECRET", "demo-policy-secret-value");
+    const fetchMock = okFetch();
+    const compiled = await compileGraph(
+      {
+        ...demoGraph({
+          http: { url: "https://example.com/api", headers: { "X-Token": "{{ secret.FG_DEMO_POLICY_SECRET }}" } },
+          output: { to: "demo" },
+        }),
+        secrets: ["FG_DEMO_POLICY_SECRET"],
+      },
+      { cwd: mkWorkspace(), nodePolicy: { blockSecrets: true } },
+    );
+    const result = await compiled.run({ threadId: "demo-block-secrets" });
+    expect(result.status).toBe("error");
+    expect(String((result.error as Error)?.message ?? result.error)).toMatch(/secret\.FG_DEMO_POLICY_SECRET reads the host environment/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails the run on a computed secret name the graph does not declare", async () => {
+    vi.stubEnv("FG_DEMO_POLICY_SECRET", "demo-policy-secret-value");
+    const fetchMock = okFetch();
+    const spec = demoGraph({
+      http: { url: "https://example.com/api", headers: { "X-Token": "{{ secret[config.vars.key] }}" } },
+      output: { to: "demo" },
+    });
+    spec.config = { vars: { key: "FG_DEMO_POLICY_SECRET" } };
+    const result = await (await compileGraph(spec, { cwd: mkWorkspace() })).run({ threadId: "demo-undeclared" });
+    expect(result.status).toBe("error");
+    expect(String((result.error as Error)?.message ?? result.error)).toContain(
+      'demo node "capture" reads secret "FG_DEMO_POLICY_SECRET", which the graph does not declare',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("holds http captures to the outbound HTTP policy", async () => {
+    const fetchMock = okFetch();
+    const compiled = await compileGraph(
+      demoGraph({ http: { url: "http://127.0.0.1:9/admin" }, output: { to: "demo" } }),
+      { cwd: mkWorkspace(), nodePolicy: { outboundHttp: { publicOnly: true } } },
+    );
+    const result = await compiled.run({ threadId: "demo-outbound" });
+    expect(result.status).toBe("error");
+    expect(String((result.error as Error)?.message ?? result.error)).toMatch(/127\.0\.0\.1, a loopback address/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses browser captures under an outbound HTTP policy", async () => {
+    const compiled = await compileGraph(
+      demoGraph({ screenshot: { url: "http://127.0.0.1:9/" }, output: { to: "demo" } }),
+      { cwd: mkWorkspace(), nodePolicy: { outboundHttp: { publicOnly: true } } },
+    );
+    const result = await compiled.run({ threadId: "demo-outbound-browser" });
+    expect(result.status).toBe("error");
+    expect(String((result.error as Error)?.message ?? result.error)).toMatch(/screenshot capture drives a browser/);
   });
 });

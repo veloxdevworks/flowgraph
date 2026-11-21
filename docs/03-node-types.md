@@ -121,9 +121,9 @@ An LLM-driven agent that runs a tool-calling loop. **This is the hub in hub-and-
 - The agent runs **inside a single graph node**. Its internal tool-calls do **not** create graph edges; they are intra-node steps. This keeps the graph topology readable while allowing rich agent behavior.
 - A tool that is a **skill** or **node** is invoked through flowgraph's runtime, so tool-calls still emit events/traces (nested spans under the agent span) and respect contracts.
 - A `node` tool may be any node type except `map` (a map is expanded into the graph when it is compiled; put it in a `subgraph` and expose that instead). The model's arguments become the node's input. An interrupt anywhere below a node tool (an asking agent, a `hitl` node, a node inside a subgraph or map item it runs, or a node tool it calls in turn) saves the replay entries of the whole top-level node, so on resume every model turn and tool result already produced is reused and only the approved call runs. A reused tool result must have been recorded for the same tool name and arguments; if the model asks for a different call at that point the run fails with `REPLAY_MISMATCH` rather than reusing it.
-- `permission: ask` raises a **HITL interrupt before every tool call** on that node. `permission: deny` blocks all tool calls. `permission: auto` (default) allows tools unless a hook vetoes or interrupts.
+- `permission: ask` raises a **HITL interrupt before every tool call** on that node. `permission: deny` blocks all tool calls. `permission: auto` allows tools unless a hook vetoes or interrupts. A node without `permission` uses the host's default (`runConfig.permission` in `compileGraph`, inherited by embedded subgraphs), which is `auto` unless the host sets `ask` or `deny`. The host value is only a default, not a ceiling: a node that sets `permission: auto`, or a Claude provider with `permissionMode` such as `bypassPermissions`, still runs tools without asking. Gate untrusted graphs with `runtime.hooks`, a node policy, or by rejecting those settings before compiling.
 - Per-tool gates use `runtime.hooks` on `agent:beforeToolCall` (e.g. require approval only for `fs_write`). See [11 — Local Tools](./11-local-tools.md).
-- In CI, interrupt behavior is governed by `--on-interrupt` / `runtime.hitl.onInterrupt`.
+- In CI, interrupt behavior is governed by the host: `--on-interrupt`, or `onInterrupt` in run options (default `fail`).
 - When a richer, *visible-in-the-graph* decomposition is wanted, use a `router` + explicit nodes or a `subgraph` instead of (or in addition to) agent tools. The two compose.
 
 ### Provider mapping
@@ -240,6 +240,7 @@ Model-based routing:
 
 - `with.match: firstMatch` (default) selects the first matching route. `with.match: allMatches` fans out to every matching destination, deduplicates destinations, and writes an array of chosen route keys as the router output. The default route is used only when no condition matches. `allMatches` is only valid with `mode: rules`. A router with `mode: model` and `match: allMatches` is rejected; model routers select one route.
 - Model-based routers receive every declared route key and description, including the default as an explicit "none of the above" choice (enforced via structured output).
+- `mode: model` requires `with.input`, the text the model routes on. The model sees that rendered text, the instruction and the routes, never the whole state.
 - Routers are `routing: true` capability; they return a `Command{ goto }` rather than a state update.
 - In the desktop builder, dragging from a router node adds a route (not a parallel edge), and the canvas draws dashed edges from `with.routes`.
 
@@ -289,13 +290,15 @@ See `examples/mcp/` for a runnable walkthrough.
     method: GET
     url: "https://api.github.com/repos/{{ config.vars.repo }}/pulls?state=closed"
     headers:
-      Authorization: "Bearer {{ secret.GITHUB_TOKEN }}"   # secrets via secret.* (redacted)
+      Authorization: "Bearer {{ secret.GITHUB_TOKEN }}"   # GITHUB_TOKEN listed in top-level secrets: (value redacted)
     query: { per_page: 100 }
     # body: { ... }          # for POST/PUT/PATCH; supports {{ }} interpolation
     expect: { status: [200] }            # assert; non-match ⇒ node error
     output:
       map: { prs: "{{ result.body }}" }   # parse JSON by default; result.body/status/headers
 ```
+
+The `node.output` event and the debug log show the request URL with credentials and sensitive query parameters masked. In the event, request headers that are sensitive or listed in `runtime.secrets.redact.headers` show as `[REDACTED]`, and so do response headers that are sensitive, listed there, or auth/token-like by name (`Set-Cookie`, `X-Auth-Token`, `X-Session-Id`, …). The event's response body also masks those headers' values and each `Set-Cookie`'s `name=value` and credential-like bare value (the same cookie rule as `webhook`). This masking applies to the event only: `result.headers`, the response body and the node's output keep the real values, so a later node can forward a session cookie, for example `Cookie: "{{ split(state.login.headers['set-cookie'], ';')[0] }}"`.
 
 `retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.retry` and `with.timeout` on `http` are rejected, with an error that names those fields. Other node types that take a `with.timeout` (for example `shell`, `script`, `wait`, `demo`, and media) still enforce that setting as their operation deadline, inside the node's own `timeout`.
 
@@ -311,7 +314,7 @@ See `examples/mcp/` for a runnable walkthrough.
     output: { to: notifyResult }
 ```
 
-Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
+Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). A `{{ secret.X }}` in a webhook needs `X` in the graph's top-level `secrets:`, as in `http`. Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. Sensitive response headers such as `Set-Cookie` show as `[REDACTED]` in `result.headers`, and their values are redacted elsewhere too. For each `Set-Cookie`, the cookie's `name=value` is redacted as well. Its bare value is redacted on its own only when it is at least 16 characters, or at least 8 under a credential-like cookie name. A name is credential-like when one of its words, split on `-`, `_`, `.` and case changes, is `sess`, `session`, `sid`, `token`, `auth`, `jwt`, `secret`, `key`, `csrf`, `xsrf`, `login`, `remember` or `refresh`, or one of the compounds `sessionid`, `sessid`, `phpsessid`, `jsessionid`, `csrftoken` and `apikey`: `session_id`, `auth-token`, `XSRF-TOKEN`, `refreshToken`, `PHPSESSID` and `csrftoken` qualify, `monkey` and `Access-Mode` do not. A body that echoes only a session token is masked, while values such as `default` from `theme=default` or `true` from `consent=true` stay readable elsewhere in the run. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well; a listed header shows as `[REDACTED]` in `result.headers`, the same as a built-in one. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
@@ -323,13 +326,15 @@ The primary escape hatch for custom logic: run any CLI, script, or shell pipelin
 
 | Config | How it runs | Use when |
 |---|---|---|
-| `args` set | `execFile(command, args)` — no shell, argv-safe | You have a discrete binary + arguments |
-| `args` omitted | OS shell (`/bin/sh -c` / `cmd.exe`) | You need pipes, `&&`, globs, or shell builtins |
+| default | `execFile(command, args)` — no shell; `command` names one program | You have a discrete binary + arguments |
+| `shell: true` | OS shell (`/bin/sh -c` / `cmd.exe`) runs `command` as a command line | You need pipes, `&&`, globs, or shell builtins |
 
-Each argument is one argv value. Whole-argument templates preserve their value until conversion: objects and arrays become JSON, while scalar values become text. Literal arguments in YAML must be strings. Use argv mode to pass structured data without shell quoting.
+`command` is never a template: a `{{ }}` in it is a config error in both modes, so run data cannot become shell syntax. Without `shell: true`, a `command` that contains whitespace needs `args` (use `args: []` for a program path with spaces); otherwise the graph fails validation and asks for `shell: true`. `args` cannot be combined with `shell: true`.
+
+Each argument is one argv value. Whole-argument templates preserve their value until conversion: objects and arrays become JSON, while scalar values become text. Literal arguments in YAML must be strings. Use argv mode to pass structured data without shell quoting. Rendered `args` and `env` values reach the child exactly as rendered.
 
 ```yaml
-# Safe argv mode (recommended)
+# Argv mode (default)
 - id: greet
   type: shell
   with:
@@ -337,10 +342,11 @@ Each argument is one argv value. Whole-argument templates preserve their value u
     args: ["Hello, {{ input.name }}!"]
     output: { to: message }
 
-# Shell-string mode (pipes / chaining)
+# Shell mode (pipes / chaining)
 - id: build
   type: shell
   with:
+    shell: true
     command: "npm run build && npm test"
     cwd: "{{ state.repoDir }}"
     timeout: 5m
@@ -361,7 +367,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 
 **Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kind_of: command` handlers. An explicit `with.input` is rendered and sent instead. When neither is set, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
 
-**Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"`. Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
+**Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"` (with `MY_TOKEN` in the graph's top-level `secrets:`). Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
 
 **Defaults:** timeout `30s`, `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
 
@@ -379,14 +385,25 @@ Declare toolchains with `requires` so missing binaries are caught at preflight a
 
 `onMissingTool: skip` returns `{ ok: false, skipped: true }` and records a `TOOL_NOT_FOUND` run issue so later agents can see that verification never ran. Even in `fail` mode, a missing binary (ENOENT / exit 127) is reported as `TOOL_NOT_FOUND` rather than a raw spawn error.
 
-**Injection caveat:** shell-string mode interpolates templates into the command line. Treat untrusted state values the same way you would for `http` URL/body templates — prefer argv mode (`args`) when values come from external input.
+Argv mode keeps data out of the shell, but the program still parses its own options: a value such as `--output=/etc/passwd` or `-rf` is read as a flag. When a program accepts `--` to end its options, put it before data-supplied arguments:
 
-**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values. In argv mode there is no shell expansion; use a `{{ ... }}` template to supply a value.
+```yaml
+- id: grep-term
+  type: shell
+  with:
+    command: grep
+    args: ["-n", "--", "{{ state.term }}", "notes.txt"]
+```
+
+**Run data in shell mode:** pass values through `env` and quote them in the command (`"$NAME"`), so the shell treats them as data. Typographic quotes (`“ ” ‘ ’`) in the authored command line are converted to ASCII quotes; rendered values are not touched. On Windows, `cmd.exe` expands `%NAME%` before it parses the line, so an env value can still change a `cmd.exe` command line — use argv mode there when values come from external input.
+
+**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values, and only for names declared under `secrets:`. In argv mode there is no shell expansion; use a `{{ ... }}` template in `args` or `env` to supply a value.
 
 ```yaml
 - id: materialize
   type: shell
   with:
+    shell: true
     env:
       SLUG: "{{ state.specsDraft.slug }}"
     # $SLUG and ${SLUG} both expand when the child shell runs
@@ -432,6 +449,8 @@ runtime:
   services:
     terminateOnEnd: true            # default — stop non-keepAlive services on completed/error
 ```
+
+**Environment:** a service receives the same default host allowlist as `shell` (`PATH`, `HOME`, temp and locale variables) plus its `with.env`. Nothing else from the host environment is inherited; pass a credential explicitly, for example `env: { DATABASE_URL: "{{ secret.DATABASE_URL }}" }` with the name declared under `secrets:`.
 
 ### Lifecycle
 
@@ -629,7 +648,13 @@ remain unsupported.
 | Third-party npm packages | Unreachable (no `node_modules`) | Not supported |
 | `node:*` builtins | Available (subject to the rows above) | — |
 
-Directory grants should end with `/` (or omit the trailing slash — the engine normalizes directories). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
+A grant covers only the path it names, and never its parent. A path that already exists is granted as what it is: a directory covers everything under it, a file only itself. A path that does not exist yet is classified by its last name alone:
+
+- A name ending in a dot and letters or digits (`report.json`, `data.v2`) is an **exact-file** grant. The script may write that path but nothing under it, so `fsWrite: [data.v2]` cannot be used to fill a `data.v2` folder.
+- Any other name (`out`, `Makefile`) is a **directory** grant: the script may create that path, as a folder or a file, and anything under it. `fsWrite: [Makefile]` therefore also allows `Makefile/anything`.
+- A trailing `/` always means a directory: write `data.v2/` to grant a new folder whose name contains a dot.
+
+A new file in a folder that does not exist yet needs a grant on the folder (`fsWrite: [out]`, not `fsWrite: [out/report.json]`). Script children receive the same default host allowlist as `shell` (`PATH`, `HOME`, `TMPDIR`, `TEMP`/`TMP`, `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`). The rest of the host environment is **not** inherited; pass other values explicitly via `with.env` (including secrets via `{{ secret.X }}` templates).
 
 **Network caveat:** Node's permission model has **no** `--allow-net` flag. Scripts can open sockets / `fetch` unless the host environment (container network policy, OS firewall) blocks them. Treat network restriction as a deploy-time concern, same class of trust as `shell`.
 
@@ -688,6 +713,8 @@ Run a node/subgraph once per item in a collection, concurrently, then fan-in. (S
 Each entry into a map has a separate collection round, in input order. Looping back replaces the internal collection bag; an explicitly append-reduced destination channel still follows its declared reducer. Inner `output.map` expressions run after execution with both `item` and `result` in scope. Inner retry/timeout settings override the map/default policy. Item IDs such as `views[0]` are stable across resume and are used by media journals and artifact writers. Older array-format collection checkpoints remain readable.
 
 An inner `output.map` always collects one object containing exactly its declared keys per item: `{value: "{{ result }}"}` produces `[{value: ...}, ...]`. Adding another key preserves that shape; the internal `outputs` wrapper is omitted. Inner `output.to` alone still collects the bare result. These item projections do not write separate parent channels; `collect` chooses the parent destination.
+
+The map renders the inner node's `with` and `input` once per item, with `state`, `input`, `config`, `run` and `item` in scope. Item data is never rendered a second time: an item whose text contains `{{ ... }}` reaches the inner node as that literal text, so it cannot evaluate expressions or read secrets. Map bodies have no `secret` scope.
 
 ```yaml
 - id: implement-all
@@ -1038,7 +1065,7 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
       method: GET
       url: "http://localhost:{{ state.port }}/health"
       headers:
-        Authorization: "Bearer {{ secret.API_TOKEN }}"
+        Authorization: "Bearer {{ secret.API_TOKEN }}"   # API_TOKEN listed in top-level secrets:
     # output omitted → state.outputs.prove-api
 
 # Web screenshot (requires optional peer `playwright`)
@@ -1102,7 +1129,7 @@ Every result has a `status` that says what it shows ([ADR-0019](./adr/0019-demo-
 | `not_captured` | Nothing was captured: Playwright or its browser missing, connection refused, DNS error, source file not found, app did not launch, empty output, … | `false` | none |
 | `passed` | A `steps` flow ran to the end, every assertion held, at least one positive assertion ran, and evidence exists. No other mode can produce it | `true` | yes |
 
-Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
+Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. A host node policy refusal is not a capture failure and always fails the node: `{{ secret.X }}` when the policy blocks secrets or when the graph does not list `X` under its top-level `secrets:`, an `http` target outside the outbound HTTP policy, or a `screenshot`, `video` or `steps` capture while an outbound HTTP policy is set (a browser loads pages and redirects outside those checks). Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
 
 Use `expect` when a different status is the point, such as proving a 404 page:
 
@@ -1128,7 +1155,7 @@ Use `expect` when a different status is the point, such as proving a 404 page:
       web: { url: "{{ state.baseUrl }}/login", timeout: 2m, stepTimeout: 30s }
     steps:
       - fill: { selector: "#email", value: "{{ config.vars.testUser }}" }
-      - fill: { selector: "#password", value: "{{ secret.TEST_PASSWORD }}" }
+      - fill: { selector: "#password", value: "{{ secret.TEST_PASSWORD }}" }   # TEST_PASSWORD listed in top-level secrets:
       - click: 'button:has-text("Sign in")'
       - expect: { url: "**/account" }
       - click: "text=Checkout"
@@ -1190,7 +1217,7 @@ A gate that lists a failed capture in `with.artifacts` adds a "Capture problems"
 
 ### What transcripts mask
 
-`http` transcripts, and the `request` / `response` in the result, mask sensitive headers, sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. This is best effort: a secret under an innocent name in a response body stays visible. `steps` results mask the same way: a `fill` value holding a secret is recorded as `[REDACTED]` whatever its length, and steps, assertions, console messages and Playwright's own errors all pass through the same masking, including percent-encoded forms of a secret, though a secret shorter than 6 characters is only masked in `fill`. A `label` or `objective` is masked in every mode, including in the file names a label produces. Screenshots and videos are not masked.
+`http` transcripts, and the `request` / `response` in the result, mask sensitive headers (including names in `runtime.secrets.redact.headers`), sensitive query parameters and URL credentials, string fields with sensitive names (`password`, `apiKey`, `token`, …) at any depth, and any `{{ secret.* }}` value this node rendered, wherever it appears. Every masked value shows as `[REDACTED]`, the same marker `http` events and `webhook` results use. This is best effort: a secret under an innocent name in a response body stays visible. `steps` results mask the same way: a `fill` value holding a secret is recorded as `[REDACTED]` whatever its length, and steps, assertions, console messages and Playwright's own errors all pass through the same masking, including percent-encoded forms of a secret, though a secret shorter than 6 characters is only masked in `fill`. A `label` or `objective` is masked in every mode, including in the file names a label produces. Screenshots and videos are not masked.
 
 ### Result shape
 
@@ -1414,7 +1441,7 @@ OpenAI image dimensions are checked offline and again after rendering, before in
 | `demo` | Best-effort artifact capture (HTTP / screenshot / video / simulator / file) | side-effecting | core (+ optional `playwright`; simulators need Xcode/adb) |
 | `mcp` | MCP tool/resource call | side-effecting | core (+ `@flowgraph/mcp` at runtime) |
 | `webhook` | Outbound HTTP notify | side-effecting | core |
-| `shell` | Run a local command / shell string | side-effecting | core |
+| `shell` | Run a local program, or a shell command line with `shell: true` | side-effecting | core |
 | `service` | Start/stop long-running background processes | side-effecting | core |
 | `port` | Allocate free TCP port(s) at run time | — | core |
 | `script` | Sandboxed inline Node.js (ESM) | side-effecting | core |

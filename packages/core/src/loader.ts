@@ -1,4 +1,3 @@
-import { currentEnvironment } from "./environment.js";
 /**
  * Stage 1 of compilation: load a YAML file and return a validated GraphSpec.
  */
@@ -25,6 +24,8 @@ import { setGraphFile, subgraphAliases } from "./runtime/graph-files.js";
 import "./nodes/index.js";
 import { getMediaVendor } from "./media/registry.js";
 import { offlineProviderValidations, providerConfigDiagnostics } from "./providers/diagnostics.js";
+import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
+import { expandGraphEnv, recordGraphEnvExpansion, unexpandedEnvDiagnostics, type GraphEnvExpansion } from "./runtime/config-env.js";
 
 export {
   envExpansionCollisionDiagnostics,
@@ -91,16 +92,22 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
   catch { return { spec: null, diagnostics: [{ severity: "error", code: "FILE_NOT_FOUND", message: `Cannot read: ${resolved}` }] }; }
   const envCollisionDiags = envExpansionCollisionDiagnostics(raw);
   let parsed: unknown;
-  try { parsed = normalizeNodeTypeAliases(expandGraphEnv(parseYaml(raw))); }
+  let expansion: GraphEnvExpansion;
+  try {
+    parsed = parseYaml(raw);
+    expansion = expandGraphEnv(parsed);
+    parsed = normalizeNodeTypeAliases(parsed);
+  }
   catch (err) {
     return { spec: null, diagnostics: [{ severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` }, ...envCollisionDiags] };
   }
   const result = GraphSpecSchema.safeParse(parsed);
-  if (!result.success) return { spec: null, diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...rawNodeTypeDiagnostics(parsed), ...envCollisionDiags] };
+  if (!result.success) return { spec: null, diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...rawNodeTypeDiagnostics(parsed), ...expansion.diagnostics, ...envCollisionDiags] };
   const spec = result.data;
   setGraphFile(spec, resolved);
+  recordGraphEnvExpansion(spec, expansion);
   const dir = path.dirname(resolved);
-  const diagnostics = [...envCollisionDiags];
+  const diagnostics = [...envCollisionDiags, ...expansion.diagnostics];
   let fatal = false;
 
   // Check declarations even when unused; this never imports or executes a module.
@@ -125,7 +132,7 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
     const childPath = path.resolve(dir, ref);
     usedFiles.add(childPath);
     const child = await loadGraphFile(childPath, { seen }, cache);
-    diagnostics.push(...child.diagnostics);
+    diagnostics.push(...inFile(child.diagnostics, childPath));
     if (!child.spec) { fatal = true; continue; }
     if (site.out) diagnostics.push(...unknownSubgraphOutputDiagnostics(site, child.spec));
     if (graphHasPlacement(child.spec) || filePlacement.has(child.spec)) {
@@ -141,36 +148,20 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
     const childPath = path.resolve(dir, imp.subgraph);
     if (usedFiles.has(childPath)) continue;
     const child = await loadGraphFile(childPath, { seen }, cache);
-    diagnostics.push(...child.diagnostics);
+    diagnostics.push(...inFile(child.diagnostics, childPath));
     if (!child.spec) fatal = true;
   }
-  const unique = [...new Map(diagnostics.map((d) => [`${d.code}:${d.path}:${d.message}`, d])).values()];
+  const unique = [...new Map(diagnostics.map((d) => [`${d.file}:${d.code}:${d.path}:${d.message}`, d])).values()];
   return { spec: fatal ? null : spec, diagnostics: unique };
+}
+
+/** A file subgraph's diagnostics name its file; ones from deeper files keep theirs. */
+function inFile(diagnostics: Diagnostic[], file: string): Diagnostic[] {
+  return diagnostics.map((d) => (d.file ? d : { ...d, file }));
 }
 
 function isGraphFileRef(ref: string): boolean {
   return ref.endsWith(".yaml") || ref.endsWith(".yml") || ref.startsWith(".") || ref.includes("/") || ref.includes("\\");
-}
-
-/** Expand trusted config/runtime scalar values after parsing, never source text or keys. */
-function expandGraphEnv(parsed: unknown): unknown {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
-  const root = parsed as Record<string, unknown>;
-  const expand = (value: unknown): unknown => {
-    if (typeof value === "string") return value.replace(/(?<!\$)\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => currentEnvironment()[name] ?? def ?? "").replace(/\$\$\{/g, "${");
-    if (Array.isArray(value)) return value.map(expand);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, val]) => [key, expand(val)]));
-    return value;
-  };
-  for (const key of ["config", "runtime"]) if (root[key] != null) root[key] = expand(root[key]);
-  const node = (value: unknown): void => {
-    if (!value || typeof value !== "object") return;
-    const n = value as Record<string, unknown>, withConfig = n.with as Record<string, unknown> | undefined;
-    if (n.type === "map") node(withConfig?.node);
-    if (n.type === "subgraph") { if (n.graph) expandGraphEnv(n.graph); if (withConfig?.graph) expandGraphEnv(withConfig.graph); }
-  };
-  if (Array.isArray(root.nodes)) root.nodes.forEach(node);
-  return root;
 }
 
 /** Deprecated YAML node type → canonical type. */
@@ -259,13 +250,14 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
         diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"` });
       }
     };
-    check(edge.from);
+    // A `from` list is checked in barrierEdgeDiagnostics, including unknown ids.
+    if (!Array.isArray(edge.from)) check(edge.from);
     if ("to" in edge) { const tos = Array.isArray(edge.to) ? edge.to : [edge.to]; for (const t of tos) check(t); }
     if ("branch" in edge) { for (const b of edge.branch) check(b.to); }
   }
 
   // Must have START edge
-  if (!spec.edges.some((e) => e.from === "START")) {
+  if (!spec.edges.some((e) => (Array.isArray(e.from) ? e.from : [e.from]).includes("START"))) {
     diagnostics.push({ severity: "error", code: "NO_START_EDGE", message: 'Graph has no edge from "START"' });
   }
 
@@ -338,5 +330,6 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
   });
 
   diagnostics.push(...providerConfigDiagnostics(spec, offlineProviderValidations(spec)));
+  diagnostics.push(...secretReferenceDiagnostics(spec), ...unexpandedEnvDiagnostics(spec));
   return diagnostics;
 }

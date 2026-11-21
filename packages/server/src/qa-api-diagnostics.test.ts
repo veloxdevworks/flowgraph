@@ -150,7 +150,7 @@ it("resumes a paused pre-upgrade thread with stored imports safely removed", asy
       with: { mode: "approve", message: "Continue?", output: { to: "approval" } },
     }],
     edges: [{ from: "START", to: "gate" }, { from: "gate", to: "END" }],
-    runtime: { checkpoint: { backend: "memory" }, hitl: { onInterrupt: "fail" } },
+    runtime: { checkpoint: { backend: "memory" } },
   };
   await service.startRun({ threadId: "legacy", yaml: JSON.stringify(graph) });
   await vi.waitFor(() => expect(service.registry.get("legacy")?.status).toBe("interrupted"));

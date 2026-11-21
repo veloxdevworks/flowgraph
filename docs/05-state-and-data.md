@@ -113,13 +113,15 @@ registry.registerReducer("uniqueById", (cur: Item[] = [], inc: Item | Item[]) =>
 findings: { type: array, reducer: "custom:uniqueById" }
 ```
 
-`custom:<name>` reducers must be registered before `compileGraph` / `flowgraph run` — via `registry.registerReducer` in app bootstrap or `imports: [{ reducers: "./my-reducers.ts" }]` in the graph YAML. An unregistered name is an error at validate/compile time (no silent fallback to last-write-wins).
+`custom:<name>` reducers must be registered before `compileGraph` / `flowgraph run` — via `registry.registerReducer` in app bootstrap or `imports: [{ reducers: "./my-reducers.ts" }]` in the graph YAML. `flowgraph validate` does not load that module. With a `reducers` import declared, the name is a warning (`UNREGISTERED_REDUCER`); without one it is an error. An unregistered name is also an error when the graph runs (no silent fallback to last-write-wins).
 
 `flowgraph validate` also reports fan-in `lastWrite` risks, reducer/type mismatches, undeclared output channels (`UNDECLARED_OUTPUT_CHANNEL`), and reachability warnings offline.
 
 Channels with `type: messages` (or `reducer: messages`) use LangGraph's `messagesStateReducer` — append plus id-based message upsert, not last-write-wins.
 
 > Reducers are essential for **parallel branches** ([02 §Fan-out](./02-graph-spec.md#fan-out-parallel-edges)) and `map` nodes: when multiple branches write the same channel in one superstep, the reducer merges their writes. Without an accumulating reducer, the last write wins and data is lost — the compiler **warns** when immediate fan-out branch nodes (the direct `to` targets of a parallel edge) write the same channel with `lastWrite` or no reducer. The warning does not trace multi-hop paths before a join.
+>
+> A plain fan-in runs the target once per inbound edge that arrives. Branches of equal length arrive together, so the target runs once and reducers see one superstep. Branches of different lengths arrive separately, so the target runs again for each later branch (`UNEVEN_FAN_IN`). A barrier edge, `{ from: [a, b], to: join }`, waits until every listed source has finished and then runs the join once. Reducers still merge the writes those sources made along the way. A loop that sends the run back through only some of those sources does not run the join again; every listed source has to finish again first. See [02 §Fan-out](./02-graph-spec.md#fan-out-parallel-edges).
 
 ### Subgraph merge-back
 
@@ -248,6 +250,7 @@ The stdlib is intentionally small and pure. Anything more complex belongs in a `
 
 - No I/O, no clock-skew nondeterminism beyond explicit `now()`, no host access.
 - Evaluation is **total**: a missing path yields `null` (configurable to "strict" mode that errors), preventing crashes from optional fields.
+- Evaluation has **limits** that stop the common runaway cases; they are not a hard cap on time or memory. One expression may take at most 1,000,000 steps: each evaluated node is a step (a callback body counts once per item), and each function call adds a step per array element, object key or 64 characters it receives or returns. Steps are counted as the work happens, so a single call or `+` can still build a large value before its cost is charged. `range()` returns at most 10,000 items, and `replace()`, `join()` and `format()` refuse a result longer than 16M characters before building it. Going past a limit fails the expression with an evaluation error.
 - Expressions are parsed at **compile time** so referenced channels/inputs can be validated (e.g. `state.sumary` typo ⇒ warning).
 
 ## 5. Two interpolation phases (don't confuse them)
@@ -255,20 +258,21 @@ The stdlib is intentionally small and pure. Anything more complex belongs in a `
 | | `${ENV}` interpolation | `{{ expr }}` expressions |
 |---|---|---|
 | When | **Load time** (once, before validation) | **Run time** (per node execution) |
-| Scope | environment variables only | `state`, `input`, `result`, `config`, `secret`, `env`, `run` |
-| Where allowed | `config`, `runtime`, scalar settings | node `input`/`with`/`output`, `when`, edge `branch.when` |
-| Purpose | wire env/secrets config into the spec | dynamic data flow during execution |
+| Scope | names declared under top-level `secrets:` | `state`, `input`, `result`, `config`, `secret`, `env`, `run` |
+| Where allowed | `config`, `runtime` scalar values | node `input`/`with`/`output`, `when`, edge `branch.when` |
+| Purpose | wire declared secrets into config | dynamic data flow during execution |
 
 ```yaml
+secrets: [JIRA_TOKEN]
 config:
-  defaults: { model: "${FLOWGRAPH_MODEL:-claude-sonnet-4.5}" }   # ${} = env, resolved at load
+  vars: { jiraToken: "${JIRA_TOKEN}" }   # ${} = declared secret, resolved at load and redacted
 nodes:
   - id: x
     type: agent
     with: { prompt: "Summarize {{ state.issue.title }}" }     # {{ }} = expr, per run
 ```
 
-> **Gotcha — shell bodies:** load-time `${ENV}` expansion currently scans the **entire YAML text**, not only `config`/`runtime`. So `${SLUG}` or `${SPEC_SLUG:-}` inside a `shell` node's `command` / `args` / `env` is rewritten against the *host* process environment before the node runs (usually to empty) — even when that same node sets `SPEC_SLUG` via `with.env`. Use unbraced `$SLUG` / `$SPEC_SLUG` for node-level env vars (POSIX shell substitution at exec time), or `{{ state.* }}` for runtime data. `loadGraph` emits a `NODE_BODY_ENV_EXPANSION` warning when it detects this pattern.
+> **Shell bodies:** load-time `${ENV}` expansion touches only `config` and `runtime`, so `${SLUG}` or `${SPEC_SLUG:-}` in a `shell` node's `command` / `args` / `env` is left for the child shell, which sees only its allowed environment and `with.env`. An undeclared `${NAME}` in `config` or `runtime` is not expanded and is reported as `SECRET_UNDECLARED` ([02 §7](./02-graph-spec.md#7-config)).
 
 ## 6. Expression scope objects
 
@@ -279,7 +283,7 @@ nodes:
 | `result` | this node's raw output (only in `output` mapping) |
 | `item` | current item inside a `map` node (`item.<as>`) |
 | `config` | `config.vars.*` and resolved `config.defaults.*` |
-| `secret` | secret accessor — `secret.JIRA_TOKEN` (values redacted in events/logs/checkpoints) |
+| `secret` | secret accessor — `secret.JIRA_TOKEN`, for names listed in top-level `secrets:` (values redacted in events/logs/checkpoints) |
 | `env` | non-secret environment values explicitly exposed to the graph |
 | `run` | run metadata: `run.id`, `run.threadId`, `run.startedAt`, `run.labels` |
 | `issues` | accumulated `RunIssue[]` for this thread (also in reserved `__issues`) |
@@ -491,7 +495,9 @@ The per-type subject cap and `similarSubjects` without tags read the covering in
 
 `format('{1}, {0}', 'Ada', 'Hello')` supports positional placeholders as well as sequential `{}` placeholders. `duration('1h 30m')` returns milliseconds (units: `ms`, `s`, `m`, `h`, `d`).
 
-Array callbacks in YAML use expression strings: `map(state.rows, 'item.price * state.factor')`, `filter(state.rows, 'item.active')`, and `find(state.rows, 'item.id == input.id')`. Each callback sees the current `item`, zero-based `index` and the outer scope, with the same own-property restrictions as other expressions. JavaScript arrow functions are not part of the expression grammar.
+Array callbacks in YAML use expression strings: `map(state.rows, 'item.price * state.factor')`, `filter(state.rows, 'item.active')`, and `find(state.rows, 'item.id == input.id')`. The pipe form takes the callback as its argument: `state.rows |> map('item.price')`. Each callback sees the current `item`, zero-based `index` and the outer scope, with the same own-property restrictions as other expressions. JavaScript arrow functions are not part of the expression grammar.
+
+`range(n)` returns `0` to `n - 1`; `range(start, end, step)` stops before `end`. Both return at most 10,000 items.
 
 Undeclared run input keys produce an `INPUT_UNKNOWN_KEY` warning when they would be discarded by state storage. Declare intended keys in `inputs` or `state.channels`. Unknown `runtime.hooks[].on` phases fail validation with the supported names.
 

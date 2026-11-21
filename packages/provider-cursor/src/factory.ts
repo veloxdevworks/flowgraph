@@ -2,7 +2,7 @@
  * Build a Cursor provider from declarative provider config (YAML `providers` block).
  */
 
-import { currentEnvironment, type ProviderAdapter } from "@flowgraph/core";
+import { assertSecretDeclared, currentEnvironment, type ProviderAdapter } from "@flowgraph/core";
 import type { CursorProviderConfig } from "@flowgraph/spec";
 import { createCursorProvider, type CursorRuntime } from "./provider.js";
 
@@ -16,6 +16,8 @@ function readEnvKey(name: string): string | undefined {
 
 export interface CursorProviderFromConfigOptions {
   cwd?: string;
+  /** The graph's top-level `secrets:`. An explicit `apiKeyEnv` is read only when it is listed here. */
+  secrets?: readonly string[] | undefined;
 }
 
 export async function createCursorProviderFromConfig(
@@ -23,6 +25,9 @@ export async function createCursorProviderFromConfig(
   cfg: CursorProviderConfig,
   options: CursorProviderFromConfigOptions = {},
 ): Promise<ProviderAdapter> {
+  if (cfg.apiKeyEnv !== undefined) {
+    assertSecretDeclared(new Set(options.secrets ?? []), cfg.apiKeyEnv, `Provider "${name}" apiKeyEnv`);
+  }
   const apiKeyEnv = cfg.apiKeyEnv ?? DEFAULT_API_KEY_ENV;
   const apiKey = readEnvKey(apiKeyEnv);
   if (!apiKey) {

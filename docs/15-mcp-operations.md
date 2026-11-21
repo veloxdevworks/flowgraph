@@ -96,6 +96,8 @@ MCP OAuth tokens are **independent** of LLM API keys. Agent nodes reuse the same
 For HTTP servers using bearer tokens:
 
 ```yaml
+secrets: [MY_API_TOKEN]
+
 mcpServers:
   my-api:
     transport: http
@@ -104,7 +106,7 @@ mcpServers:
       Authorization: "Bearer {{ secret.MY_API_TOKEN }}"
 ```
 
-Set `MY_API_TOKEN` in `.env` (loaded automatically by the CLI from cwd).
+Declare `MY_API_TOKEN` under `secrets:` and set it in `.env` (loaded automatically by the CLI from cwd).
 
 ## Troubleshooting
 

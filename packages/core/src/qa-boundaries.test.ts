@@ -22,6 +22,7 @@ function graph(type: string, config: Record<string, unknown>): GraphSpec {
     kind: "Graph",
     metadata: { name: "qa-boundaries" },
     config: { vars: { marker: "configured" } },
+    secrets: ["FGQA_DECOY"],
     nodes: [{ id: "execute", type, with: { ...config, output: { to: "answer" } } }],
     edges: [
       { from: "START", to: "execute" },

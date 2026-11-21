@@ -15,12 +15,13 @@ metadata: { ... }           # name, labels, description
 triggers: [ ... ]           # optional — host-interpreted auto-start conditions
 imports: [ ... ]            # optional — reusable subgraphs/skills/node packages
 config: { ... }             # optional — graph-level config/defaults
+secrets: [ ... ]            # optional — host environment variables the graph may read
 state: { ... }              # optional — channel (state) definitions
 inputs: [ ... ]             # optional — typed run parameters (collected before start)
 input: { ... }              # optional — default seed values for a run
 nodes: [ ... ]              # required — the node list
 edges: [ ... ]              # required — static + conditional edges
-runtime: { ... }            # optional — checkpoint/HITL/retry/observability defaults
+runtime: { ... }            # optional — checkpoint/retry/hook defaults
 ```
 
 `apiVersion` pins the schema contract. The loader rejects unknown major versions and warns on unknown minor fields (forward-compatible).
@@ -37,7 +38,7 @@ metadata:
     domain: github
 ```
 
-`metadata.name` becomes the root OTel span name and the default checkpoint namespace.
+`metadata.name` becomes the root OTel span name.
 
 ## 2a. `triggers` (auto-start conditions)
 
@@ -148,6 +149,8 @@ imports:
 - `subgraph:` — import another graph to embed via a `subgraph` node.
 - `nodes:` — load a plugin package that registers custom node `type`s into the registry.
 - `reducers:` — load a module that registers custom state reducers (`custom:<name>`). The module may call `registry.registerReducer` on load, or `export default` a record of `{ [name]: (cur, inc) => next }` (or an array of `{ name, reducer }`).
+
+`flowgraph validate` reads every import but does not load `nodes`, `providers` or `reducers` modules. Those modules load when the graph runs. A node type that is not already registered is an error (`UNKNOWN_NODE_TYPE`). Once the graph declares a `nodes` import, that same type — including a typo — is a warning, `PLUGIN_TYPE_UNRESOLVED`, because validate does not load the module and cannot tell a plugin type from a misspelling. A `custom:` reducer is an error unless the graph declares a `reducers` import, in which case it is a warning, `UNREGISTERED_REDUCER`. `flowgraph validate --strict` treats those warnings as errors.
 
 Resolution order for path/package specifiers: relative path → workspace alias → node module. See [04 — Skills](./04-skills.md) for skill resolution details and [16 — Agents](./16-agents.md) for agent definitions.
 
@@ -273,24 +276,87 @@ edges:
   - { from: impl-c, to: gather }                    # fan-in; reducers merge writes
 ```
 
-> `flowgraph validate` checks schema errors, unknown edge refs, duplicate node ids, reachability from `START`, paths to `END`, reducer/type pairing, unregistered `custom:*` reducers, and parallel fan-in `lastWrite` risks on immediate branch nodes. Conditional branch targets must reference real nodes.
+Separate inbound edges fire the target once for each predecessor that finishes. When those predecessors are the same number of hops from `START`, they finish together and the target runs once. When the branches have different lengths, the target runs again for each later arrival.
+
+A static `from` list is a barrier. The target runs once, after every listed source has finished:
+
+```yaml
+edges:
+  - { from: START, to: split }
+  - { from: split, to: short }          # 2 hops from START
+  - { from: split, to: mid }
+  - { from: mid, to: long }             # long is 3 hops from START
+  - { from: [short, long], to: join }   # join runs once, after both
+  - { from: join, to: END }
+```
+
+`from` must be a node id or a list of at least two distinct node ids. The same syntax is in [examples/join-barrier](../examples/join-barrier/uneven-join.graph.yaml). A barrier cannot target `END`, cannot list `END` or `START` as a source, and cannot list its own target in `from` (`BARRIER_SELF_SOURCE`): the join would wait for itself to finish. Every source must be reachable by static edges. A source that can only be reached through a conditional branch, a router, or a `hitl` node that declares `with.routes` is an error (`BARRIER_CONDITIONAL_SOURCE`): the join waits for every listed source, so a path that is skipped would leave it waiting. Edges out of those nodes are not static. The compiler follows the declared route and does not install their `to` edges.
+
+A node listed in `from` cannot carry a recovery route (`BARRIER_RECOVERY_SOURCE`). That is `on.error: route:...` on the node, the same field on a `map` item, or a hook whose `do` is `route:...`. If that node failed, the barrier would still see it finish, and the join would run at the same time as the recovery route.
+
+A recovery route on a node that is not itself a barrier source stays allowed. Its ordinary `to` edges still run when the node succeeds. If that node fails before a downstream barrier source is reached, the source never finishes, so the join does not run. The run still reports completed when the recovery route reaches the end of the graph.
+
+Plain multi-inbound edges are unchanged. `flowgraph validate` warns (`UNEVEN_FAN_IN`) when a node has several plain inbound edges from parallel branches of uneven length and is not using a barrier. Exclusive routes are not parallel branches, so that warning does not apply to them.
+
+A loop that runs only some of the listed sources again does not release the barrier a second time. The join runs again only after every listed source has finished again.
+
+> `flowgraph validate` checks schema errors, unknown edge refs, duplicate node ids, reachability from `START`, paths to `END`, reducer/type pairing, unregistered `custom:*` reducers, parallel fan-in `lastWrite` risks on immediate branch nodes, and uneven fan-in that is not a barrier. Conditional branch targets must reference real nodes.
 
 ## 7. `config`
 
-Graph-level configuration and reusable values. Supports environment interpolation and references.
+Graph-level configuration and reusable values. Supports interpolation of declared secrets and references.
 
 ```yaml
+secrets: [JIRA_TOKEN]
 config:
   defaults:
     provider: claude              # default provider for agent nodes
-    model: "${FLOWGRAPH_MODEL:-claude-sonnet-4.5}"   # env interpolation w/ fallback
+    model: claude-sonnet-4.5
   vars:                           # author-defined constants, referenced as {{ config.vars.* }}
     jiraProject: "PLAT"
+    jiraToken: "${JIRA_TOKEN}"    # expanded at load because JIRA_TOKEN is declared; redacted like any secret
 ```
 
 `config.defaults` may set `provider` and `model` for agent nodes. Retry and timeout are not set here: the graph defaults are `runtime.retry` and `runtime.timeoutDefault`, and a node's own `retry` / `timeout` override those. `config.defaults.retry` and `config.defaults.timeout` are rejected, with an error that names the field to use instead.
 
-Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars. Expansion runs after YAML parsing, so environment values cannot inject YAML structure. `$${VAR}` escapes interpolation in those sections. Node bodies, inputs, state defaults, metadata and keys remain literal; shell `${VAR}` syntax is left for the child shell and its allowed environment. Use `{{ secret.NAME }}` for credentials instead of embedding them in config variables. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
+Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars, and only for names the graph lists under its top-level `secrets:` ([§7a](#7a-secrets-declared-credentials)):
+
+- A placeholder whose name is not declared is left as written and reported as `SECRET_UNDECLARED`, with its path and the name to add, by `loadGraph` / `flowgraph validate`. A `:-default` does not make an undeclared name optional.
+- `compileGraph` checks any spec itself, whether loaded, copied, bundled, parsed by the server or built in code: it refuses an unexpanded `${NAME}` in `config` or `runtime` (or an inline subgraph's) whose name that graph does not declare. `validateSpec` reports the same diagnostics. Only `loadGraph` expands placeholders, so in a spec built in code a declared `${NAME}` stays literal and `$${NAME}` stays as written.
+- An inline subgraph `spec:` and a file subgraph each expand only the names in their own `secrets:` list.
+- A declared name behaves as before: its value, else the `:-default`, else an empty string.
+- `$${VAR}` escapes a placeholder; the result is the literal text `${VAR}`, which is neither read nor checked, including by `compileGraph`. Each escape counts on its own: in `"$${X}${X}"` the second placeholder is still reported when `X` is undeclared.
+- A value read from the environment this way is a secret and shows as `[REDACTED]` wherever it appears in results, events, logs and checkpoints. When a graph compiles, a declared name's host value is registered for redaction if it appears in a `config` or `runtime` string of that graph (or of the inline subgraph that declares it), so this holds for any copy of a loaded spec. A value under 8 characters is not redacted, so `true`, `1` or `default` never masks ordinary text. A `:-default` written in the graph is not redacted either. `{{ secret.NAME }}` reads are redacted when read, whatever their length. Write settings that should stay readable, such as a model name, as plain values.
+
+Expansion runs after YAML parsing, so environment values cannot inject YAML structure. Node bodies, inputs, state defaults, metadata and keys remain literal; shell `${VAR}` syntax is left for the child shell and its allowed environment. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
+
+## 7a. `secrets` (declared credentials)
+
+`secrets` lists the host environment variables the graph may read as credentials. The host supplies the values; the graph only names them.
+
+```yaml
+secrets: [GITHUB_TOKEN, JIRA_TOKEN]
+
+providers:
+  openai: { kind: langchain, vendor: openai, apiKeyEnv: OPENAI_KEY_TEAM_A }   # needs OPENAI_KEY_TEAM_A in secrets
+
+nodes:
+  - id: fetch
+    type: http
+    with:
+      url: https://api.github.com/user
+      headers: { Authorization: "Bearer {{ secret.GITHUB_TOKEN }}" }
+```
+
+- Each entry is an environment variable name (letters, digits and `_`, not starting with a digit). A name listed twice is an error.
+- `{{ secret.NAME }}` reads only a declared name. `flowgraph validate` and `compileGraph` report `SECRET_UNDECLARED` for any literal `secret.NAME` / `secret["NAME"]` in a node or an `mcpServers` entry that the list does not name. A computed name (`secret[state.key]`) is checked when it is read, and the node fails with the same message. A declared name the host has not set renders as an empty string.
+- A provider `apiKeyEnv` must be declared. A provider with a `baseUrl` but no `apiKeyEnv` would send the vendor's default key (for example `OPENAI_API_KEY`) to that endpoint, so that default key must be declared too. A provider without `apiKeyEnv` or `baseUrl` reads its vendor's default key as before, without a declaration.
+- A `command` skill's `env.vars` entry marked `secret: true` reaches the skill's process only when the graph declares it; a required one that is not declared fails the skill, an `optional: true` one is left out.
+- `${NAME}` in `config` and `runtime` expands only a declared name ([§7](#7-config)); an undeclared one is reported as `SECRET_UNDECLARED`.
+- An inline subgraph `spec:` and a file subgraph (`uses: ./child.graph.yaml`) each have their own `secrets` list. A child never reads a name only its parent declares, through `{{ secret.X }}` or `${X}`.
+- `http`, `webhook`, `demo`, `service`, `shell`, `script`, skills and `mcpServers` all read `{{ secret.X }}` through the same declared list. A `demo` capture that reads an undeclared name fails the node rather than reporting `not_captured`.
+- Declaring a name does not pass it to child processes. `shell`, `script`, `service` and command skills start from a small default allowlist (`PATH`, `HOME`, temp and locale variables); pass a secret explicitly, for example `env: { TOKEN: "{{ secret.GITHUB_TOKEN }}" }`.
+- `secrets:` controls what templates and provider settings read; it is **not** an isolation boundary for `shell`, `script`, skill or `service` nodes. A shell `with.inheritEnv` entry, a skill's non-secret `env.vars`, and anything those processes read from their parent environment or the file system can still carry a host value that is not declared. Run graphs you do not trust under a node policy that blocks those node types.
 
 ## 8. Input / output mapping
 
@@ -344,11 +410,11 @@ runtime:
   webhookServer:                  # embedded HTTP ingress for wait.webhook
     host: "127.0.0.1"             # default
     port: 8878                    # default; 0 = ephemeral; EADDRINUSE → ephemeral fallback
-    # token: ${FLOWGRAPH_WEBHOOK_TOKEN} # optional shared secret for GET/POST
+    # token: "${FLOWGRAPH_WEBHOOK_TOKEN}" # optional shared secret for GET/POST; list FLOWGRAPH_WEBHOOK_TOKEN under secrets:
   services:
     terminateOnEnd: true          # stop non-keepAlive `service` processes on completed/error (default)
   hitl:
-    onInterrupt: prompt           # prompt | fail | approve | webhook  (per-environment overridable)
+    breakpoints: { before: [publish] }   # static pause points
   retry:                          # default for every node that omits retry
     maxAttempts: 2
     backoff: exponential
@@ -359,10 +425,16 @@ runtime:
     - on: agent:beforeToolCall
       where: { tool: fs_write }
       do: interrupt
-  observability:
-    otel: { enabled: true }
-    logs: { level: info, format: auto }   # auto = pretty on TTY, json otherwise
 ```
+
+Some settings belong to the host running the graph, not the graph, and are rejected here with a message that names the replacement:
+
+| Field | Set it in the host instead |
+|---|---|
+| `runtime.hitl.onInterrupt` | CLI `--on-interrupt`, or `onInterrupt` in `run()` / `resume()` options. The default is `fail`. |
+| `runtime.observability` | `FLOWGRAPH_LOG_LEVEL`, event sinks, and `@flowgraph/observability-otel`. |
+| `runtime.secrets.provider` | List names under the top-level `secrets:`; the host supplies their values. |
+| `runtime.checkpoint.namespace` | Not needed: checkpoints are kept per thread. |
 
 ## 10. Full example
 
@@ -383,7 +455,7 @@ imports:
     as: notify
 
 config:
-  defaults: { provider: claude, model: "${FLOWGRAPH_MODEL:-claude-sonnet-4.5}" }
+  defaults: { provider: claude, model: claude-sonnet-4.5 }
   vars: { jiraProject: "PLAT" }
 
 state:
@@ -450,8 +522,6 @@ edges:
 
 runtime:
   checkpoint: { enabled: true, backend: sqlite, path: ".flowgraph/checkpoints.db" }
-  hitl: { onInterrupt: prompt }
-  observability: { otel: { enabled: true } }
 ```
 
 ## 11. Validation & diagnostics

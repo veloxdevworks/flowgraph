@@ -79,6 +79,38 @@ describe("router Command.goto", () => {
     expect(result.state.path).toBe("no");
   });
 
+  it("sends the model only its rendered input, not the whole state", async () => {
+    const spec = routerOnlySpec("maybe");
+    spec.state!.channels!["note"] = { type: "string" };
+    spec.nodes[0]!.provider = "classifier";
+    spec.nodes[0]!.with = {
+      mode: "model",
+      input: "Request: {{ state.flag }}",
+      routes: { yes: { to: "take-yes" }, other: { to: "take-no", default: true } },
+    };
+    const prompts: string[] = [];
+    const provider = defineProvider({
+      name: "classifier", capabilities: { toolCalling: false, structuredOutput: true, streaming: false },
+      async run(req) {
+        prompts.push(req.prompt);
+        return { output: { route: "yes" }, stopReason: "done" };
+      },
+    });
+    const compiled = await compileGraph(spec, { providers: [provider] });
+    const result = await compiled.run({ input: { flag: "maybe", note: "unrelated-state-value" } });
+    expect(result.status).toBe("completed");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("Request: maybe");
+    expect(prompts[0]).not.toContain("unrelated-state-value");
+  });
+
+  it("refuses a model router without input at compile time", async () => {
+    const spec = routerOnlySpec("maybe");
+    spec.nodes[0]!.provider = "classifier";
+    spec.nodes[0]!.with = { mode: "model", routes: { yes: { to: "take-yes" }, other: { to: "take-no", default: true } } };
+    await expect(compileGraph(spec, {})).rejects.toThrow(/router mode: model requires input/);
+  });
+
   registerFunction("emitYes", () => "yes");
   registerFunction("emitNo", () => "no");
 

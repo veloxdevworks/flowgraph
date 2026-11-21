@@ -3,6 +3,7 @@ import { compileGraph } from "../compiler.js";
 import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "../events.js";
 import { redactHeaders } from "./http.js";
+import { redactSensitiveFields, redactUrlSecrets } from "./http-request.js";
 
 function httpGraph(withConfig: Record<string, unknown>): GraphSpec {
   return {
@@ -25,6 +26,22 @@ function httpGraph(withConfig: Record<string, unknown>): GraphSpec {
   } as unknown as GraphSpec;
 }
 
+describe("transcript masking", () => {
+  it("masks URL credentials and sensitive query parameters with the shared marker, unencoded", () => {
+    expect(redactUrlSecrets("https://user:pass@example.com/p?token=abc&q=1")).toBe(
+      "https://[REDACTED]:[REDACTED]@example.com/p?token=[REDACTED]&q=1",
+    );
+    expect(redactUrlSecrets("https://example.com/p?q=1")).toBe("https://example.com/p?q=1");
+  });
+
+  it("masks sensitive field names with the shared marker", () => {
+    expect(redactSensitiveFields({ password: "pw", nested: [{ apiKey: "k", name: "n" }] })).toEqual({
+      password: "[REDACTED]",
+      nested: [{ apiKey: "[REDACTED]", name: "n" }],
+    });
+  });
+});
+
 describe("redactHeaders", () => {
   it("masks sensitive header names case-insensitively", () => {
     expect(
@@ -35,8 +52,8 @@ describe("redactHeaders", () => {
         Accept: "text/html",
       }),
     ).toEqual({
-      Authorization: "***",
-      "X-Api-Key": "***",
+      Authorization: "[REDACTED]",
+      "X-Api-Key": "[REDACTED]",
       "Content-Type": "application/json",
       Accept: "text/html",
     });
@@ -56,6 +73,7 @@ describe("http node", () => {
     vi.stubGlobal("fetch", fetchMock);
     const spec = httpGraph({ url: "https://example.com/{{ config.vars.path }}", headers: { Authorization: "{{ secret.FGQA_DECOY }}" } });
     spec.config = { vars: { path: "configured" } };
+    spec.secrets = ["FGQA_DECOY"];
     const result = await (await compileGraph(spec)).run();
     expect(result.status).toBe("completed");
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://example.com/configured");
@@ -117,12 +135,143 @@ describe("http node", () => {
 
     expect(data.request.method).toBe("POST");
     expect(data.request.url).toBe("https://example.com/api");
-    expect(data.request.headers.Authorization).toBe("***");
+    expect(data.request.headers.Authorization).toBe("[REDACTED]");
     expect(data.request.headers["X-Custom"]).toBe("visible");
     expect(data.request.body).toEqual({ hello: "world" });
 
     expect(data.response.status).toBe(200);
     expect(data.response.body).toEqual({ ok: true });
     expect(data.response.headers["x-from"]).toBe("mock");
+  });
+});
+
+describe("http node transcript headers", () => {
+  const originalFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("masks headers listed in runtime.secrets.redact.headers with the same marker as built-in ones", async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({}),
+    })) as unknown as typeof fetch;
+    const spec = httpGraph({
+      url: "https://example.com/api",
+      headers: { Authorization: "Bearer built-in-token", "X-Service-Token": "custom-token-value", "X-Custom": "visible" },
+    });
+    spec.runtime = { ...spec.runtime, secrets: { redact: { headers: ["x-service-token"] } } } as GraphSpec["runtime"];
+    const events: FlowgraphEvent[] = [];
+    const r = await (await compileGraph(spec, { sinks: [(e) => { events.push(e); }] })).run({});
+    expect(r.status).toBe("completed");
+    const data = events.find((e) => e.type === "node.output")?.data as { request: { headers: Record<string, string> } };
+    expect(data.request.headers).toMatchObject({
+      Authorization: "[REDACTED]",
+      "X-Service-Token": "[REDACTED]",
+      "X-Custom": "visible",
+    });
+  });
+
+  it("masks the URL and sensitive response headers in the event only, by header name", async () => {
+    global.fetch = vi.fn(async () => {
+      const headers = new Headers({
+        "content-type": "application/json",
+        "x-service-token": "custom-response-token",
+        "x-upstream-auth": "upstream-auth-value",
+        "x-request-id": "req-1",
+      });
+      headers.append("set-cookie", "sid=s3cr3tid; HttpOnly");
+      headers.append("set-cookie", "theme=default; Path=/");
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers,
+        json: async () => ({
+          sid: "s3cr3tid",
+          token: "custom-response-token",
+          pair: "theme=default",
+          text: "use default settings",
+        }),
+      };
+    }) as unknown as typeof fetch;
+    const spec = httpGraph({ url: "https://user:pass@example.com/api?token=query-token&q=1", output: { to: "res" } });
+    spec.state = { channels: { res: { type: "object" } } };
+    spec.runtime = { ...spec.runtime, secrets: { redact: { headers: ["x-upstream-auth"] } } } as GraphSpec["runtime"];
+    const events: FlowgraphEvent[] = [];
+    const r = await (await compileGraph(spec, { sinks: [(e) => { events.push(e); }] })).run({});
+    expect(r.status).toBe("completed");
+
+    const data = events.find((e) => e.type === "node.output")?.data as {
+      request: { url: string };
+      response: { headers: Record<string, string>; body: Record<string, string> };
+    };
+    expect(data.request.url).toBe("https://[REDACTED]:[REDACTED]@example.com/api?token=[REDACTED]&q=1");
+    expect(data.response.headers).toEqual({
+      "content-type": "application/json",
+      "set-cookie": "[REDACTED]",
+      "x-service-token": "[REDACTED]",
+      "x-upstream-auth": "[REDACTED]",
+      "x-request-id": "req-1",
+    });
+    expect(data.response.body).toEqual({ sid: "[REDACTED]", token: "[REDACTED]", pair: "[REDACTED]", text: "use default settings" });
+    const log = events.find((e) => e.type === "log" && (e.data as { msg?: string }).msg === "http request");
+    expect(JSON.stringify(log)).not.toContain("query-token");
+
+    const res = r.state["res"] as { body: Record<string, string>; headers: Record<string, string> };
+    expect(res.body).toEqual({ sid: "s3cr3tid", token: "custom-response-token", pair: "theme=default", text: "use default settings" });
+    expect(res.headers["x-service-token"]).toBe("custom-response-token");
+    expect(res.headers["x-upstream-auth"]).toBe("upstream-auth-value");
+    expect(JSON.stringify(r.state)).not.toContain("[REDACTED]");
+  });
+
+  it("forwards a session cookie from one http node to a later request", async () => {
+    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    global.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+      const headers = new Headers({ "content-type": "application/json" });
+      if (String(url).endsWith("/login")) headers.append("set-cookie", "session=abcdefghijklmnopqrstu; HttpOnly");
+      return { ok: true, status: 200, statusText: "OK", headers, json: async () => ({ ok: true }) };
+    }) as unknown as typeof fetch;
+    const spec = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "cookie-forward" },
+      state: { channels: { login: { type: "object" }, account: { type: "object" } } },
+      nodes: [
+        { id: "sign-in", type: "http", with: { url: "https://example.com/login", method: "POST", output: { to: "login" } } },
+        {
+          id: "fetch-account",
+          type: "http",
+          with: {
+            url: "https://example.com/account",
+            headers: { Cookie: "{{ split(state.login.headers['set-cookie'], ';')[0] }}" },
+            output: { to: "account" },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "sign-in" },
+        { from: "sign-in", to: "fetch-account" },
+        { from: "fetch-account", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false, backend: "memory" } },
+    } as unknown as GraphSpec;
+    const events: FlowgraphEvent[] = [];
+    const r = await (await compileGraph(spec, { sinks: [(e) => { events.push(e); }] })).run({});
+    expect(r.status).toBe("completed");
+    expect(calls[1]?.headers["Cookie"]).toBe("session=abcdefghijklmnopqrstu");
+    expect((r.state["login"] as { headers: Record<string, string> }).headers["set-cookie"]).toBe(
+      "session=abcdefghijklmnopqrstu; HttpOnly",
+    );
+    const outputs = events.filter((e) => e.type === "node.output").map((e) => e.data as {
+      request: { headers: Record<string, string> };
+      response: { headers: Record<string, string> };
+    });
+    expect(outputs[0]?.response.headers["set-cookie"]).toBe("[REDACTED]");
+    expect(outputs[1]?.request.headers["Cookie"]).toBe("[REDACTED]");
   });
 });

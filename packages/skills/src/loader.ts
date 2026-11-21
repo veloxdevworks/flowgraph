@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import matter from "gray-matter";
 import { SkillFrontMatterSchema, type SkillDef } from "./schema.js";
 import type { Diagnostic } from "@flowgraph/spec";
+import { parseYamlFrontMatter, YamlFrontMatterError } from "./front-matter.js";
 
 /**
  * Load and parse a SKILL.md file (or a directory containing one).
@@ -40,8 +40,22 @@ export async function loadSkill(skillPath: string): Promise<{ skill: SkillDef | 
     return { skill: null, diagnostics };
   }
 
-  // Parse front-matter
-  const parsed = matter(raw);
+  let parsed: { data: unknown; content: string };
+  try {
+    parsed = parseYamlFrontMatter(raw);
+  } catch (err) {
+    const detail =
+      err instanceof YamlFrontMatterError
+        ? err.message
+        : `Front matter must be YAML. ${String(err)}`;
+    diagnostics.push({
+      severity: "error",
+      code: "SKILL_FRONT_MATTER_ERROR",
+      file: resolvedPath,
+      message: `${resolvedPath}: ${detail}`,
+    });
+    return { skill: null, diagnostics };
+  }
   const frontMatterResult = SkillFrontMatterSchema.safeParse(parsed.data);
 
   if (!frontMatterResult.success) {

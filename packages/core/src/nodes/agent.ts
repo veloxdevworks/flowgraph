@@ -146,7 +146,7 @@ export const agentNode = defineNode<Config>({
           model: nodeModel ?? ctx.config.defaults?.model,
           maxSteps: config.maxSteps,
           maxTokens: config.maxTokens,
-          permission: config.permission ?? "auto",
+          permission: config.permission ?? ctx.config.permission ?? "auto",
           streaming: config.streaming,
         };
 

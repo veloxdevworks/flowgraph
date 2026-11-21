@@ -7,7 +7,7 @@
 
 import { z } from "zod";
 import { RouterWithSchema } from "@flowgraph/spec";
-import { evalGuard, renderDeep } from "@flowgraph/expr";
+import { evalGuard, renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { providerFor, providerNamesFor } from "../providers/registry.js";
@@ -35,7 +35,7 @@ export const routerNode = defineNode<Config>({
         const scope = buildScope(state, ctx);
 
         if (config.mode === "model") {
-          return runModelRouter(config, state, ctx, scope, String(nodeSpec["id"]), nodeSpec["provider"] as string | undefined);
+          return runModelRouter(config, ctx, scope, String(nodeSpec["id"]), nodeSpec["provider"] as string | undefined);
         }
 
         const routes = Object.entries(config.routes);
@@ -132,7 +132,6 @@ function buildScope(
  */
 async function runModelRouter(
   config: Config,
-  state: Record<string, unknown>,
   ctx: NodeRunContext,
   scope: Record<string, unknown>,
   nodeId: string,
@@ -148,7 +147,10 @@ async function runModelRouter(
   }
 
   const routeKeys = Object.keys(config.routes);
-  const inputText = config.input ? String(renderDeep(config.input, scope)) : JSON.stringify(state);
+  if (!config.input?.trim()) {
+    throw new Error(`router "${nodeId}" mode=model requires with.input: the text the model routes on. The router does not send the whole state.`);
+  }
+  const inputText = stringifyRendered(renderDeep(config.input, scope));
   const instruction = config.instruction ?? "Choose the single most appropriate route for the input.";
   const prompt =
     `${instruction}\n\nInput:\n${inputText}\n\n` +

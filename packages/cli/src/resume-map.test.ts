@@ -26,7 +26,6 @@ const PARALLEL = {
   ],
   runtime: {
     checkpoint: { enabled: true, backend: "memory" },
-    hitl: { onInterrupt: "fail" },
   },
 } as unknown as GraphSpec;
 

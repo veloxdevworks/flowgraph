@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DemoWithSchema, type GraphSpec } from "@flowgraph/spec";
 import type { NodeRunContext } from "../context.js";
+import { DECLARED_SECRETS } from "../runtime/secret-scope.js";
 import { preflightGraphRequires } from "../preflight-graph.js";
 import { compileGraph } from "../compiler.js";
 import type { FlowgraphEvent } from "../events.js";
@@ -37,6 +38,8 @@ async function capture(
     signal?: AbortSignal;
     /** Filled as the node raises issues, so a run that throws can still be inspected. */
     issues?: Array<Record<string, unknown>>;
+    /** The graph's declared secrets. */
+    secrets?: string[];
   } = {},
 ) {
   const issues = opts.issues ?? [];
@@ -53,6 +56,7 @@ async function capture(
     emit() {},
     issue: (issue: Record<string, unknown>) => issues.push(issue),
     _input: opts.input ?? {},
+    [DECLARED_SECRETS]: new Set(opts.secrets ?? ["DEMO_TEST_SECRET"]),
     ...(opts.signal ? { signal: opts.signal } : {}),
   } as unknown as NodeRunContext;
   const res = await compiled.run(opts.state ?? {}, ctx);
@@ -146,6 +150,18 @@ describe("http capture", () => {
 
     expect(out.ok).toBe(true);
     expect(fs.readFileSync(out.path!, "utf8")).not.toContain("rendered-secret-value");
+  });
+
+  it("fails the node on a secret the graph does not declare instead of reporting not_captured", async () => {
+    vi.stubEnv("DEMO_TEST_SECRET", "rendered-secret-value");
+    const workspace = mkdir();
+    await expect(
+      capture(workspace, { http: { url: `${base}/echo-auth`, headers: { "X-Custom": "{{ secret.DEMO_TEST_SECRET }}" } } }, { secrets: [] }),
+    ).rejects.toMatchObject({
+      code: "SECRET_UNDECLARED",
+      message: expect.stringContaining('reads secret "DEMO_TEST_SECRET", which the graph does not declare'),
+    });
+    expect(readDemoManifest(workspace, THREAD)).toEqual([]);
   });
 
   it("strict fails the node on a recorded failure, and the evidence stays in the manifest", async () => {

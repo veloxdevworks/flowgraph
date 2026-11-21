@@ -9,7 +9,6 @@
 
 import { spawn } from "node:child_process";
 import {
-  existsSync,
   mkdtempSync,
   writeFileSync,
   readFileSync,
@@ -18,7 +17,7 @@ import {
   statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { ScriptWithSchema } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
@@ -171,12 +170,14 @@ function normalizeScriptPermissions(
   return Object.keys(out).length ? out : undefined;
 }
 
+/** The realpath of `p`, or of its nearest existing ancestor with the rest appended. */
 function resolvePermissionPath(p: string): string {
   try {
     return realpathSync(p);
   } catch {
-    // Path may not exist yet (e.g. a file the script will create).
-    return p;
+    const parent = dirname(p);
+    if (parent === p) return p;
+    return join(resolvePermissionPath(parent), basename(p));
   }
 }
 
@@ -187,43 +188,42 @@ function resolveGrantPath(p: string, workspace?: string): string {
 }
 
 /**
- * Node's permission model treats a path with a trailing `/` as a directory
- * grant (covers all children). Without it, only that exact path is allowed.
+ * Node's permission model treats an existing directory (with or without a
+ * trailing `/`) as covering its children; any other path is allowed exactly.
+ * A directory that does not exist yet is only covered through `dir/*`.
  *
- * Returns one or two grants: the path as given, plus its realpath when they
+ * A path that does not exist and has no file extension is taken as a
+ * directory the script may create: the exact path (so `mkdir` or a file of
+ * that name works) plus `path/*`. Nothing outside the named path is granted,
+ * so a file in a folder that does not exist yet needs a grant on the folder.
+ *
+ * Grants are returned for the path as given and for its realpath when they
  * differ (macOS `/tmp` → `/private/var/folders/…`). Node's permission check
  * does not always follow symlinks for the *operation* path, so both forms
  * must be allowed for author-facing paths to work reliably.
  */
-function normalizePermissionGrant(raw: string): string {
-  if (raw.endsWith("/") || raw.endsWith("\\")) return raw;
+function normalizePermissionGrants(raw: string): string[] {
+  const bare = raw.replace(/[\\/]+$/, "") || raw;
+  let isDirectory: boolean;
   try {
-    if (statSync(raw).isDirectory()) return `${raw}/`;
+    isDirectory = statSync(bare).isDirectory();
   } catch {
-    if (!/\.[A-Za-z0-9]+$/.test(raw)) return `${raw}/`;
+    if (raw !== bare || !/\.[A-Za-z0-9]+$/.test(bare)) return [bare, join(bare, "*")];
+    return [bare];
   }
-  return raw;
+  return [isDirectory && !bare.endsWith("/") ? `${bare}/` : bare];
 }
 
 function asPermissionGrants(p: string, workspace?: string): string[] {
   const absolute = resolveGrantPath(p, workspace);
-  const original = normalizePermissionGrant(absolute);
-  const resolved = normalizePermissionGrant(resolvePermissionPath(absolute));
-  const grants = original === resolved ? [original] : [original, resolved];
-
-  // Creating a path that does not exist yet requires write access on its parent
-  // (e.g. fsWrite: ["outputs"] → mkdir("outputs") needs write on the workspace).
-  if (!existsSync(absolute)) {
-    const parent = dirname(absolute);
-    if (parent && parent !== absolute) {
-      const parentOrig = normalizePermissionGrant(parent);
-      const parentResolved = normalizePermissionGrant(resolvePermissionPath(parent));
-      grants.push(parentOrig);
-      if (parentResolved !== parentOrig) grants.push(parentResolved);
-    }
-  }
-
-  return [...new Set(grants)];
+  // `resolve` and `realpath` drop a trailing `/`, which marks a directory grant.
+  const asWritten = (q: string) => (/[\\/]$/.test(p) && !/[\\/]$/.test(q) ? `${q}/` : q);
+  return [
+    ...new Set([
+      ...normalizePermissionGrants(asWritten(absolute)),
+      ...normalizePermissionGrants(asWritten(resolvePermissionPath(absolute))),
+    ]),
+  ];
 }
 
 function buildPermissionArgs(

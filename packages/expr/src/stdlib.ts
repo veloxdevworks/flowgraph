@@ -20,24 +20,62 @@ function toArr(v: unknown): unknown[] {
   return Array.isArray(v) ? v : v == null ? [] : [v];
 }
 
+/** Most items `range()` returns. */
+export const MAX_RANGE_LENGTH = 10_000;
+
+/** Longest string `replace()`, `join()` or `format()` builds; checked before the string is built. */
+export const MAX_STRING_RESULT_LENGTH = 16 * 1024 * 1024;
+
+function assertResultLength(fn: string, length: number): void {
+  if (length > MAX_STRING_RESULT_LENGTH) {
+    throw new Error(`${fn}: result would be longer than ${MAX_STRING_RESULT_LENGTH} characters`);
+  }
+}
+
+const FORMAT_PLACEHOLDER = /\{(\d*)\}/g;
+
+function countOccurrences(text: string, search: string): number {
+  if (search === "") return text.length + 1;
+  let count = 0;
+  for (let at = text.indexOf(search); at >= 0; at = text.indexOf(search, at + search.length)) count++;
+  return count;
+}
+
 export const stdlib: Stdlib = {
   // String
   lower: (s) => toStr(s).toLowerCase(),
   upper: (s) => toStr(s).toUpperCase(),
   trim: (s) => toStr(s).trim(),
   split: (s, sep) => toStr(s).split(toStr(sep)),
-  join: (arr, sep) =>
-    toArr(arr)
-      .map(toStr)
-      .join(toStr(sep ?? "")),
-  replace: (s, search, repl) => toStr(s).replaceAll(toStr(search), toStr(repl)),
+  join: (arr, sep) => {
+    const parts = toArr(arr).map(toStr);
+    const separator = toStr(sep ?? "");
+    let length = Math.max(parts.length - 1, 0) * separator.length;
+    for (const part of parts) length += part.length;
+    assertResultLength("join", length);
+    return parts.join(separator);
+  },
+  replace: (s, search, repl) => {
+    const text = toStr(s);
+    const from = toStr(search);
+    const to = toStr(repl);
+    if (to.length > from.length) assertResultLength("replace", text.length + countOccurrences(text, from) * (to.length - from.length));
+    return text.replaceAll(from, to);
+  },
   contains: (s, sub) => toStr(s).includes(toStr(sub)),
   startsWith: (s, prefix) => toStr(s).startsWith(toStr(prefix)),
   endsWith: (s, suffix) => toStr(s).endsWith(toStr(suffix)),
   slice: (s, start, end) => toStr(s).slice(toNum(start), end != null ? toNum(end) : undefined),
   format: (template, ...args) => {
-    let i = 0;
-    return toStr(template).replace(/\{(\d*)\}/g, (_match, index: string) => toStr(args[index ? Number(index) : i++]));
+    const text = toStr(template);
+    const values = args.map(toStr);
+    let next = 0;
+    const valueFor = (index: string) => values[index ? Number(index) : next++] ?? "";
+    let length = text.length;
+    for (const match of text.matchAll(FORMAT_PLACEHOLDER)) length += valueFor(match[1]!).length - match[0].length;
+    assertResultLength("format", length);
+    next = 0;
+    return text.replace(FORMAT_PLACEHOLDER, (_match, index: string) => valueFor(index));
   },
   len: (v) => {
     if (typeof v === "string") return v.length;
@@ -84,14 +122,17 @@ export const stdlib: Stdlib = {
   unique: (arr) => [...new Set(toArr(arr))],
   flatten: (arr) => toArr(arr).flat(Infinity),
   includes: (arr, item) => toArr(arr).includes(item),
+  /** `range(end)` counts from 0; `range(start, end, step)` stops before `end`. At most MAX_RANGE_LENGTH items. */
   range: (start, end, step) => {
-    const s = toNum(start);
+    const s = end == null ? 0 : toNum(start);
     const e = toNum(end ?? start);
     const st = toNum(step ?? 1);
-    const result: number[] = [];
-    if (st > 0) for (let i = s; i < e; i += st) result.push(i);
-    if (st < 0) for (let i = s; i > e; i += st) result.push(i);
-    return result;
+    if (!(st > 0 && e > s) && !(st < 0 && e < s)) return [];
+    const length = Math.ceil((e - s) / st);
+    if (!(length <= MAX_RANGE_LENGTH)) {
+      throw new Error(`range: at most ${MAX_RANGE_LENGTH} items (asked for ${Number.isFinite(length) ? length : "unbounded"})`);
+    }
+    return Array.from({ length }, (_, i) => s + i * st);
   },
   reverse: (arr) => [...toArr(arr)].reverse(),
   concat: (...arrays) => ([] as unknown[]).concat(...arrays.map(toArr)),

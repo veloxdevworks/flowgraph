@@ -40,7 +40,7 @@ export async function buildServerProviders(
     switch (cfg.kind) {
       case "langchain": {
         if (opts.untrusted) assertUntrustedProvider(name, cfg);
-        providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd }));
+        providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd, secrets: spec.secrets }));
         built.add(name);
         break;
       }
@@ -76,7 +76,7 @@ export async function buildServerProviders(
           vendor: defaultName,
           ...(model ? { model } : {}),
         },
-        { cwd },
+        { cwd, secrets: spec.secrets },
       ),
     );
   }

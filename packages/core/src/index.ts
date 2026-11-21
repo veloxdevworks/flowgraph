@@ -8,7 +8,7 @@ export {
   NODE_BODY_ENV_EXPANSION,
 } from "./loader.js";
 export { hostSupportDiagnostics, type HostSupportOptions } from "./runtime/host-support.js";
-export { loadGraphImports } from "./runtime/load-imports.js";
+export { loadGraphImports, readGraphImportAliases, withUnresolvedImports } from "./runtime/load-imports.js";
 export type { LoadGraphImportsOptions, LoadGraphImportsResult } from "./runtime/load-imports.js";
 export {
   collectNodeWriteChannels,
@@ -212,6 +212,17 @@ export {
   DEFAULT_REDACT_PATTERNS,
 } from "./secrets.js";
 export type { SecretProvider, Redactor } from "./secrets.js";
+export {
+  DECLARED_SECRETS,
+  UndeclaredSecretError,
+  assertSecretDeclared,
+  declaredSecretsOf,
+} from "./runtime/secret-scope.js";
+export {
+  providerSecretDiagnostics,
+  secretNamesIn,
+  secretReferenceDiagnostics,
+} from "./runtime/secret-declarations.js";
 
 export {
   createLogger,

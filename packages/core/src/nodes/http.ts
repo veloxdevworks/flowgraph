@@ -12,7 +12,7 @@ import type { NodeRunContext } from "../context.js";
 import { nodePolicyOf } from "../node-policy.js";
 import type { NodeResult } from "../registry.js";
 import { applyOutput } from "./output.js";
-import { performHttpRequest, redactHeaders } from "./http-request.js";
+import { maskResponseForEvent, performHttpRequest, redactHeaders, redactUrlSecrets } from "./http-request.js";
 import { secretScope } from "../runtime/secret-scope.js";
 
 export { redactHeaders } from "./http-request.js";
@@ -52,7 +52,7 @@ export const httpNode = defineNode<Config>({
           ? (renderDeep(config.query, scope) as Record<string, unknown>)
           : undefined;
 
-        ctx.logger.debug("http request", { method, url });
+        ctx.logger.debug("http request", { method, url: redactUrlSecrets(url) });
 
         const result = await performHttpRequest({
           method,
@@ -68,15 +68,11 @@ export const httpNode = defineNode<Config>({
         ctx.emit("node.output", {
           request: {
             method: result.method,
-            url: result.url,
+            url: redactUrlSecrets(result.url),
             headers: redactHeaders(result.requestHeaders),
             ...(result.requestBody !== undefined ? { body: result.requestBody } : {}),
           },
-          response: {
-            status: result.status,
-            headers: result.headers,
-            body: result.body,
-          },
+          response: { status: result.status, ...maskResponseForEvent(result) },
         });
 
         const out = { status: result.status, body: result.body, headers: result.headers };

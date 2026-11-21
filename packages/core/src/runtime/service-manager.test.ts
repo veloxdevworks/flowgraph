@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs/promises";
 import * as http from "node:http";
+import * as os from "node:os";
+import * as path from "node:path";
 import * as net from "node:net";
 import {
   startService,
@@ -203,6 +206,35 @@ describe("service-manager url readiness (live server)", () => {
       await new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
       );
+    }
+  });
+});
+
+describe("service environment", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("passes the default allowlist and spec.env, not the rest of the host environment", async () => {
+    vi.stubEnv("FGQA_SERVICE_STRAY", "stray");
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flowgraph-service-env-"));
+    const out = path.join(dir, "env.json");
+    try {
+      await startService(THREAD, {
+        name: "env-dump",
+        command: process.execPath,
+        args: [
+          "-e",
+          `require('fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify(Object.keys(process.env))); console.log('READY'); setInterval(()=>{},1000)`,
+        ],
+        env: { FGQA_SERVICE_EXPLICIT: "set" },
+        ready: { log: "READY" },
+        readyTimeout: "5s",
+        readyInterval: "50ms",
+      });
+      const keys = JSON.parse(await fs.readFile(out, "utf8")) as string[];
+      expect(keys).toEqual(expect.arrayContaining(["PATH", "FGQA_SERVICE_EXPLICIT"]));
+      expect(keys).not.toContain("FGQA_SERVICE_STRAY");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
     }
   });
 });

@@ -7,7 +7,7 @@ export const SUBGRAPH_HOST_CONTEXT = Symbol.for("flowgraph.subgraphHostContext")
 
 interface SubgraphHostContext {
   hooks: Hook[];
-  runConfig: Pick<RunConfig, "vars" | "defaults">;
+  runConfig: Pick<RunConfig, "vars" | "defaults" | "permission">;
 }
 
 // A child executes nodes within the root invocation, not another run/interrupt lifecycle.
@@ -47,11 +47,12 @@ function copyPlainData<T>(value: T, seen = new WeakMap<object, object>()): T {
 }
 
 function copyHostOverrides(
-  runConfig?: Pick<RunConfig, "vars" | "defaults">,
+  runConfig?: Pick<RunConfig, "vars" | "defaults" | "permission">,
 ): SubgraphHostContext["runConfig"] {
   return {
     ...(runConfig?.vars ? { vars: copyPlainData(runConfig.vars) } : {}),
     ...(runConfig?.defaults ? { defaults: { ...runConfig.defaults } } : {}),
+    ...(runConfig?.permission ? { permission: runConfig.permission } : {}),
   };
 }
 
