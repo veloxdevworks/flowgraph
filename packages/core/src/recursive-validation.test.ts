@@ -6,7 +6,7 @@ import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { loadGraph, validateSpec } from "./loader.js";
 import { cronScheduleProblem, isKnownTimeZone } from "./runtime/cron-schedule.js";
-import { graphStructureDiagnostics, MAX_GRAPH_NESTING } from "./runtime/validate-graph.js";
+import { graphNestingDiagnostics, MAX_GRAPH_NESTING } from "./runtime/validate-graph.js";
 
 const head = { apiVersion: "flowgraph/v1", kind: "Graph" } as const;
 
@@ -316,16 +316,22 @@ describe("nesting depth", () => {
     expect(validateSpec(graph([map]))).toEqual([expect.objectContaining({ code: "GRAPH_NESTING_TOO_DEEP" })]);
   });
 
-  it("walks a spec object shared by many nodes once per object", () => {
+  // Two nodes share each child spec, so there are 2^(levels-1) paths but only `levels` spec objects.
+  function sharedTo(levels: number): GraphSpec {
     let shared = graph([{ id: "leaf", ...echo }]);
-    for (let level = 1; level < 20; level++) {
+    for (let level = 1; level < levels; level++) {
       const child = { ...head, metadata: { name: `l${level}` }, nodes: shared.nodes, edges: shared.edges };
       shared = graph([
         { id: "a", type: "subgraph", spec: child },
         { id: "b", type: "subgraph", spec: child },
       ], { edges: [{ from: "START", to: "a" }, { from: "START", to: "b" }, { from: "a", to: "END" }, { from: "b", to: "END" }] });
     }
-    expect(graphStructureDiagnostics(shared).filter((d) => d.code === "GRAPH_NESTING_TOO_DEEP")).toEqual([]);
+    return shared;
+  }
+
+  it("checks nesting once per shared spec object, not once per path", () => {
+    expect(graphNestingDiagnostics(sharedTo(MAX_GRAPH_NESTING))).toEqual([]);
+    expect(graphNestingDiagnostics(sharedTo(40))).toEqual([expect.objectContaining({ code: "GRAPH_NESTING_TOO_DEEP" })]);
   });
 });
 
