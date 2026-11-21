@@ -1,4 +1,3 @@
-import { currentEnvironment } from "../environment.js";
 /**
  * Shared skill execution: resolve a SKILL.md, preflight, run its handler.
  * Used by both the `skill` node and skill-as-tool for intelligent nodes.
@@ -13,6 +12,9 @@ import {
 } from "@flowgraph/skills";
 import { resolveSkillPath } from "../skill-resolver.js";
 import { contractErrors } from "../runtime/json-schema.js";
+import { DEFAULT_INHERITED_ENV, pickHostEnv } from "../runtime/child-env.js";
+import { assertSecretDeclared, declaredSecretsOf } from "../runtime/secret-scope.js";
+import { assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
 import type { NodeRunContext } from "../context.js";
 
 export async function loadResolvedSkill(uses: string, ctx: NodeRunContext): Promise<SkillDef> {
@@ -72,7 +74,7 @@ export async function runSkill(
     }
     result = await handler(input, ctx);
   } else if (skill.frontMatter.kind_of === "command" && skill.frontMatter.command) {
-    result = await runCommand(skill.frontMatter.command, input, ctx);
+    result = await runCommand(skill.frontMatter.command, skillEnvNames(skill, ctx), input, ctx);
   } else {
     throw new Error(
       `skill "${skill.frontMatter.name}": kind_of="${skill.frontMatter.kind_of}" is not configured correctly. ` +
@@ -84,8 +86,29 @@ export async function runSkill(
   return result;
 }
 
+/**
+ * Host variables a command skill receives beyond the default allowlist: its
+ * declared `env.vars`. A var marked `secret` passes only when the graph
+ * declares it; a required one that is not declared fails the skill.
+ */
+export function skillEnvNames(skill: SkillDef, ctx: NodeRunContext): string[] {
+  const declared = declaredSecretsOf(ctx);
+  const where = `skill "${skill.frontMatter.name}"`;
+  const names: string[] = [];
+  for (const v of skill.frontMatter.env?.vars ?? []) {
+    if (v.secret) {
+      if (!declared.has(v.name) && v.optional) continue;
+      assertSecretAllowed(nodePolicyOf(ctx), v.name, where);
+      assertSecretDeclared(declared, v.name, where);
+    }
+    names.push(v.name);
+  }
+  return names;
+}
+
 async function runCommand(
   command: string[],
+  envNames: readonly string[],
   input: Record<string, unknown>,
   ctx: NodeRunContext,
 ): Promise<unknown> {
@@ -95,7 +118,7 @@ async function runCommand(
 
   const [cmd, ...args] = command as [string, ...string[]];
   const { stdout } = await execFileAsync(cmd, args, {
-    env: { ...currentEnvironment(), FLOWGRAPH_INPUT: JSON.stringify(input) },
+    env: { ...pickHostEnv([...DEFAULT_INHERITED_ENV, ...envNames]), FLOWGRAPH_INPUT: JSON.stringify(input) },
     cwd: ctx.workspace,
     signal: ctx.signal,
   });
