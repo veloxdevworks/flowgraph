@@ -1,4 +1,3 @@
-import { currentEnvironment } from "./environment.js";
 /**
  * Stage 1 of compilation: load a YAML file and return a validated GraphSpec.
  */
@@ -26,6 +25,7 @@ import "./nodes/index.js";
 import { getMediaVendor } from "./media/registry.js";
 import { offlineProviderValidations, providerConfigDiagnostics } from "./providers/diagnostics.js";
 import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
+import { expandGraphEnv, recordGraphEnvExpansion, type GraphEnvExpansion } from "./runtime/config-env.js";
 
 export {
   envExpansionCollisionDiagnostics,
@@ -92,16 +92,22 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
   catch { return { spec: null, diagnostics: [{ severity: "error", code: "FILE_NOT_FOUND", message: `Cannot read: ${resolved}` }] }; }
   const envCollisionDiags = envExpansionCollisionDiagnostics(raw);
   let parsed: unknown;
-  try { parsed = normalizeNodeTypeAliases(expandGraphEnv(parseYaml(raw))); }
+  let expansion: GraphEnvExpansion;
+  try {
+    parsed = parseYaml(raw);
+    expansion = expandGraphEnv(parsed);
+    parsed = normalizeNodeTypeAliases(parsed);
+  }
   catch (err) {
     return { spec: null, diagnostics: [{ severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` }, ...envCollisionDiags] };
   }
   const result = GraphSpecSchema.safeParse(parsed);
-  if (!result.success) return { spec: null, diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...rawNodeTypeDiagnostics(parsed), ...envCollisionDiags] };
+  if (!result.success) return { spec: null, diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...rawNodeTypeDiagnostics(parsed), ...expansion.diagnostics, ...envCollisionDiags] };
   const spec = result.data;
   setGraphFile(spec, resolved);
+  recordGraphEnvExpansion(spec, expansion);
   const dir = path.dirname(resolved);
-  const diagnostics = [...envCollisionDiags];
+  const diagnostics = [...envCollisionDiags, ...expansion.diagnostics];
   let fatal = false;
 
   // Check declarations even when unused; this never imports or executes a module.
@@ -151,27 +157,6 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
 
 function isGraphFileRef(ref: string): boolean {
   return ref.endsWith(".yaml") || ref.endsWith(".yml") || ref.startsWith(".") || ref.includes("/") || ref.includes("\\");
-}
-
-/** Expand trusted config/runtime scalar values after parsing, never source text or keys. */
-function expandGraphEnv(parsed: unknown): unknown {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
-  const root = parsed as Record<string, unknown>;
-  const expand = (value: unknown): unknown => {
-    if (typeof value === "string") return value.replace(/(?<!\$)\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => currentEnvironment()[name] ?? def ?? "").replace(/\$\$\{/g, "${");
-    if (Array.isArray(value)) return value.map(expand);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, val]) => [key, expand(val)]));
-    return value;
-  };
-  for (const key of ["config", "runtime"]) if (root[key] != null) root[key] = expand(root[key]);
-  const node = (value: unknown): void => {
-    if (!value || typeof value !== "object") return;
-    const n = value as Record<string, unknown>, withConfig = n.with as Record<string, unknown> | undefined;
-    if (n.type === "map") node(withConfig?.node);
-    if (n.type === "subgraph") { if (n.graph) expandGraphEnv(n.graph); if (withConfig?.graph) expandGraphEnv(withConfig.graph); }
-  };
-  if (Array.isArray(root.nodes)) root.nodes.forEach(node);
-  return root;
 }
 
 /** Deprecated YAML node type → canonical type. */

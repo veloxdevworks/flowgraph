@@ -55,8 +55,11 @@ export class SecretRedaction {
         if (key.toLowerCase() === "set-cookie") for (const part of setCookieRedactions(value)) this.observe(part);
       }
   }
+  /** A per-invocation copy: values observed during one invocation never reach another. */
   fork(): SecretRedaction {
-    return new SecretRedaction([...this.patterns.values()], [...this.headers]);
+    const copy = new SecretRedaction([...this.patterns.values()], [...this.headers]);
+    for (const value of this.values) copy.values.add(value);
+    return copy;
   }
   absorb(other: SecretRedaction): void {
     for (const name of other.headers) this.headers.add(name);

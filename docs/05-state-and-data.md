@@ -258,20 +258,21 @@ The stdlib is intentionally small and pure. Anything more complex belongs in a `
 | | `${ENV}` interpolation | `{{ expr }}` expressions |
 |---|---|---|
 | When | **Load time** (once, before validation) | **Run time** (per node execution) |
-| Scope | environment variables only | `state`, `input`, `result`, `config`, `secret`, `env`, `run` |
-| Where allowed | `config`, `runtime`, scalar settings | node `input`/`with`/`output`, `when`, edge `branch.when` |
-| Purpose | wire env/secrets config into the spec | dynamic data flow during execution |
+| Scope | names declared under top-level `secrets:` | `state`, `input`, `result`, `config`, `secret`, `env`, `run` |
+| Where allowed | `config`, `runtime` scalar values | node `input`/`with`/`output`, `when`, edge `branch.when` |
+| Purpose | wire declared secrets into config | dynamic data flow during execution |
 
 ```yaml
+secrets: [JIRA_TOKEN]
 config:
-  defaults: { model: "${FLOWGRAPH_MODEL:-claude-sonnet-4.5}" }   # ${} = env, resolved at load
+  vars: { jiraToken: "${JIRA_TOKEN}" }   # ${} = declared secret, resolved at load and redacted
 nodes:
   - id: x
     type: agent
     with: { prompt: "Summarize {{ state.issue.title }}" }     # {{ }} = expr, per run
 ```
 
-> **Gotcha — shell bodies:** load-time `${ENV}` expansion currently scans the **entire YAML text**, not only `config`/`runtime`. So `${SLUG}` or `${SPEC_SLUG:-}` inside a `shell` node's `command` / `args` / `env` is rewritten against the *host* process environment before the node runs (usually to empty) — even when that same node sets `SPEC_SLUG` via `with.env`. Use unbraced `$SLUG` / `$SPEC_SLUG` for node-level env vars (POSIX shell substitution at exec time), or `{{ state.* }}` for runtime data. `loadGraph` emits a `NODE_BODY_ENV_EXPANSION` warning when it detects this pattern.
+> **Shell bodies:** load-time `${ENV}` expansion touches only `config` and `runtime`, so `${SLUG}` or `${SPEC_SLUG:-}` in a `shell` node's `command` / `args` / `env` is left for the child shell, which sees only its allowed environment and `with.env`. An undeclared `${NAME}` in `config` or `runtime` is not expanded and is reported as `SECRET_UNDECLARED` ([02 §7](./02-graph-spec.md#7-config)).
 
 ## 6. Expression scope objects
 

@@ -397,7 +397,7 @@ Argv mode keeps data out of the shell, but the program still parses its own opti
 
 **Run data in shell mode:** pass values through `env` and quote them in the command (`"$NAME"`), so the shell treats them as data. Typographic quotes (`“ ” ‘ ’`) in the authored command line are converted to ASCII quotes; rendered values are not touched. On Windows, `cmd.exe` expands `%NAME%` before it parses the line, so an env value can still change a `cmd.exe` command line — use argv mode there when values come from external input.
 
-**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values. In argv mode there is no shell expansion; use a `{{ ... }}` template in `args` or `env` to supply a value.
+**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values, and only for names declared under `secrets:`. In argv mode there is no shell expansion; use a `{{ ... }}` template in `args` or `env` to supply a value.
 
 ```yaml
 - id: materialize
