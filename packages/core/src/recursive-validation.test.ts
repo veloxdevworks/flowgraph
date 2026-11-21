@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { loadGraph, validateSpec } from "./loader.js";
+import { cronScheduleProblem, isKnownTimeZone } from "./runtime/cron-schedule.js";
 
 const head = { apiVersion: "flowgraph/v1", kind: "Graph" } as const;
 
@@ -200,15 +201,44 @@ describe("triggers", () => {
     expect(found[1]!.message).toContain('minute "61" is out of range (0-59)');
   });
 
-  it("accepts standard schedules with ranges, lists, steps and names", () => {
+  it("accepts standard schedules with ranges, lists, steps, names, seconds and macros", () => {
     const spec = graph([{ id: "a", ...echo }], {
       triggers: [
         { id: "a", type: "cron", schedule: "*/15 9-17 * * mon-fri", timezone: "America/Denver" },
         { id: "b", type: "cron", schedule: "0 0 1,15 JAN-JUN/2 0,7", timezone: "UTC" },
         { id: "c", type: "cron", schedule: "5 4 * * 7" },
+        { id: "d", type: "cron", schedule: "30 */5 * * * *" },
+        ...["@yearly", "@annually", "@monthly", "@weekly", "@daily", "@hourly"].map((schedule) => ({ id: schedule, type: "cron", schedule })),
       ],
     });
     expect(validateSpec(spec).filter((d) => d.path?.startsWith("triggers"))).toEqual([]);
+  });
+});
+
+describe("cronScheduleProblem", () => {
+  it("accepts an optional leading seconds field and the standard macros", () => {
+    expect(cronScheduleProblem("0 0 2 * * *")).toBeUndefined();
+    expect(cronScheduleProblem("@daily")).toBeUndefined();
+    expect(cronScheduleProblem("  @hourly ")).toBeUndefined();
+  });
+
+  it("rejects unknown macros, out-of-range seconds and the wrong field count", () => {
+    expect(cronScheduleProblem("@reboot")).toContain('unknown macro "@reboot"');
+    expect(cronScheduleProblem("60 0 2 * * *")).toContain('second "60" is out of range (0-59)');
+    expect(cronScheduleProblem("0 0 0 2 * * *")).toContain("got 7");
+    expect(cronScheduleProblem("")).toContain("got 0");
+  });
+});
+
+describe("isKnownTimeZone", () => {
+  it("accepts canonical IANA names and UTC", () => {
+    for (const zone of ["America/Denver", "Europe/London", "Asia/Tokyo", "UTC"]) expect(isKnownTimeZone(zone)).toBe(true);
+  });
+
+  it("rejects abbreviations, offsets, other spellings and unknown names", () => {
+    for (const zone of ["EST", "+05:00", "america/denver", "AMERICA/DENVER", "utc", " UTC", "", "Mars/Olympus"]) {
+      expect(isKnownTimeZone(zone), zone).toBe(false);
+    }
   });
 });
 

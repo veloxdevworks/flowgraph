@@ -50,30 +50,43 @@ function fieldProblem(text: string, field: CronField): string | undefined {
   return undefined;
 }
 
+const SECONDS: CronField = { name: "second", min: 0, max: 59 };
+
+const MACROS = new Set(["@yearly", "@annually", "@monthly", "@weekly", "@daily", "@hourly"]);
+
 /**
- * Why a standard 5-field cron expression (minute hour day-of-month month
- * day-of-week) is invalid, or undefined when it is valid. Fields accept `*`,
- * numbers, ranges `a-b`, lists `a,b`, steps `/n`, and month and weekday names.
+ * Why a cron expression is invalid, or undefined when it is valid. Accepts the
+ * five standard fields (minute hour day-of-month month day-of-week), an
+ * optional leading seconds field, or one of the macros `@yearly`,
+ * `@annually`, `@monthly`, `@weekly`, `@daily` and `@hourly`. Fields accept
+ * `*`, numbers, ranges `a-b`, lists `a,b`, steps `/n`, and month and weekday names.
  */
 export function cronScheduleProblem(schedule: string): string | undefined {
-  const parts = schedule.trim().split(/\s+/);
-  if (parts.length !== FIELDS.length || parts[0] === "") {
-    return `expected 5 fields (minute hour day-of-month month day-of-week), got ${parts[0] === "" ? 0 : parts.length}`;
+  const trimmed = schedule.trim();
+  if (trimmed.startsWith("@")) {
+    return MACROS.has(trimmed) ? undefined : `unknown macro "${trimmed}"; use one of ${[...MACROS].join(", ")}`;
   }
-  for (const [index, field] of FIELDS.entries()) {
+  const parts = trimmed === "" ? [] : trimmed.split(/\s+/);
+  const fields = parts.length === FIELDS.length + 1 ? [SECONDS, ...FIELDS] : FIELDS;
+  if (parts.length !== fields.length) {
+    return `expected 5 fields (minute hour day-of-month month day-of-week), or 6 with leading seconds, got ${parts.length}`;
+  }
+  for (const [index, field] of fields.entries()) {
     const problem = fieldProblem(parts[index]!, field);
     if (problem) return problem;
   }
   return undefined;
 }
 
-/** True when the runtime's Intl data knows `timeZone` (an IANA name such as "America/Denver", or "UTC"). */
+let canonicalTimeZones: ReadonlySet<string> | undefined;
+
+/**
+ * True when `timeZone` is a canonical IANA name such as "America/Denver", or
+ * "UTC". Matched case-sensitively against `Intl.supportedValuesOf("timeZone")`,
+ * so abbreviations ("EST"), offsets ("+05:00") and lowercase spellings, which
+ * `Intl.DateTimeFormat` accepts on some Node versions, are rejected.
+ */
 export function isKnownTimeZone(timeZone: string): boolean {
-  if (!timeZone.trim()) return false;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone });
-    return true;
-  } catch {
-    return false;
-  }
+  canonicalTimeZones ??= new Set([...Intl.supportedValuesOf("timeZone"), "UTC"]);
+  return canonicalTimeZones.has(timeZone);
 }
