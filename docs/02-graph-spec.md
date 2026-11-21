@@ -121,8 +121,9 @@ inputs:
 **Runtime behavior:**
 
 - CLI: `flowgraph run … --input prospectName=Acme --input jiraTicketId=PROJ-1`. Missing required keys exit `1` with a list of issues (no interactive prompt).
-- Programmatic / desktop: values are passed as `run({ input: { … } })` and validated against `inputs` inside `compiled.run()`.
-- Graphs without an `inputs` array keep the previous free-form `input:` / `--input` behavior (no validation).
+- Programmatic / desktop: values are passed as `run({ input: { … } })` and validated against `inputs` inside `compiled.run()`, `compiled.stream()` and `compiled.prepare({ mode: "start" })`. A missing required key or a value of the wrong type rejects with `InputValidationError` (code `INPUT_INVALID`) before anything runs.
+- Every entry point resolves input the same way (`resolveGraphInput(spec, provided)`): the graph's `input:` seed values, overlaid by the caller's values, then `inputs` defaults, coercion and required checks. The CLI and the server use the same function.
+- Graphs without an `inputs` array keep the previous free-form `input:` / `--input` behavior (no validation); the graph's `input:` values are still merged under the caller's.
 
 Do **not** use a leading `hitl` node for call parameters — reserve HITL for mid-run approvals and clarifying questions that depend on something computed during execution.
 
@@ -324,7 +325,7 @@ nodes:
 | `{ to: X }` and/or `{ map: {…} }` | Apply those projections **and** still write `state.outputs.<nodeId>` |
 | `{ to: X }` and/or `{ map: {…} }` with `raw: false` | Apply only those projections; `state.outputs.<nodeId>` is not written |
 
-- `input:` builds an `input` object available to the node's `with` expressions (and to skills as their declared inputs).
+- `input:` builds an `input` object available to the node's `with` expressions as `{{ input.* }}`. It is also the payload the node executes with: a skill gets it as its declared inputs, a `function` handler and a `script` get it as their argument, and a `shell` command gets it as `FLOWGRAPH_INPUT` and stdin. For `function`, `script` and `shell`, an explicit `with.input` replaces it (and can read it through `{{ input.* }}`).
 - `to` / `map` are optional overrides for shared/typed/reducer-backed channels (e.g. parallel fan-in into one `append` channel) or field projection.
 - **Exception — `subgraph`:** when `output` and `stateMap.out` are both omitted, channels that **share a name** merge back and the parent's reducer combines only the child's new values. Use `output: none` to write nothing, `output.to` / `output.map` for a normal node projection, or `stateMap.out` (`parentChannel: childChannel`) for an explicit mapping. See [05 — Subgraph merge-back](./05-state-and-data.md#subgraph-merge-back).
 - `raw: false` keeps large or sensitive results out of state and checkpoints while still passing on the fields you project. It needs `to` or `map`; to write nothing, use `output: none`. Anything that reads `state.outputs.<nodeId>` (for example a gate's `round`) then sees no previous value.

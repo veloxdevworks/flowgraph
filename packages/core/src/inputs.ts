@@ -3,9 +3,12 @@
  * Mirrors desktop `packages/ui-graph` validateRunInput — keep behaviors in sync.
  */
 
-import type { InputField, InputFieldType } from "@flowgraph/spec";
+import type { GraphSpec, InputField, InputFieldType } from "@flowgraph/spec";
 
 export class InputValidationError extends Error {
+  /** Same code on every entry point: `compiled.run()`, the CLI and the server. */
+  code = "INPUT_INVALID";
+  readonly retryable = false;
   readonly issues: string[];
   readonly errors: Record<string, string>;
 
@@ -68,7 +71,10 @@ function coerceValue(
   }
 
   if (type === "json") {
-    if (raw !== null && typeof raw === "object") return { ok: true, value: raw };
+    // Objects, arrays, numbers and booleans are already-parsed JSON values; only strings are JSON text.
+    if (raw !== null && (typeof raw === "object" || typeof raw === "number" || typeof raw === "boolean")) {
+      return { ok: true, value: raw };
+    }
     if (typeof raw === "string") {
       const trimmed = raw.trim();
       if (trimmed === "") return { ok: false, error: "expected JSON" };
@@ -149,4 +155,18 @@ export function resolveAndValidateInput(
     throw new InputValidationError(issues, errors);
   }
   return result;
+}
+
+/**
+ * The one way a run's input is resolved, used by `compiled.run()` / `stream()` /
+ * `prepare({ mode: "start" })`, the CLI and the server: the graph's `input:` seed
+ * values, overlaid by the caller's values, then `inputs:` defaults, coercion and
+ * required checks. Resolving an already-resolved input returns the same values.
+ * Throws {@link InputValidationError} (code `INPUT_INVALID`).
+ */
+export function resolveGraphInput(
+  spec: Pick<GraphSpec, "inputs" | "input">,
+  provided: Record<string, unknown> | undefined | null = {},
+): Record<string, unknown> {
+  return resolveAndValidateInput(spec.inputs, { ...(spec.input ?? {}), ...(provided ?? {}) });
 }
