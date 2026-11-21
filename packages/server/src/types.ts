@@ -145,7 +145,8 @@ export interface GraphMeta {
   owner?: ThreadOwner;
   /**
    * `raw`: the stored file is the YAML as uploaded, with any `${VAR}`
-   * placeholders left in; they are filled only when a trusted author runs it.
+   * placeholders left in; declared ones in `config` / `runtime` are filled
+   * only when a trusted author runs it.
    * Absent on files stored by older servers, which held expanded YAML and are
    * never expanded again.
    */
@@ -181,9 +182,21 @@ export interface ServerConfig {
   /**
    * How callers are identified (OIDC, one legacy token, or none). Built from
    * FLOWGRAPH_AUTH_MODE / FLOWGRAPH_OIDC_* by `defaultServerConfig`. Unset:
-   * `authToken` / `authDisabled` decide, and the single principal is trusted.
+   * `authToken` / `authDisabled` decide; the single principal is trusted with
+   * `authDisabled`, and in token mode only with `trustTokenCallers` or when
+   * `authToken` is unset too (an embedded service no caller can authenticate to).
    */
   auth?: ServerAuthConfig;
+  /**
+   * Treat token-mode callers (everyone holding the shared token) as trusted
+   * authors: their uploads may use shell, script and service nodes and other
+   * host access, and their graphs' declared `${VAR}` config values are
+   * expanded. Default false: token-mode uploads get the untrusted upload
+   * policy (except on an embedded service whose config sets neither `auth`
+   * nor `authToken`). Has no effect in `oidc` mode (FLOWGRAPH_OIDC_TRUSTED_ROLES /
+   * TEAMS decide) or `none` mode. Env: `FLOWGRAPH_TRUST_TOKEN_CALLERS=1`.
+   */
+  trustTokenCallers?: boolean;
   /**
    * The server runs as a Bedrock AgentCore Runtime (`FLOWGRAPH_AGENTCORE=1`).
    * Only then does `/invocations` trust the AgentCore edge (SigV4) to have
@@ -445,6 +458,7 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
     eventBufferSize: Number(env.FLOWGRAPH_EVENT_BUFFER ?? 5000),
     authDisabled: envFlag(env, "FLOWGRAPH_AUTH_DISABLED"),
     auth: authConfigFromEnv(env),
+    trustTokenCallers: envFlag(env, "FLOWGRAPH_TRUST_TOKEN_CALLERS"),
     agentcore: envFlag(env, "FLOWGRAPH_AGENTCORE"),
     maxBodyBytes: envInt(env, "FLOWGRAPH_MAX_BODY_BYTES", 2_000_000),
     maxConcurrentRuns: envInt(env, "FLOWGRAPH_MAX_CONCURRENT_RUNS", 16),

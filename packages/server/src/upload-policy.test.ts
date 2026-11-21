@@ -459,6 +459,31 @@ describe("RunService upload policy", () => {
     });
   });
 
+  it("refuses shell nodes from token-mode callers by default and allows them with the opt-in", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-token-"));
+    const open = async (extra: { trustTokenCallers?: boolean }): Promise<RunService> => {
+      const auth: ServerAuthConfig = { mode: "token", explicit: true, insecureDev: false };
+      const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, auth, authToken: "shared", ...extra });
+      await s.init();
+      cleanup.push(() => s.close());
+      return s;
+    };
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+
+    const locked = await open({});
+    expect(locked.principalFor()).toMatchObject({ via: "token", trusted: false });
+    await expect(locked.startRun({ threadId: "tk1", yaml: SHELL.replace("NAME", "tk-shell") })).rejects.toMatchObject({
+      status: 403,
+      code: "UPLOAD_NODE_TYPE_BLOCKED",
+    });
+    expect(await locked.getRun("tk1")).toBeNull();
+
+    const opted = await open({ trustTokenCallers: true });
+    expect(opted.principalFor()).toMatchObject({ via: "token", trusted: true });
+    await opted.startRun({ threadId: "tk2", yaml: SHELL.replace("NAME", "tk2-shell") });
+    expect(await settle(opted, "tk2", ["interrupted", "error"])).toBe("interrupted");
+  });
+
   it("never expands env placeholders for untrusted authors, and never stores expanded values", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-raw-"));
     cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));

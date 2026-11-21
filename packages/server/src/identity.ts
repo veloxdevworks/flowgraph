@@ -8,7 +8,8 @@
  *             production mode). Keys come from the issuer's JWKS.
  * - `token` — one shared FLOWGRAPH_AUTH_TOKEN for a single-user server
  *             (legacy / dev). Every caller is the same principal, built from
- *             FLOWGRAPH_ORG / FLOWGRAPH_PROJECT / FLOWGRAPH_USER.
+ *             FLOWGRAPH_ORG / FLOWGRAPH_PROJECT / FLOWGRAPH_USER. It is an
+ *             untrusted author unless FLOWGRAPH_TRUST_TOKEN_CALLERS=1.
  * - `none`  — FLOWGRAPH_AUTH_DISABLED=1 (local dev). Every caller is the same
  *             anonymous principal.
  *
@@ -141,7 +142,11 @@ export function singleUserPrincipal(config: ServerConfig): Principal {
     };
   }
   const subject = id?.user ?? "token";
-  return { id: `token:${subject}`, subject, org, project, teams: [], roles: [], trusted: true, via: "token" };
+  // Anyone holding the shared token is this principal, so it is trusted only on
+  // the operator's say-so. A config with neither `auth` nor a token is an
+  // embedded RunService: no caller can present a token, so calls come from the host.
+  const embedded = config.auth === undefined && !config.authToken;
+  return { id: `token:${subject}`, subject, org, project, teams: [], roles: [], trusted: config.trustTokenCallers === true || embedded, via: "token" };
 }
 
 function bearer(authorization: string | undefined): string | undefined {
@@ -418,6 +423,9 @@ export function checkStartupAuth(config: ServerConfig): string[] {
       );
     }
     warnings.push("FLOWGRAPH_AUTH_MODE=token: every caller is one principal; use OIDC for a shared server.");
+  }
+  if (mode === "token" && config.trustTokenCallers) {
+    warnings.push("FLOWGRAPH_TRUST_TOKEN_CALLERS=1: anyone with the shared token can upload graphs that run host commands and read declared secrets.");
   }
   if (mode === "none" && durable && insecureDev) {
     warnings.push("FLOWGRAPH_INSECURE_DEV=1 with auth disabled: anyone who can reach the port owns every run and memory.");
