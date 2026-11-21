@@ -53,6 +53,11 @@ export interface RunConfig {
     timeout?: string | undefined;
   } | undefined;
   onInterrupt?: "prompt" | "fail" | "approve" | "webhook" | undefined;
+  /**
+   * Host default for agent tool calls when a node sets no `with.permission`
+   * (default "auto"). Hosts running graphs they do not fully trust set "ask" or "deny".
+   */
+  permission?: "auto" | "ask" | "deny" | undefined;
   maxRetries?: number | undefined;
   cwd?: string | undefined;
   /** Skill alias map: alias → path/package */

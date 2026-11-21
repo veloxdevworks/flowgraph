@@ -103,7 +103,7 @@ When a tool is invoked, the adapter calls back into flowgraph's runtime (`ctx.in
 
 **Governance layers:**
 
-1. **Node `permission`** — `auto` (default), `ask` (interrupt every tool call), or `deny` (no tools).
+1. **Node `permission`** — `auto`, `ask` (interrupt every tool call), or `deny` (no tools). A node that sets none uses the host's default, `runConfig.permission` in `compileGraph` (`auto` when the host sets nothing). A host running graphs it does not fully trust sets `ask` or `deny`.
 2. **`runtime.hooks`** — fine-grained control per tool name on `agent:beforeToolCall` (`veto`, `interrupt`, mutate args). Recommended for side-effecting tools like `fs_write` ([11 — Local Tools](./11-local-tools.md)).
 
 `permission: ask` and hook `do: interrupt` both route through HITL ([07 §HITL](./07-runtime-and-execution.md#5-human-in-the-loop)).
