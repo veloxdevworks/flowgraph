@@ -15,6 +15,7 @@ metadata: { ... }           # name, labels, description
 triggers: [ ... ]           # optional — host-interpreted auto-start conditions
 imports: [ ... ]            # optional — reusable subgraphs/skills/node packages
 config: { ... }             # optional — graph-level config/defaults
+secrets: [ ... ]            # optional — host environment variables the graph may read
 state: { ... }              # optional — channel (state) definitions
 inputs: [ ... ]             # optional — typed run parameters (collected before start)
 input: { ... }              # optional — default seed values for a run
@@ -293,6 +294,31 @@ config:
 `config.defaults` may set `provider` and `model` for agent nodes. Retry and timeout are not set here: the graph defaults are `runtime.retry` and `runtime.timeoutDefault`, and a node's own `retry` / `timeout` override those. `config.defaults.retry` and `config.defaults.timeout` are rejected, with an error that names the field to use instead.
 
 Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars. Expansion runs after YAML parsing, so environment values cannot inject YAML structure. `$${VAR}` escapes interpolation in those sections. Node bodies, inputs, state defaults, metadata and keys remain literal; shell `${VAR}` syntax is left for the child shell and its allowed environment. Use `{{ secret.NAME }}` for credentials instead of embedding them in config variables. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
+
+## 7a. `secrets` (declared credentials)
+
+`secrets` lists the host environment variables the graph may read as credentials. The host supplies the values; the graph only names them.
+
+```yaml
+secrets: [GITHUB_TOKEN, JIRA_TOKEN]
+
+providers:
+  openai: { kind: langchain, vendor: openai, apiKeyEnv: OPENAI_KEY_TEAM_A }   # needs OPENAI_KEY_TEAM_A in secrets
+
+nodes:
+  - id: fetch
+    type: http
+    with:
+      url: https://api.github.com/user
+      headers: { Authorization: "Bearer {{ secret.GITHUB_TOKEN }}" }
+```
+
+- Each entry is an environment variable name (letters, digits and `_`, not starting with a digit). A name listed twice is an error.
+- `{{ secret.NAME }}` reads only a declared name. `flowgraph validate` and `compileGraph` report `SECRET_UNDECLARED` for any literal `secret.NAME` / `secret["NAME"]` in a node or an `mcpServers` entry that the list does not name. A computed name (`secret[state.key]`) is checked when it is read, and the node fails with the same message. A declared name the host has not set renders as an empty string.
+- A provider `apiKeyEnv` must be declared. A provider with a `baseUrl` but no `apiKeyEnv` would send the vendor's default key (for example `OPENAI_API_KEY`) to that endpoint, so that default key must be declared too. A provider without `apiKeyEnv` or `baseUrl` reads its vendor's default key as before, without a declaration.
+- A `command` skill's `env.vars` entry marked `secret: true` reaches the skill's process only when the graph declares it; a required one that is not declared fails the skill, an `optional: true` one is left out.
+- An inline subgraph `spec:` has its own `secrets` list. A child never reads a name only its parent declares.
+- Declaring a name does not pass it to child processes. `shell`, `script`, `service` and command skills start from a small default allowlist (`PATH`, `HOME`, temp and locale variables); pass a secret explicitly, for example `env: { TOKEN: "{{ secret.GITHUB_TOKEN }}" }`.
 
 ## 8. Input / output mapping
 

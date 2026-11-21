@@ -352,10 +352,11 @@ Without a `topology` and `transport` in `CompileOptions.placement`, only the loc
 
 ## 8. Secrets & redaction
 
-- Secrets come from a `SecretProvider` (default: env vars; pluggable: file/keychain/vault). Accessed via `ctx.secrets.get(name)` or `secret.NAME` in expressions.
+- A graph lists the host environment variables it reads as credentials under the top-level `secrets:` ([02 §7a](./02-graph-spec.md#7a-secrets-declared-credentials)). `{{ secret.NAME }}`, provider `apiKeyEnv`, and the `secret: true` vars of command skills read only those names; anything else fails with `SECRET_UNDECLARED` at validation, compile, or (for computed names) run time. Host code reads secrets through `ctx.secrets.get(name)`.
 - Values accessed through `{{ secret.NAME }}` or the secret provider, and sensitive HTTP header values used in a request, are registered without enumerating the host environment. Values shorter than six characters are masked only when they occupy a whole value, so ordinary words and numeric text remain intact; use a redaction pattern for short credentials embedded in text. Returned strings are masked before state updates, checkpoint writes, replay snapshots, event buffering and logging. Configured redaction patterns apply to both state and events. Redaction preserves structured message objects and does not modify the value sent to the child process or HTTP endpoint. Secrets returned under unrelated names without ever being registered cannot be inferred; use secret references and configure patterns for application-specific sensitive data.
 - Skills/nodes declare which secrets they need (`env.vars[].secret`); preflight verifies availability without printing values.
 
+secrets: [JIRA_TOKEN]
 ```yaml
 runtime:
   secrets:

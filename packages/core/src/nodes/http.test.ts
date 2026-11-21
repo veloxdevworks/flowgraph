@@ -56,6 +56,7 @@ describe("http node", () => {
     vi.stubGlobal("fetch", fetchMock);
     const spec = httpGraph({ url: "https://example.com/{{ config.vars.path }}", headers: { Authorization: "{{ secret.FGQA_DECOY }}" } });
     spec.config = { vars: { path: "configured" } };
+    spec.secrets = ["FGQA_DECOY"];
     const result = await (await compileGraph(spec)).run();
     expect(result.status).toBe("completed");
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://example.com/configured");

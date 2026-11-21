@@ -25,6 +25,7 @@ import { setGraphFile, subgraphAliases } from "./runtime/graph-files.js";
 import "./nodes/index.js";
 import { getMediaVendor } from "./media/registry.js";
 import { offlineProviderValidations, providerConfigDiagnostics } from "./providers/diagnostics.js";
+import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
 
 export {
   envExpansionCollisionDiagnostics,
@@ -338,5 +339,6 @@ export function validateSpec(spec: GraphSpec): Diagnostic[] {
   });
 
   diagnostics.push(...providerConfigDiagnostics(spec, offlineProviderValidations(spec)));
+  diagnostics.push(...secretReferenceDiagnostics(spec));
   return diagnostics;
 }

@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ProviderAdapter } from "../types.js";
 import { createLangChainProvider, type ChatModelLike, type LangChainProviderOptions } from "./provider.js";
+import { UndeclaredSecretError, undeclaredBaseUrlKeyMessage, undeclaredSecretMessage } from "../../runtime/secret-scope.js";
 
 const DEFAULT_API_KEY_ENV: Record<LangChainVendor, string | undefined> = {
   openai: "OPENAI_API_KEY",
@@ -38,6 +39,11 @@ export interface LangChainProviderConfigInput {
   region?: string | undefined;
 }
 
+/** The env var a LangChain entry reads when it sets no `apiKeyEnv`. */
+export function defaultLangChainApiKeyEnv(vendor: string): string | undefined {
+  return isLangChainVendor(vendor) ? DEFAULT_API_KEY_ENV[vendor] : undefined;
+}
+
 function isLangChainVendor(v: string): v is LangChainVendor {
   return (
     v === "openai" ||
@@ -55,10 +61,10 @@ function readEnvKey(name: string): string | undefined {
   return raw.trim();
 }
 
-function resolveApiKey(vendor: LangChainVendor, apiKeyEnv: string): string | undefined {
+function resolveApiKey(vendor: LangChainVendor, apiKeyEnv: string, declared: ReadonlySet<string> | undefined): string | undefined {
   const primary = readEnvKey(apiKeyEnv);
   if (primary) return primary;
-  if (vendor === "xai" && apiKeyEnv === "XAI_API_KEY") {
+  if (vendor === "xai" && apiKeyEnv === "XAI_API_KEY" && (!declared || declared.has("GROK_API_KEY"))) {
     return readEnvKey("GROK_API_KEY");
   }
   return undefined;
@@ -98,7 +104,12 @@ async function importVendorModule(
   }
 }
 
-async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): Promise<ChatModelLike> {
+async function loadVendorModel(
+  name: string,
+  cfg: LangChainProviderConfigInput,
+  cwd: string,
+  declared: ReadonlySet<string>,
+): Promise<ChatModelLike> {
   const vendor = cfg.vendor;
   if (!isLangChainVendor(vendor)) {
     throw new Error(`Unknown LangChain vendor "${vendor}". Supported: ${Object.keys(VENDOR_PACKAGES).join(", ")}.`);
@@ -111,7 +122,16 @@ async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): 
 
   const apiKeyEnv = cfg.apiKeyEnv ?? DEFAULT_API_KEY_ENV[vendor];
   if (apiKeyEnv) {
-    const key = resolveApiKey(vendor, apiKeyEnv);
+    // A graph-chosen key name, or any key sent to a graph-chosen endpoint, must be declared.
+    const restricted = cfg.apiKeyEnv !== undefined || cfg.baseUrl !== undefined;
+    if (restricted && !declared.has(apiKeyEnv)) {
+      throw new UndeclaredSecretError(
+        cfg.apiKeyEnv !== undefined
+          ? undeclaredSecretMessage(apiKeyEnv, `Provider "${name}" apiKeyEnv`)
+          : undeclaredBaseUrlKeyMessage(name, apiKeyEnv),
+      );
+    }
+    const key = resolveApiKey(vendor, apiKeyEnv, restricted ? declared : undefined);
     if (!key) {
       const hints =
         vendor === "xai"
@@ -213,6 +233,11 @@ async function loadVendorModel(cfg: LangChainProviderConfigInput, cwd: string): 
 export interface LangChainProviderFromConfigOptions extends LangChainProviderOptions {
   /** Working directory for resolving optional vendor packages (graph cwd). */
   cwd?: string;
+  /**
+   * The graph's top-level `secrets:`. An explicit `apiKeyEnv`, or the key of an
+   * entry with a `baseUrl`, is read only when it is listed here.
+   */
+  secrets?: readonly string[] | undefined;
 }
 
 /**
@@ -227,8 +252,10 @@ export async function createLangChainProviderFromConfig(
     throw new Error(`Provider "${name}": only kind "langchain" is supported (got "${cfg.kind}").`);
   }
 
+  const { secrets, ...adapterOptions } = options;
   const cwd = options.cwd ?? process.cwd();
   const model = await loadVendorModel(
+    name,
     {
       vendor: cfg.vendor,
       model: cfg.model,
@@ -238,11 +265,12 @@ export async function createLangChainProviderFromConfig(
       region: "region" in cfg ? cfg.region : undefined,
     },
     cwd,
+    new Set(secrets ?? []),
   );
 
   // `cfg.model` is the default model, not the list of models the vendor accepts, so it
   // is not advertised as `models`: a node may override it with any model the vendor serves.
-  const providerOpts: LangChainProviderOptions = { name, ...options };
+  const providerOpts: LangChainProviderOptions = { name, ...adapterOptions };
 
   return createLangChainProvider(model, providerOpts);
 }
@@ -258,6 +286,7 @@ export async function createLangChainChatModelFromConfig(
   }
   const cwd = options.cwd ?? process.cwd();
   return loadVendorModel(
+    name,
     {
       vendor: cfg.vendor,
       model: cfg.model,
@@ -267,6 +296,7 @@ export async function createLangChainChatModelFromConfig(
       region: "region" in cfg ? cfg.region : undefined,
     },
     cwd,
+    new Set(options.secrets ?? []),
   );
 }
 

@@ -69,7 +69,7 @@ describe("checkUntrustedUpload", () => {
   });
 
   it("blocks env placeholders and secret templates", () => {
-    const yaml = graph(`  - { id: a, type: http, with: { url: "https://example.com/\${HOME}", headers: { x: "{{ secret.OPENAI_API_KEY }}" } } }`);
+    const yaml = graph(`  - { id: a, type: http, with: { url: "https://example.com/\${HOME}", headers: { x: "{{ secret.OPENAI_API_KEY }}" } } }`, "secrets: [OPENAI_API_KEY]");
     const codes = codesOf(yaml);
     expect(codes.some((c) => c.startsWith("UPLOAD_ENV_PLACEHOLDER_BLOCKED line"))).toBe(true);
     expect(codes).toContain("UPLOAD_SECRET_REFERENCE_BLOCKED nodes[0].with.headers.x");
@@ -80,7 +80,8 @@ describe("checkUntrustedUpload", () => {
       `  - { id: a, type: subgraph, uses: ./other.graph.yaml }
   - { id: b, type: agent, workspace: /srv, with: { prompt: hi, tools: [{ skill: deploy }] } }
   - { id: c, type: workshop, with: { diff: { cwd: / } } }`,
-      `providers:
+      `secrets: [AWS_SECRET_ACCESS_KEY]
+providers:
   openai:
     kind: langchain
     vendor: openai
@@ -150,7 +151,7 @@ describe("untrusted outbound targets and provider endpoints", () => {
     expect(codesOf(graph(hitl, `config:\n  defaults: { provider: ollama, model: llama3 }\n`))).toEqual([
       "UPLOAD_PROVIDER_ENDPOINT_BLOCKED config.defaults.provider",
     ]);
-    expect(codesOf(graph(hitl, `providers:\n  openai: { kind: langchain, vendor: openai, baseUrl: "http://10.0.0.1/v1" }\n`))).toEqual([
+    expect(codesOf(graph(hitl, `secrets: [OPENAI_API_KEY]\nproviders:\n  openai: { kind: langchain, vendor: openai, baseUrl: "http://10.0.0.1/v1" }\n`))).toEqual([
       "UPLOAD_PROVIDER_ENDPOINT_BLOCKED providers.openai.baseUrl",
     ]);
     const inline = graph(`  - id: a
@@ -178,7 +179,7 @@ describe("untrusted outbound targets and provider endpoints", () => {
       code: "PROVIDER_ENDPOINT_BLOCKED",
     });
     await expect(
-      buildServerProviders(parse(`providers:\n  o: { kind: langchain, vendor: openai, baseUrl: "http://10.0.0.1/v1" }\n`), process.cwd(), { untrusted: true }),
+      buildServerProviders(parse(`secrets: [OPENAI_API_KEY]\nproviders:\n  o: { kind: langchain, vendor: openai, baseUrl: "http://10.0.0.1/v1" }\n`), process.cwd(), { untrusted: true }),
     ).rejects.toMatchObject({ code: "PROVIDER_ENDPOINT_BLOCKED" });
     await expect(buildServerProviders(parse(`config:\n  defaults: { provider: ollama, model: llama3 }\n`), process.cwd(), {})).resolves.toBeDefined();
   });
@@ -189,7 +190,7 @@ describe("untrusted outbound targets and provider endpoints", () => {
       buildServerProviders(parse(`providers:\n  art: { kind: media, vendor: tripo }\n`), process.cwd(), { untrusted: true }),
     ).resolves.toEqual([]);
     await expect(
-      buildServerProviders(parse(`providers:\n  art: { kind: media, vendor: tripo, baseUrl: "http://10.0.0.1" }\n`), process.cwd(), { untrusted: true }),
+      buildServerProviders(parse(`secrets: [TRIPO_API_KEY]\nproviders:\n  art: { kind: media, vendor: tripo, baseUrl: "http://10.0.0.1" }\n`), process.cwd(), { untrusted: true }),
     ).rejects.toMatchObject({ status: 403, code: "PROVIDER_ENDPOINT_BLOCKED" });
   });
 

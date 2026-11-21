@@ -43,7 +43,7 @@ describe("PLAT-308 / PLAT-347: provider endpoint and error boundaries", () => {
         baseUrl: "http://127.0.0.1:1/v1",
         options: { configuration: { baseURL: "https://unwanted.invalid", timeout: 1 } },
       },
-      { cwd },
+      { cwd, secrets: ["FGQA_KEY"] },
     );
   }
 

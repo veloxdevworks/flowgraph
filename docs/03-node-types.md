@@ -289,7 +289,7 @@ See `examples/mcp/` for a runnable walkthrough.
     method: GET
     url: "https://api.github.com/repos/{{ config.vars.repo }}/pulls?state=closed"
     headers:
-      Authorization: "Bearer {{ secret.GITHUB_TOKEN }}"   # secrets via secret.* (redacted)
+      Authorization: "Bearer {{ secret.GITHUB_TOKEN }}"   # GITHUB_TOKEN listed in top-level secrets: (value redacted)
     query: { per_page: 100 }
     # body: { ... }          # for POST/PUT/PATCH; supports {{ }} interpolation
     expect: { status: [200] }            # assert; non-match ⇒ node error
@@ -361,7 +361,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 
 **Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kind_of: command` handlers. An explicit `with.input` is rendered and sent instead. When neither is set, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
 
-**Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"`. Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
+**Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"` (with `MY_TOKEN` in the graph's top-level `secrets:`). Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
 
 **Defaults:** timeout `30s`, `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
 

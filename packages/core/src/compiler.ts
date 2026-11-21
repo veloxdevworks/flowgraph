@@ -20,6 +20,7 @@ import { registry, type NodeFactory } from "./registry.js";
 import { resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { SecretRedaction, SECRET_REDACTION, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
+import { DECLARED_SECRETS } from "./runtime/secret-scope.js";
 import { createEnvSecretProvider, DEFAULT_REDACT_PATTERNS } from "./secrets.js";
 import {
   createLogger,
@@ -1536,6 +1537,7 @@ async function assembleCompiledLangGraph(
     store,
   };
   (baseCtx as Record<symbol, unknown>)[SECRET_REDACTION] = redaction;
+  (baseCtx as Record<symbol, unknown>)[DECLARED_SECRETS] = new Set(spec.secrets ?? []);
   (baseCtx as Record<symbol, unknown>)[SUBGRAPH_HOST_CONTEXT] = captureSubgraphHostContext(opts);
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
   if (opts.nodePolicy) (baseCtx as Record<symbol, unknown>)[NODE_POLICY] = opts.nodePolicy;

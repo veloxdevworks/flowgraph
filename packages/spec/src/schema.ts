@@ -1872,6 +1872,26 @@ export type InputField = z.infer<typeof InputFieldSchema>;
 export type InputFieldType = z.infer<typeof InputFieldTypeSchema>;
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Declared secrets
+// ---------------------------------------------------------------------------
+
+export const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Host environment variables the graph may read: `{{ secret.NAME }}` and
+ * provider `apiKeyEnv`. Any other name is refused. The host supplies the values.
+ */
+export const SecretsSchema = z
+  .array(z.string().regex(SECRET_NAME_PATTERN, "Invalid secret name: use an environment variable name such as GITHUB_TOKEN"))
+  .superRefine((names, ctx) => {
+    const seen = new Set<string>();
+    names.forEach((name, index) => {
+      if (seen.has(name)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index], message: `Secret "${name}" is declared more than once` });
+      seen.add(name);
+    });
+  });
+
 // Root Graph spec
 // ---------------------------------------------------------------------------
 
@@ -1901,6 +1921,8 @@ export const GraphSpecSchema = z.object({
   nodes: z.array(NodeSpecSchema),
   edges: z.array(EdgeSpecSchema),
   runtime: RuntimeSchema.optional(),
+  /** Host environment variables this graph may read (see SecretsSchema). */
+  secrets: SecretsSchema.optional(),
 }).strict();
 
 export type GraphSpec = Omit<z.infer<typeof GraphSpecSchema>, "nodes"> & {

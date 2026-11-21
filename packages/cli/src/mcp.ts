@@ -2,7 +2,7 @@ import { renderDeep } from "@flowgraph/expr";
 import { stdin, stdout } from "node:process";
 import type { McpServerDefs } from "@flowgraph/mcp";
 import type { GraphSpec } from "@flowgraph/spec";
-import type { CompileOptions, McpHub } from "@flowgraph/core";
+import { assertSecretDeclared, type CompileOptions, type McpHub } from "@flowgraph/core";
 import { lazyOptionalImport } from "./optional-deps.js";
 
 const loadMcp = lazyOptionalImport<typeof import("@flowgraph/mcp")>(
@@ -11,13 +11,19 @@ const loadMcp = lazyOptionalImport<typeof import("@flowgraph/mcp")>(
 );
 
 function buildRenderScope(spec: GraphSpec): Record<string, unknown> {
-  // Expressions read own properties only; every name resolves (unset -> "").
+  const declared = new Set(spec.secrets ?? []);
+  const check = (prop: string) => assertSecretDeclared(declared, prop, "mcpServers");
+  // Expressions read own properties only; every declared name resolves (unset -> "").
   const secret = new Proxy({} as Record<string, string>, {
-    getOwnPropertyDescriptor: (_t, prop) =>
-      typeof prop === "string" ? { configurable: true, enumerable: false } : undefined,
+    getOwnPropertyDescriptor: (_t, prop) => {
+      if (typeof prop !== "string") return undefined;
+      check(prop);
+      return { configurable: true, enumerable: false };
+    },
     get(_t, prop) {
-      const v = process.env[String(prop)];
-      return v ?? "";
+      if (typeof prop !== "string") return undefined;
+      check(prop);
+      return process.env[prop] ?? "";
     },
   });
   return {

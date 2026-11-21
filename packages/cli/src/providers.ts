@@ -111,17 +111,17 @@ export async function buildProviders(
         break;
       }
       case "langchain": {
-        providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd }));
+        providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd, secrets: spec.secrets }));
         break;
       }
       case "claude": {
         const createClaude = await loadClaudeFactory();
-        providers.push(await createClaude(name, cfg, { cwd }));
+        providers.push(await createClaude(name, cfg, { cwd, secrets: spec.secrets }));
         break;
       }
       case "cursor": {
         const createCursor = await loadCursorFactory();
-        providers.push(await createCursor(name, cfg, { cwd }));
+        providers.push(await createCursor(name, cfg, { cwd, secrets: spec.secrets }));
         break;
       }
       case "deepagents": {
@@ -148,7 +148,7 @@ export async function buildProviders(
       await createLangChainProviderFromConfig(
         defaultName,
         { kind: "langchain", vendor: defaultName, ...(model ? { model } : {}) },
-        { cwd },
+        { cwd, secrets: spec.secrets },
       ),
     );
     built.add(defaultName);

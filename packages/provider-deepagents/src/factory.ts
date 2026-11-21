@@ -30,7 +30,7 @@ export async function createDeepAgentsProviderFromConfig(
   const model = await createLangChainChatModelFromConfig(
     modelProviderName,
     source,
-    options.cwd ? { cwd: options.cwd } : {},
+    { ...(options.cwd ? { cwd: options.cwd } : {}), secrets: spec?.secrets },
   );
   const agentOptions = (cfg as DeepAgentsProviderConfig).options;
   return createDeepAgentsProvider({

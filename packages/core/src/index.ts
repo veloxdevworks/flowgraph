@@ -212,6 +212,17 @@ export {
   DEFAULT_REDACT_PATTERNS,
 } from "./secrets.js";
 export type { SecretProvider, Redactor } from "./secrets.js";
+export {
+  DECLARED_SECRETS,
+  UndeclaredSecretError,
+  assertSecretDeclared,
+  declaredSecretsOf,
+} from "./runtime/secret-scope.js";
+export {
+  providerSecretDiagnostics,
+  secretNamesIn,
+  secretReferenceDiagnostics,
+} from "./runtime/secret-declarations.js";
 
 export {
   createLogger,
