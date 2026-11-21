@@ -77,7 +77,7 @@ async function serve(service: RunService, config: ServerConfig): Promise<string>
 
 async function realServer(): Promise<{ base: string; dir: string; service: RunService }> {
   const dir = await storeDir();
-  const config: ServerConfig = { host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 100, authToken: "t" };
+  const config: ServerConfig = { host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 100, authToken: "t", trustTokenUploads: true };
   const service = new RunService(config);
   services.push(service);
   await service.init();

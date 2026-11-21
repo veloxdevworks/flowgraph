@@ -181,9 +181,20 @@ export interface ServerConfig {
   /**
    * How callers are identified (OIDC, one legacy token, or none). Built from
    * FLOWGRAPH_AUTH_MODE / FLOWGRAPH_OIDC_* by `defaultServerConfig`. Unset:
-   * `authToken` / `authDisabled` decide, and the single principal is trusted.
+   * `authToken` / `authDisabled` decide; the single principal is trusted with
+   * `authDisabled`, and with a token only when `trustTokenUploads` is set.
    */
   auth?: ServerAuthConfig;
+  /**
+   * Token mode: treat the shared-token principal (also used for in-process
+   * calls that pass no caller) as a trusted author. Unset, its graphs follow
+   * the untrusted upload rules: no shell, script, service or other host
+   * nodes, and no `${VAR}` or `secret.*` reads of the server environment.
+   * Everyone holding the token can then run host commands and read the
+   * environment variables a graph declares. Ignored in OIDC and none modes.
+   * Env: `FLOWGRAPH_TRUST_TOKEN_UPLOADS=1`. Default false.
+   */
+  trustTokenUploads?: boolean;
   /**
    * The server runs as a Bedrock AgentCore Runtime (`FLOWGRAPH_AGENTCORE=1`).
    * Only then does `/invocations` trust the AgentCore edge (SigV4) to have
@@ -453,6 +464,7 @@ export function defaultServerConfig(env: NodeJS.ProcessEnv = process.env): Serve
   const workerLabels = workerLabelsFromEnv(env);
   if (workerLabels) config.workerLabels = workerLabels;
   if (env.FLOWGRAPH_AUTH_TOKEN) config.authToken = env.FLOWGRAPH_AUTH_TOKEN;
+  if (envFlag(env, "FLOWGRAPH_TRUST_TOKEN_UPLOADS")) config.trustTokenUploads = true;
   if (env.DATABASE_URL) config.databaseUrl = env.DATABASE_URL;
   const memBackend = (env.FLOWGRAPH_MEMORY_BACKEND?.trim().toLowerCase() || "memory") as ServerMemoryBackend;
   if (!MEMORY_BACKENDS.includes(memBackend)) {

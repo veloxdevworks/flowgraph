@@ -49,6 +49,7 @@ async function service(dir: string, memory: ServerMemoryConfig, databaseUrl?: st
     port: 0,
     graphStoreDir: dir,
     eventBufferSize: 100,
+    trustTokenUploads: true,
     memory,
     ...(databaseUrl ? { databaseUrl } : {}),
   };

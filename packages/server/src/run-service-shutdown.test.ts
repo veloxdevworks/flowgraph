@@ -66,7 +66,7 @@ afterEach(async () => {
 async function service(extra: Partial<ServerConfig> = {}): Promise<RunService> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-shutdown-"));
   dirs.push(dir);
-  const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 100, authToken: "t", ...extra });
+  const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 100, authToken: "t", trustTokenUploads: true, ...extra });
   await s.init();
   return s;
 }

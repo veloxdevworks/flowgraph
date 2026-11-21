@@ -316,11 +316,28 @@ describe("startup refusal", () => {
 });
 
 describe("single-user principals", () => {
-  it("trusts the token holder, and the anonymous caller only in insecure dev", () => {
+  it("trusts the token holder only with FLOWGRAPH_TRUST_TOKEN_UPLOADS, and the anonymous caller only in insecure dev", () => {
     const base = defaultServerConfig({ FLOWGRAPH_ORG: "acme", FLOWGRAPH_USER: "ryan", FLOWGRAPH_AUTH_TOKEN: "t" });
-    expect(singleUserPrincipal(base)).toMatchObject({ id: "token:ryan", org: "acme", project: "local", trusted: true, via: "token" });
+    expect(base.trustTokenUploads).toBeUndefined();
+    expect(singleUserPrincipal(base)).toMatchObject({ id: "token:ryan", org: "acme", project: "local", trusted: false, via: "token" });
+    const trusting = defaultServerConfig({ FLOWGRAPH_ORG: "acme", FLOWGRAPH_USER: "ryan", FLOWGRAPH_AUTH_TOKEN: "t", FLOWGRAPH_TRUST_TOKEN_UPLOADS: "true" });
+    expect(trusting.trustTokenUploads).toBe(true);
+    expect(singleUserPrincipal(trusting)).toMatchObject({ id: "token:ryan", trusted: true, via: "token" });
+    const { auth: _auth, ...legacy } = base;
+    expect(singleUserPrincipal({ ...legacy, trustTokenUploads: true }).trusted).toBe(true);
+    expect(singleUserPrincipal(legacy).trusted).toBe(false);
     expect(singleUserPrincipal(defaultServerConfig({ FLOWGRAPH_AUTH_DISABLED: "1" }))).toMatchObject({ id: "anonymous", trusted: false });
     expect(singleUserPrincipal(defaultServerConfig({ FLOWGRAPH_AUTH_DISABLED: "1", FLOWGRAPH_INSECURE_DEV: "1" })).trusted).toBe(true);
+  });
+
+  it("warns when token uploads are trusted, and that the setting does nothing outside token mode", () => {
+    const cfg = (env: Record<string, string>): ServerConfig => defaultServerConfig({ FLOWGRAPH_GRAPH_STORE: os.tmpdir(), ...env });
+    expect(checkStartupAuth(cfg({ FLOWGRAPH_AUTH_TOKEN: "t", FLOWGRAPH_TRUST_TOKEN_UPLOADS: "1" }))).toEqual([
+      expect.stringMatching(/^FLOWGRAPH_TRUST_TOKEN_UPLOADS=1: everyone holding FLOWGRAPH_AUTH_TOKEN is a trusted author/),
+    ]);
+    expect(checkStartupAuth(cfg({ FLOWGRAPH_AUTH_DISABLED: "1", FLOWGRAPH_TRUST_TOKEN_UPLOADS: "1" }))).toEqual([
+      "FLOWGRAPH_TRUST_TOKEN_UPLOADS only applies to token mode and is ignored in none mode.",
+    ]);
   });
 
   it("the token authenticator compares the shared token", async () => {

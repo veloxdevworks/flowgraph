@@ -83,7 +83,7 @@ function captureErrorLog(): Array<Record<string, unknown>> {
 async function newService(): Promise<{ service: RunService; dir: string }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-event-errors-"));
   dirs.push(dir);
-  const service = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 200, errorIdKey: KEY });
+  const service = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 200, errorIdKey: KEY, trustTokenUploads: true });
   services.push(service);
   await service.init();
   return { service, dir };

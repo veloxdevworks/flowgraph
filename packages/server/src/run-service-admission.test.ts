@@ -9,7 +9,7 @@ const dirs: string[] = [], services: RunService[] = [];
 afterEach(async () => { for (const service of services.splice(0)) await service.close(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 async function pair() {
   const dir = await mkdtemp(join(tmpdir(), "fg-service-admission-")); dirs.push(dir);
-  const open = async () => { const service = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 100, memory: { backend: "sqlite", identity: { org: "acme", project: "local" } } }); await service.init(); services.push(service); return service; };
+  const open = async () => { const service = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 100, trustTokenUploads: true, memory: { backend: "sqlite", identity: { org: "acme", project: "local" } } }); await service.init(); services.push(service); return service; };
   return { a: await open(), b: await open() };
 }
 const yaml = JSON.stringify({ apiVersion: "flowgraph/v1", kind: "Graph", metadata: { name: "admission" }, nodes: [{ id: "gate", type: "hitl", with: { mode: "approve", message: "yes?" } }, { id: "work", type: "function", with: { fn: "qaServerAdmission" } }], edges: [{ from: "START", to: "gate" }, { from: "gate", to: "work" }, { from: "work", to: "END" }] });

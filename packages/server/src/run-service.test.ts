@@ -44,6 +44,7 @@ describe("RunService", () => {
       port: 0,
       graphStoreDir: dir,
       eventBufferSize: 100,
+      trustTokenUploads: true,
     };
     service = new RunService(config);
     await service.init();

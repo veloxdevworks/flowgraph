@@ -353,7 +353,7 @@ describe("placement end to end over the direct transport", () => {
     }) as unknown as GraphSpec;
 
   async function resolve(workerLabels: NonNullable<ServerConfig["workerLabels"]>, spec: GraphSpec) {
-    const { base } = await boot({ authDisabled: false, authToken: "tok", workerLabels });
+    const { base } = await boot({ authDisabled: false, authToken: "tok", trustTokenUploads: true, workerLabels });
     return resolvePlacements(spec, {
       localLabels: ["os:macos"],
       topology: { targets: { studio: { url: base, token: "tok" } } },
