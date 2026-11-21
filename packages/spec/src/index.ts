@@ -65,6 +65,7 @@ export {
   SkillWithSchema,
   SubgraphWithSchema,
   MapWithSchema,
+  MapBodyNodeSchema,
   WorktreeWithSchema,
   HitlWithSchema,
   HitlRouteSchema,

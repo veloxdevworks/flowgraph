@@ -20,7 +20,9 @@ import {
   normalizeHitlRoutes,
 } from "../nodes/hitl-routes.js";
 import type { Hook } from "../hooks/types.js";
+import { KNOWN_PHASES, knownHookDirective } from "../hooks/builtin.js";
 import { recoveryTargets } from "./routing-policy.js";
+import { cronScheduleProblem, isKnownTimeZone } from "./cron-schedule.js";
 
 /** Node ids on an edge `from`: one source, or every source of a barrier. */
 function edgeFromIds(from: string | readonly string[]): string[] {
@@ -369,9 +371,9 @@ export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {
 }
 
 /**
- * LangGraph drops node-update keys that are not declared in the state annotation.
  * Flag any output/collect/stateMap.out target that is missing from state.channels.
- * (compileGraph auto-declares these; this lint still catches the authoring mistake.)
+ * compileGraph declares these as `type: any` with last-write-wins, so the write is
+ * kept; this is a warning that the channel's type and reducer are not stated.
  */
 export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
@@ -382,12 +384,11 @@ export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[
     // Reserved per-node bag — always auto-declared by ensureDeclaredOutputChannels.
     if (channel === OUTPUTS_CHANNEL) return;
     diagnostics.push({
-      severity: "error",
+      severity: "warning",
       code: "UNDECLARED_OUTPUT_CHANNEL",
       message:
-        `Node "${nodeId}" writes to channel "${channel}" but it is not declared in state.channels — ` +
-        `the write will be silently dropped at runtime unless the channel is declared ` +
-        `(or auto-declared by the runtime/compiler)`,
+        `Node "${nodeId}" writes to channel "${channel}", which is not declared in state.channels. ` +
+        `The channel is declared for you as type any with last-write-wins; declare it to set its type and reducer.`,
       path,
     });
   };
@@ -1256,6 +1257,347 @@ export function barrierEdgeDiagnostics(spec: GraphSpec, hooks: Hook[] = []): Dia
       });
     }
   });
+  return diagnostics;
+}
+
+/**
+ * Lints that read only one graph's own nodes, edges and channels. Run on each
+ * nested graph (inline subgraph `spec`); the top level gets them, and the lints
+ * that walk the whole tree, from {@link graphLintDiagnostics}.
+ */
+export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+  return [
+    ...hitlRouteDiagnostics(spec),
+    ...hitlSelectDiagnostics(spec),
+    ...topologyDiagnostics(spec),
+    ...channelReducerDiagnostics(spec),
+    ...undeclaredOutputChannelDiagnostics(spec),
+    ...nodeChannelNameCollisionDiagnostics(spec),
+    ...fanInLastWriteDiagnostics(spec),
+    ...unevenFanInDiagnostics(spec),
+    ...barrierEdgeDiagnostics(spec),
+    ...unconditionalFanOutDiagnostics(spec),
+    ...subgraphRefDiagnostics(spec),
+  ];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** A nested graph's diagnostic, with its path under the node that holds it. */
+function nested(d: Diagnostic, prefix: string): Diagnostic {
+  return { ...d, path: d.path ? `${prefix}${d.path}` : prefix.replace(/\.$/, "") };
+}
+
+/** Most graphs and map bodies one spec may nest, counting the top level. */
+export const MAX_GRAPH_NESTING = 32;
+
+/**
+ * Most nodes one spec may expand to, counting a nested graph or map body once
+ * for each place it is used. Validation and compile visit every such place.
+ */
+export const MAX_GRAPH_NODES = 10_000;
+
+interface GraphShape {
+  /** Path of the first nested graph or map body beyond {@link MAX_GRAPH_NESTING}. */
+  overflowPath?: string;
+  /** Nodes once each nested graph and map body is counted at every place it is used. */
+  nodes: number;
+}
+
+/**
+ * Nesting depth and expanded size of a spec. Walks plain objects only, once per
+ * object even when it is shared, so a cyclic or heavily shared programmatic
+ * spec ends here instead of overflowing the stack or taking exponential time
+ * in a schema parse or a later lint.
+ */
+function graphShape(spec: GraphSpec): GraphShape {
+  // Levels each object spans (counting its own) and the nodes it expands to.
+  const known = new WeakMap<object, { height: number; nodes: number }>();
+  const open = new WeakSet<object>();
+  class Overflow {
+    constructor(readonly path: string) {}
+  }
+  const visit = (value: Record<string, unknown>, path: string, level: number, measure: () => { height: number; nodes: number }) => {
+    if (level > MAX_GRAPH_NESTING || open.has(value)) throw new Overflow(path);
+    const seen = known.get(value);
+    if (seen) {
+      if (level + seen.height - 1 > MAX_GRAPH_NESTING) throw new Overflow(path);
+      return seen;
+    }
+    open.add(value);
+    const result = measure();
+    open.delete(value);
+    known.set(value, result);
+    return result;
+  };
+  const graph = (value: Record<string, unknown>, path: string, level: number) => visit(value, path, level, () => {
+    let height = 1;
+    let nodes = 0;
+    for (const item of Array.isArray(value.nodes) ? value.nodes : []) {
+      if (!isRecord(item)) continue;
+      const child = node(item, `${path}nodes.${String(item.id)}`, level);
+      height = Math.max(height, child.height);
+      nodes += child.nodes;
+    }
+    return { height, nodes };
+  });
+  const node = (value: Record<string, unknown>, path: string, level: number): { height: number; nodes: number } => visit(value, path, level, () => {
+    let height = 1;
+    let nodes = 1;
+    if (isRecord(value.spec)) {
+      const inner = graph(value.spec, `${path}.spec.`, level + 1);
+      height = Math.max(height, 1 + inner.height);
+      nodes += inner.nodes;
+    }
+    const body = isRecord(value.with) ? value.with.node : undefined;
+    if (isRecord(body)) {
+      const inner = node(body, `${path}.with.node`, level + 1);
+      height = Math.max(height, 1 + inner.height);
+      nodes += inner.nodes;
+    }
+    return { height, nodes };
+  });
+  try {
+    return { nodes: graph(spec as unknown as Record<string, unknown>, "", 1).nodes };
+  } catch (err) {
+    if (err instanceof Overflow) return { overflowPath: err.path.replace(/\.$/, "") || "nodes", nodes: Number.NaN };
+    throw err;
+  }
+}
+
+/** Diagnostics that stop every other check, because those walk each place a nested graph is used. */
+export const GRAPH_SHAPE_CODES: ReadonlySet<string> = new Set(["GRAPH_NESTING_TOO_DEEP", "GRAPH_TOO_LARGE"]);
+
+/**
+ * `GRAPH_NESTING_TOO_DEEP` when graphs and map bodies nest beyond
+ * {@link MAX_GRAPH_NESTING} or refer back to themselves, `GRAPH_TOO_LARGE` when
+ * the spec expands to more than {@link MAX_GRAPH_NODES} nodes, else nothing.
+ * Run it before any other walk of a programmatic spec.
+ */
+export function graphShapeDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const shape = graphShape(spec);
+  if (shape.overflowPath !== undefined) {
+    return [{
+      severity: "error",
+      code: "GRAPH_NESTING_TOO_DEEP",
+      path: shape.overflowPath,
+      message: `Graphs and map bodies nest more than ${MAX_GRAPH_NESTING} levels deep or refer back to themselves; flatten the nesting`,
+    }];
+  }
+  if (shape.nodes > MAX_GRAPH_NODES) {
+    return [{
+      severity: "error",
+      code: "GRAPH_TOO_LARGE",
+      path: "nodes",
+      message: `The graph expands to ${shape.nodes} nodes, counting each nested graph and map body at every place it is used, more than ${MAX_GRAPH_NODES}; use the nested graphs in fewer places or flatten the nesting`,
+    }];
+  }
+  return [];
+}
+
+export interface GraphStructureOptions {
+  /**
+   * Also report the authoring checks that do not stop a compile: graph
+   * `inputs` and `triggers` at every level, and the body lints of
+   * {@link graphBodyLintDiagnostics} for nested graphs (the top level gets
+   * those from `graphLintDiagnostics`).
+   */
+  lints?: boolean;
+}
+
+/**
+ * The checks a graph must pass before it compiles, applied to the graph and
+ * to every graph nested in it at any depth: each inline subgraph `spec` and
+ * each `map` body (`with.node`, including a subgraph body's own `spec`).
+ *
+ * - nesting and expanded size stay within {@link MAX_GRAPH_NESTING} and
+ *   {@link MAX_GRAPH_NODES} (otherwise only that is reported)
+ * - hook phases and directives are known
+ * - node ids are unique; edges name known nodes; `END` is never a source and
+ *   `START` never an edge, router or hitl route target; there is an edge from `START`
+ * - every node type is registered and its `with` matches that type's schema
+ *
+ * `compileGraph` refuses a spec with any error among these. `validateSpec`
+ * passes `lints: true` and reports the rest of its lints alongside, and
+ * `loadGraph` applies `validateSpec` to `uses` files.
+ */
+export function graphStructureDiagnostics(spec: GraphSpec, options: GraphStructureOptions = {}): Diagnostic[] {
+  const shape = graphShapeDiagnostics(spec);
+  if (shape.length) return shape;
+  const out: Diagnostic[] = [];
+  graphStructure(spec, "", out, options.lints === true);
+  return out;
+}
+
+function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean): void {
+  const push = (...items: Diagnostic[]) => out.push(...(prefix ? items.map((d) => nested(d, prefix)) : items));
+  const nodes = Array.isArray(spec.nodes) ? spec.nodes : [];
+  const edges = Array.isArray(spec.edges) ? spec.edges : [];
+
+  for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
+    if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook phase "${hook.on}". Allowed phases: ${[...KNOWN_PHASES].join(", ")}` });
+  }
+  for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
+    if (!knownHookDirective(hook.do)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Unknown hook directive "${hook.do}". Use retry, continue, ignore, interrupt, fail, redact or route:<node>.` });
+  }
+
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const seen = new Set<string>();
+  for (const node of nodes) {
+    if (seen.has(node.id)) push({ severity: "error", code: "DUPLICATE_NODE_ID", message: `Duplicate node id: "${node.id}"`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
+    seen.add(node.id);
+  }
+
+  for (const [index, edge] of edges.entries()) {
+    const check = (ref: string) => {
+      if (ref === "START" || ref === "END") return;
+      if (!nodeIds.has(ref)) push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"`, ...(prefix ? { path: `edges[${index}]` } : {}) });
+    };
+    const targets = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : edge.branch.map((b) => b.to);
+    // A `from` list is checked in barrierEdgeDiagnostics, including unknown ids, START and END.
+    if (!Array.isArray(edge.from)) {
+      check(edge.from);
+      if (edge.from === "END") {
+        push({ severity: "error", code: "EDGE_FROM_END", path: `edges[${index}].from`, message: 'An edge cannot start at "END": the run has finished there. Start the edge at a node.' });
+      }
+    }
+    for (const target of targets) check(target);
+    if (targets.includes("START")) {
+      push({ severity: "error", code: "EDGE_TO_START", path: `edges[${index}]`, message: 'An edge cannot lead to "START". Point it at the first node instead.' });
+    }
+  }
+
+  if (!edges.some((e) => (Array.isArray(e.from) ? e.from : [e.from]).includes("START"))) {
+    push({ severity: "error", code: "NO_START_EDGE", message: 'Graph has no edge from "START"', ...(prefix ? { path: "edges" } : {}) });
+  }
+
+  const allTargets = new Set<string>();
+  for (const edge of edges) {
+    if ("to" in edge) for (const t of Array.isArray(edge.to) ? edge.to : [edge.to]) allTargets.add(t);
+    if ("branch" in edge) for (const b of edge.branch) allTargets.add(b.to);
+  }
+  // A router's or routing hitl's own `with.routes` also lead somewhere.
+  for (const node of nodes) {
+    const routeTargets = declaredRouteTargets(spec, node.id);
+    for (const t of routeTargets) allTargets.add(t);
+    if (routeTargets.includes("START")) {
+      push({ severity: "error", code: "ROUTE_TO_START", path: `nodes.${node.id}.with.routes`, message: `${node.type === "hitl" ? "Hitl" : "Router"} "${node.id}" has a route to "START". Route to the first node instead.` });
+    }
+  }
+  for (const node of nodes) {
+    if (!allTargets.has(node.id)) push({ severity: "warning", code: "NO_INBOUND_EDGE", message: `Node "${node.id}" has no inbound edges`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
+  }
+
+  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out, lints);
+
+  if (lints) {
+    push(...inputFieldDiagnostics(spec), ...triggerDiagnostics(spec));
+    if (prefix) push(...graphBodyLintDiagnostics(spec));
+  }
+}
+
+/** Type registration and `with` shape for one node, then the graphs nested in it. */
+function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean): void {
+  const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
+  const factory = registry.get(node.type);
+  if (!factory) {
+    push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
+  } else {
+    const configResult = factory.configSchema.safeParse(node.with ?? {});
+    if (!configResult.success) {
+      for (const issue of configResult.error.issues) {
+        const fieldPath = issue.path.join(".");
+        push({
+          severity: "error",
+          code: "NODE_CONFIG_ERROR",
+          message: fieldPath ? `${fieldPath}: ${issue.message}` : issue.message,
+          path: fieldPath ? `${path}.with.${fieldPath}` : `${path}.with`,
+        });
+      }
+    }
+  }
+  if (node.type === "map") {
+    const body = (node.with as { node?: unknown } | undefined)?.node;
+    // A body without a type is already reported against the map's own `with`.
+    if (isRecord(body) && typeof body.type === "string") {
+      const id = typeof body.id === "string" ? body.id : undefined;
+      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out, lints);
+    }
+  }
+  if (node.type === "subgraph" && isRecord(node.spec) && Array.isArray(node.spec.nodes)) {
+    graphStructure(node.spec, `${prefix}${path}.spec.`, out, lints);
+  }
+}
+
+function inputDefaultProblem(field: NonNullable<GraphSpec["inputs"]>[number]): string | undefined {
+  const value = field.default;
+  if (value === undefined || value === null) return undefined;
+  switch (field.type ?? "string") {
+    case "string":
+    case "text":
+      return typeof value === "string" ? undefined : "must be a string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value) ? undefined : "must be a number";
+    case "boolean":
+      return typeof value === "boolean" ? undefined : "must be true or false";
+    case "select":
+      if (typeof value !== "string") return "must be a string";
+      return !field.options?.length || field.options.includes(value) ? undefined : `must be one of: ${field.options.join(", ")}`;
+    case "json":
+      if (typeof value !== "string") return undefined;
+      try {
+        JSON.parse(value);
+        return undefined;
+      } catch {
+        return "is a string, so it must be JSON text; write the value itself in YAML instead";
+      }
+    default:
+      return undefined;
+  }
+}
+
+/** Graph `inputs`: unique keys, options for each select, and defaults of the declared type. */
+export function inputFieldDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const seen = new Set<string>();
+  for (const [index, field] of (Array.isArray(spec.inputs) ? spec.inputs : []).entries()) {
+    const path = `inputs[${index}]`;
+    if (seen.has(field.key)) {
+      diagnostics.push({ severity: "error", code: "DUPLICATE_INPUT_KEY", path: `${path}.key`, message: `Input "${field.key}" is declared more than once` });
+    }
+    seen.add(field.key);
+    if (field.type === "select" && !field.options?.length) {
+      diagnostics.push({ severity: "error", code: "INPUT_OPTIONS_MISSING", path: `${path}.options`, message: `Input "${field.key}" has type select but no options; list the values it accepts` });
+    }
+    const problem = inputDefaultProblem(field);
+    if (problem) {
+      diagnostics.push({ severity: "error", code: "INPUT_DEFAULT_TYPE", path: `${path}.default`, message: `Input "${field.key}" (type ${field.type ?? "string"}): default ${problem}` });
+    }
+  }
+  return diagnostics;
+}
+
+/** Graph `triggers`: unique ids, and a valid schedule and time zone on each cron trigger. */
+export function triggerDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const seen = new Set<string>();
+  for (const [index, trigger] of (Array.isArray(spec.triggers) ? spec.triggers : []).entries()) {
+    const path = `triggers[${index}]`;
+    if (seen.has(trigger.id)) {
+      diagnostics.push({ severity: "error", code: "DUPLICATE_TRIGGER_ID", path: `${path}.id`, message: `Trigger id "${trigger.id}" is used more than once; hosts use it to tell triggers apart` });
+    }
+    seen.add(trigger.id);
+    if (trigger.type !== "cron") continue;
+    const problem = cronScheduleProblem(trigger.schedule);
+    if (problem) {
+      diagnostics.push({ severity: "error", code: "TRIGGER_CRON_INVALID", path: `${path}.schedule`, message: `Trigger "${trigger.id}" schedule "${trigger.schedule}": ${problem}` });
+    }
+    if (trigger.timezone !== undefined && !isKnownTimeZone(trigger.timezone)) {
+      diagnostics.push({ severity: "error", code: "TRIGGER_TIMEZONE_INVALID", path: `${path}.timezone`, message: `Trigger "${trigger.id}" timezone "${trigger.timezone}" is not a known IANA time zone, such as "America/Denver" or "UTC"` });
+    }
+  }
   return diagnostics;
 }
 

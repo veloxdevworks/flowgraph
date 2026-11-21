@@ -111,6 +111,7 @@ flowgraph validate ./my.graph.yaml --strict --format json
 
 - Accepts a **single graph file path** (glob patterns not supported yet).
 - Loads and parses the graph, then lints it. It does not run the graph, call a model, or load `imports` modules (`nodes`, `providers`, `reducers`). Skill, agent and subgraph aliases are read as data.
+- Map bodies, inline subgraph `spec` blocks and `uses:` subgraph files are linted like the graph itself; a file's diagnostics name that file ([02 §11](./02-graph-spec.md#11-validation--diagnostics)).
 - A node type that is not already registered is an error. On a graph that declares a `nodes` import, that type — including a typo — is a warning, `PLUGIN_TYPE_UNRESOLVED`, because validate does not load the module. A `custom:` reducer is an error unless a `reducers` import is declared, in which case it is a warning, `UNREGISTERED_REDUCER`. `flowgraph run` loads those modules when the graph executes.
 - `--strict` promotes warnings to errors.
 - `--format json` emits machine-readable diagnostics.
@@ -139,7 +140,7 @@ flowgraph graph ./triage.graph.yaml --format json
 flowgraph schema --out schema/v1.json
 ```
 
-Prints or writes the Graph JSON Schema from `@flowgraph/spec`. Use in YAML headers for editor autocomplete:
+Prints or writes the Graph JSON Schema (draft-07) from `@flowgraph/spec`. Its `$id` is `https://veloxdevworks.com/flowgraph/schema/v1.json`; a breaking schema change is published at a new versioned path. The root refers to the `GraphSpec` definition through `allOf`, and the schema compiles under Ajv strict mode with `allowUnionTypes`. Nodes, inline subgraph `spec` blocks and `map` bodies are recursive definitions, so nested graphs get the same completion and checks as the top level. Per-type `with` fields are not typed yet. Use in YAML headers for editor autocomplete:
 
 ```yaml
 # yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json

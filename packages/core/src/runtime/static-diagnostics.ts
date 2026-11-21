@@ -85,7 +85,12 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
     }
   };
   for (const node of spec.nodes) {
-    templates(node.with, `nodes.${node.id}.with`);
+    // Script source is never rendered, so `{{` there (JSX `style={{ … }}`) is code, not a template.
+    // A map body is rendered with the item first, so its script code is still checked.
+    if (node.type === "script" && node.with && typeof node.with === "object" && "code" in node.with) {
+      const { code: _code, ...rest } = node.with as Record<string, unknown>;
+      templates(rest, `nodes.${node.id}.with`);
+    } else templates(node.with, `nodes.${node.id}.with`);
     templates(node.input, `nodes.${node.id}.input`);
     if (node.when)
       check(node.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim(), `nodes.${node.id}.when`);
@@ -96,7 +101,9 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
         if (route.when && !route.when.includes("{{"))
           check(route.when, `nodes.${node.id}.with.routes.${key}.when`);
       }
-    if (node.spec) diagnostics.push(...staticGraphDiagnostics(node.spec));
+    if (node.spec) {
+      for (const d of staticGraphDiagnostics(node.spec)) diagnostics.push({ ...d, path: `nodes.${node.id}.spec.${d.path}` });
+    }
   }
   for (const [index, edge] of spec.edges.entries())
     if ("branch" in edge) {

@@ -96,7 +96,7 @@ describe("validateSpec graph lint", () => {
     expect(diags.some((d) => d.code === "UNREACHABLE_FROM_START" && d.message.includes("orphan"))).toBe(true);
   });
 
-  it("errors when output.to targets an undeclared channel", () => {
+  it("warns when output.to targets an undeclared channel, which compile declares", () => {
     const diags = validateSpec({
       metadata: { name: "undeclared-to" },
       nodes: [
@@ -113,14 +113,14 @@ describe("validateSpec graph lint", () => {
       diags.some(
         (d) =>
           d.code === "UNDECLARED_OUTPUT_CHANNEL" &&
-          d.severity === "error" &&
+          d.severity === "warning" &&
           d.message.includes("shell") &&
           d.path === "nodes.shell-1.with.output",
       ),
     ).toBe(true);
   });
 
-  it("errors when output.map keys target undeclared channels", () => {
+  it("warns when output.map keys target undeclared channels", () => {
     const diags = validateSpec({
       metadata: { name: "undeclared-map" },
       nodes: [
@@ -145,7 +145,7 @@ describe("validateSpec graph lint", () => {
     expect(undeclared[0]!.message).toContain("missing");
   });
 
-  it("errors when subgraph stateMap.out keys target undeclared parent channels", () => {
+  it("warns when subgraph stateMap.out keys target undeclared parent channels", () => {
     const diags = validateSpec({
       metadata: { name: "undeclared-statemap" },
       nodes: [
@@ -178,7 +178,7 @@ describe("validateSpec graph lint", () => {
     );
   });
 
-  it("does not error when output channels are declared", () => {
+  it("does not warn when output channels are declared", () => {
     const diags = validateSpec({
       metadata: { name: "declared-ok" },
       nodes: [
