@@ -111,6 +111,8 @@ runtime: { retry: { maxAttempts: 2, backoff: exponential, baseMs: 500 }, timeout
   timeout: 30s
 ```
 
+Precedence is node `retry` / `timeout`, then `runtime.retry` / `runtime.timeoutDefault`. `config.defaults.retry`, `config.defaults.timeout`, and HTTP `with.retry` / `with.timeout` are rejected.
+
 - **Backoff:** `fixed | linear | exponential` with jitter; `baseMs`, `maxMs`, `factor`.
 - **retryOn:** error classes / HTTP statuses; non-matching errors fail immediately.
 - **Idempotency:** nodes declare `sideEffecting`. On resume after an interrupt, LangGraph **re-runs the interrupted node from its start**, so side-effecting nodes must be idempotent or guarded. The runtime helps via an optional **idempotency key** (`ctx.once(key, fn)` runs `fn` at most once per key per thread, recorded in the checkpoint) so a "create ticket" doesn't double-fire on resume.
