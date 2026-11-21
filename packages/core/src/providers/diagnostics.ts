@@ -2,6 +2,7 @@ import type { Diagnostic, GraphSpec, NodeSpec } from "@flowgraph/spec";
 import type { ProviderAdapter } from "./types.js";
 import { getProvider } from "./registry.js";
 import { langchainConfigDiagnostics } from "./langchain/provider.js";
+import { providerSecretDiagnostics } from "../runtime/secret-declarations.js";
 
 /** The parts of a provider adapter that config diagnostics read. */
 export type ProviderValidation = Pick<ProviderAdapter, "name" | "validate"> & {
@@ -108,5 +109,6 @@ export function providerConfigDiagnostics(
       });
     }
   }
+  out.push(...providerSecretDiagnostics(spec));
   return out;
 }

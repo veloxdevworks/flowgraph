@@ -12,9 +12,8 @@ import { defineNode, type CompiledNode, type BuildContext, type NodeResult } fro
 import type { NodeRunContext } from "../context.js";
 import { nodePolicyOf } from "../node-policy.js";
 import { guardedFetch } from "../outbound-http.js";
-import { observeSensitiveHeaders } from "../runtime/secret-redaction.js";
+import { maskSensitiveHeaders, observeSensitiveHeaders } from "../runtime/secret-redaction.js";
 import { secretScope } from "../runtime/secret-scope.js";
-import { redactHeaders } from "./http-request.js";
 import { applyOutput } from "./output.js";
 
 const configSchema = WebhookWithSchema;
@@ -109,7 +108,7 @@ async function runEmit(
     return {
       status: response.status,
       body: responseBody,
-      headers: redactHeaders(responseHeaders),
+      headers: maskSensitiveHeaders(responseHeaders),
     };
   });
 

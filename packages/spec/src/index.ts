@@ -93,6 +93,8 @@ export {
   LocalToolsFsSchema,
   LocalToolsSchema,
   RuntimeSchema,
+  SecretsSchema,
+  SECRET_NAME_PATTERN,
   CheckpointRetentionSchema,
   RetrySchema,
   DurationSchema,

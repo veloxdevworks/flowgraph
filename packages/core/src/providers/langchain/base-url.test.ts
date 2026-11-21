@@ -47,7 +47,7 @@ describe("PLAT-308: baseUrl reaches each vendor client under the option it reads
     await createLangChainProviderFromConfig(
       "qa",
       { vendor, model: "test-model", apiKeyEnv: "FGQA_KEY", baseUrl: "http://127.0.0.1:1/v1" },
-      { cwd },
+      { cwd, secrets: ["FGQA_KEY"] },
     );
     const options = JSON.parse(readFileSync(join(cwd, "options.json"), "utf8"));
     expect(options[field]).toBe("http://127.0.0.1:1/v1");

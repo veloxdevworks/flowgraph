@@ -128,6 +128,7 @@ describe("router model mode", () => {
           provider: "router-mock",
           with: {
             mode: "model",
+            input: "{{ input.text }}",
             instruction: "Pick a route.",
             routes: {
               bug: { to: "handle" },

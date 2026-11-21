@@ -24,7 +24,6 @@ edges:
   - { from: gate, to: END }
 runtime:
   checkpoint: { enabled: true, backend: memory }
-  hitl: { onInterrupt: fail }
 `;
 
 /** Resolves when the registry next records `want` for the thread; no polling. */

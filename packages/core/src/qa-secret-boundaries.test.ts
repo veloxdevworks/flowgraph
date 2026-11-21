@@ -26,6 +26,7 @@ const spec = (node: unknown, runtime = {}) =>
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "secret-boundary" },
+    secrets: ["FGQA_R2_KEY", "FGQA_R2_SHORT"],
     nodes: [{ id: "echo", ...(node as object) }],
     edges: [
       { from: "START", to: "echo" },

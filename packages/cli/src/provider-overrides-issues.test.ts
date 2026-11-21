@@ -38,6 +38,7 @@ it("a correctly configured run with a per-node model override passes --fail-on-i
   try {
     writeFileSync(join(cwd, "flow.yaml"), JSON.stringify({
       apiVersion: "flowgraph/v1", kind: "Graph", metadata: { name: "override-issues" },
+      secrets: ["FGQA_OVERRIDE_KEY"],
       providers: { lc: { kind: "langchain", vendor: "openai", model: "default-model", apiKeyEnv: "FGQA_OVERRIDE_KEY", baseUrl: `http://127.0.0.1:${port}/v1` } },
       nodes: [{ id: "ask", type: "agent", provider: "lc", model: "override-model", with: { prompt: "Say done" } }],
       edges: [{ from: "START", to: "ask" }, { from: "ask", to: "END" }],

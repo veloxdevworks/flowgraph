@@ -103,7 +103,7 @@ When a tool is invoked, the adapter calls back into flowgraph's runtime (`ctx.in
 
 **Governance layers:**
 
-1. **Node `permission`** — `auto` (default), `ask` (interrupt every tool call), or `deny` (no tools).
+1. **Node `permission`** — `auto`, `ask` (interrupt every tool call), or `deny` (no tools). A node that sets none uses the host's default, `runConfig.permission` in `compileGraph` (`auto` when the host sets nothing). A host running graphs it does not fully trust sets `ask` or `deny`. That value is a default, not a ceiling: a node's own `permission: auto`, or `providers.claude.permissionMode` (for example `bypassPermissions`), still overrides it, so also gate untrusted graphs with hooks or a node policy.
 2. **`runtime.hooks`** — fine-grained control per tool name on `agent:beforeToolCall` (`veto`, `interrupt`, mutate args). Recommended for side-effecting tools like `fs_write` ([11 — Local Tools](./11-local-tools.md)).
 
 `permission: ask` and hook `do: interrupt` both route through HITL ([07 §HITL](./07-runtime-and-execution.md#5-human-in-the-loop)).
@@ -113,6 +113,8 @@ When a tool is invoked, the adapter calls back into flowgraph's runtime (`ctx.in
 Graphs declare LLM backends once at the top level. The CLI builds and registers them on `flowgraph run` / `resume`:
 
 ```yaml
+secrets: [ANTHROPIC_API_KEY]          # every apiKeyEnv must be declared
+
 providers:
   main:
     kind: langchain
@@ -133,6 +135,8 @@ config:
 
 Install the vendor package you reference (`@langchain/anthropic`, `@langchain/openai`, `@langchain/aws`, etc.) and set the API key env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). Ollama needs no key; set `baseUrl` if not localhost.
 
+**Keys and `secrets:`.** A provider's `apiKeyEnv` must be listed in the graph's top-level `secrets:`; otherwise `flowgraph validate` and `compileGraph` report `SECRET_UNDECLARED` and the provider factory refuses to read it. A provider with a `baseUrl` and no `apiKeyEnv` sends the vendor's default key to that endpoint, so the default key (for example `ANTHROPIC_API_KEY` above) must be declared too. A provider with neither reads the vendor's default key without a declaration. Hosts building providers themselves pass the list as `secrets: spec.secrets` to `createLangChainProviderFromConfig`, `createClaudeProviderFromConfig` and `createCursorProviderFromConfig`.
+
 **AWS Bedrock** (`vendor: bedrock`): use an [inference-profile model ID](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html) (e.g. `us.anthropic.claude-sonnet-4-20250514-v1:0`), set `region` on the provider entry, and authenticate via the AWS default credential chain — `AWS_PROFILE` / `~/.aws` files, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`). There is no single API-key env for Bedrock. Note: the LangChain adapter constructs the chat model from the provider entry's `model` at build time and ignores per-node `model:` / `req.model` for LangChain vendors.
 
 MCP OAuth tokens (`.flowgraph/mcp-oauth/`) are independent of LLM API keys — agent nodes reuse the same MCP hub as deterministic `mcp` nodes.
@@ -146,7 +150,7 @@ providers:
   grok:   { kind: langchain, vendor: xai }      # agents AND images/video use this one entry
   gpt:    { kind: langchain, vendor: openai }   # agents AND image generation
   tripo:  { kind: media, vendor: tripo }        # dedicated media backend, no LLM side
-  meshy:  { kind: media, vendor: meshy, apiKeyEnv: MESHY_KEY }
+  meshy:  { kind: media, vendor: meshy, apiKeyEnv: MESHY_KEY }   # MESHY_KEY listed in secrets:
 ```
 
 - A `langchain` entry whose vendor has a registered media adapter (`xai`, `openai`) automatically **also** serves media under the same name, reusing its `apiKeyEnv` and `baseUrl`. The entry's `model` is an LLM model id and is not used for media; set `model:` on the media node instead.
@@ -225,7 +229,7 @@ providers:
     model: claude-sonnet-4.5
     permissionMode: acceptEdits   # default | acceptEdits | bypassPermissions | plan | dontAsk
     cwd: "{{ run.workspace }}"
-    apiKeyEnv: ANTHROPIC_API_KEY  # optional override
+    apiKeyEnv: ANTHROPIC_API_KEY  # optional override; must be listed in secrets:
 ```
 
 Auth: `ANTHROPIC_API_KEY` (env/secret, or `apiKeyEnv` override). Requirements documented for preflight (Node ≥ 18; bundled binary).
@@ -238,7 +242,7 @@ providers:
     kind: cursor
     model: composer-2.5
     runtime: local              # local | cloud
-    apiKeyEnv: CURSOR_API_KEY   # optional override
+    apiKeyEnv: CURSOR_API_KEY   # optional override; must be listed in secrets:
 ```
 
 Wraps `@cursor/sdk` (`Agent.create`/`prompt`/`stream`). Maps the same `AgentRequest` onto the Cursor agent loop, exposing skills/nodes as `local.customTools` and streaming run messages into flowgraph events. Supports Cursor's local vs. cloud runtime selection via `providers.cursor.runtime` or `with.cursor.runtime`. Auth via `CURSOR_API_KEY` (or `apiKeyEnv`), surfaced to preflight.

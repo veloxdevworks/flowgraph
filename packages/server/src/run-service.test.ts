@@ -172,7 +172,6 @@ edges:
   - { from: post, to: END }
 runtime:
   checkpoint: { enabled: true, backend: memory }
-  hitl: { onInterrupt: fail }
 `;
     const threadId = `mem-resume-${Date.now()}`;
     const waitFor = async (want: string[]) => {
@@ -265,8 +264,6 @@ edges:
   - { from: gate, to: END }
 runtime:
   checkpoint: { enabled: true, backend: memory }
-  hitl:
-    onInterrupt: fail
 `;
     const threadId = `resume-${Date.now()}`;
     const events: string[] = [];

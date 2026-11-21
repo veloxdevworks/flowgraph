@@ -544,6 +544,14 @@ export const RouterWithSchema = z
           "router mode: model cannot use match: allMatches; a model router selects one route. Use mode: rules for allMatches, or omit match.",
       });
     }
+    if (value.mode === "model" && !value.input?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["input"],
+        message:
+          "router mode: model requires input: the text the model routes on, e.g. input: \"{{ state.request }}\". The router does not send the whole state.",
+      });
+    }
   });
 
 // http node
@@ -1762,7 +1770,9 @@ export const RuntimeSchema = z.object({
       enabled: z.boolean().optional().default(true),
       backend: CheckpointBackendSchema.optional().default("memory"),
       path: z.string().optional(),
-      namespace: z.string().optional(),
+      namespace: relocatedField(
+        "runtime.checkpoint.namespace is not supported; checkpoints are already kept per thread. Remove it.",
+      ),
       /** Bound checkpoint history. Omitted means the default retention policy. */
       retention: CheckpointRetentionSchema.optional(),
     })
@@ -1819,7 +1829,9 @@ export const RuntimeSchema = z.object({
     .optional(),
   hitl: z
     .object({
-      onInterrupt: HitlPolicySchema.optional().default("prompt"),
+      onInterrupt: relocatedField(
+        "runtime.hitl.onInterrupt is not a graph setting; the host decides how interrupts are answered (CLI --on-interrupt, or onInterrupt in run options). Remove it.",
+      ),
       breakpoints: z
         .object({
           before: z.array(z.string()).optional(),
@@ -1844,7 +1856,9 @@ export const RuntimeSchema = z.object({
   context: RuntimeContextSchema.optional(),
   secrets: z
     .object({
-      provider: z.union([z.literal("env"), z.literal("dotenv"), z.string()]).optional(),
+      provider: relocatedField(
+        "runtime.secrets.provider is not supported; list the names the graph reads under the top-level secrets: and let the host supply their values.",
+      ),
       redact: z
         .object({
           patterns: z.array(z.string()).optional(),
@@ -1853,22 +1867,9 @@ export const RuntimeSchema = z.object({
         .optional(),
     })
     .optional(),
-  observability: z
-    .object({
-      otel: z
-        .object({
-          enabled: z.boolean().optional(),
-          endpoint: z.string().optional(),
-        })
-        .optional(),
-      logs: z
-        .object({
-          level: z.union([z.literal("debug"), z.literal("info"), z.literal("warn"), z.literal("error")]).optional(),
-          format: z.union([z.literal("auto"), z.literal("pretty"), z.literal("json")]).optional(),
-        })
-        .optional(),
-    })
-    .optional(),
+  observability: relocatedField(
+    "runtime.observability is not a graph setting; configure logging and OpenTelemetry in the host (FLOWGRAPH_LOG_LEVEL, event sinks). Remove it.",
+  ),
   hooks: z
     .array(
       z.object({
@@ -1923,6 +1924,26 @@ export type InputField = z.infer<typeof InputFieldSchema>;
 export type InputFieldType = z.infer<typeof InputFieldTypeSchema>;
 
 // ---------------------------------------------------------------------------
+// Declared secrets
+// ---------------------------------------------------------------------------
+
+export const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Host environment variables the graph may read: `{{ secret.NAME }}` and
+ * provider `apiKeyEnv`. Any other name is refused. The host supplies the values.
+ */
+export const SecretsSchema = z
+  .array(z.string().regex(SECRET_NAME_PATTERN, "Invalid secret name: use an environment variable name such as GITHUB_TOKEN"))
+  .superRefine((names, ctx) => {
+    const seen = new Set<string>();
+    names.forEach((name, index) => {
+      if (seen.has(name)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index], message: `Secret "${name}" is declared more than once` });
+      seen.add(name);
+    });
+  });
+
+// ---------------------------------------------------------------------------
 // Root Graph spec
 // ---------------------------------------------------------------------------
 
@@ -1951,6 +1972,8 @@ export const GraphSpecSchema = z.object({
   input: z.record(z.unknown()).optional(),
   nodes: z.array(NodeSpecSchema),
   edges: z.array(EdgeSpecSchema),
+  /** Host environment variables this graph may read (see SecretsSchema). */
+  secrets: SecretsSchema.optional(),
   runtime: RuntimeSchema.optional(),
 }).strict();
 

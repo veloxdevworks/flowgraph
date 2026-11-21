@@ -84,7 +84,7 @@ When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 | `version` | Semver of the skill; enables pinning when published. |
 | `kind_of` | How the skill executes — see §3. |
 | `inputs` / `outputs` | The **contract**: a map of name → JSON Schema (draft-07), the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as hitl forms and agent output. Each input value is checked against its schema before the skill runs. An input's `required: true` means the caller must pass it (default `false`); a `required: [a, b]` list keeps its JSON Schema meaning for an object-typed input. |
-| `env.vars` | Required env vars; `secret: true` ⇒ resolved via SecretProvider + redacted. |
+| `env.vars` | Required env vars; `secret: true` ⇒ resolved via SecretProvider + redacted. A `command` skill's process receives the default host allowlist (`PATH`, `HOME`, temp and locale variables), its `env.vars`, and `FLOWGRAPH_INPUT`; a `secret: true` var reaches it only when the graph lists the name under top-level `secrets:`. |
 | `env.bin` | Required executables on PATH (with `optional`). `name` is one executable name — letters, digits, `.`, `_`, `+` or `-` — not a path or a shell command. Preflight looks it up with `which` / `where` and no shell. |
 | `env.network` | Whether outbound network is needed (preflight can fail in offline CI). |
 | `env.node` / `env.packages` | Engine + npm deps for executable skills. |

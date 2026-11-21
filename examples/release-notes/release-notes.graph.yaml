@@ -23,8 +23,6 @@ runtime:
     enabled: true
     backend: sqlite
     path: ".flowgraph/release-notes.db"
-  hitl:
-    onInterrupt: prompt
 
 nodes:
   - id: draft-notes

@@ -89,7 +89,7 @@ describe("node policy", () => {
     process.env["FG_POLICY_TEST_SECRET"] = "s3cret";
     try {
       const http = { id: "h", type: "http", with: { url: "http://127.0.0.1:9/?k={{ secret.FG_POLICY_TEST_SECRET }}", output: { to: "out" } } };
-      const compiled = await compileGraph(graph([http]), { checkpointer: "memory", nodePolicy: POLICY });
+      const compiled = await compileGraph({ ...graph([http]), secrets: ["FG_POLICY_TEST_SECRET"] }, { checkpointer: "memory", nodePolicy: POLICY });
       const text = await runError(compiled.run({ threadId: "secret" }));
       expect(text).toMatch(/secret\.FG_POLICY_TEST_SECRET reads the host environment/);
       expect(text).not.toContain("s3cret");

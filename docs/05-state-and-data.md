@@ -282,7 +282,7 @@ nodes:
 | `result` | this node's raw output (only in `output` mapping) |
 | `item` | current item inside a `map` node (`item.<as>`) |
 | `config` | `config.vars.*` and resolved `config.defaults.*` |
-| `secret` | secret accessor — `secret.JIRA_TOKEN` (values redacted in events/logs/checkpoints) |
+| `secret` | secret accessor — `secret.JIRA_TOKEN`, for names listed in top-level `secrets:` (values redacted in events/logs/checkpoints) |
 | `env` | non-secret environment values explicitly exposed to the graph |
 | `run` | run metadata: `run.id`, `run.threadId`, `run.startedAt`, `run.labels` |
 | `issues` | accumulated `RunIssue[]` for this thread (also in reserved `__issues`) |

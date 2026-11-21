@@ -3,6 +3,7 @@ import { compileGraph } from "../compiler.js";
 import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "../events.js";
 import { redactHeaders } from "./http.js";
+import { redactSensitiveFields, redactUrlSecrets } from "./http-request.js";
 
 function httpGraph(withConfig: Record<string, unknown>): GraphSpec {
   return {
@@ -25,6 +26,22 @@ function httpGraph(withConfig: Record<string, unknown>): GraphSpec {
   } as unknown as GraphSpec;
 }
 
+describe("transcript masking", () => {
+  it("masks URL credentials and sensitive query parameters with the shared marker, unencoded", () => {
+    expect(redactUrlSecrets("https://user:pass@example.com/p?token=abc&q=1")).toBe(
+      "https://[REDACTED]:[REDACTED]@example.com/p?token=[REDACTED]&q=1",
+    );
+    expect(redactUrlSecrets("https://example.com/p?q=1")).toBe("https://example.com/p?q=1");
+  });
+
+  it("masks sensitive field names with the shared marker", () => {
+    expect(redactSensitiveFields({ password: "pw", nested: [{ apiKey: "k", name: "n" }] })).toEqual({
+      password: "[REDACTED]",
+      nested: [{ apiKey: "[REDACTED]", name: "n" }],
+    });
+  });
+});
+
 describe("redactHeaders", () => {
   it("masks sensitive header names case-insensitively", () => {
     expect(
@@ -35,8 +52,8 @@ describe("redactHeaders", () => {
         Accept: "text/html",
       }),
     ).toEqual({
-      Authorization: "***",
-      "X-Api-Key": "***",
+      Authorization: "[REDACTED]",
+      "X-Api-Key": "[REDACTED]",
       "Content-Type": "application/json",
       Accept: "text/html",
     });
@@ -56,6 +73,7 @@ describe("http node", () => {
     vi.stubGlobal("fetch", fetchMock);
     const spec = httpGraph({ url: "https://example.com/{{ config.vars.path }}", headers: { Authorization: "{{ secret.FGQA_DECOY }}" } });
     spec.config = { vars: { path: "configured" } };
+    spec.secrets = ["FGQA_DECOY"];
     const result = await (await compileGraph(spec)).run();
     expect(result.status).toBe("completed");
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://example.com/configured");
@@ -117,12 +135,43 @@ describe("http node", () => {
 
     expect(data.request.method).toBe("POST");
     expect(data.request.url).toBe("https://example.com/api");
-    expect(data.request.headers.Authorization).toBe("***");
+    expect(data.request.headers.Authorization).toBe("[REDACTED]");
     expect(data.request.headers["X-Custom"]).toBe("visible");
     expect(data.request.body).toEqual({ hello: "world" });
 
     expect(data.response.status).toBe(200);
     expect(data.response.body).toEqual({ ok: true });
     expect(data.response.headers["x-from"]).toBe("mock");
+  });
+});
+
+describe("http node transcript headers", () => {
+  const originalFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("masks headers listed in runtime.secrets.redact.headers with the same marker as built-in ones", async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({}),
+    })) as unknown as typeof fetch;
+    const spec = httpGraph({
+      url: "https://example.com/api",
+      headers: { Authorization: "Bearer built-in-token", "X-Service-Token": "custom-token-value", "X-Custom": "visible" },
+    });
+    spec.runtime = { ...spec.runtime, secrets: { redact: { headers: ["x-service-token"] } } } as GraphSpec["runtime"];
+    const events: FlowgraphEvent[] = [];
+    const r = await (await compileGraph(spec, { sinks: [(e) => { events.push(e); }] })).run({});
+    expect(r.status).toBe("completed");
+    const data = events.find((e) => e.type === "node.output")?.data as { request: { headers: Record<string, string> } };
+    expect(data.request.headers).toMatchObject({
+      Authorization: "[REDACTED]",
+      "X-Service-Token": "[REDACTED]",
+      "X-Custom": "visible",
+    });
   });
 });

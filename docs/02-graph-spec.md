@@ -15,12 +15,13 @@ metadata: { ... }           # name, labels, description
 triggers: [ ... ]           # optional — host-interpreted auto-start conditions
 imports: [ ... ]            # optional — reusable subgraphs/skills/node packages
 config: { ... }             # optional — graph-level config/defaults
+secrets: [ ... ]            # optional — host environment variables the graph may read
 state: { ... }              # optional — channel (state) definitions
 inputs: [ ... ]             # optional — typed run parameters (collected before start)
 input: { ... }              # optional — default seed values for a run
 nodes: [ ... ]              # required — the node list
 edges: [ ... ]              # required — static + conditional edges
-runtime: { ... }            # optional — checkpoint/HITL/retry/observability defaults
+runtime: { ... }            # optional — checkpoint/retry/hook defaults
 ```
 
 `apiVersion` pins the schema contract. The loader rejects unknown major versions and warns on unknown minor fields (forward-compatible).
@@ -37,7 +38,7 @@ metadata:
     domain: github
 ```
 
-`metadata.name` becomes the root OTel span name and the default checkpoint namespace.
+`metadata.name` becomes the root OTel span name.
 
 ## 2a. `triggers` (auto-start conditions)
 
@@ -318,6 +319,33 @@ config:
 
 Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time for `config`/`runtime` scalars. Expansion runs after YAML parsing, so environment values cannot inject YAML structure. `$${VAR}` escapes interpolation in those sections. Node bodies, inputs, state defaults, metadata and keys remain literal; shell `${VAR}` syntax is left for the child shell and its allowed environment. Use `{{ secret.NAME }}` for credentials instead of embedding them in config variables. Runtime expressions (`{{ ... }}`) are evaluated per-node-execution against live state. `state` in an expression never includes the engine's own channels (names starting with `__`): `{{ state }}`, `keys(state)` and `state['_' + '_x']` all leave them out; `__` keys inside your own channels are still readable. The two are distinct — see [05](./05-state-and-data.md).
 
+## 7a. `secrets` (declared credentials)
+
+`secrets` lists the host environment variables the graph may read as credentials. The host supplies the values; the graph only names them.
+
+```yaml
+secrets: [GITHUB_TOKEN, JIRA_TOKEN]
+
+providers:
+  openai: { kind: langchain, vendor: openai, apiKeyEnv: OPENAI_KEY_TEAM_A }   # needs OPENAI_KEY_TEAM_A in secrets
+
+nodes:
+  - id: fetch
+    type: http
+    with:
+      url: https://api.github.com/user
+      headers: { Authorization: "Bearer {{ secret.GITHUB_TOKEN }}" }
+```
+
+- Each entry is an environment variable name (letters, digits and `_`, not starting with a digit). A name listed twice is an error.
+- `{{ secret.NAME }}` reads only a declared name. `flowgraph validate` and `compileGraph` report `SECRET_UNDECLARED` for any literal `secret.NAME` / `secret["NAME"]` in a node or an `mcpServers` entry that the list does not name. A computed name (`secret[state.key]`) is checked when it is read, and the node fails with the same message. A declared name the host has not set renders as an empty string.
+- A provider `apiKeyEnv` must be declared. A provider with a `baseUrl` but no `apiKeyEnv` would send the vendor's default key (for example `OPENAI_API_KEY`) to that endpoint, so that default key must be declared too. A provider without `apiKeyEnv` or `baseUrl` reads its vendor's default key as before, without a declaration.
+- A `command` skill's `env.vars` entry marked `secret: true` reaches the skill's process only when the graph declares it; a required one that is not declared fails the skill, an `optional: true` one is left out.
+- An inline subgraph `spec:` and a file subgraph (`uses: ./child.graph.yaml`) each have their own `secrets` list. A child never reads a name only its parent declares.
+- `http`, `webhook`, `demo`, `service`, `shell`, `script`, skills and `mcpServers` all read `{{ secret.X }}` through the same declared list. A `demo` capture that reads an undeclared name fails the node rather than reporting `not_captured`.
+- Declaring a name does not pass it to child processes. `shell`, `script`, `service` and command skills start from a small default allowlist (`PATH`, `HOME`, temp and locale variables); pass a secret explicitly, for example `env: { TOKEN: "{{ secret.GITHUB_TOKEN }}" }`.
+- `secrets:` controls what templates and provider settings read; it is **not** an isolation boundary for `shell`, `script`, skill or `service` nodes. A shell `with.inheritEnv` entry, a skill's non-secret `env.vars`, and anything those processes read from their parent environment or the file system can still carry a host value that is not declared. Run graphs you do not trust under a node policy that blocks those node types.
+
 ## 8. Input / output mapping
 
 To keep nodes reusable, a node declares **what it reads** (`input`) and optionally **where else it writes** (`output`), instead of hard-coding channel names inside logic.
@@ -374,7 +402,7 @@ runtime:
   services:
     terminateOnEnd: true          # stop non-keepAlive `service` processes on completed/error (default)
   hitl:
-    onInterrupt: prompt           # prompt | fail | approve | webhook  (per-environment overridable)
+    breakpoints: { before: [publish] }   # static pause points
   retry:                          # default for every node that omits retry
     maxAttempts: 2
     backoff: exponential
@@ -385,10 +413,16 @@ runtime:
     - on: agent:beforeToolCall
       where: { tool: fs_write }
       do: interrupt
-  observability:
-    otel: { enabled: true }
-    logs: { level: info, format: auto }   # auto = pretty on TTY, json otherwise
 ```
+
+Some settings belong to the host running the graph, not the graph, and are rejected here with a message that names the replacement:
+
+| Field | Set it in the host instead |
+|---|---|
+| `runtime.hitl.onInterrupt` | CLI `--on-interrupt`, or `onInterrupt` in `run()` / `resume()` options. The default is `fail`. |
+| `runtime.observability` | `FLOWGRAPH_LOG_LEVEL`, event sinks, and `@flowgraph/observability-otel`. |
+| `runtime.secrets.provider` | List names under the top-level `secrets:`; the host supplies their values. |
+| `runtime.checkpoint.namespace` | Not needed: checkpoints are kept per thread. |
 
 ## 10. Full example
 
@@ -476,8 +510,6 @@ edges:
 
 runtime:
   checkpoint: { enabled: true, backend: sqlite, path: ".flowgraph/checkpoints.db" }
-  hitl: { onInterrupt: prompt }
-  observability: { otel: { enabled: true } }
 ```
 
 ## 11. Validation & diagnostics

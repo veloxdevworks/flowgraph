@@ -25,7 +25,7 @@ nodes:
 edges:
   - { from: START, to: gate }
   - { from: gate, to: END }
-runtime: { checkpoint: { enabled: true, backend: memory }, hitl: { onInterrupt: fail } }
+runtime: { checkpoint: { enabled: true, backend: memory } }
 `;
 const shellGraph = (name: string, withBlock: string) => `
 apiVersion: flowgraph/v1

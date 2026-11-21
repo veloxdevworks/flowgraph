@@ -1,4 +1,3 @@
-import { currentEnvironment } from "../environment.js";
 /**
  * Process-scoped registry for long-running background services started by
  * `service` nodes. Services are keyed by (threadId, name), survive HITL
@@ -16,6 +15,7 @@ import * as net from "node:net";
 import { normalizeShellText } from "../nodes/shell.js";
 import { performHttpRequest } from "../nodes/http-request.js";
 import { parseDuration, sleep } from "./duration.js";
+import { DEFAULT_INHERITED_ENV, pickHostEnv } from "./child-env.js";
 
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_READY_INTERVAL_MS = 300;
@@ -274,8 +274,9 @@ export async function startService(
   const args = spec.args?.map((a) => normalizeShellText(a));
   const useShell = args === undefined;
   const cwd = spec.cwd;
+  // Operational defaults only; a service gets anything else through `env`.
   const env: NodeJS.ProcessEnv = {
-    ...currentEnvironment(),
+    ...pickHostEnv(DEFAULT_INHERITED_ENV),
     ...(spec.env
       ? Object.fromEntries(
           Object.entries(spec.env).map(([k, v]) => [k, normalizeShellText(String(v))]),
