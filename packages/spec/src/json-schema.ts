@@ -40,19 +40,22 @@ export function generateJsonSchema(): Record<string, unknown> {
   dropRelocated(schema);
   markBarrierFromUnique(schema);
   unicodeSafePatterns(schema);
+  const { $schema, $ref, ...rest } = schema;
+  // Draft-07 ignores every keyword beside a `$ref`, so the root reference sits in `allOf`.
   return {
-    $schema: schema.$schema,
+    $schema,
     $id: GRAPH_JSON_SCHEMA_ID,
     title: "Flowgraph graph (flowgraph/v1)",
-    ...Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema")),
+    allOf: [{ $ref }],
+    ...rest,
   };
 }
 
 /** A `map` node's `with.node` is a map body, checked like any other node. */
 function mapBodyRule(): Record<string, unknown> {
   return {
-    if: { properties: { type: { const: "map" } }, required: ["type"] },
-    then: { properties: { with: { properties: { node: { $ref: MAP_BODY_REF } } } } },
+    if: { type: "object", properties: { type: { const: "map" } }, required: ["type"] },
+    then: { type: "object", properties: { with: { type: "object", properties: { node: { $ref: MAP_BODY_REF } } } } },
   };
 }
 

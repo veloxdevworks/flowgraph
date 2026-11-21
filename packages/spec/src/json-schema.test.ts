@@ -17,7 +17,7 @@ function child(nodes: unknown[]): Record<string, unknown> {
 const mapOf = (body: unknown) => ({ id: "m", type: "map", with: { over: "{{ state.items }}", node: body } });
 
 function compile() {
-  const ajv = new Ajv({ strict: false, allErrors: true });
+  const ajv = new Ajv({ strict: true, allowUnionTypes: true, allErrors: true, logger: { log: () => {}, warn: (...args: unknown[]) => { throw new Error(`Ajv strict warning: ${args.join(" ")}`); }, error: () => {} } });
   return ajv.compile(generateJsonSchema());
 }
 
@@ -37,6 +37,18 @@ describe("published Graph JSON Schema", () => {
     expect(schema.$id).toBe(GRAPH_JSON_SCHEMA_ID);
     expect(GRAPH_JSON_SCHEMA_ID).toMatch(/\/v1\.json$/);
     expect(schema.$schema).toBe("http://json-schema.org/draft-07/schema#");
+  });
+
+  it("keeps the root reference in allOf, so draft-07 does not ignore $id and title beside it", () => {
+    const schema = generateJsonSchema();
+    expect(schema).not.toHaveProperty("$ref");
+    expect(schema.allOf).toEqual([{ $ref: "#/definitions/GraphSpec" }]);
+    expect(schema.title).toBe("Flowgraph graph (flowgraph/v1)");
+  });
+
+  it("compiles under Ajv strict mode without warnings", () => {
+    expect(() => compile()).not.toThrow();
+    expect(compile()(graph([{ id: "a", ...echo }]))).toBe(true);
   });
 
   it("uses recursive definitions for nodes, inline subgraph specs and map bodies", () => {
