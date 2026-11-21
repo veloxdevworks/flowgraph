@@ -107,7 +107,7 @@ import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { acquireThreadRun, adoptThreadRunClaim, defaultThreadRunOwner, threadAdmissionError, type ThreadRunClaim } from "./checkpoint/execution-claim.js";
 import { flowFailure } from "./runtime/failure.js";
 import { captureSubgraphHostContext, SUBGRAPH_HOST_CONTEXT } from "./runtime/subgraph-host-context.js";
-import { exclusiveRouting, isEdgeGuardError, isNoMatchError, normalTargets, recoveryTargets, ROUTING_CHANNEL, selectBranchTarget, type GuardScope } from "./runtime/routing-policy.js";
+import { exclusiveRouting, isEdgeGuardError, isNoMatchError, isRoutingFailure, normalTargets, recoveryTargets, ROUTING_CHANNEL, selectBranchTarget, type GuardScope } from "./runtime/routing-policy.js";
 
 import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
@@ -1669,7 +1669,7 @@ async function assembleCompiledLangGraph(
     ): Promise<NodeRun> =>
       runWithPolicy<NodeRun>(
         (attempt, signal) => {
-          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig, !embedded);
+          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig, !embedded, nodeTimeout);
           if (signal && receivesTimeoutSignal) ctx.signal = signal;
           return compiled.run(state, ctx).then((res) => {
             finishInterruptDeadline(runScopeOf(lgConfig), nodeSpec.id);
@@ -1799,6 +1799,10 @@ async function assembleCompiledLangGraph(
         if (terminal) {
           events.emit("node.error", { nodeId: nodeSpec.id, error: terminal.reason, code: terminal.code }, scope);
           throw terminal;
+        }
+        if (isRoutingFailure(err)) {
+          if (isNoMatchError(err)) recordGuardError(err, lgConfig);
+          throw err;
         }
 
         // node:error — fail, continue, route, or retry
@@ -2725,6 +2729,7 @@ function buildNodeCtx(
   inputOverride?: Record<string, unknown>,
   lgConfig?: LangGraphRunnableConfig,
   usePinnedWorkspace = true,
+  timeout?: string,
 ) {
   // Embedded subgraphs have no run of their own: their nodes report the
   // top graph's run and thread (from the run scope in the invoke config).
@@ -2775,6 +2780,7 @@ function buildNodeCtx(
     nodeId,
     nodeType,
     attempt,
+    ...(timeout ? { timeout } : {}),
     _input,
     _onceUpdates,
     _issueUpdates,
@@ -3090,6 +3096,7 @@ function addCheckpointedMap(
     if (isInterruptLike(err) || ctx.baseCtx.signal?.aborted) throw err;
     const terminal = flowFailure(err);
     if (terminal) throw terminal;
+    if (isRoutingFailure(err)) throw err;
     const error = err instanceof Error ? err : new Error(String(err));
     const meta = (runScopeOf(lgConfig)?.meta ?? ctx.baseCtx.meta) as RunMeta;
     const hook = await ctx.hooks.run("node:error", { state, run: meta, payload: { nodeId: mapId, nodeType: "map", error } });
@@ -3170,6 +3177,7 @@ function addCheckpointedMap(
             undefined,
             itemLgConfig,
             !ctx.embedded,
+            nodeTimeout,
           );
           if (signal && innerReceivesTimeoutSignal) nodeCtx.signal = signal;
           return runMapItem(buildCtx, mapId, config, state, nodeCtx, task, memo).then((value) => {

@@ -16,7 +16,7 @@ import { modelRequest } from "../providers/model-choice.js";
 import { applyOutput } from "./output.js";
 import { enforceBudget } from "./agent.js";
 import type { TokenUsage } from "../providers/types.js";
-import { noMatchError } from "../runtime/routing-policy.js";
+import { noMatchError, routerGuardError } from "../runtime/routing-policy.js";
 
 const configSchema = RouterWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -47,6 +47,7 @@ export const routerNode = defineNode<Config>({
         }
 
         const routes = config.routes;
+        const routerId = String(nodeSpec["id"]);
         const labels = routes.map((route) => route.name ?? route.to);
         let matchedTo: string | null = null;
         let matchedKey: string | null = null;
@@ -60,8 +61,13 @@ export const routerNode = defineNode<Config>({
             continue;
           }
           if (!route.when) continue;
-          // A throwing guard fails the run, the same way an edge guard does.
-          if (evalGuard(guardExpression(route.when), scope)) {
+          let hit = false;
+          try {
+            hit = evalGuard(guardExpression(route.when), scope);
+          } catch (err) {
+            throw routerGuardError(routerId, route.when, err);
+          }
+          if (hit) {
             matchedTo = route.to;
             matchedKey = key;
             matched.push({ key, to: route.to });
@@ -89,7 +95,7 @@ export const routerNode = defineNode<Config>({
         });
 
         if (matchedTo === null || matchedKey === null) {
-          throw noMatchError(`router "${String(nodeSpec["id"])}"`);
+          throw noMatchError(`router "${routerId}"`, routerId);
         }
 
         const nodeId = String(nodeSpec["id"]);

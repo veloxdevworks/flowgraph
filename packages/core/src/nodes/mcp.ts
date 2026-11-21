@@ -46,7 +46,9 @@ export const mcpNode = defineNode<Config>({
             : {};
           ctx.emit("mcp.tool.call", { server: config.server, tool: config.tool, args });
           result = assertMcpToolSuccess(
-            await abortable(hub.callTool(config.server, config.tool, args), ctx.signal),
+            await (ctx.signal
+              ? hub.callTool(config.server, config.tool, args, { signal: ctx.signal })
+              : hub.callTool(config.server, config.tool, args)),
             config.server,
             config.tool,
           );
@@ -54,7 +56,9 @@ export const mcpNode = defineNode<Config>({
         } else {
           const uri = String(renderDeep(config.resource!, scope));
           ctx.emit("mcp.resource.read", { server: config.server, uri });
-          result = await abortable(hub.readResource(config.server, uri), ctx.signal);
+          result = ctx.signal
+            ? await hub.readResource(config.server, uri, { signal: ctx.signal })
+            : await hub.readResource(config.server, uri);
         }
 
         return {
@@ -67,28 +71,3 @@ export const mcpNode = defineNode<Config>({
     };
   },
 });
-
-function abortable<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) {
-    const reason = signal.reason;
-    return Promise.reject(reason instanceof Error ? reason : new Error("Aborted"));
-  }
-  return new Promise((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error("Aborted"));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    work.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (err) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(err);
-      },
-    );
-  });
-}

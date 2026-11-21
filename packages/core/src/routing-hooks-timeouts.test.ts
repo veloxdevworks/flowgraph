@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
+import type { FlowgraphEvent } from "./events.js";
 import { registerFunction } from "./nodes/function.js";
 import { createHookBus } from "./hooks/bus.js";
+import { normalizeNodeTypeAliases } from "./loader.js";
 import { runScriptSandboxed } from "./nodes/script.js";
 import { effectiveModel } from "./providers/model-choice.js";
 import { createScriptedProvider } from "./providers/index.js";
@@ -104,6 +106,107 @@ describe("routing", () => {
     expect(edgeMiss.error?.message).toMatch(/Edge "a" has no matching route and no default/);
   });
 
+  it("does not swallow or retry a router miss or a throwing rule", async () => {
+    registerFunction("routeMark", (input) => (input as { id: string }).id);
+    const events: FlowgraphEvent[] = [];
+    const miss = graph(
+      [
+        {
+          id: "route",
+          type: "router",
+          on: { error: "continue" },
+          retry: { maxAttempts: 3, backoff: "fixed", baseMs: 1, jitter: false },
+          with: { routes: [{ when: "{{ false }}", to: "a" }] },
+        },
+        mark("a"),
+      ],
+      [
+        { from: "START", to: "route" },
+        { from: "a", to: "END" },
+      ],
+      { runtime: { hooks: [{ on: "node:error", do: "continue" }] } },
+    );
+    const missed = await (await compileGraph(miss, { sinks: [(event) => { events.push(event); }] })).run();
+    expect(missed.status).toBe("error");
+    expect(missed.error).toMatchObject({ code: "NO_MATCH", retryable: false });
+    expect(missed.issues?.some((issue) => issue.code === "NO_MATCH" && issue.nodeId === "route")).toBe(true);
+    expect(events.some((event) => event.type === "node.retry")).toBe(false);
+    expect(events.some((event) => event.type === "node.start" && (event.data as { nodeId?: string }).nodeId === "a")).toBe(false);
+
+    const thrown = graph(
+      [
+        {
+          id: "route",
+          type: "router",
+          on: { error: "continue" },
+          retry: { maxAttempts: 3, backoff: "fixed", baseMs: 1, jitter: false },
+          with: { routes: [{ when: "{{ nosuchfn() }}", to: "a" }, { default: true, to: "a" }] },
+        },
+        mark("a"),
+      ],
+      [
+        { from: "START", to: "route" },
+        { from: "a", to: "END" },
+      ],
+      { runtime: { hooks: [{ on: "node:error", do: "continue" }] } },
+    );
+    const failed = await (await compileGraph(thrown)).run();
+    expect(failed.status).toBe("error");
+    expect(failed.error).toMatchObject({ code: "ROUTER_GUARD_ERROR", retryable: false });
+    expect(failed.state.seen ?? null).toBeNull();
+  });
+
+  it("cancels an MCP call on timeout so the retry does not overlap it", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const signals: AbortSignal[] = [];
+    const spec = graph(
+      [
+        {
+          id: "call",
+          type: "mcp",
+          timeout: "20ms",
+          retry: { maxAttempts: 2, backoff: "fixed", baseMs: 1, jitter: false },
+          with: { server: "tools", tool: "lookup" },
+        },
+      ],
+      [
+        { from: "START", to: "call" },
+        { from: "call", to: "END" },
+      ],
+    );
+    const result = await (await compileGraph(spec, {
+      mcp: {
+        listTools: async () => [],
+        callTool: async (_server, _name, _args, options) => {
+          const signal = options?.signal;
+          if (!signal) throw new Error("missing signal");
+          signals.push(signal);
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          try {
+            await new Promise((_resolve, reject) => {
+              if (signal.aborted) {
+                reject(signal.reason);
+                return;
+              }
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            });
+          } finally {
+            inFlight -= 1;
+          }
+          return {};
+        },
+        readResource: async () => ({}),
+        close: async () => {},
+      },
+    })).run();
+    expect(result.status).toBe("error");
+    expect(signals).toHaveLength(2);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(maxInFlight).toBe(1);
+  });
+
   it("reads config from a branch guard and input from a node guard", async () => {
     registerFunction("routeMark", (input) => (input as { id: string }).id);
     const spec = graph(
@@ -131,16 +234,26 @@ describe("routing", () => {
 });
 
 describe("hooks", () => {
-  it("rejects an unknown where key before the handler runs", async () => {
+  it("rejects an unknown where key when the hook is registered", () => {
     const bus = createHookBus();
-    bus.register({
+    expect(() => bus.register({
       phase: "node:before",
       where: { nodeId: "a", typo: true } as { nodeId: string },
       handler: () => ({ kind: "veto", reason: "no" }),
-    });
-    await expect(bus.run("node:before", { state: {}, run: { runId: "r", graph: "g", startedAt: "" }, payload: { nodeId: "a" } })).rejects.toMatchObject({
-      code: "HOOK_WHERE_UNKNOWN",
-    });
+    })).toThrow(expect.objectContaining({ code: "HOOK_WHERE_UNKNOWN" }));
+  });
+
+  it("keeps a rejected hook event under the name that was written", () => {
+    const rewritten = normalizeNodeTypeAliases({
+      runtime: {
+        hooks: [
+          { on: "intelligent:beforeStep", do: "allow" },
+          { on: "intelligent:beforeToolCall", do: "deny" },
+        ],
+      },
+    }) as { runtime: { hooks: Array<{ on: string }> } };
+    expect(rewritten.runtime.hooks[0]?.on).toBe("intelligent:beforeStep");
+    expect(rewritten.runtime.hooks[1]?.on).toBe("agent:beforeToolCall");
   });
 
   it("continues on an error verb and fails even when on.error is continue", async () => {

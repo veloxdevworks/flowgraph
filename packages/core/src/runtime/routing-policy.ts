@@ -4,7 +4,7 @@ import { Command } from "@langchain/langgraph";
 import type { Hook } from "../hooks/types.js";
 
 export const ROUTING_CHANNEL = "__routing";
-const phases = new Set(["node:before", "node:after", "node:error"]);
+const phases = new Set(["node:error"]);
 
 export function recoveryTargets(spec: GraphSpec, node: NodeSpec, hooks: Hook[] = []): string[] {
   const targets = new Set<string>();
@@ -69,6 +69,33 @@ export function noMatchError(subject: string, from?: string): NoMatchError {
   err.retryable = false;
   if (from !== undefined) err.from = from;
   return err;
+}
+
+/** A router `when` that throws is a routing failure, not a node error to swallow or retry. */
+export const ROUTER_GUARD_ERROR = "ROUTER_GUARD_ERROR";
+
+export type RouterGuardError = Error & {
+  code: typeof ROUTER_GUARD_ERROR;
+  retryable: false;
+};
+
+export function isRouterGuardError(err: unknown): err is RouterGuardError {
+  return err instanceof Error && (err as { code?: unknown }).code === ROUTER_GUARD_ERROR;
+}
+
+export function routerGuardError(routerId: string, when: string, cause: unknown): RouterGuardError {
+  const reason = cause instanceof Error ? cause.message : String(cause);
+  const err = new Error(
+    `router "${routerId}" guard \`${when}\` could not be evaluated: ${reason}`,
+    { cause },
+  ) as RouterGuardError;
+  err.code = ROUTER_GUARD_ERROR;
+  err.retryable = false;
+  return err;
+}
+
+export function isRoutingFailure(err: unknown): boolean {
+  return isNoMatchError(err) || isRouterGuardError(err);
 }
 
 /** Values a guard may read: state, the node input, config, and the run. */

@@ -134,6 +134,8 @@ export interface NodeRunContext extends RunContext {
   nodeId: string;
   nodeType: string;
   attempt: number;
+  /** Node `timeout`, or `runtime.timeoutDefault`, when either is set. */
+  timeout?: string | undefined;
   render(template: string, extra?: Record<string, unknown>): unknown;
   emit(type: EventType, data: unknown): void;
   /**
