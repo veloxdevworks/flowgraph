@@ -171,11 +171,10 @@ function collectMapUpdate(
   if (
     config.collect != null &&
     typeof config.collect === "object" &&
-    config.collect.map != null &&
-    !config.collect.none
+    config.collect.map != null
   ) {
     const update = applyOutput(
-      { to: config.collect.to, none: config.collect.none },
+      { to: config.collect.to, ...(config.collect.raw !== undefined ? { raw: config.collect.raw } : {}) },
       ordered,
       { nodeId, scope: baseScope },
     );

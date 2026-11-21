@@ -294,7 +294,7 @@ Environment interpolation (`${VAR}` / `${VAR:-default}`) happens at load time fo
 
 To keep nodes reusable, a node declares **what it reads** (`input`) and optionally **where else it writes** (`output`), instead of hard-coding channel names inside logic.
 
-**Default:** every node auto-saves its raw result to `state.outputs.<nodeId>` (a reserved object channel with `mergeDeep`). LangGraph forbids a channel name equal to a node id, so results live under the `outputs` bag. No `output` block is required for the common case — downstream nodes read `{{ state.outputs.summarize }}`, etc. The `outputs` channel is auto-declared at compile time when needed.
+**Default:** every node auto-saves its raw result to `state.outputs.<nodeId>` (a reserved object channel keyed by node id). Each run of a node **replaces** its whole previous entry: a node that returned `{ count: 1, approved: true }` and then `{ count: 2 }` leaves `state.outputs.<nodeId>` as `{ count: 2 }`, so downstream nodes never see a field the latest run did not produce. LangGraph forbids a channel name equal to a node id, so results live under the `outputs` bag. No `output` block is required for the common case — downstream nodes read `{{ state.outputs.summarize }}`, etc. The `outputs` channel is auto-declared at compile time when needed.
 
 ```yaml
 nodes:
@@ -305,25 +305,29 @@ nodes:
     with:
       prompt: "Summarize: {{ input.text }}"
       # omitted output → writes state.outputs.summarize automatically
-      # optional projections (additive with the slug):
+      # optional projections (written alongside the slug):
       # output:
       #   to: summary              # also write full result to state.summary
       #   map:
       #     tokens: "{{ result.usage.totalTokens }}"
+      #   raw: false               # keep only the projections, not state.outputs.summarize
       # opt out of any state write (pure side-effect):
-      # output: none               # or { none: true }
+      # output: none
 ```
 
 | Form | Effect |
 |------|--------|
 | omitted / `{}` | Write `{ outputs: { [nodeId]: rawResult } }` |
-| `output: none` or `{ none: true }` | Write nothing (side-effect-only nodes) |
+| `output: none` | Write nothing (side-effect-only nodes) |
 | `{ to: X }` and/or `{ map: {…} }` | Apply those projections **and** still write `state.outputs.<nodeId>` |
+| `{ to: X }` and/or `{ map: {…} }` with `raw: false` | Apply only those projections; `state.outputs.<nodeId>` is not written |
 
 - `input:` builds an `input` object available to the node's `with` expressions (and to skills as their declared inputs).
 - `to` / `map` are optional overrides for shared/typed/reducer-backed channels (e.g. parallel fan-in into one `append` channel) or field projection.
 - **Exception — `subgraph`:** when `output` and `stateMap.out` are both omitted, channels that **share a name** merge back and the parent's reducer combines only the child's new values. Use `output: none` to write nothing, `output.to` / `output.map` for a normal node projection, or `stateMap.out` (`parentChannel: childChannel`) for an explicit mapping. See [05 — Subgraph merge-back](./05-state-and-data.md#subgraph-merge-back).
-- Prefer not to declare your own `outputs` channel unless you intend to override its `mergeDeep` semantics.
+- `raw: false` keeps large or sensitive results out of state and checkpoints while still passing on the fields you project. It needs `to` or `map`; to write nothing, use `output: none`. Anything that reads `state.outputs.<nodeId>` (for example a gate's `round`) then sees no previous value.
+- `none` cannot be combined with `to` / `map`, and a `none` key inside an output object is not supported, whatever its value (for example `{ none: true }`); write `output: none`.
+- Prefer not to declare your own `outputs` channel. If you do, its declared reducer is used as written (for example `mergeDeep` to deep-merge successive results).
 
 ## 9. `runtime` (graph-level defaults)
 

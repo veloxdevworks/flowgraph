@@ -18,8 +18,7 @@ export function outputChannelsForNode(node: NodeSpec): string[] {
   const addFrom = (mapping: unknown) => {
     if (mapping == null || mapping === "none") return;
     if (typeof mapping !== "object" || Array.isArray(mapping)) return;
-    const m = mapping as { to?: unknown; map?: unknown; none?: unknown };
-    if (m.none === true) return;
+    const m = mapping as { to?: unknown; map?: unknown };
     if (typeof m.to === "string" && m.to.trim()) channels.add(m.to.trim());
     if (m.map != null && typeof m.map === "object" && !Array.isArray(m.map)) {
       for (const ch of Object.keys(m.map as Record<string, unknown>)) {

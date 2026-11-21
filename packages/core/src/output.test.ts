@@ -40,9 +40,9 @@ function baseSpec(nodes: GraphSpec["nodes"], channels: Record<string, unknown> =
 }
 
 describe("applyOutput helper", () => {
-  it("isOutputNone recognizes both forms", () => {
+  it("isOutputNone recognizes only the none string", () => {
     expect(isOutputNone("none")).toBe(true);
-    expect(isOutputNone({ none: true })).toBe(true);
+    expect(isOutputNone({ none: true })).toBe(false);
     expect(isOutputNone({ to: "x" })).toBe(false);
     expect(isOutputNone(undefined)).toBe(false);
   });
@@ -55,7 +55,6 @@ describe("applyOutput helper", () => {
 
   it("opts out with none", () => {
     expect(applyOutput("none", { ok: 1 }, { nodeId: "step" })).toEqual({});
-    expect(applyOutput({ none: true }, { ok: 1 }, { nodeId: "step" })).toEqual({});
   });
 
   it("applies to + map additively with the outputs slug", () => {
@@ -203,9 +202,10 @@ describe("collectNodeWriteChannels — outputs auto-declare", () => {
     expect(chans.sort()).toEqual(["a", OUTPUTS_CHANNEL, "shared"].sort());
   });
 
-  it("ensureDeclaredOutputChannels auto-declares outputs with mergeDeep", () => {
+  it("ensureDeclaredOutputChannels auto-declares outputs with a shallow merge", () => {
     const spec = baseSpec([{ id: "alpha", type: "function", with: { fn: "echo" } }]);
     const ensured = ensureDeclaredOutputChannels(spec);
     expect(ensured.state?.channels?.[OUTPUTS_CHANNEL]).toEqual(OUTPUTS_CHANNEL_DEF);
+    expect(OUTPUTS_CHANNEL_DEF.reducer).toBe("merge");
   });
 });

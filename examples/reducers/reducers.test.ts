@@ -11,6 +11,8 @@ describe("reducers example", () => {
     const result = await runGraphFile(graphPath, { cwd: __dirname });
     expect(result.status).toBe("completed");
     expect([...(result.state.tags as string[])].sort()).toEqual(["alpha", "beta"]);
+    // raw: false keeps only the projection.
+    expect(result.state.outputs).toBeUndefined();
   });
 
   it("custom uniqueById reducer dedupes findings by id", async () => {

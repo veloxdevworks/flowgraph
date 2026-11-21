@@ -137,15 +137,24 @@ export type PropertyDef = {
 // State / channels
 // ---------------------------------------------------------------------------
 
-export const ReducerSchema = z.union([
-  z.literal("lastWrite"),
-  z.literal("append"),
-  z.literal("concat"),
-  z.literal("merge"),
-  z.literal("mergeDeep"),
-  z.literal("messages"),
-  z.string().startsWith("custom:"),
-]);
+const reducerErrorMap: z.ZodErrorMap = (_issue, ctx) => ({
+  message:
+    ctx.data === "concat"
+      ? 'reducer "concat" was removed; use "append", which concatenates arrays the same way'
+      : "expected one of lastWrite | append | merge | mergeDeep | messages | custom:<name>",
+});
+
+export const ReducerSchema = z.union(
+  [
+    z.literal("lastWrite"),
+    z.literal("append"),
+    z.literal("merge"),
+    z.literal("mergeDeep"),
+    z.literal("messages"),
+    z.string({ errorMap: reducerErrorMap }).startsWith("custom:"),
+  ],
+  { errorMap: reducerErrorMap },
+);
 
 export const ChannelTypeSchema = z.union([
   z.literal("string"),
@@ -200,28 +209,55 @@ export const DurationSchema = z.string().regex(/^\d+(\.\d+)?(ms|s|m|h|d)$/, "Inv
 /**
  * How a node's result is written into state.
  *
- * - omitted / `{}` — auto-save to `state.<nodeId>` (see runtime `applyOutput`)
- * - `"none"` / `{ none: true }` — opt out; write nothing
- * - `{ to }` and/or `{ map }` — optional projections, additive with the nodeId slug
+ * - omitted / `{}` — save the raw result to `state.outputs.<nodeId>`, replacing
+ *   that node's previous result (see runtime `applyOutput`)
+ * - `"none"` — opt out; write nothing
+ * - `{ to }` and/or `{ map }` — projections, written alongside `state.outputs.<nodeId>`
+ * - `raw: false` with `to` / `map` — write only the projections
  */
 export const OutputMappingObjectSchema = z.object({
-  /** Write the full result to this channel (in addition to `state.<nodeId>`). */
+  /** Write the full result to this channel (in addition to `state.outputs.<nodeId>`). */
   to: z.string().optional(),
-  /** Project fields from `result` into channels (in addition to `state.<nodeId>`). */
+  /** Project fields from `result` into channels (in addition to `state.outputs.<nodeId>`). */
   map: z.record(z.string({ invalid_type_error: 'Use an expression string, for example "{{ [\'x\'] }}", instead of a YAML list or object.' })).optional(),
-  /** When true, write nothing to state (pure side-effect). */
-  none: z.boolean().optional(),
+  /**
+   * Also keep the raw result under `state.outputs.<nodeId>` (default `true`).
+   * `false` keeps only the `to` / `map` projections, so large or sensitive
+   * results are not stored in state or checkpoints.
+   */
+  raw: z.boolean().optional(),
+  /** Not supported: write `output: none`. Declared only so any `none` key is rejected with a clear message. */
+  none: z.undefined().optional(),
 });
 
-export const OutputMappingSchema = z.union(
-  [z.literal("none"), OutputMappingObjectSchema],
-  {
-    errorMap: () => ({
-      message:
-        'expected "none", { none: true }, { to: "<channel>" }, and/or { map: { <channel>: "<expr>" } }. Map values must be expression strings, for example "{{ [\'x\'] }}", rather than YAML lists or objects.',
-    }),
-  },
-);
+const OUTPUT_MAPPING_FORMS =
+  'expected "none", { to: "<channel>" }, and/or { map: { <channel>: "<expr>" } }, optionally with raw: false. Map values must be expression strings, for example "{{ [\'x\'] }}", rather than YAML lists or objects.';
+
+/** The message for an output mapping that uses a removed or contradictory form, if any. */
+function outputMappingFormError(data: unknown): string | undefined {
+  if (data == null || typeof data !== "object" || Array.isArray(data)) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(data, "none")) return undefined;
+  const m = data as Record<string, unknown>;
+  if (m["to"] !== undefined || m["map"] !== undefined) {
+    return 'output "none" writes nothing, so it cannot be combined with to or map. Use output: none to write nothing, or keep to / map (with raw: false to skip state.outputs.<nodeId>).';
+  }
+  return 'the none key is not supported inside an output object; write output: none to write nothing.';
+}
+
+export const OutputMappingSchema = z
+  .union([z.literal("none"), OutputMappingObjectSchema], {
+    errorMap: (_issue, ctx) => ({ message: outputMappingFormError(ctx.data) ?? OUTPUT_MAPPING_FORMS }),
+  })
+  .superRefine((value, ctx) => {
+    if (typeof value !== "object") return;
+    if (value.raw === false && value.to === undefined && value.map === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "raw: false needs to or map; to write nothing at all, use output: none.",
+        path: ["raw"],
+      });
+    }
+  });
 
 export type OutputMapping = z.infer<typeof OutputMappingSchema>;
 

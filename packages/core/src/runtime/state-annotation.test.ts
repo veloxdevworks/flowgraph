@@ -29,11 +29,6 @@ describe("channelReducerAndDefault", () => {
     expect(reducer([1], 2)).toEqual([1, 2]);
   });
 
-  it("concat concatenates arrays like append", () => {
-    const { reducer } = channelReducerAndDefault("items", { type: "array", reducer: "concat" });
-    expect(reducer(["a"], ["b"])).toEqual(["a", "b"]);
-  });
-
   it("merge shallow-merges objects", () => {
     const { reducer } = channelReducerAndDefault("ctx", { type: "object", reducer: "merge" });
     expect(reducer({ a: 1 }, { b: 2 })).toEqual({ a: 1, b: 2 });
