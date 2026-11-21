@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GraphSpecSchema, RouterWithSchema, WaitWithSchema } from "./index.js";
+import { generateJsonSchema, GraphSpecSchema, RouterWithSchema, WaitWithSchema } from "./index.js";
 
 const graph = (edges: unknown[], nodes: unknown[] = [{ id: "a", type: "function" }, { id: "b", type: "function" }]) =>
   GraphSpecSchema.safeParse({
@@ -93,6 +93,13 @@ describe("on.error", () => {
     });
     expect(parsed.success).toBe(false);
     expect(parsed.error?.issues.some((issue) => issue.message === "on.error ignore was removed; use continue")).toBe(true);
+  });
+
+  it("keeps fail, continue, and route in the editor schema", () => {
+    const encoded = JSON.stringify(generateJsonSchema());
+    expect(encoded).toContain('"const":"fail"');
+    expect(encoded).toContain('"const":"continue"');
+    expect(encoded).toContain("^route\\\\:");
   });
 });
 

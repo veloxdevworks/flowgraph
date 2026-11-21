@@ -77,6 +77,8 @@ export const ROUTER_GUARD_ERROR = "ROUTER_GUARD_ERROR";
 export type RouterGuardError = Error & {
   code: typeof ROUTER_GUARD_ERROR;
   retryable: false;
+  from: string;
+  when: string;
 };
 
 export function isRouterGuardError(err: unknown): err is RouterGuardError {
@@ -91,6 +93,8 @@ export function routerGuardError(routerId: string, when: string, cause: unknown)
   ) as RouterGuardError;
   err.code = ROUTER_GUARD_ERROR;
   err.retryable = false;
+  err.from = routerId;
+  err.when = when;
   return err;
 }
 

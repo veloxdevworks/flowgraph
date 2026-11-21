@@ -513,6 +513,24 @@ export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
+export function routerNoDefaultDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const node of spec.nodes) {
+    if (node.type !== "router") continue;
+    const withBlock = node.with as { mode?: string; routes?: Array<{ default?: boolean }> } | undefined;
+    const routes = withBlock?.routes;
+    if ((withBlock?.mode ?? "rules") !== "rules" || !Array.isArray(routes)) continue;
+    if (routes.some((route) => route?.default === true)) continue;
+    diagnostics.push({
+      severity: "warning",
+      code: "ROUTER_NO_DEFAULT",
+      message: `Router "${node.id}" has no default. A run with no matching when fails.`,
+      path: `nodes.${node.id}.with.routes`,
+    });
+  }
+  return diagnostics;
+}
+
 /**
  * Subgraph nodes must identify the child via exactly one of `uses` (path/alias)
  * or `spec` (inline GraphSpec from bundling).
@@ -1293,6 +1311,7 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...unevenFanInDiagnostics(spec),
     ...barrierEdgeDiagnostics(spec),
     ...unconditionalFanOutDiagnostics(spec),
+    ...routerNoDefaultDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
     ...subgraphOutputMappingDiagnostics(spec),
     ...placementDiagnostics(spec),

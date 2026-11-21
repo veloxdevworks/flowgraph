@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
-import { defaultModelDiagnostics, unconditionalFanOutDiagnostics } from "./validate-graph.js";
+import { defaultModelDiagnostics, routerNoDefaultDiagnostics, unconditionalFanOutDiagnostics } from "./validate-graph.js";
 import { staticGraphDiagnostics } from "./static-diagnostics.js";
 
 describe("unconditionalFanOutDiagnostics", () => {
@@ -87,6 +87,31 @@ describe("unconditionalFanOutDiagnostics", () => {
       ],
     } as unknown as GraphSpec;
     expect(unconditionalFanOutDiagnostics(spec).map((item) => item.code)).toEqual(["BRANCH_NO_DEFAULT"]);
+  });
+});
+
+describe("router defaults", () => {
+  it("warns when a rules router has no default", () => {
+    const spec = {
+      metadata: { name: "router" },
+      nodes: [
+        {
+          id: "route",
+          type: "router",
+          with: { routes: [{ when: "{{ false }}", to: "a" }] },
+        },
+      ],
+      edges: [],
+    } as unknown as GraphSpec;
+    expect(routerNoDefaultDiagnostics(spec).map((item) => item.code)).toEqual(["ROUTER_NO_DEFAULT"]);
+    expect(routerNoDefaultDiagnostics({
+      ...spec,
+      nodes: [{
+        id: "route",
+        type: "router",
+        with: { mode: "model", input: "text", routes: [{ name: "a", to: "a" }] },
+      }],
+    } as GraphSpec)).toEqual([]);
   });
 });
 

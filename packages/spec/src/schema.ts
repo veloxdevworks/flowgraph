@@ -1530,21 +1530,18 @@ export const NodeSpecSchema = z.object({
   on: z
     .object({
       error: z
-        .string()
-        .superRefine((value, ctx) => {
-          if (value === "ignore") {
-            ctx.addIssue({
-              code: z.ZodIssueCode.custom,
-              message: "on.error ignore was removed; use continue",
-            });
-            return;
-          }
-          if (value === "fail" || value === "continue" || value.startsWith("route:")) return;
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `Unsupported on.error "${value}"`,
-          });
-        })
+        .union([
+          z.literal("fail"),
+          z.literal("continue"),
+          z.string({
+            errorMap: (_issue, ctx) => {
+              if (ctx.data === "ignore") {
+                return { message: "on.error ignore was removed; use continue" };
+              }
+              return { message: ctx.defaultError };
+            },
+          }).startsWith("route:"),
+        ])
         .optional(),
     })
     .optional(),

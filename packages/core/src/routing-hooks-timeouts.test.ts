@@ -153,6 +153,7 @@ describe("routing", () => {
     const failed = await (await compileGraph(thrown)).run();
     expect(failed.status).toBe("error");
     expect(failed.error).toMatchObject({ code: "ROUTER_GUARD_ERROR", retryable: false });
+    expect(failed.issues?.some((issue) => issue.code === "ROUTER_GUARD_ERROR" && issue.nodeId === "route")).toBe(true);
     expect(failed.state.seen ?? null).toBeNull();
   });
 

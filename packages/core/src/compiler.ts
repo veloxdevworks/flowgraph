@@ -107,7 +107,7 @@ import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { acquireThreadRun, adoptThreadRunClaim, defaultThreadRunOwner, threadAdmissionError, type ThreadRunClaim } from "./checkpoint/execution-claim.js";
 import { flowFailure } from "./runtime/failure.js";
 import { captureSubgraphHostContext, SUBGRAPH_HOST_CONTEXT } from "./runtime/subgraph-host-context.js";
-import { exclusiveRouting, isEdgeGuardError, isNoMatchError, isRoutingFailure, normalTargets, recoveryTargets, ROUTING_CHANNEL, selectBranchTarget, type GuardScope } from "./runtime/routing-policy.js";
+import { exclusiveRouting, isEdgeGuardError, isNoMatchError, isRouterGuardError, isRoutingFailure, normalTargets, recoveryTargets, ROUTING_CHANNEL, selectBranchTarget, type GuardScope } from "./runtime/routing-policy.js";
 
 import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
@@ -1801,7 +1801,7 @@ async function assembleCompiledLangGraph(
           throw terminal;
         }
         if (isRoutingFailure(err)) {
-          if (isNoMatchError(err)) recordGuardError(err, lgConfig);
+          recordGuardError(err, lgConfig);
           throw err;
         }
 
@@ -1934,8 +1934,8 @@ async function assembleCompiledLangGraph(
   // issues name the edge and the expression next to the error status.
   const recordGuardError = (err: unknown, lgConfig?: LangGraphRunnableConfig): unknown => {
     const runMeta = (runScopeOf(lgConfig)?.meta ?? baseCtx.meta) as RunMeta | undefined;
-    const from = isEdgeGuardError(err) ? err.from : isNoMatchError(err) ? err.from : undefined;
-    if (!isEdgeGuardError(err) && !isNoMatchError(err)) return err;
+    const from = isEdgeGuardError(err) ? err.from : isNoMatchError(err) ? err.from : isRouterGuardError(err) ? err.from : undefined;
+    if (!isEdgeGuardError(err) && !isNoMatchError(err) && !isRouterGuardError(err)) return err;
     const issue = stampIssue(
       isEdgeGuardError(err)
         ? {
@@ -1946,12 +1946,21 @@ async function assembleCompiledLangGraph(
             remediation: "Fix the `when` expression, or guard missing values (for example `state.a != null && state.a.b`).",
             detail: { from: err.from, to: err.to, when: err.when },
           }
-        : {
-            code: ISSUE_CODE.NO_MATCH,
-            severity: "error",
-            message: err.message,
-            impact: "The run stopped because no route matched and there is no default.",
-          },
+        : isRouterGuardError(err)
+          ? {
+              code: ISSUE_CODE.ROUTER_GUARD_ERROR,
+              severity: "error",
+              message: err.message,
+              impact: "The run stopped because a router rule could not be evaluated.",
+              remediation: "Fix the `when` expression, or guard missing values (for example `state.a != null && state.a.b`).",
+              detail: { when: err.when },
+            }
+          : {
+              code: ISSUE_CODE.NO_MATCH,
+              severity: "error",
+              message: err.message,
+              impact: "The run stopped because no route matched and there is no default.",
+            },
       from ? { nodeId: from } : {},
     );
     events.emit("run.issue", issue, from ? { nodeId: from } : {});
