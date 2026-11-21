@@ -327,24 +327,24 @@ describe("async jobs and the journal", () => {
 
   it("keeps the journal on timeout so a later retry can re-attach", async () => {
     const calls = newCalls();
-    const provider = asyncProvider(calls, [{ state: "running" }], { pollIntervalMs: 20 });
-    const g = graph([{ id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x" } }]);
+    const provider = asyncProvider(calls, [{ state: "running" }], { pollIntervalMs: 10_000 });
+    const g = graph([{ id: "vid", type: "video", provider: "fake", timeout: "5s", with: { prompt: "x" } }]);
     const res = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "tt" });
     expect(res.status).toBe("error");
-    expect(String(res.error?.message ?? res.error)).toMatch(/still running after 50ms/);
+    expect(String(res.error?.message ?? res.error)).toMatch(/still running after 5s/);
     const left = await readdir(path.join(dir, ".flowgraph", "jobs", "tt"));
     expect(left).toHaveLength(1);
   });
 
   it("does not cancel the vendor job on a node timeout, so a retry can re-attach", async () => {
     const calls = newCalls();
-    const provider = asyncProvider(calls, [{ state: "running" }], { pollIntervalMs: 20 });
+    const provider = asyncProvider(calls, [{ state: "running" }], { pollIntervalMs: 10_000 });
     const g = graph([
-      { id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x" } },
+      { id: "vid", type: "video", provider: "fake", timeout: "5s", with: { prompt: "x" } },
     ]);
     const res = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "tn" });
     expect(res.status).toBe("error");
-    expect(String(res.error?.message ?? res.error)).toMatch(/still running after 50ms/);
+    expect(String(res.error?.message ?? res.error)).toMatch(/still running after 5s/);
     expect(calls.cancel).toBe(0);
     const left = await readdir(path.join(dir, ".flowgraph", "jobs", "tn"));
     expect(left).toHaveLength(1);
