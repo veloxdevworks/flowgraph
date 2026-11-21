@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderTemplate } from "./template.js";
 const MAX_EVAL_STEPS = 1_000_000;
-const MAX_RANGE_LENGTH = 10_000, MAX_REPLACE_LENGTH = 16 * 1024 * 1024;
+const MAX_RANGE_LENGTH = 10_000, MAX_STRING_RESULT_LENGTH = 16 * 1024 * 1024;
 
 const render = (template: string, scope: Record<string, unknown> = {}) => renderTemplate(template, scope);
 
@@ -78,8 +78,29 @@ describe("replace()", () => {
   it("refuses a result that would grow past the limit before building it", () => {
     const s = "y".repeat(100_000);
     expect(() => render("{{ len(replace(state.s, '', state.s)) }}", { state: { s } })).toThrow(
-      new RegExp(`longer than ${MAX_REPLACE_LENGTH} characters`),
+      new RegExp(`longer than ${MAX_STRING_RESULT_LENGTH} characters`),
     );
     expect(render("{{ replace('a-b-c', '-', '+') }}")).toBe("a+b+c");
+  });
+});
+
+describe("join() and format()", () => {
+  it("refuses a join that would grow past the limit before building it", () => {
+    const sep = "s".repeat(20 * 1024);
+    expect(() => render("{{ join(range(10000), state.sep) }}", { state: { sep } })).toThrow(
+      new RegExp(`join: result would be longer than ${MAX_STRING_RESULT_LENGTH} characters`),
+    );
+    expect(render("{{ join(range(3), ', ') }}")).toBe("0, 1, 2");
+    expect(render("{{ join([], '-') }}")).toBe("");
+  });
+
+  it("refuses a format that would grow past the limit before building it", () => {
+    const template = "{0}".repeat(100_000);
+    const value = "v".repeat(1024);
+    expect(() => render("{{ format(state.t, state.v) }}", { state: { t: template, v: value } })).toThrow(
+      new RegExp(`format: result would be longer than ${MAX_STRING_RESULT_LENGTH} characters`),
+    );
+    expect(render("{{ format('{} and {} then {0}', 'a', 'b') }}")).toBe("a and b then a");
+    expect(render("{{ format('{5}|{}', 'x') }}")).toBe("|x");
   });
 });
