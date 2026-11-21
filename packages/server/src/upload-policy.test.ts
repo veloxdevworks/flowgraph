@@ -75,6 +75,13 @@ describe("checkUntrustedUpload", () => {
     expect(codes).toContain("UPLOAD_SECRET_REFERENCE_BLOCKED nodes[0].with.headers.x");
   });
 
+  it("blocks env placeholders written with a YAML escape", () => {
+    const yaml = graph(`  - { id: a, type: hitl, with: { mode: approve, message: "key=\\u0024{HOME}" } }`);
+    expect(yaml).not.toContain("${HOME}");
+    expect(parseGraphYaml(yaml, { expandEnv: false }).spec?.nodes[0]?.with).toMatchObject({ message: "key=${HOME}" });
+    expect(codesOf(yaml)).toEqual(["UPLOAD_ENV_PLACEHOLDER_BLOCKED nodes[0].with.message"]);
+  });
+
   it("blocks file subgraphs, skill tools, host paths and provider overrides", () => {
     const yaml = graph(
       `  - { id: a, type: subgraph, uses: ./other.graph.yaml }
