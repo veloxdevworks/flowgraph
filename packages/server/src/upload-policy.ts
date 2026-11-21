@@ -175,7 +175,11 @@ export function findEnvPlaceholder(line: string): string | undefined {
   }
 }
 
-/** Check an untrusted upload. `raw` is the YAML text as sent; `spec` its parse without env expansion. */
+/**
+ * Check an untrusted upload. `raw` is the YAML text as sent; `spec` its parse
+ * without env expansion. `${VAR}` is looked for in both, so a placeholder
+ * written with a YAML escape is still found.
+ */
 export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: UntrustedUploadOptions = {}): UploadViolation[] {
   const out: UploadViolation[] = [];
   const add = (code: UploadViolationCode, path: string, message: string) => out.push({ severity: "error", code, path, message });
@@ -195,6 +199,11 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
   });
 
   walkStrings(spec, "", (value, path) => {
+    // YAML escapes (`"\u0024{X}"`) only become a placeholder once parsed; the raw scan has reported the rest.
+    const placeholder = findEnvPlaceholder(value);
+    if (placeholder !== undefined && !raw.includes(placeholder)) {
+      add("UPLOAD_ENV_PLACEHOLDER_BLOCKED", path, `${placeholder} would read the server's environment; pass the value as run input instead`);
+    }
     if (templateRefs(value).secret) {
       add("UPLOAD_SECRET_REFERENCE_BLOCKED", path, "secret.* templates read the server's environment; pass the value as run input instead");
     }

@@ -37,6 +37,8 @@ import {
   parseGraphYaml,
   persistGraph,
   loadPersistedGraph,
+  redactExpandedError,
+  redactExpandedValues,
   readPersistedGraphYaml,
   readGraphMeta,
   graphStoreClaim,
@@ -727,6 +729,21 @@ export class RunService {
     principal: Principal,
     dryRun = false,
   ): Promise<CompiledGraph> {
+    try {
+      return await this.compileNow(spec, cwd, threadId, onEvent, principal, dryRun);
+    } catch (err) {
+      throw redactExpandedError(spec, err);
+    }
+  }
+
+  private async compileNow(
+    spec: GraphSpec,
+    cwd: string,
+    threadId: string,
+    onEvent: (ev: FlowgraphEvent) => void,
+    principal: Principal,
+    dryRun: boolean,
+  ): Promise<CompiledGraph> {
     const checkpointer = await this.getCheckpointer();
     const providers = await buildServerProviders(spec, cwd, { dryRun, untrusted: !principal.trusted });
     const identity = this.memoryIdentityFor(principal);
@@ -1023,7 +1040,7 @@ export class RunService {
     const diagnostics: Diagnostic[] = [...parsed.diagnostics];
     const done = (): WorkerPreflightResult => ({
       ok: diagnostics.every((d) => d.severity !== "error"),
-      diagnostics,
+      diagnostics: diagnostics.map((d) => ({ ...d, message: redactExpandedValues(parsed.spec, d.message) })),
       ...importsStripped,
     });
     if (!parsed.spec) {
