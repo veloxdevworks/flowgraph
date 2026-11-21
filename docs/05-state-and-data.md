@@ -16,7 +16,7 @@ state:
     counters: { type: object, reducer: merge }    # shallow object merge
 ```
 
-> **Channels must be declared before they can be written.** Any channel targeted by `output`, `collect`, or `subgraph` `stateMap.out` should appear under `state.channels`. The underlying LangGraph state schema only accepts keys that were declared at compile time — undeclared writes are otherwise **silently dropped** (no runtime error), so a later `{{ state.myChannel }}` reads as empty/`null`. `flowgraph validate` reports this as `UNDECLARED_OUTPUT_CHANNEL`. The desktop builder and `compileGraph` auto-declare missing targets as `{ type: any }` so runs still succeed; prefer declaring the real type (`object`, `string`, …) in YAML.
+> **Declare the channels nodes write.** Any channel targeted by `output`, `collect`, or `subgraph` `stateMap.out` should appear under `state.channels`. The underlying LangGraph state schema only accepts keys that were declared at compile time, so `compileGraph` (and the desktop builder) declares each missing target as `{ type: any }` with last-write-wins, and the write is kept. `flowgraph validate` reports a missing declaration as the warning `UNDECLARED_OUTPUT_CHANNEL`; declare the real type (`object`, `string`, …) and reducer in YAML.
 
 ### Channel types
 
@@ -134,7 +134,7 @@ A `subgraph` node writes child results into the parent through the same reducers
 
 The child is seeded with the matching parent values (or `stateMap.in`). The update is only the **new** portion, then the **parent's** reducer combines it: an `append` channel receives the suffix the child added, and a `merge` / `mergeDeep` channel receives the keys the child changed. Unchanged seeded channels are left alone, so a parallel branch is not overwritten with a stale copy.
 
-Parallel subgraphs in one superstep merge in node-id order (map items merge in input order). `flowgraph validate` reports `UNDECLARED_OUTPUT_CHANNEL` when an `out` key is not a parent channel, and `SUBGRAPH_OUTPUT_UNKNOWN` when an `out` value names a child channel that does not exist.
+Parallel subgraphs in one superstep merge in node-id order (map items merge in input order). `flowgraph validate` warns with `UNDECLARED_OUTPUT_CHANNEL` when an `out` key is not a declared parent channel, and errors with `SUBGRAPH_OUTPUT_UNKNOWN` when an `out` value names a child channel that does not exist.
 
 ## 3. Reading & writing state
 
@@ -257,7 +257,7 @@ The stdlib is intentionally small and pure. Anything more complex belongs in a `
 
 | | `${ENV}` interpolation | `{{ expr }}` expressions |
 |---|---|---|
-| When | **Load time** (once, before validation) | **Run time** (per node execution) |
+| When | **Load time** (once, after parsing and before validation) | **Run time** (per node execution) |
 | Scope | names declared under top-level `secrets:` | `state`, `input`, `result`, `config`, `secret`, `env`, `run` |
 | Where allowed | `config`, `runtime` scalar values | node `input`/`with`/`output`, `when`, edge `branch.when` |
 | Purpose | wire declared secrets into config | dynamic data flow during execution |
@@ -272,7 +272,9 @@ nodes:
     with: { prompt: "Summarize {{ state.issue.title }}" }     # {{ }} = expr, per run
 ```
 
-> **Shell bodies:** load-time `${ENV}` expansion touches only `config` and `runtime`, so `${SLUG}` or `${SPEC_SLUG:-}` in a `shell` node's `command` / `args` / `env` is left for the child shell, which sees only its allowed environment and `with.env`. An undeclared `${NAME}` in `config` or `runtime` is not expanded and is reported as `SECRET_UNDECLARED` ([02 §7](./02-graph-spec.md#7-config)).
+The full `${ENV}` rule (undeclared names, `:-default`, the `$${NAME}` escape, redaction) is in [02 §7](./02-graph-spec.md#7-config); the CLI and the server apply the same rule.
+
+> **Shell bodies:** `${ENV}` expansion touches only `config` and `runtime`, so `${SLUG}` or `${SPEC_SLUG:-}` in a `shell` node's `command` / `args` / `env` is left for the child shell, which sees only its allowed environment and `with.env`.
 
 ## 6. Expression scope objects
 

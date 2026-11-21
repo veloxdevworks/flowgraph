@@ -88,7 +88,12 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
     }
   };
   for (const node of spec.nodes) {
-    templates(node.with, `nodes.${node.id}.with`);
+    // Script source is never rendered, so `{{` there (JSX `style={{ … }}`) is code, not a template.
+    // A map body is rendered with the item first, so its script code is still checked.
+    if (node.type === "script" && node.with && typeof node.with === "object" && "code" in node.with) {
+      const { code: _code, ...rest } = node.with as Record<string, unknown>;
+      templates(rest, `nodes.${node.id}.with`);
+    } else templates(node.with, `nodes.${node.id}.with`);
     templates(node.input, `nodes.${node.id}.input`);
     if (node.when) check(guardExpression(node.when), `nodes.${node.id}.when`);
     const routes = (node.with as { routes?: Array<{ when?: string }> } | undefined)?.routes;
@@ -97,7 +102,9 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
         if (route?.when) check(guardExpression(route.when), `nodes.${node.id}.with.routes[${index}].when`);
       });
     }
-    if (node.spec) diagnostics.push(...staticGraphDiagnostics(node.spec));
+    if (node.spec) {
+      for (const d of staticGraphDiagnostics(node.spec)) diagnostics.push({ ...d, path: d.path ? `nodes.${node.id}.spec.${d.path}` : `nodes.${node.id}.spec` });
+    }
   }
   for (const [index, edge] of spec.edges.entries())
     if ("branch" in edge) {

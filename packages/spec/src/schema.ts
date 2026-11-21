@@ -234,18 +234,26 @@ export const RetrySchema = z.object({
 // Duration string: "30s", "5m", "2h"
 export const DurationSchema = z.string().regex(/^\d+(\.\d+)?(ms|s|m|h|d)$/, "Invalid duration");
 
+const relocatedFields = new WeakSet<object>();
 
 /**
  * A setting that is not part of the contract. If present, validation fails
  * with `message`, which should name the canonical field to use instead.
  */
 function relocatedField(message: string) {
-  return z
+  const field = z
     .any()
     .superRefine((_value, ctx) => {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message });
     })
     .optional();
+  relocatedFields.add(field._def);
+  return field;
+}
+
+/** True for a field that only exists to reject a relocated setting; the published JSON Schema leaves it out. */
+export function isRelocatedFieldDef(def: object): boolean {
+  return relocatedFields.has(def);
 }
 
 
@@ -1184,7 +1192,9 @@ export const MapWithSchema = z.object({
   over: z.string().describe("Expression evaluating to an array"),
   as: z.string().default("item"),
   concurrency: z.number().int().positive().optional().default(5),
-  node: z.record(z.unknown()),
+  node: z
+    .lazy((): typeof MapBodyNodeSchema => MapBodyNodeSchema)
+    .describe("The node run once per item: a node spec whose id is optional"),
   collect: OutputMappingSchema.optional(),
 });
 
@@ -1546,6 +1556,15 @@ export const NodeSpecSchema = z.object({
     })
     .optional(),
 }).strict();
+
+/**
+ * A `map` body (`with.node`): the same fields as a graph node, but `id` is
+ * optional because each item runs as `<mapId>[<index>]`. Its `with` is checked
+ * against the body type's own schema by validation, as for any node.
+ */
+export const MapBodyNodeSchema = NodeSpecSchema.extend({
+  id: NodeSpecSchema.shape.id.optional(),
+});
 
 // NodeSpec is declared after GraphSpec (see below) so `spec?: GraphSpec` can
 // close the recursive type without a forward reference.

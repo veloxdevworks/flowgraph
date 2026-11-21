@@ -360,6 +360,8 @@ describe("subgraph merge-back", () => {
             node: {
               type: "subgraph",
               spec: {
+                apiVersion: "flowgraph/v1",
+                kind: "Graph",
                 metadata: { name: "sq" },
                 state: { channels: { n: { type: "number" }, squared: { type: "number" } } },
                 nodes: [

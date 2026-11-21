@@ -62,6 +62,8 @@ import {
   collectNodeWriteChannels,
   demoToolExposureDiagnostics,
   ensureDeclaredOutputChannels,
+  graphShapeDiagnostics,
+  graphStructureDiagnostics,
   provesObjective,
 } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
@@ -449,6 +451,7 @@ function compileWarningIssue(diag: Diagnostic, raisedAt: string): RunIssue {
 }
 
 export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): Promise<CompiledGraph> {
+  throwIfInvalid(graphShapeDiagnostics(spec));
   const plan = await planPlacements(spec, opts.placement);
   const assembled = await assembleCompiledLangGraph(spec, opts, plan);
   const {
@@ -1440,12 +1443,25 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   };
 }
 
+function throwIfInvalid(diagnostics: Diagnostic[]): void {
+  const invalid = diagnostics.filter((d) => d.severity === "error");
+  if (!invalid.length) return;
+  throw Object.assign(new Error(`Invalid graph: ${invalid.map((d) => `${d.code}${d.path ? ` at ${d.path}` : ""}: ${d.message}`).join("; ")}`), {
+    code: invalid[0]!.code,
+    diagnostics: invalid,
+    retryable: false,
+  });
+}
+
 async function assembleCompiledLangGraph(
   spec: GraphSpec,
   opts: CompileOptions,
   plan?: PlacementPlan,
   embedded = false,
 ): Promise<AssembledGraph> {
+  // Before any other walk, so a cyclic or heavily shared programmatic spec fails here, not with a
+  // RangeError or after exponential work.
+  throwIfInvalid(graphShapeDiagnostics(spec));
   const sourceFile = graphFile(spec);
   const unexpandedEnv = unexpandedEnvDiagnostics(spec);
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
@@ -1518,6 +1534,10 @@ async function assembleCompiledLangGraph(
     });
     assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
   }
+  // The structural errors validateSpec reports for the graph, its map bodies and inline
+  // subgraphs; lints such as inputs, triggers and hitl routes stay validate-time at every level.
+  // After imports and extra factories, so plugin types resolve.
+  throwIfInvalid(graphStructureDiagnostics(spec));
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
   const exposed = demoToolExposureDiagnostics(spec)[0];
   if (exposed) throw new Error(`${exposed.path}: ${exposed.message}`);

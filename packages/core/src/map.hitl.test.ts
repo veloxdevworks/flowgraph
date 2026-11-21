@@ -134,6 +134,8 @@ describe("checkpointed map + HITL", () => {
             node: {
               type: "subgraph",
               spec: {
+                apiVersion: "flowgraph/v1",
+                kind: "Graph",
                 metadata: { name: "item-child" },
                 state: { channels: { gateResult: { type: "object" } } },
                 nodes: [

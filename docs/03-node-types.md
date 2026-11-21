@@ -253,6 +253,7 @@ Model-based routing:
 ```
 
 - `routes` is an ordered list. Each rules entry has exactly one of `when` or `default: true`. The first matching `when` wins; a throwing `when` fails the run. No match and no default fails with `NO_MATCH`. Model entries need a unique `name` and do not take `when`.
+- A route's `to` is a node id or `END`. A route to `START` is rejected by `flowgraph validate` and `compileGraph` (`ROUTE_TO_START`); route to the first node instead.
 - `with.match: firstMatch` (default) selects the first matching route. `with.match: allMatches` fans out to every matching destination, deduplicates destinations, and writes an array of chosen route keys as the router output. The default route is used only when no condition matches. `allMatches` is only valid with `mode: rules`. A router with `mode: model` and `match: allMatches` is rejected; model routers select one route.
 - Model-based routers receive every declared route key and description, including the default as an explicit "none of the above" choice (enforced via structured output).
 - `mode: model` requires `with.input`, the text the model routes on. The model sees that rendered text, the instruction and the routes, never the whole state.
@@ -616,6 +617,8 @@ export default async function (input, ctx) {
 
 ### How it runs
 
+`with.code` is never rendered as a template, so `{{` in source (JSX `style={{ color: "red" }}`, an object literal in a template string) is code and `flowgraph validate` does not parse it as an expression. Pass run data through `with.input`, which is rendered. Inside a `map` body the map renders the body's `with` with the item, code included, so there `{{` in code is still checked; use `with.file` for such source.
+
 Choose exactly one of `with.code` or `with.file`. A file path is static and resolves
 relative to the graph file declaring the node, independently of `runtime.workspace`.
 The file must contain the same default-export function as inline code:
@@ -715,7 +718,7 @@ Child events are nested under the parent's span. The parent must use checkpointi
 
 On resume, the parent `subgraph` node re-executes from the top (recomputing `stateMap.in`). Side effects reached before a nested interrupt should use `ctx.once()` so they do not re-fire on replay (same pattern as top-level HITL nodes).
 
-`flowgraph validate` errors when an `out` key is not a parent channel (`UNDECLARED_OUTPUT_CHANNEL`) or an `out` value names a child channel that does not exist (`SUBGRAPH_OUTPUT_UNKNOWN`).
+`flowgraph validate` warns when an `out` key is not a declared parent channel (`UNDECLARED_OUTPUT_CHANNEL`; compile declares it as `type: any`) and errors when an `out` value names a child channel that does not exist (`SUBGRAPH_OUTPUT_UNKNOWN`). An inline `spec` is validated like a top-level graph, and so is a `uses:` file when the graph is loaded ([02 §11](./02-graph-spec.md#11-validation--diagnostics)).
 
 ---
 
@@ -745,6 +748,8 @@ The map renders the inner node's `with` and `input` once per item, with `state`,
     collect:
       to: results                   # results array written via append reducer
 ```
+
+`with.node` is a node spec with the same fields as a graph node, except that `id` is optional (each item runs as `<map>[<index>]`). `flowgraph validate` and `compileGraph` check it like any node: an unknown key, a missing `type`, an unregistered type, or a `with` that does not match the body type's schema (for example a `shell` body without `command`) is an error before the run starts. A body's inline subgraph `spec` is validated like a top-level graph.
 
 Set `with.memoize: true` to reuse completed per-item results when a loop returns to this map. The cache belongs to the thread/map checkpoint; it survives resume with a durable checkpointer and never crosses threads. Reordering items preserves reuse. Failed/unfinished work is not cached, and duplicates in the same dispatch may execute independently. Hits skip execution and side effects, then apply the current inner output projection and collection order.
 
@@ -804,7 +809,7 @@ For `approve`, `choice` and `review`, the human's answer *is* the routing decisi
 
 - Keys are the outcomes: `approved` / `rejected` for `approve`, each entry of `choices` for `choice`, each decision for `review` (`approve` / `request-changes` unless `decision` lists others). A value is a node id, or `{ to, description }`.
 - A `default` route catches any outcome without its own. It is required when `choices` are templated, since the answers are only known at run time. An answer with no route and no `default` fails the run.
-- Lint (`validateSpec` / `flowgraph validate`) errors on a literal outcome with no route (`HITL_ROUTE_MISSING`), on routes for `question` / `form` (`HITL_ROUTES_MODE`) and on unknown targets, and warns about routes that never match.
+- Lint (`validateSpec` / `flowgraph validate`) errors on a literal outcome with no route (`HITL_ROUTE_MISSING`), on routes for `question` / `form` (`HITL_ROUTES_MODE`) and on unknown targets, and warns about routes that never match. These lints apply the same way to a gate in an inline subgraph `spec`, and `compileGraph` does not check them at any level. A route to `START` is an error in validate and compile (`ROUTE_TO_START`).
 - Like a router, a gate with `routes` is the source of truth: edges leaving it that aren't route targets are ignored, and the decision is reported as a `router.decision` event (`mode: "hitl"`). You don't need a `branch` edge, and the desktop canvas draws one cell per route on the node.
 - For logic over state or model-based choices, keep using a [`router`](#3-router--intelligent--rule-based-routing).
 - A `router` right after a gate that only compares the gate's answer is flagged by lint as `HITL_ROUTER_MERGEABLE` (an `info` recommendation). Fold it in by moving its routes onto the gate — the desktop Builder does this with **Merge into HITL** (node right-click menu, or the Lint tab). Routers that test anything beyond the answer, take several routes, or write state are left alone.

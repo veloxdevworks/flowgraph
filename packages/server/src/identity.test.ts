@@ -316,9 +316,21 @@ describe("startup refusal", () => {
 });
 
 describe("single-user principals", () => {
-  it("trusts the token holder, and the anonymous caller only in insecure dev", () => {
+  it("trusts the token holder only with the opt-in, and the anonymous caller only in insecure dev", () => {
     const base = defaultServerConfig({ FLOWGRAPH_ORG: "acme", FLOWGRAPH_USER: "ryan", FLOWGRAPH_AUTH_TOKEN: "t" });
-    expect(singleUserPrincipal(base)).toMatchObject({ id: "token:ryan", org: "acme", project: "local", trusted: true, via: "token" });
+    expect(singleUserPrincipal(base)).toMatchObject({ id: "token:ryan", org: "acme", project: "local", trusted: false, via: "token" });
+    const optIn = defaultServerConfig({ FLOWGRAPH_ORG: "acme", FLOWGRAPH_USER: "ryan", FLOWGRAPH_AUTH_TOKEN: "t", FLOWGRAPH_TRUST_TOKEN_CALLERS: "1" });
+    expect(optIn.trustTokenCallers).toBe(true);
+    expect(singleUserPrincipal(optIn)).toMatchObject({ id: "token:ryan", trusted: true, via: "token" });
+    expect(checkStartupAuth(optIn)).toEqual([expect.stringMatching(/FLOWGRAPH_TRUST_TOKEN_CALLERS=1/)]);
+    // A programmatic config with a token is still token mode; one with no token and no auth is an embedded service.
+    expect(singleUserPrincipal({ host: "127.0.0.1", port: 0, graphStoreDir: "/tmp/x", eventBufferSize: 1, authToken: "t" }).trusted).toBe(false);
+    expect(singleUserPrincipal({ host: "127.0.0.1", port: 0, graphStoreDir: "/tmp/x", eventBufferSize: 1 }).trusted).toBe(true);
+    // On AgentCore, /invocations callers reach that principal without a token.
+    expect(singleUserPrincipal({ host: "127.0.0.1", port: 0, graphStoreDir: "/tmp/x", eventBufferSize: 1, agentcore: true }).trusted).toBe(false);
+    expect(singleUserPrincipal({ host: "127.0.0.1", port: 0, graphStoreDir: "/tmp/x", eventBufferSize: 1, agentcore: true, trustTokenCallers: true }).trusted).toBe(true);
+    // The opt-in does not reach other modes.
+    expect(singleUserPrincipal(defaultServerConfig({ FLOWGRAPH_AUTH_DISABLED: "1", FLOWGRAPH_TRUST_TOKEN_CALLERS: "1" })).trusted).toBe(false);
     expect(singleUserPrincipal(defaultServerConfig({ FLOWGRAPH_AUTH_DISABLED: "1" }))).toMatchObject({ id: "anonymous", trusted: false });
     expect(singleUserPrincipal(defaultServerConfig({ FLOWGRAPH_AUTH_DISABLED: "1", FLOWGRAPH_INSECURE_DEV: "1" })).trusted).toBe(true);
   });

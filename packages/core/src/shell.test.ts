@@ -78,7 +78,7 @@ describe("shell node: run data never becomes shell syntax", () => {
   it("refuses to compile a templated command", async () => {
     await expect(
       compileGraph(shellSpec({ command: "echo Hello {{ state.title }}", output: { to: "out" } }), {}),
-    ).rejects.toThrow(/config error: .*command cannot contain \{\{ \}\} templates/);
+    ).rejects.toThrow(/NODE_CONFIG_ERROR at nodes\.run\.with\.command: .*command cannot contain \{\{ \}\} templates/);
     const diags = validateSpec(shellSpec({ command: "echo Hello {{ state.title }}", shell: true }));
     expect(diags).toContainEqual(
       expect.objectContaining({ severity: "error", message: expect.stringMatching(/command cannot contain \{\{ \}\} templates/) }),
