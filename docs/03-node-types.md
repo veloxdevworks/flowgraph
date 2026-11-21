@@ -121,7 +121,7 @@ An LLM-driven agent that runs a tool-calling loop. **This is the hub in hub-and-
 - The agent runs **inside a single graph node**. Its internal tool-calls do **not** create graph edges; they are intra-node steps. This keeps the graph topology readable while allowing rich agent behavior.
 - A tool that is a **skill** or **node** is invoked through flowgraph's runtime, so tool-calls still emit events/traces (nested spans under the agent span) and respect contracts.
 - A `node` tool may be any node type except `map` (a map is expanded into the graph when it is compiled; put it in a `subgraph` and expose that instead). The model's arguments become the node's input. An interrupt anywhere below a node tool (an asking agent, a `hitl` node, a node inside a subgraph or map item it runs, or a node tool it calls in turn) saves the replay entries of the whole top-level node, so on resume every model turn and tool result already produced is reused and only the approved call runs. A reused tool result must have been recorded for the same tool name and arguments; if the model asks for a different call at that point the run fails with `REPLAY_MISMATCH` rather than reusing it.
-- `permission: ask` raises a **HITL interrupt before every tool call** on that node. `permission: deny` blocks all tool calls. `permission: auto` allows tools unless a hook vetoes or interrupts. A node without `permission` uses the host's default (`runConfig.permission` in `compileGraph`, inherited by embedded subgraphs), which is `auto` unless the host sets `ask` or `deny`.
+- `permission: ask` raises a **HITL interrupt before every tool call** on that node. `permission: deny` blocks all tool calls. `permission: auto` allows tools unless a hook vetoes or interrupts. A node without `permission` uses the host's default (`runConfig.permission` in `compileGraph`, inherited by embedded subgraphs), which is `auto` unless the host sets `ask` or `deny`. The host value is only a default, not a ceiling: a node that sets `permission: auto`, or a Claude provider with `permissionMode` such as `bypassPermissions`, still runs tools without asking. Gate untrusted graphs with `runtime.hooks`, a node policy, or by rejecting those settings before compiling.
 - Per-tool gates use `runtime.hooks` on `agent:beforeToolCall` (e.g. require approval only for `fs_write`). See [11 — Local Tools](./11-local-tools.md).
 - In CI, interrupt behavior is governed by the host: `--on-interrupt`, or `onInterrupt` in run options (default `fail`).
 - When a richer, *visible-in-the-graph* decomposition is wanted, use a `router` + explicit nodes or a `subgraph` instead of (or in addition to) agent tools. The two compose.
@@ -312,7 +312,7 @@ See `examples/mcp/` for a runnable walkthrough.
     output: { to: notifyResult }
 ```
 
-Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
+Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). A `{{ secret.X }}` in a webhook needs `X` in the graph's top-level `secrets:`, as in `http`. Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
@@ -1047,7 +1047,7 @@ Capture a small artifact that demonstrates what a pipeline produced — an API r
       method: GET
       url: "http://localhost:{{ state.port }}/health"
       headers:
-        Authorization: "Bearer {{ secret.API_TOKEN }}"
+        Authorization: "Bearer {{ secret.API_TOKEN }}"   # API_TOKEN listed in top-level secrets:
     # output omitted → state.outputs.prove-api
 
 # Web screenshot (requires optional peer `playwright`)
@@ -1111,7 +1111,7 @@ Every result has a `status` that says what it shows ([ADR-0019](./adr/0019-demo-
 | `not_captured` | Nothing was captured: Playwright or its browser missing, connection refused, DNS error, source file not found, app did not launch, empty output, … | `false` | none |
 | `passed` | A `steps` flow ran to the end, every assertion held, at least one positive assertion ran, and evidence exists. No other mode can produce it | `true` | yes |
 
-Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. A host node policy refusal is not a capture failure and always fails the node: `{{ secret.X }}` when the policy blocks secrets, an `http` target outside the outbound HTTP policy, or a `screenshot`, `video` or `steps` capture while an outbound HTTP policy is set (a browser loads pages and redirects outside those checks). Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
+Neither failure **fails the run** by default: the node raises a run issue and logs a warning so the rest of the pipeline can continue. A graph that needs more than "something was captured" can route on `status`. A host node policy refusal is not a capture failure and always fails the node: `{{ secret.X }}` when the policy blocks secrets or when the graph does not list `X` under its top-level `secrets:`, an `http` target outside the outbound HTTP policy, or a `screenshot`, `video` or `steps` capture while an outbound HTTP policy is set (a browser loads pages and redirects outside those checks). Set `with.strict: true` to fail the node instead when the artifact is required; its entry still lands in the manifest. A strict capture whose tools are missing is a preflight error, so the run stops before it starts rather than at the end.
 
 Use `expect` when a different status is the point, such as proving a 404 page:
 
@@ -1137,7 +1137,7 @@ Use `expect` when a different status is the point, such as proving a 404 page:
       web: { url: "{{ state.baseUrl }}/login", timeout: 2m, stepTimeout: 30s }
     steps:
       - fill: { selector: "#email", value: "{{ config.vars.testUser }}" }
-      - fill: { selector: "#password", value: "{{ secret.TEST_PASSWORD }}" }
+      - fill: { selector: "#password", value: "{{ secret.TEST_PASSWORD }}" }   # TEST_PASSWORD listed in top-level secrets:
       - click: 'button:has-text("Sign in")'
       - expect: { url: "**/account" }
       - click: "text=Checkout"

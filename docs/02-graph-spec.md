@@ -341,8 +341,10 @@ nodes:
 - `{{ secret.NAME }}` reads only a declared name. `flowgraph validate` and `compileGraph` report `SECRET_UNDECLARED` for any literal `secret.NAME` / `secret["NAME"]` in a node or an `mcpServers` entry that the list does not name. A computed name (`secret[state.key]`) is checked when it is read, and the node fails with the same message. A declared name the host has not set renders as an empty string.
 - A provider `apiKeyEnv` must be declared. A provider with a `baseUrl` but no `apiKeyEnv` would send the vendor's default key (for example `OPENAI_API_KEY`) to that endpoint, so that default key must be declared too. A provider without `apiKeyEnv` or `baseUrl` reads its vendor's default key as before, without a declaration.
 - A `command` skill's `env.vars` entry marked `secret: true` reaches the skill's process only when the graph declares it; a required one that is not declared fails the skill, an `optional: true` one is left out.
-- An inline subgraph `spec:` has its own `secrets` list. A child never reads a name only its parent declares.
+- An inline subgraph `spec:` and a file subgraph (`uses: ./child.graph.yaml`) each have their own `secrets` list. A child never reads a name only its parent declares.
+- `http`, `webhook`, `demo`, `service`, `shell`, `script`, skills and `mcpServers` all read `{{ secret.X }}` through the same declared list. A `demo` capture that reads an undeclared name fails the node rather than reporting `not_captured`.
 - Declaring a name does not pass it to child processes. `shell`, `script`, `service` and command skills start from a small default allowlist (`PATH`, `HOME`, temp and locale variables); pass a secret explicitly, for example `env: { TOKEN: "{{ secret.GITHUB_TOKEN }}" }`.
+- `secrets:` controls what templates and provider settings read; it is **not** an isolation boundary for `shell`, `script`, skill or `service` nodes. A shell `with.inheritEnv` entry, a skill's non-secret `env.vars`, and anything those processes read from their parent environment or the file system can still carry a host value that is not declared. Run graphs you do not trust under a node policy that blocks those node types.
 
 ## 8. Input / output mapping
 
