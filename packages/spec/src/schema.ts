@@ -544,6 +544,14 @@ export const RouterWithSchema = z
           "router mode: model cannot use match: allMatches; a model router selects one route. Use mode: rules for allMatches, or omit match.",
       });
     }
+    if (value.mode === "model" && !value.input?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["input"],
+        message:
+          "router mode: model requires input: the text the model routes on, e.g. input: \"{{ state.request }}\". The router does not send the whole state.",
+      });
+    }
   });
 
 // http node
