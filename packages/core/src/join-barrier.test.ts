@@ -15,6 +15,10 @@ registerFunction("joinBarrierMark", (input) => {
   return id;
 });
 
+registerFunction("joinBarrierFail", () => {
+  throw new Error("expected failure");
+});
+
 beforeEach(() => {
   calls.length = 0;
 });
@@ -78,6 +82,31 @@ async function seenOf(spec: GraphSpec): Promise<string[]> {
 
 function joinCount(seen: string[]): number {
   return seen.filter((id) => id === "join").length;
+}
+
+/** START fans out to e and z, and both must finish before join. */
+function recoveryBarrier(source: Record<string, unknown>): GraphSpec {
+  return {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: "barrier-recovery-source" },
+    state: { channels: { seen: { type: "array", reducer: "append" }, items: { type: "array" } } },
+    nodes: [source, mark("z"), mark("join"), mark("rec")],
+    edges: [
+      { from: "START", to: ["e", "z"] },
+      { from: ["e", "z"], to: "join" },
+      { from: "join", to: "END" },
+      { from: "rec", to: "END" },
+    ],
+    runtime: { checkpoint: { enabled: false } },
+  } as unknown as GraphSpec;
+}
+
+async function expectRecoverySource(spec: GraphSpec, id: string): Promise<void> {
+  const diags = validateSpec(spec).filter((d) => d.code === "BARRIER_RECOVERY_SOURCE");
+  expect(diags.map((d) => d.message)).toEqual([expect.stringContaining(`"${id}"`)]);
+  expect(diags.every((d) => d.severity === "error" && d.message.includes('"rec"'))).toBe(true);
+  await expect(compileGraph(spec, {})).rejects.toMatchObject({ code: "BARRIER_RECOVERY_SOURCE" });
 }
 
 /** `x` is listed on a barrier, but the only edges that name it leave a route-declaring node. */
@@ -468,6 +497,96 @@ describe("join barrier", () => {
     expect(seen).toEqual(expect.arrayContaining(["a", "x", "z"]));
     expect(joinCount(seen)).toBe(1);
     expect(seen).not.toContain("fallback");
+  });
+
+  it("rejects the failing source in START to [e, z] then [e, z] to join", async () => {
+    const spec = recoveryBarrier({
+      id: "e",
+      type: "function",
+      with: { fn: "joinBarrierFail" },
+      on: { error: "route:rec" },
+    });
+    await expectRecoverySource(spec, "e");
+  });
+
+  it("rejects a map whose item has an error recovery route", async () => {
+    const spec = recoveryBarrier({
+      id: "e",
+      type: "map",
+      with: {
+        over: "{{ state.items }}",
+        node: {
+          id: "inner",
+          type: "function",
+          on: { error: "route:rec" },
+          with: { fn: "joinBarrierFail" },
+        },
+      },
+    });
+    await expectRecoverySource(spec, "e");
+  });
+
+  it("rejects a barrier source selected by a route hook", async () => {
+    const spec = recoveryBarrier({
+      id: "e",
+      type: "function",
+      with: { fn: "joinBarrierFail" },
+    });
+    spec.runtime = {
+      checkpoint: { enabled: false },
+      hooks: [{ on: "node:error", where: { nodeId: "e" }, do: "route:rec" }],
+    } as unknown as GraphSpec["runtime"];
+    await expectRecoverySource(spec, "e");
+  });
+
+  it("reports a short list, END, and a self-target from compileGraph", async () => {
+    const one = graph([
+      { from: "START", to: "split" },
+      { from: ["short"], to: "join" },
+      { from: "join", to: "END" },
+    ]);
+    const endList = graph([
+      { from: "START", to: "split" },
+      { from: ["END"], to: "join" },
+    ]);
+    const endPair = graph([
+      { from: "START", to: "split" },
+      { from: ["END", "short"], to: "join" },
+      { from: "join", to: "END" },
+    ]);
+    const selfList = graph([
+      { from: "START", to: "split" },
+      { from: ["join"], to: "join" },
+    ]);
+
+    expect(
+      validateSpec(one).some(
+        (d) => d.code === "BARRIER_SOURCE_INVALID" && d.message.includes("at least two"),
+      ),
+    ).toBe(true);
+    await expect(compileGraph(one, {})).rejects.toMatchObject({
+      code: "BARRIER_SOURCE_INVALID",
+      message: expect.stringContaining("at least two"),
+    });
+
+    expect(
+      validateSpec(endList).some(
+        (d) => d.code === "BARRIER_SOURCE_INVALID" && d.message.includes("cannot be a barrier source"),
+      ),
+    ).toBe(true);
+    await expect(compileGraph(endList, {})).rejects.toMatchObject({
+      code: "BARRIER_SOURCE_INVALID",
+      message: expect.stringContaining('"END"'),
+    });
+    await expect(compileGraph(endPair, {})).rejects.toMatchObject({
+      code: "BARRIER_SOURCE_INVALID",
+      message: expect.stringContaining("cannot be a barrier source"),
+    });
+
+    expect(validateSpec(selfList).some((d) => d.code === "BARRIER_SELF_SOURCE")).toBe(true);
+    await expect(compileGraph(selfList, {})).rejects.toMatchObject({
+      message: expect.stringContaining("wait for itself"),
+    });
   });
 
   it("parses the uneven-join example", () => {

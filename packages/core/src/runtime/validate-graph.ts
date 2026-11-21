@@ -19,6 +19,8 @@ import {
   hitlRouteTargets,
   normalizeHitlRoutes,
 } from "../nodes/hitl-routes.js";
+import type { Hook } from "../hooks/types.js";
+import { recoveryTargets } from "./routing-policy.js";
 
 /** Node ids on an edge `from`: one source, or every source of a barrier. */
 function edgeFromIds(from: string | readonly string[]): string[] {
@@ -1147,28 +1149,28 @@ export function unevenFanInDiagnostics(spec: GraphSpec): Diagnostic[] {
 }
 
 /**
- * Errors for a static `from` list: unknown ids, duplicates, reserved ids,
- * a barrier aimed at END or at one of its own sources, and sources that are
- * only reachable through a conditional branch or a declared route (the
- * barrier would never fire).
+ * Errors for a static `from` list: fewer than two ids, unknown ids, duplicates,
+ * reserved ids, a barrier aimed at END or at one of its own sources, a source
+ * with a recovery route, and sources that are only reachable through a
+ * conditional branch or a declared route (the barrier would never fire).
  */
-export function barrierEdgeDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function barrierEdgeDiagnostics(spec: GraphSpec, hooks: Hook[] = []): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const nodeIds = new Set(spec.nodes.map((n) => n.id));
+  const byId = new Map(spec.nodes.map((n) => [n.id, n]));
   const adj = staticSuccessors(spec);
   const dist = hopDistances(adj);
   const reachable = nodesReachableFromStart(spec);
 
   spec.edges.forEach((edge, index) => {
     if (!Array.isArray(edge.from)) return;
-    if (edge.from.length === 0) {
+    if (edge.from.length < 2) {
       diagnostics.push({
         severity: "error",
         code: "BARRIER_SOURCE_INVALID",
-        message: "Edge from must list at least one node id.",
+        message: "Edge from must list at least two node ids.",
         path: `edges[${index}].from`,
       });
-      return;
     }
 
     const seen = new Set<string>();
@@ -1193,7 +1195,6 @@ export function barrierEdgeDiagnostics(spec: GraphSpec): Diagnostic[] {
       }
     }
 
-    if (!isJoinBarrier(edge.from)) return;
     const targets = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : [];
     for (const target of targets) {
       if (target === "END" || !seen.has(target)) continue;
@@ -1204,7 +1205,7 @@ export function barrierEdgeDiagnostics(spec: GraphSpec): Diagnostic[] {
         path: `edges[${index}]`,
       });
     }
-    if (targets.includes("END")) {
+    if (isJoinBarrier(edge.from) && targets.includes("END")) {
       diagnostics.push({
         severity: "error",
         code: "BARRIER_TARGET_END",
@@ -1232,7 +1233,19 @@ export function barrierEdgeDiagnostics(spec: GraphSpec): Diagnostic[] {
         });
         continue;
       }
-      if (!nodeIds.has(id) || dist.has(id) || !reachable.has(id)) continue;
+      const node = byId.get(id);
+      const recovery = node ? recoveryTargets(spec, node, hooks) : [];
+      if (node && recovery.length > 0 && isJoinBarrier(edge.from)) {
+        diagnostics.push({
+          severity: "error",
+          code: "BARRIER_RECOVERY_SOURCE",
+          message:
+            `Barrier source "${id}" has a recovery route to ${recovery.map((to) => `"${to}"`).join(", ")}. ` +
+            "If it fails, the join still runs, at the same time as that route.",
+          path: `edges[${index}].from`,
+        });
+      }
+      if (!isJoinBarrier(edge.from) || !nodeIds.has(id) || dist.has(id) || !reachable.has(id)) continue;
       diagnostics.push({
         severity: "error",
         code: "BARRIER_CONDITIONAL_SOURCE",

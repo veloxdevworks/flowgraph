@@ -1447,7 +1447,10 @@ async function assembleCompiledLangGraph(
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
   // does not silently drop node updates when authors omit state.channels entries.
   spec = ensureDeclaredOutputChannels(spec);
-  const barrierErrors = barrierEdgeDiagnostics(spec).filter((d) => d.severity === "error");
+  // Reject a short list, END, a self-target, and a recovery source here, before
+  // LangGraph sees the edge. A one-id list, END as a start, or a barrier aimed
+  // at itself would otherwise fail inside addEdge.
+  const barrierErrors = barrierEdgeDiagnostics(spec, opts.hooks).filter((d) => d.severity === "error");
   if (barrierErrors.length) {
     throw Object.assign(new Error(barrierErrors.map((d) => d.message).join("; ")), {
       code: barrierErrors[0]!.code,
