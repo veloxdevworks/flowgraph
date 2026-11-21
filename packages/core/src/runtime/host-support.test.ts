@@ -3,6 +3,9 @@ import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "../compiler.js";
 import { hostSupportDiagnostics } from "./host-support.js";
 import { registerFunction } from "../nodes/function.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function graph(over: Record<string, unknown> = {}): GraphSpec {
   return GraphSpecSchema.parse({
@@ -87,5 +90,26 @@ describe("compiled.run() host warning", () => {
     const r2 = await desktop.run();
     expect(r2.status).toBe("completed");
     expect(quiet).toEqual([]);
+  });
+});
+
+describe("the host warning is a run issue", () => {
+  it("lands in RunResult.issues with the host's name, and not when the host interprets triggers", async () => {
+    registerFunction("hostSupportOk", () => ({ ok: true }));
+    const spec = graph({ triggers: [{ id: "nightly", type: "cron", schedule: "0 2 * * *" }] });
+    const ws = mkdtempSync(join(tmpdir(), "fg-host-issue-"));
+    try {
+      const r = await (await compileGraph(spec, { workspace: ws, hostName: "flowgraph CLI" })).run();
+      expect(r.status).toBe("completed");
+      expect(r.issues).toHaveLength(1);
+      expect(r.issues![0]).toMatchObject({ code: "TRIGGERS_HOST_UNSUPPORTED", severity: "warning", detail: { path: "triggers" } });
+      expect(r.issues![0]!.message).toContain("flowgraph CLI");
+      expect(r.issues![0]!.raisedAt).toEqual(expect.any(String));
+
+      const quiet = await (await compileGraph(spec, { workspace: ws, interpretsTriggers: true })).run();
+      expect(quiet.issues ?? []).toEqual([]);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
   });
 });

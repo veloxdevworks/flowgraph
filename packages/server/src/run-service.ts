@@ -732,6 +732,7 @@ export class RunService {
     const identity = this.memoryIdentityFor(principal);
     const graphPath = path.join(cwd, `${threadId.replace(/[^a-zA-Z0-9._-]/g, "_")}.graph.yaml`);
     return compileGraph(spec, {
+      hostName: "flowgraph server",
       cwd,
       graphPath,
       checkpointer,

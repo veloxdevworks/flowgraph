@@ -365,6 +365,7 @@ program
     let compiled;
     try {
       compiled = await compileGraph(spec, {
+        hostName: "flowgraph CLI",
         cwd,
         graphPath,
         ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),
@@ -512,6 +513,7 @@ program
     for (const w of localTools.warnings) {if(opts.json)console.error(w);else printWarning(w);}
     const continuations = continuationMailbox();
     const compiled = await compileGraph(spec, {
+      hostName: "flowgraph CLI",
       cwd,
       graphPath,
       ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),

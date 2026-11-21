@@ -211,6 +211,8 @@ export interface CompileOptions {
    * not warn that it ignores them. Default: false (CLI, server, programmatic).
    */
   interpretsTriggers?: boolean;
+  /** Name of the host in host-support run issues (default "compiled.run()"), e.g. "flowgraph CLI". */
+  hostName?: string;
   /** MCP hub for mcp nodes and intelligent MCP tools (built from mcpServers by CLI). */
   mcp?: McpHub;
   /**
@@ -770,11 +772,25 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     });
 
     if (mode === "start") {
+      // Recorded like any other run issue, so RunResult.issues, the server's issue list and
+      // --fail-on-issues see it, not only event subscribers.
       for (const d of hostSupportDiagnostics(graphSpec, {
-        hostName: "compiled.run()",
+        hostName: opts.hostName ?? "compiled.run()",
         ...(opts.interpretsTriggers ? { interpretsTriggers: true } : {}),
       })) {
-        events.emit("run.issue", { code: d.code, severity: d.severity, message: d.message, path: d.path });
+        const issue = stampIssue(
+          {
+            code: d.code,
+            severity: d.severity === "error" ? "error" : "warning",
+            message: d.message,
+            impact: "Runs are started only by this call; the graph's triggers do nothing on this host.",
+            remediation: "Run the graph on a host that interprets triggers, or remove them.",
+            ...(d.path ? { detail: { path: d.path } } : {}),
+          },
+          {},
+        );
+        try { appendRunIssue(workspace, runIssuesKey({ threadId, runId }), issue); } catch { /* the event still reports it */ }
+        events.emit("run.issue", issue);
       }
     }
 
