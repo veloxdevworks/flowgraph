@@ -122,7 +122,7 @@ Non-fatal degradations (missing toolchain, skipped verification, failed demo cap
 
 CLI prints an `Issues (N)` block after a successful run (`--fail-on-issues` exits 1). Server exposes `GET /runs/:threadId/issues`. Desktop surfaces them on the Runner Issues tab and in the summarize-run report.
 
-Well-known codes: `TOOL_NOT_FOUND`, `CAPTURE_FAILED`, `STEP_SKIPPED`, `BUDGET_EXCEEDED`, `MAX_STEPS`, `ROUTE_EVAL_ERROR`, `ERROR_SWALLOWED`, `AGENT_REPORTED`.
+Well-known codes: `TOOL_NOT_FOUND`, `CAPTURE_FAILED`, `STEP_SKIPPED`, `BUDGET_EXCEEDED`, `MAX_STEPS`, `ROUTE_EVAL_ERROR`, `EDGE_GUARD_ERROR`, `ERROR_SWALLOWED`, `AGENT_REPORTED`.
 
 ## 4. Hook model
 

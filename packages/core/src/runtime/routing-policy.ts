@@ -35,6 +35,43 @@ export function recoveryTargets(spec: GraphSpec, node: NodeSpec, hooks: Hook[] =
   return [...targets];
 }
 
+/** Code of the error raised when a branch `when` guard cannot be evaluated. */
+export const EDGE_GUARD_ERROR = "EDGE_GUARD_ERROR";
+
+export type EdgeGuardError = Error & {
+  code: typeof EDGE_GUARD_ERROR;
+  retryable: false;
+  from: string;
+  to: string;
+  when: string;
+};
+
+export function isEdgeGuardError(err: unknown): err is EdgeGuardError {
+  return err instanceof Error && (err as { code?: unknown }).code === EDGE_GUARD_ERROR;
+}
+
+/**
+ * Evaluate one branch guard. A guard that throws (bad path, wrong type, unknown
+ * function) fails the run: falling through to the default branch or END would
+ * make a broken condition look like a normal decision.
+ */
+export function evalBranchGuard(
+  from: string,
+  branch: { to: string; when: string },
+  state: Record<string, unknown>,
+): boolean {
+  const expr = branch.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
+  try {
+    return Boolean(evalGuard(expr, { state }));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw Object.assign(
+      new Error(`Edge "${from}" -> "${branch.to}": guard \`${branch.when}\` could not be evaluated: ${reason}`, { cause: err }),
+      { code: EDGE_GUARD_ERROR, retryable: false as const, from, to: branch.to, when: branch.when },
+    ) as EdgeGuardError;
+  }
+}
+
 export function normalTargets(
   spec: GraphSpec,
   id: string,
@@ -47,14 +84,8 @@ export function normalTargets(
       for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) targets.add(to);
     else {
       const chosen =
-        edge.branch.find((b) => {
-          if (b.default || !b.when) return false;
-          try {
-            return evalGuard(b.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim(), { state });
-          } catch {
-            return false;
-          }
-        }) ?? edge.branch.find((b) => b.default);
+        edge.branch.find((b) => !b.default && !!b.when && evalBranchGuard(id, { to: b.to, when: b.when }, state)) ??
+        edge.branch.find((b) => b.default);
       targets.add(chosen?.to ?? "END");
     }
   }

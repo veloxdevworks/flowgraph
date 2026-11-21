@@ -48,6 +48,7 @@ import {
   readRunIssues,
   runIssuesKey,
   stampIssue,
+  ISSUE_CODE,
   type IssueInput,
   type RunIssue,
 } from "./runtime/run-issues.js";
@@ -99,7 +100,7 @@ import { wrapperSpecForNode } from "./placement/remote.js";
 import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { acquireThreadRun, adoptThreadRunClaim, defaultThreadRunOwner, threadAdmissionError, type ThreadRunClaim } from "./checkpoint/execution-claim.js";
 import { flowFailure } from "./runtime/failure.js";
-import { exclusiveRouting, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
+import { evalBranchGuard, exclusiveRouting, isEdgeGuardError, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
 
 import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
@@ -1783,6 +1784,29 @@ async function assembleCompiledLangGraph(
     return Object.keys(out).length ? out : undefined;
   };
 
+  // A branch guard that throws fails the run. Record why first, so the run's
+  // issues name the edge and the expression next to the error status.
+  const recordGuardError = (err: unknown, lgConfig?: LangGraphRunnableConfig): unknown => {
+    if (!isEdgeGuardError(err)) return err;
+    const runMeta = (runScopeOf(lgConfig)?.meta ?? baseCtx.meta) as RunMeta | undefined;
+    const issue = stampIssue(
+      {
+        code: ISSUE_CODE.EDGE_GUARD_ERROR,
+        severity: "error",
+        message: err.message,
+        impact: "The run stopped at this edge instead of taking the default branch or ending.",
+        remediation: "Fix the `when` expression, or guard missing values (for example `state.a != null && state.a.b`).",
+        detail: { from: err.from, to: err.to, when: err.when },
+      },
+      { nodeId: err.from },
+    );
+    events.emit("run.issue", issue, { nodeId: err.from });
+    if (runMeta) {
+      try { appendRunIssue(runScopeOf(lgConfig)?.replayWorkspace ?? (!embedded ? runScopeOf(lgConfig)?.workspace : undefined) ?? graphWorkspace, runIssuesKey(runMeta), issue); } catch { /* the error still fails the run */ }
+    }
+    return err;
+  };
+
   // Edges. Router nodes drive exclusive routing via Command{ goto } + `ends`
   // declared from with.routes — skip their static/branch edges so a UI fan-out
   // (`to: [a, b]`) cannot race with the router's decision and run both branches.
@@ -1790,9 +1814,11 @@ async function assembleCompiledLangGraph(
   for (const node of spec.nodes) {
     if (recoveryTargets(spec, node, opts.hooks).length === 0) continue;
     routerIds.add(node.id);
-    graph.addConditionalEdges((mapJoinById.get(node.id) ?? node.id) as typeof START, (state: Record<string, unknown>) => {
+    graph.addConditionalEdges((mapJoinById.get(node.id) ?? node.id) as typeof START, (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
       const selected = (state[ROUTING_CHANNEL] as Record<string, string | string[] | null> | undefined)?.[node.id];
-      const targets = selected == null ? normalTargets(spec, node.id, state) : Array.isArray(selected) ? selected : [selected];
+      let targets: string[];
+      try { targets = selected == null ? normalTargets(spec, node.id, state) : Array.isArray(selected) ? selected : [selected]; }
+      catch (err) { throw recordGuardError(err, lgConfig); }
       return targets.map(to => to === "END" ? END : to);
     }, Object.fromEntries([...spec.nodes.map(n => n.id), END].map(id => [id, id])) as Record<string, typeof END>);
   }
@@ -1805,13 +1831,14 @@ async function assembleCompiledLangGraph(
       for (const t of tos) graph.addEdge(from as typeof START, (t === "END" ? END : t) as typeof END);
     } else if ("branch" in edge) {
       const branches = edge.branch;
-      graph.addConditionalEdges(from as typeof START, (state: Record<string, unknown>) => {
-        for (const b of branches) {
-          if (b.default) continue;
-          if (b.when) {
-            const expr = b.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
-            try { if (evalGuard(expr, { state })) return b.to; } catch { continue; }
+      graph.addConditionalEdges(from as typeof START, (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
+        try {
+          for (const b of branches) {
+            if (b.default || !b.when) continue;
+            if (evalBranchGuard(edge.from, { to: b.to, when: b.when }, state)) return b.to;
           }
+        } catch (err) {
+          throw recordGuardError(err, lgConfig);
         }
         return branches.find((b) => b.default)?.to ?? "END";
       });
