@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { existsSync, readFileSync, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -485,6 +486,64 @@ export default async function() {
       );
     } finally {
       await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("stops a grandchild that traps SIGTERM", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-group-"));
+    const pidFile = path.join(dir, "grandchild.pid");
+    const grandchild = `
+      process.on("SIGTERM", () => {});
+      require("node:fs").writeFileSync(process.env.PID_FILE, String(process.pid));
+      setInterval(() => {}, 1000);
+    `;
+    const code = `
+      export default async function () {
+        process.on("SIGTERM", () => {});
+        const { spawn } = await import("node:child_process");
+        spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore", env: process.env });
+        await new Promise(() => {});
+      }
+    `;
+    const ac = new AbortController();
+    let pid = 0;
+    const pending = runScriptSandboxed(code, {
+      signal: ac.signal,
+      permissions: { childProcess: true, fsWrite: [dir] },
+      env: { PID_FILE: pidFile },
+      workspace: dir,
+    });
+    try {
+      pid = await new Promise<number>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          watcher.close();
+          reject(new Error("grandchild did not start"));
+        }, 4000);
+        const finish = () => {
+          if (!existsSync(pidFile)) return;
+          clearTimeout(timer);
+          watcher.close();
+          resolve(Number(readFileSync(pidFile, "utf8")));
+        };
+        const watcher = watch(dir, finish);
+        finish();
+      });
+      ac.abort(new Error("stop"));
+      await expect(pending).rejects.toThrow(/stop/);
+      let state = "gone";
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        state = stat.split(")")[1]?.trim().split(" ")[0] ?? "gone";
+      } catch {
+        state = "gone";
+      }
+      expect(state === "gone" || state === "Z").toBe(true);
+    } finally {
+      ac.abort(new Error("stop"));
+      if (pid) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
     }
   });
 });

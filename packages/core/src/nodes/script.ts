@@ -386,6 +386,9 @@ export const scriptNode = defineNode<Config>({
   },
 });
 
+/** How long a trapped child gets to exit after SIGTERM before the group is SIGKILLed. */
+const STOP_GRACE_MS = 50;
+
 function runProcess(opts: {
   command: string;
   args: string[];
@@ -398,55 +401,88 @@ function runProcess(opts: {
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(signal.reason ?? new Error("Aborted"));
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted"));
       return;
     }
 
+    // A new process group so a timeout or abort reaches grandchildren, including
+    // a script that traps SIGTERM. Windows has no POSIX process groups.
+    const grouped = process.platform !== "win32";
     const child = spawn(command, args, {
       shell: false,
       cwd,
       env,
-      signal,
+      detached: grouped,
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     let stdout = "";
     let stderr = "";
     let settled = false;
-    let timedOut = false;
+    let stopReason: Error | undefined;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+
+    const killGroup = (sig: NodeJS.Signals) => {
+      const pid = child.pid;
+      if (grouped && pid !== undefined) {
+        try {
+          process.kill(-pid, sig);
+          return;
+        } catch {
+          // The group has already exited.
+        }
+      }
+      try { child.kill(sig); } catch { /* already exited */ }
+    };
+
+    const requestStop = (reason: Error) => {
+      if (stopReason) return;
+      stopReason = reason;
+      grace = setTimeout(() => killGroup("SIGKILL"), STOP_GRACE_MS);
+      killGroup("SIGTERM");
+    };
+
+    const onAbort = () => {
+      const reason = signal?.reason;
+      requestStop(reason instanceof Error ? reason : new Error("Aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
 
     const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
+      requestStop(new Error(`script: timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
     const finish = (err?: Error, exitCode = 1) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      if (err) {
-        reject(err);
+      if (grace) clearTimeout(grace);
+      signal?.removeEventListener("abort", onAbort);
+      if (stopReason) {
+        reject(stopReason);
         return;
       }
-      if (timedOut) {
-        reject(new Error(`script: timed out after ${timeoutMs}ms`));
+      if (err) {
+        reject(err);
         return;
       }
       resolve({ stdout, stderr, exitCode });
     };
 
+    const overflow = (which: "stdout" | "stderr") => {
+      if (stopReason) return;
+      stopReason = new Error(`script: ${which} exceeded maxBuffer (${MAX_BUFFER} bytes)`);
+      killGroup("SIGKILL");
+    };
+
     child.stdout?.on("data", (chunk: Buffer | string) => {
       stdout += String(chunk);
-      if (stdout.length > MAX_BUFFER) {
-        child.kill("SIGKILL");
-        finish(new Error(`script: stdout exceeded maxBuffer (${MAX_BUFFER} bytes)`));
-      }
+      if (stdout.length > MAX_BUFFER) overflow("stdout");
     });
     child.stderr?.on("data", (chunk: Buffer | string) => {
       stderr += String(chunk);
-      if (stderr.length > MAX_BUFFER) {
-        child.kill("SIGKILL");
-        finish(new Error(`script: stderr exceeded maxBuffer (${MAX_BUFFER} bytes)`));
-      }
+      if (stderr.length > MAX_BUFFER) overflow("stderr");
     });
 
     child.on("error", (err) => finish(err));
