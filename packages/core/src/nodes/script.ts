@@ -386,8 +386,12 @@ export const scriptNode = defineNode<Config>({
   },
 });
 
-/** How long a trapped child gets to exit after SIGTERM before the group is SIGKILLed. */
-const STOP_GRACE_MS = 50;
+/**
+ * After SIGTERM, always SIGKILL the process group. The direct child often exits
+ * on SIGTERM and would otherwise cancel this timer, leaving a grandchild that
+ * ignores SIGTERM reparented to init.
+ */
+const STOP_GRACE_MS = 2_000;
 
 function runProcess(opts: {
   command: string;
@@ -421,6 +425,8 @@ function runProcess(opts: {
     let settled = false;
     let stopReason: Error | undefined;
     let grace: ReturnType<typeof setTimeout> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let closeResult: { err?: Error; exitCode: number } | undefined;
 
     const killGroup = (sig: NodeJS.Signals) => {
       const pid = child.pid;
@@ -435,25 +441,7 @@ function runProcess(opts: {
       try { child.kill(sig); } catch { /* already exited */ }
     };
 
-    const requestStop = (reason: Error) => {
-      if (stopReason) return;
-      stopReason = reason;
-      grace = setTimeout(() => killGroup("SIGKILL"), STOP_GRACE_MS);
-      killGroup("SIGTERM");
-    };
-
-    const onAbort = () => {
-      const reason = signal?.reason;
-      requestStop(reason instanceof Error ? reason : new Error("Aborted"));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) onAbort();
-
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
-      requestStop(new Error(`script: timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const finish = (err?: Error, exitCode = 1) => {
+    const settle = () => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
@@ -463,11 +451,41 @@ function runProcess(opts: {
         reject(stopReason);
         return;
       }
-      if (err) {
-        reject(err);
+      if (closeResult?.err) {
+        reject(closeResult.err);
         return;
       }
-      resolve({ stdout, stderr, exitCode });
+      resolve({ stdout, stderr, exitCode: closeResult?.exitCode ?? 1 });
+    };
+
+    // A requested stop always reaches SIGKILL, even when `close` already ran.
+    const requestStop = (reason: Error) => {
+      if (stopReason) return;
+      stopReason = reason;
+      killGroup("SIGTERM");
+      grace = setTimeout(() => {
+        killGroup("SIGKILL");
+        settle();
+      }, STOP_GRACE_MS);
+    };
+
+    const onAbort = () => {
+      const reason = signal?.reason;
+      requestStop(reason instanceof Error ? reason : new Error("Aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        requestStop(new Error(`script: timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }
+
+    const noteClose = (err?: Error, exitCode = 1) => {
+      if (!closeResult?.err) closeResult = { ...(err ? { err } : {}), exitCode };
+      if (grace) return;
+      settle();
     };
 
     const overflow = (which: "stdout" | "stderr") => {
@@ -485,8 +503,8 @@ function runProcess(opts: {
       if (stderr.length > MAX_BUFFER) overflow("stderr");
     });
 
-    child.on("error", (err) => finish(err));
-    child.on("close", (code) => finish(undefined, code ?? 1));
+    child.on("error", (err) => noteClose(err));
+    child.on("close", (code) => noteClose(undefined, code ?? 1));
     child.stdin?.end();
   });
 }

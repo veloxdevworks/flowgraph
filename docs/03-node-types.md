@@ -644,7 +644,7 @@ file sources; untrusted server uploads retain their script restrictions.
 2. It spawns `node --permission … entry.mjs` in that temp directory (no `node_modules` on the resolution path).
 3. The wrapper calls your default export with the rendered `input` and writes the JSON-serialized return value to a result file, which is mapped via `output`.
 
-**Defaults:** with no node `timeout` and no `runtime.timeoutDefault`, a script is unbounded. Stdout and stderr are capped at 10MB. Non-zero exit, a node timeout, or a missing/invalid result file fail the node (stderr excerpt included). A timeout or abort stops the script process group: the child and any grandchild get SIGTERM, then SIGKILL after a short grace.
+**Defaults:** with no node `timeout` and no `runtime.timeoutDefault`, a script is unbounded. Stdout and stderr are capped at 10MB. Non-zero exit, a node timeout, or a missing/invalid result file fail the node (stderr excerpt included). A timeout or abort stops the script process group: the child and any grandchild get SIGTERM, then SIGKILL about 2 seconds later, even if the direct child has already exited.
 
 File sources remain self-contained modules: their contents run in the same temp
 sandbox as inline code. Loading a source file grants the child no access to its

@@ -514,36 +514,84 @@ export default async function() {
       workspace: dir,
     });
     try {
-      pid = await new Promise<number>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          watcher.close();
-          reject(new Error("grandchild did not start"));
-        }, 4000);
-        const finish = () => {
-          if (!existsSync(pidFile)) return;
-          clearTimeout(timer);
-          watcher.close();
-          resolve(Number(readFileSync(pidFile, "utf8")));
-        };
-        const watcher = watch(dir, finish);
-        finish();
-      });
+      pid = await grandchildPid(pidFile, dir);
       ac.abort(new Error("stop"));
       await expect(pending).rejects.toThrow(/stop/);
-      let state = "gone";
-      try {
-        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-        state = stat.split(")")[1]?.trim().split(" ")[0] ?? "gone";
-      } catch {
-        state = "gone";
-      }
-      expect(state === "gone" || state === "Z").toBe(true);
+      await expectStopped(pid);
     } finally {
       ac.abort(new Error("stop"));
-      if (pid) {
+      if (pid > 0) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("stops a grandchild that ignores SIGTERM after the direct child exits", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-group-"));
+    const pidFile = path.join(dir, "grandchild.pid");
+    const code = `
+      export default async function () {
+        const { spawn } = await import("node:child_process");
+        spawn("sh", ["-c", "trap '' TERM; echo $$ > \\"$PID_FILE\\"; sleep 30"], {
+          stdio: "ignore",
+          env: process.env,
+        });
+        await new Promise(() => {});
+      }
+    `;
+    const ac = new AbortController();
+    let pid = 0;
+    const pending = runScriptSandboxed(code, {
+      signal: ac.signal,
+      permissions: { childProcess: true, fsWrite: [dir] },
+      env: { PID_FILE: pidFile },
+      workspace: dir,
+    });
+    try {
+      pid = await grandchildPid(pidFile, dir);
+      ac.abort(new Error("stop"));
+      await expect(pending).rejects.toThrow(/stop/);
+      await expectStopped(pid);
+    } finally {
+      ac.abort(new Error("stop"));
+      if (pid > 0) {
         try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ }
       }
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
 });
+
+/** `kill(pid, 0)` still succeeds while the kernel has not reaped the process. */
+async function expectStopped(pid: number): Promise<void> {
+  const deadline = Date.now() + 200;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  expect(() => process.kill(pid, 0)).toThrow();
+}
+
+function grandchildPid(pidFile: string, dir: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      watcher.close();
+      reject(new Error("grandchild did not start"));
+    }, 4000);
+    const finish = () => {
+      if (!existsSync(pidFile)) return;
+      const raw = readFileSync(pidFile, "utf8").trim();
+      if (!/^[1-9]\d*$/.test(raw)) return;
+      clearTimeout(timer);
+      watcher.close();
+      resolve(Number(raw));
+    };
+    const watcher = watch(dir, finish);
+    finish();
+  });
+}
