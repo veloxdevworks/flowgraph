@@ -362,8 +362,10 @@ runtime:
     provider: env                 # env | dotenv | keychain | <custom>
     redact:
       patterns: ["(?i)token", "(?i)secret", "(?i)password"]
-      headers: ["authorization", "cookie"]
+      headers: ["x-service-token"] # added to authorization, cookie, set-cookie, x-api-key, ...
 ```
+
+`redact.headers` adds header names to the built-in list (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `api-key`, `x-auth-token`). Values sent under those names by `http`, `webhook` and `demo` nodes, and received under them in a `webhook` response, are redacted. A custom token header is not recognized until it is listed here.
 
 ## 9. Run lifecycle (sequence)
 

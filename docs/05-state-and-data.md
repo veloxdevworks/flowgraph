@@ -250,7 +250,7 @@ The stdlib is intentionally small and pure. Anything more complex belongs in a `
 
 - No I/O, no clock-skew nondeterminism beyond explicit `now()`, no host access.
 - Evaluation is **total**: a missing path yields `null` (configurable to "strict" mode that errors), preventing crashes from optional fields.
-- Evaluation is **bounded**. One expression may take at most 1,000,000 steps: each evaluated node is a step (a callback body counts once per item), and each function call adds a step per array element, object key or 64 characters it receives or returns. `range()` returns at most 10,000 items, and `replace()` refuses a result longer than 16M characters before building it. Going past a bound fails the expression with an evaluation error.
+- Evaluation has **limits** that stop the common runaway cases; they are not a hard cap on time or memory. One expression may take at most 1,000,000 steps: each evaluated node is a step (a callback body counts once per item), and each function call adds a step per array element, object key or 64 characters it receives or returns. Steps are counted as the work happens, so a single call or `+` can still build a large value before its cost is charged. `range()` returns at most 10,000 items, and `replace()`, `join()` and `format()` refuse a result longer than 16M characters before building it. Going past a limit fails the expression with an evaluation error.
 - Expressions are parsed at **compile time** so referenced channels/inputs can be validated (e.g. `state.sumary` typo ⇒ warning).
 
 ## 5. Two interpolation phases (don't confuse them)
