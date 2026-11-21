@@ -118,10 +118,7 @@ function routeSpec(kind: "router" | "hitl"): GraphSpec {
           type: "router",
           with: {
             mode: "rules",
-            routes: {
-              go: { default: true, to: "x" },
-              other: { when: "{{ false }}", to: "y" },
-            },
+            routes: [ { name: "go", default: true, to: "x" }, { name: "other", when: "{{ false }}", to: "y" } ],
           },
         }
       : {
@@ -162,7 +159,7 @@ function exclusiveSpec(kind: "router" | "hitl"): GraphSpec {
       ? {
           id: "gate",
           type: "router",
-          with: { mode: "rules", routes: { only: { default: true, to: "short" } } },
+          with: { mode: "rules", routes: [ { name: "only", default: true, to: "short" } ] },
         }
       : {
           id: "gate",
@@ -444,7 +441,7 @@ describe("join barrier", () => {
         {
           id: "route",
           type: "router",
-          with: { mode: "rules", routes: { go: { default: true, to: "done" } } },
+          with: { mode: "rules", routes: [ { name: "go", default: true, to: "done" } ] },
         },
         mark("side"),
         mark("done"),

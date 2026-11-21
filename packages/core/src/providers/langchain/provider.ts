@@ -58,7 +58,7 @@ export interface LangChainModelOverrides {
 /** Call options for a node model override and `maxTokens`. */
 export function langchainCallOptions(req: AgentRequest): LangChainModelOverrides {
   const options: LangChainModelOverrides = {};
-  if (req.model) options.model = req.model;
+  if (req.model && req.modelSource !== "default") options.model = req.model;
   if (req.maxTokens !== undefined) options.maxTokens = req.maxTokens;
   return options;
 }

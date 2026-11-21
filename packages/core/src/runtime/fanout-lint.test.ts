@@ -3,7 +3,7 @@ import type { GraphSpec } from "@flowgraph/spec";
 import { unconditionalFanOutDiagnostics } from "./validate-graph.js";
 
 describe("unconditionalFanOutDiagnostics", () => {
-  it("warns on multi-target to edges", () => {
+  it("does not warn on multi-target to edges", () => {
     const spec = {
       metadata: { name: "fan" },
       state: { channels: {} },
@@ -21,7 +21,7 @@ describe("unconditionalFanOutDiagnostics", () => {
     } as unknown as GraphSpec;
 
     const diags = unconditionalFanOutDiagnostics(spec);
-    expect(diags.some((d) => d.code === "UNCONDITIONAL_FANOUT")).toBe(true);
+    expect(diags.some((d) => d.code === "UNCONDITIONAL_FANOUT")).toBe(false);
   });
 
   it("does not warn when branch edges have when/default", () => {
@@ -58,7 +58,7 @@ describe("unconditionalFanOutDiagnostics", () => {
         {
           id: "route",
           type: "router",
-          with: { routes: { a: { to: "a", default: true } } },
+          with: { routes: [ { name: "a", to: "a", default: true } ] },
         },
         { id: "a", type: "shell", with: { command: "echo" } },
       ],

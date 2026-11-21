@@ -38,13 +38,13 @@ nodes:
     with:
       mode: rules
       routes:
-        bug:
+        - name: bug
           when: "{{ state.label == 'bug' }}"
           to: create-ticket
-        feature:
+        - name: feature
           when: "{{ state.label == 'feature' }}"
           to: create-ticket
-        default:
+        - name: default
           default: true
           to: create-ticket
 

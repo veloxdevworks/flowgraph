@@ -43,10 +43,7 @@ function spec(memoize: unknown = true, inner = {}, rounds = 2) {
         id: "route",
         type: "router",
         with: {
-          routes: {
-            again: { when: `{{ state.round < ${rounds} }}`, to: "fan" },
-            done: { default: true, to: "END" },
-          },
+          routes: [ { name: "again", when: `{{ state.round < ${rounds} }}`, to: "fan" }, { name: "done", default: true, to: "END" } ],
         },
       },
     ],

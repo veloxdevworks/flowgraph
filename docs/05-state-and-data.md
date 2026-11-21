@@ -499,6 +499,6 @@ Array callbacks in YAML use expression strings: `map(state.rows, 'item.price * s
 
 `range(n)` returns `0` to `n - 1`; `range(start, end, step)` stops before `end`. Both return at most 10,000 items.
 
-Undeclared run input keys produce an `INPUT_UNKNOWN_KEY` warning when they would be discarded by state storage. Declare intended keys in `inputs` or `state.channels`. Unknown `runtime.hooks[].on` phases fail validation with the supported names.
+Undeclared run input keys produce an `INPUT_UNKNOWN_KEY` warning when they would be discarded by state storage. Declare intended keys in `inputs` or `state.channels`. Unknown `runtime.hooks[].on` values fail validation.
 
-Array callback source must be a quoted literal inside the expression. Runtime strings from input/state and concatenated strings are rejected. Literal callback bodies (including nested callbacks) participate in expression validation and secret/reserved-channel checks. Unknown hook directives also fail validation; supported directives are `retry`, `continue`, `ignore`, `interrupt`, `fail`, `redact` and `route:<node>`.
+Array callback source must be a quoted literal inside the expression. Runtime strings from input/state and concatenated strings are rejected. Literal callback bodies (including nested callbacks) participate in expression validation and secret/reserved-channel checks. A hook verb is checked against its event. `node:before` and `agent:beforeToolCall` take `allow`, `deny`, or `interrupt`. `node:error` takes `retry`, `continue`, `fail`, or `route:<node>`. `node:after` and `state:beforeUpdate` take `redact`. `where` accepts only `nodeId`, `nodeType`, `tool`, and `channel`.

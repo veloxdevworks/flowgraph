@@ -247,7 +247,7 @@ describe("embedded host capabilities", () => {
       },
       state: { channels: { rootOnlyChannel: { type: "string" }, result: { type: "object" } } },
       // Graph-bound hooks stay at the declaring graph; this must not veto the child.
-      runtime: { hooks: [{ on: "node:before", where: { nodeId: "inspect" }, do: "continue" }] },
+      runtime: { hooks: [{ on: "node:before", where: { nodeId: "inspect" }, do: "deny" }] },
     });
     const compiled = await compileGraph(parent, {
       runConfig: {

@@ -7,15 +7,16 @@
 
 import { z } from "zod";
 import { RouterWithSchema } from "@flowgraph/spec";
-import { evalGuard, renderDeep, stringifyRendered } from "@flowgraph/expr";
+import { evalGuard, guardExpression, renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { providerFor, providerNamesFor } from "../providers/registry.js";
 import type { AgentRequest, ProviderRunContext } from "../providers/types.js";
+import { modelRequest } from "../providers/model-choice.js";
 import { applyOutput } from "./output.js";
 import { enforceBudget } from "./agent.js";
 import type { TokenUsage } from "../providers/types.js";
-import { ISSUE_CODE } from "../runtime/run-issues.js";
+import { noMatchError } from "../runtime/routing-policy.js";
 
 const configSchema = RouterWithSchema;
 type Config = z.infer<typeof configSchema>;
@@ -35,72 +36,60 @@ export const routerNode = defineNode<Config>({
         const scope = buildScope(state, ctx);
 
         if (config.mode === "model") {
-          return runModelRouter(config, ctx, scope, String(nodeSpec["id"]), nodeSpec["provider"] as string | undefined);
+          return runModelRouter(
+            config,
+            ctx,
+            scope,
+            String(nodeSpec["id"]),
+            nodeSpec["provider"] as string | undefined,
+            typeof nodeSpec["model"] === "string" ? nodeSpec["model"] : undefined,
+          );
         }
 
-        const routes = Object.entries(config.routes);
-
-        // Find the first matching route
+        const routes = config.routes;
+        const labels = routes.map((route) => route.name ?? route.to);
         let matchedTo: string | null = null;
         let matchedKey: string | null = null;
         const matched: Array<{ key: string; to: string }> = [];
+        let fallback: { key: string; to: string } | undefined;
 
-        for (const [key, route] of routes) {
-          if (route.default) continue;
-          if (route.when) {
-            try {
-              // Strip {{ }} if present, then evaluate
-              const expr = route.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
-              if (evalGuard(expr, scope)) {
-                matchedTo = route.to;
-                matchedKey = key;
-                matched.push({ key, to: route.to });
-                if (config.match !== "allMatches") break;
-              }
-            } catch (err) {
-              ctx.logger.warn(`router: error evaluating route "${key}" condition`, {
-                when: route.when,
-                error: String(err),
-              });
-              ctx.issue({
-                code: ISSUE_CODE.ROUTE_EVAL_ERROR,
-                severity: "warning",
-                message: `error evaluating route "${key}" condition; falling through`,
-                impact: "This route was skipped, so the default (or no route) may have been chosen instead.",
-                remediation: "Fix the `when` expression on this route.",
-                detail: { route: key, when: route.when, error: String(err) },
-              });
-            }
+        for (const route of routes) {
+          const key = route.name ?? route.to;
+          if (route.default === true) {
+            fallback ??= { key, to: route.to };
+            continue;
+          }
+          if (!route.when) continue;
+          // A throwing guard fails the run, the same way an edge guard does.
+          if (evalGuard(guardExpression(route.when), scope)) {
+            matchedTo = route.to;
+            matchedKey = key;
+            matched.push({ key, to: route.to });
+            if (config.match !== "allMatches") break;
           }
         }
 
-        // Fall back to default route
-        if (matchedTo === null) {
-          const defaultRoute = routes.find(([, r]) => r.default);
-          if (defaultRoute) {
-            matchedTo = defaultRoute[1].to;
-            matchedKey = defaultRoute[0];
-          }
+        if (matchedTo === null && fallback) {
+          matchedTo = fallback.to;
+          matchedKey = fallback.key;
         }
 
         if (config.match === "allMatches" && matched.length > 0) {
-          const to = [...new Set(matched.map(r => r.to))];
-          const chosen = matched.map(r => r.key);
-          ctx.emit("router.decision", { routes: Object.keys(config.routes), chosen, to, mode: config.mode });
+          const to = [...new Set(matched.map((r) => r.to))];
+          const chosen = matched.map((r) => r.key);
+          ctx.emit("router.decision", { routes: labels, chosen, to, mode: config.mode });
           return { command: { goto: to, update: applyOutput(config.output, chosen, { nodeId: String(nodeSpec["id"]), scope }) } };
         }
 
         ctx.emit("router.decision", {
-          routes: Object.keys(config.routes),
+          routes: labels,
           chosen: matchedKey,
           to: matchedTo,
           mode: config.mode,
         });
 
-        if (matchedTo === null) {
-          throw new Error(
-            `router "${String(nodeSpec["id"])}" has no matching route and no default route`,
-          );
+        if (matchedTo === null || matchedKey === null) {
+          throw noMatchError(`router "${String(nodeSpec["id"])}"`);
         }
 
         const nodeId = String(nodeSpec["id"]);
@@ -136,6 +125,7 @@ async function runModelRouter(
   scope: Record<string, unknown>,
   nodeId: string,
   nodeProvider: string | undefined,
+  nodeModel: string | undefined,
 ): Promise<import("../registry.js").NodeResult> {
   const providerName = nodeProvider ?? config.provider ?? ctx.config.defaults?.provider ?? (providerNamesFor(ctx).includes("mock") ? "mock" : providerNamesFor(ctx)[0]);
   if (!providerName) {
@@ -146,7 +136,8 @@ async function runModelRouter(
     throw new Error(`router "${nodeId}" mode=model: provider "${providerName}" is not registered. Available: ${providerNamesFor(ctx).join(", ") || "(none)"}.`);
   }
 
-  const routeKeys = Object.keys(config.routes);
+  const named = config.routes.filter((route): route is typeof route & { name: string } => !!route.name);
+  const routeKeys = named.map((route) => route.name);
   if (!config.input?.trim()) {
     throw new Error(`router "${nodeId}" mode=model requires with.input: the text the model routes on. The router does not send the whole state.`);
   }
@@ -154,16 +145,17 @@ async function runModelRouter(
   const instruction = config.instruction ?? "Choose the single most appropriate route for the input.";
   const prompt =
     `${instruction}\n\nInput:\n${inputText}\n\n` +
-    `Available routes:\n${routeKeys.map((key) => {
-      const route = config.routes[key]!;
-      return `- ${key}${route.description ? `: ${route.description}` : ""}${route.default ? " (default: choose when no other route fits)" : ""}`;
+    `Available routes:\n${named.map((route) => {
+      return `- ${route.name}${route.description ? `: ${route.description}` : ""}${route.default ? " (default: choose when no other route fits)" : ""}`;
     }).join("\n")}\nReturn the chosen route key.`;
 
+  const chosenModel = modelRequest(nodeModel, providerName, ctx.config.defaults);
   const req: AgentRequest = {
     prompt,
     tools: [],
     schema: { type: "object", properties: { route: { type: "string", enum: routeKeys } }, required: ["route"], additionalProperties: false },
     permission: "auto",
+    ...chosenModel,
   };
   let reportedUsage: TokenUsage = {};
   const providerCtx: ProviderRunContext = {
@@ -193,22 +185,16 @@ async function runModelRouter(
     : await provider.run(req, providerCtx);
   if (ctx.accounting) ctx.accounting.enforce(ctx);
   else { const used = usage(result); ctx.emit("agent.usage", used); enforceBudget(ctx, used); }
+  const byName = new Map(named.map((route) => [route.name, route]));
   const out = result.output as { route?: string } | undefined;
-  let chosenKey = out?.route;
-  if (!chosenKey || !(chosenKey in config.routes)) {
-    // Fall back to the default route's key
-    chosenKey = Object.keys(config.routes).find((k) => config.routes[k]?.default);
-  }
-  if (!chosenKey) {
-    throw new Error(`router "${nodeId}" mode=model: provider returned no valid route and no default exists.`);
-  }
-  const chosen = config.routes[chosenKey];
+  let chosen = out?.route ? byName.get(out.route) : undefined;
+  if (!chosen) chosen = named.find((route) => route.default === true);
   if (!chosen) {
-    throw new Error(`router "${nodeId}" mode=model: chosen route "${chosenKey}" not found.`);
+    throw noMatchError(`router "${nodeId}"`);
   }
 
-  ctx.emit("router.decision", { routes: Object.keys(config.routes), chosen: chosenKey, to: chosen.to, mode: "model" });
+  ctx.emit("router.decision", { routes: routeKeys, chosen: chosen.name, to: chosen.to, mode: "model" });
 
-  const update = applyOutput(config.output, chosenKey, { nodeId, scope });
+  const update = applyOutput(config.output, chosen.name, { nodeId, scope });
   return { command: { goto: chosen.to, update } };
 }

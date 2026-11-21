@@ -164,7 +164,7 @@ describe("resume after checkpoint pruning", () => {
     const interruptId = snap?.checkpointId;
     expect(interruptId).toBeTruthy();
 
-    const done = await compiled.resume({ threadId, resume: { go: true }, onInterrupt: "fail" });
+    const done = await compiled.resume({ threadId, resume: { signal: "go" }, onInterrupt: "fail" });
     expect(done.status).toBe("completed");
     expect(done.state["tag"]).toBe(6);
 
@@ -175,7 +175,7 @@ describe("resume after checkpoint pruning", () => {
     await expect(compiled.resumeFrom({
       threadId,
       checkpointId: interruptId!,
-      resume: { go: true },
+      resume: { signal: "go" },
       onInterrupt: "fail",
     })).rejects.toMatchObject({ code: "HISTORICAL_DECISION_REPLAY" });
   });

@@ -309,10 +309,10 @@ describe("async jobs and the journal", () => {
   it("keeps the journal on timeout so a later retry can re-attach", async () => {
     const calls = newCalls();
     const provider = asyncProvider(calls, [{ state: "running" }], { pollIntervalMs: 20 });
-    const g = graph([{ id: "vid", type: "video", provider: "fake", with: { prompt: "x", timeout: "50ms" } }]);
+    const g = graph([{ id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x" } }]);
     const res = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "tt" });
     expect(res.status).toBe("error");
-    expect(String(res.error?.message ?? res.error)).toMatch(/re-attach/);
+    expect(String(res.error?.message ?? res.error)).toMatch(/Node timed out/);
     const left = await readdir(path.join(dir, ".flowgraph", "jobs", "tt"));
     expect(left).toHaveLength(1);
   });
@@ -321,7 +321,7 @@ describe("async jobs and the journal", () => {
     const calls = newCalls();
     const provider = asyncProvider(calls, [{ state: "running" }], { pollIntervalMs: 20 });
     const g = graph([
-      { id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x", timeout: "300ms" } },
+      { id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x" } },
     ]);
     const res = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "tn" });
     expect(res.status).toBe("error");

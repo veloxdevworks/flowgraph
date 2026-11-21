@@ -40,8 +40,12 @@ export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
   if (node.type === "hitl") return hitlRouteTargets(w);
   if (node.type !== "router") return [];
   const routes = w["routes"];
-  if (!routes || typeof routes !== "object" || Array.isArray(routes)) return [];
-  return Object.values(routes as Record<string, unknown>).flatMap((r) =>
+  const values = Array.isArray(routes)
+    ? routes
+    : routes && typeof routes === "object"
+      ? Object.values(routes as Record<string, unknown>)
+      : [];
+  return values.flatMap((r) =>
     r && typeof r === "object" && typeof (r as { to?: unknown }).to === "string"
       ? [(r as { to: string }).to]
       : [],
@@ -98,9 +102,18 @@ export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; l
     } else for (const branch of edge.branch) edges.push({ from: edge.from, to: branch.to, ...(branch.when ? { label: branch.when } : branch.default ? { label: "default" } : {}) });
   }
   for (const node of spec.nodes) {
-    const routes = node.type === "hitl" ? normalizeHitlRoutes(node.with?.routes) : node.type === "router" ? node.with?.routes as Record<string,{to?:string}> | undefined : undefined;
     const labelled = new Set<string>();
-    for (const [label,route] of Object.entries(routes ?? {})) if (typeof route?.to === "string") {edges.push({from:node.id,to:route.to,label});labelled.add(route.to);}
+    if (node.type === "router" && Array.isArray(node.with?.routes)) {
+      for (const [index, route] of (node.with.routes as Array<{ name?: string; when?: string; default?: boolean; to?: string }>).entries()) {
+        if (typeof route?.to !== "string") continue;
+        const label = route.name ?? (route.default === true ? "default" : route.when) ?? String(index);
+        edges.push({ from: node.id, to: route.to, label });
+        labelled.add(route.to);
+      }
+    } else {
+      const routes = node.type === "hitl" ? normalizeHitlRoutes(node.with?.routes) : undefined;
+      for (const [label, route] of Object.entries(routes ?? {})) if (typeof route?.to === "string") { edges.push({ from: node.id, to: route.to, label }); labelled.add(route.to); }
+    }
     for (const to of nodeRouteTargets(spec, node.id)) if (!labelled.has(to)) edges.push({ from: node.id, to, label: "route" });
   }
   return [...new Map(edges.map((edge) => [`${edge.from}:${edge.to}:${edge.label ?? ""}`, edge])).values()];
@@ -486,20 +499,6 @@ export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
         });
       }
       continue;
-    }
-    if ("to" in edge) {
-      const targets = Array.isArray(edge.to) ? edge.to : [edge.to];
-      if (targets.length >= 2) {
-        diagnostics.push({
-          severity: "warning",
-          code: "UNCONDITIONAL_FANOUT",
-          message:
-            `Node "${edgeFromIds(edge.from).join(", ")}" fans out to ${targets.length} targets with no conditions — ` +
-            `all branches run in parallel. Click an edge in the builder to set when/default, ` +
-            `or use a router node for exclusive routing.`,
-          path: `edges[${i}]`,
-        });
-      }
     }
   }
 

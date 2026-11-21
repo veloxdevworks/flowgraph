@@ -1,5 +1,5 @@
 import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
-import { literalCallbackExpr, parseExpr, scanTemplate, stdlib, tokenize } from "@flowgraph/expr";
+import { guardExpression, literalCallbackExpr, parseExpr, scanTemplate, stdlib, tokenize } from "@flowgraph/expr";
 
 const MAX_DEPTH = 256;
 const MAX_TOKENS = 2048;
@@ -79,33 +79,30 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
         }
       } else if (entry.value && typeof entry.value === "object" && !seen.has(entry.value)) {
         seen.add(entry.value);
-        for (const [key, child] of Object.entries(entry.value))
+        for (const [key, child] of Object.entries(entry.value)) {
+          if (key === "when") continue;
           stack.push({ value: child, at: `${entry.at}.${key}` });
+        }
       }
     }
   };
   for (const node of spec.nodes) {
     templates(node.with, `nodes.${node.id}.with`);
     templates(node.input, `nodes.${node.id}.input`);
-    if (node.when)
-      check(node.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim(), `nodes.${node.id}.when`);
-    const routes = (node.with as { routes?: Record<string, { when?: string }> } | undefined)
-      ?.routes;
-    if (node.type === "router")
-      for (const [key, route] of Object.entries(routes ?? {})) {
-        if (route.when && !route.when.includes("{{"))
-          check(route.when, `nodes.${node.id}.with.routes.${key}.when`);
-      }
+    if (node.when) check(guardExpression(node.when), `nodes.${node.id}.when`);
+    const routes = (node.with as { routes?: Array<{ when?: string }> } | undefined)?.routes;
+    if (node.type === "router" && Array.isArray(routes)) {
+      routes.forEach((route, index) => {
+        if (route?.when) check(guardExpression(route.when), `nodes.${node.id}.with.routes[${index}].when`);
+      });
+    }
     if (node.spec) diagnostics.push(...staticGraphDiagnostics(node.spec));
   }
   for (const [index, edge] of spec.edges.entries())
     if ("branch" in edge) {
       for (const [branchIndex, branch] of edge.branch.entries())
         if (branch.when)
-          check(
-            branch.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim(),
-            `edges[${index}].branch[${branchIndex}].when`,
-          );
+          check(guardExpression(branch.when), `edges[${index}].branch[${branchIndex}].when`);
     }
   for (const [name, channel] of Object.entries(spec.state?.channels ?? {})) {
     const value = channel.default;

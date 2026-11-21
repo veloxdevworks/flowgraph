@@ -132,11 +132,8 @@ Hooks run at **defined lifecycle points** and may return a typed directive. They
 type HookPhase =
   | "run:before" | "run:after" | "run:error"
   | "node:before" | "node:after" | "node:error"
-  | "agent:beforeStep" | "agent:beforeToolCall" | "agent:afterToolCall"
-  | "skill:beforeRun" | "skill:afterRun"
-  | "router:beforeDecision" | "router:afterDecision"
+  | "agent:beforeToolCall" | "agent:afterToolCall"
   | "state:beforeUpdate"
-  | "checkpoint:beforeWrite"
   | "interrupt:beforeRaise" | "interrupt:beforeResume";
 
 interface HookContext<P extends HookPhase> {
@@ -156,18 +153,16 @@ type HookResult =
   | { interrupt: { reason: string; payload?: unknown } }; // escalate to HITL
 ```
 
-### What hooks can do per phase (examples)
+### What hooks can do (examples)
 
-| Phase | Can mutate / control |
+| Event | Can mutate / control |
 |---|---|
-| `node:before` | rewrite node `input`; `veto`; short-circuit with a cached result; `interrupt` for approval |
-| `node:after` | rewrite the node's output/update; `retry`; `route` |
-| `node:error` | swallow→`route`, `retry`, or escalate |
-| `agent:beforeToolCall` | block a dangerous tool call; require approval (`interrupt`); rewrite args |
-| `skill:beforeRun` | inject defaults; enforce a policy; `veto` if env not satisfied |
-| `state:beforeUpdate` | redact/transform a channel delta before it's committed |
-| `checkpoint:beforeWrite` | strip/transform data before persistence |
-| `interrupt:beforeRaise` | auto-resolve in CI per policy instead of pausing |
+| `node:before` | rewrite node `input`; `deny` skips the node; `interrupt` for approval |
+| `node:after` | rewrite the node's output; YAML may `redact` |
+| `node:error` | `continue` swallows, `fail` fails the node, `retry`, or `route:<node>` |
+| `agent:beforeToolCall` | `deny` blocks a tool call; `interrupt` asks for approval |
+| `state:beforeUpdate` | `redact` a channel delta before it is committed |
+| `interrupt:beforeRaise` | programmatic hooks can observe the raise |
 
 Hooks are **ordered** (priority) and **composable**; the first `veto`/`route`/`interrupt` wins, mutations chain. Built-in guardrails (redaction, secret-masking, cost ceilings, max-step limits) are themselves implemented as default hooks, so users can see and override them.
 
@@ -208,7 +203,7 @@ runtime:
   hooks:
     - on: node:error
       where: { nodeType: http }
-      do: retry              # retry | fail | continue | route:<id> | interrupt
+      do: retry              # node:error: retry | continue | fail | route:<id>
     - on: agent:beforeToolCall
       where: { tool: Bash }
       do: interrupt          # require human approval for shell tool calls

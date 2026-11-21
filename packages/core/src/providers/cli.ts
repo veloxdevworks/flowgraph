@@ -15,6 +15,7 @@ import {
   type ProviderAdapter,
   type ProviderRunContext,
 } from "./types.js";
+import { effectiveModel } from "./model-choice.js";
 
 const execFile = promisify(execFileCb);
 const DEFAULT_CLI_TIMEOUT_MS = 300_000;
@@ -307,7 +308,7 @@ export function createCliProvider(options: CliProviderOptions): ProviderAdapter 
       if (req.schema) {
         prompt = `${prompt}\n\nRespond with JSON matching this schema:\n${JSON.stringify(req.schema)}`;
       }
-      const model = req.model ?? options.model;
+      const model = effectiveModel(req, options.model);
       const args = buildArgs(vendor, prompt, model);
       const cwd = ctx.node.workspace ?? options.cwd;
 

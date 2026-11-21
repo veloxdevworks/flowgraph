@@ -86,7 +86,7 @@ nodes:
             imports:
               - { nodes: "/tmp/anything.mjs" }
             nodes:
-              - { id: w, type: wait, with: { duration: "1ms" } }
+              - { id: w, type: wait, with: { deadline: "1ms" } }
             edges:
               - { from: START, to: w }
               - { from: w, to: END }
@@ -107,7 +107,7 @@ nodes:
           imports:
             - { reducers: "/tmp/anything.mjs" }
           nodes:
-            - { id: w, type: wait, with: { duration: "1ms" } }
+            - { id: w, type: wait, with: { deadline: "1ms" } }
           edges:
             - { from: START, to: w }
             - { from: w, to: END }

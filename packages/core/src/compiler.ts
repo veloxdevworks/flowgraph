@@ -15,7 +15,7 @@ import { applyOutput } from "./runtime/apply-output.js";
 import {mkdir, realpath} from "node:fs/promises";
 import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
-import { evalGuard, renderDeep } from "@flowgraph/expr";
+import { evalGuard, guardExpression, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
 import { resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
@@ -107,7 +107,7 @@ import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { acquireThreadRun, adoptThreadRunClaim, defaultThreadRunOwner, threadAdmissionError, type ThreadRunClaim } from "./checkpoint/execution-claim.js";
 import { flowFailure } from "./runtime/failure.js";
 import { captureSubgraphHostContext, SUBGRAPH_HOST_CONTEXT } from "./runtime/subgraph-host-context.js";
-import { evalBranchGuard, exclusiveRouting, isEdgeGuardError, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
+import { exclusiveRouting, isEdgeGuardError, isNoMatchError, normalTargets, recoveryTargets, ROUTING_CHANNEL, selectBranchTarget, type GuardScope } from "./runtime/routing-policy.js";
 
 import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
@@ -1713,11 +1713,13 @@ async function assembleCompiledLangGraph(
         lgInterrupt({ reason: "paused", __flowgraphPause: true, ...(data !== undefined ? { data } : {}) });
       }
 
-      // `when` guard
+      const renderedInput = nsRecord["input"]
+        ? (renderDeep(nsRecord["input"] as Record<string, string>, { state, config: baseCtx.config, run: runMeta }) as Record<string, unknown>)
+        : {};
+      // `when` guard — same scope and brace rule as branch edges and router rules
       if (nodeSpec.when) {
-        const expr = nodeSpec.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
-        const guardScope = { state, config: baseCtx.config ?? {}, run: runMeta };
-        if (!evalGuard(expr, guardScope)) {
+        const guardScope = { state, input: renderedInput, config: baseCtx.config ?? {}, run: runMeta };
+        if (!evalGuard(guardExpression(nodeSpec.when), guardScope)) {
           events.emit("node.skipped", { nodeId: nodeSpec.id }, scope);
           return {};
         }
@@ -1799,12 +1801,16 @@ async function assembleCompiledLangGraph(
           throw terminal;
         }
 
-        // node:error — swallow (veto) / route / retry
+        // node:error — fail, continue, route, or retry
         if (hooks.has("node:error")) {
           const error = err instanceof Error ? err : new Error(String(err));
           const r = await hooks.run("node:error", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, error } });
           const c = r.control;
-          if (c?.kind === "veto") {
+          if (c?.kind === "fail") {
+            events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(error, "NODE_ERROR") }, scope);
+            throw err;
+          }
+          if (c?.kind === "continue" || c?.kind === "veto") {
             events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(error,"NODE_ERROR"), swallowed: true }, scope);
             const swallowed: RunIssue = stampIssue(
               {
@@ -1842,7 +1848,7 @@ async function assembleCompiledLangGraph(
           }
         }
         const policy = nodeSpec.on?.error;
-        if (policy === "continue" || policy === "ignore") {
+        if (policy === "continue") {
           events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(err,"NODE_ERROR"), swallowed: true, policy }, scope);
           const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `node "${nodeSpec.id}" continued after an error: ${String(err)}`, impact: "The node produced no result; subsequent nodes and sibling branches continue." }, { nodeId: nodeSpec.id, nodeType: nodeSpec.type });
           events.emit("run.issue", issue, scope);
@@ -1923,25 +1929,40 @@ async function assembleCompiledLangGraph(
   // A branch guard that throws fails the run. Record why first, so the run's
   // issues name the edge and the expression next to the error status.
   const recordGuardError = (err: unknown, lgConfig?: LangGraphRunnableConfig): unknown => {
-    if (!isEdgeGuardError(err)) return err;
     const runMeta = (runScopeOf(lgConfig)?.meta ?? baseCtx.meta) as RunMeta | undefined;
+    const from = isEdgeGuardError(err) ? err.from : isNoMatchError(err) ? err.from : undefined;
+    if (!isEdgeGuardError(err) && !isNoMatchError(err)) return err;
     const issue = stampIssue(
-      {
-        code: ISSUE_CODE.EDGE_GUARD_ERROR,
-        severity: "error",
-        message: err.message,
-        impact: "The run stopped at this edge instead of taking the default branch or ending.",
-        remediation: "Fix the `when` expression, or guard missing values (for example `state.a != null && state.a.b`).",
-        detail: { from: err.from, to: err.to, when: err.when },
-      },
-      { nodeId: err.from },
+      isEdgeGuardError(err)
+        ? {
+            code: ISSUE_CODE.EDGE_GUARD_ERROR,
+            severity: "error",
+            message: err.message,
+            impact: "The run stopped at this edge instead of taking the default branch or ending.",
+            remediation: "Fix the `when` expression, or guard missing values (for example `state.a != null && state.a.b`).",
+            detail: { from: err.from, to: err.to, when: err.when },
+          }
+        : {
+            code: ISSUE_CODE.NO_MATCH,
+            severity: "error",
+            message: err.message,
+            impact: "The run stopped because no route matched and there is no default.",
+          },
+      from ? { nodeId: from } : {},
     );
-    events.emit("run.issue", issue, { nodeId: err.from });
+    events.emit("run.issue", issue, from ? { nodeId: from } : {});
     if (runMeta) {
       try { appendRunIssue(runScopeOf(lgConfig)?.replayWorkspace ?? (!embedded ? runScopeOf(lgConfig)?.workspace : undefined) ?? graphWorkspace, runIssuesKey(runMeta), issue); } catch { /* the error still fails the run */ }
     }
     return err;
   };
+
+  const edgeScope = (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig): GuardScope => ({
+    state,
+    input: {},
+    config: (baseCtx.config ?? {}) as Record<string, unknown>,
+    run: (runScopeOf(lgConfig)?.meta ?? baseCtx.meta ?? {}) as Record<string, unknown>,
+  });
 
   // Edges. Router nodes drive exclusive routing via Command{ goto } + `ends`
   // declared from with.routes — skip their static/branch edges so a UI fan-out
@@ -1953,7 +1974,7 @@ async function assembleCompiledLangGraph(
     graph.addConditionalEdges((mapJoinById.get(node.id) ?? node.id) as typeof START, (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
       const selected = (state[ROUTING_CHANNEL] as Record<string, string | string[] | null> | undefined)?.[node.id];
       let targets: string[];
-      try { targets = selected == null ? normalTargets(spec, node.id, state) : Array.isArray(selected) ? selected : [selected]; }
+      try { targets = selected == null ? normalTargets(spec, node.id, edgeScope(state, lgConfig)) : Array.isArray(selected) ? selected : [selected]; }
       catch (err) { throw recordGuardError(err, lgConfig); }
       return targets.map(to => to === "END" ? END : to);
     }, Object.fromEntries([...spec.nodes.map(n => n.id), END].map(id => [id, id])) as Record<string, typeof END>);
@@ -1982,14 +2003,10 @@ async function assembleCompiledLangGraph(
       const branches = edge.branch;
       graph.addConditionalEdges(from as typeof START, (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
         try {
-          for (const b of branches) {
-            if (b.default || !b.when) continue;
-            if (evalBranchGuard(source, { to: b.to, when: b.when }, state)) return b.to;
-          }
+          return selectBranchTarget(source, branches, edgeScope(state, lgConfig));
         } catch (err) {
           throw recordGuardError(err, lgConfig);
         }
-        return branches.find((b) => b.default)?.to ?? "END";
       });
     }
   }
@@ -2352,9 +2369,9 @@ function collectRouteEnds(nodeSpec: { type: string; with?: unknown }): string[] 
   if (nodeSpec.type !== "router") return [];
   const withBlock = (nodeSpec.with ?? {}) as Record<string, unknown>;
   const routes = withBlock["routes"];
-  if (!routes || typeof routes !== "object" || Array.isArray(routes)) return [];
+  if (!Array.isArray(routes)) return [];
   const ends = new Set<string>();
-  for (const raw of Object.values(routes as Record<string, unknown>)) {
+  for (const raw of routes) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const to = (raw as Record<string, unknown>)["to"];
     if (typeof to === "string" && to.trim()) {
@@ -3077,9 +3094,11 @@ function addCheckpointedMap(
     const meta = (runScopeOf(lgConfig)?.meta ?? ctx.baseCtx.meta) as RunMeta;
     const hook = await ctx.hooks.run("node:error", { state, run: meta, payload: { nodeId: mapId, nodeType: "map", error } });
     const innerPolicy = itemId === mapId ? undefined : (config.node as { on?: { error?: string } }).on?.error;
-    const policy = hook.control?.kind === "route" ? `route:${hook.control.to}` : hook.control?.kind === "veto" ? "continue" : innerPolicy ?? nodeSpec.on?.error;
-    ctx.events.emit("node.error", { nodeId: itemId, ...errorInfo(error,"NODE_ERROR"), ...(policy && policy !== "fail" ? { swallowed: true, policy } : {}) }, { nodeId: itemId, nodeType: itemId === mapId ? "map" : innerType });
-    if (!policy || policy === "fail") throw err;
+    const control = hook.control;
+    const directed = control?.kind === "route" ? `route:${control.to}` : control?.kind === "continue" || control?.kind === "veto" ? "continue" : control?.kind === "fail" ? "fail" : undefined;
+    const policy = directed ?? innerPolicy ?? nodeSpec.on?.error;
+    ctx.events.emit("node.error", { nodeId: itemId, ...errorInfo(error,"NODE_ERROR"), ...(policy && policy !== "fail" && policy !== "ignore" ? { swallowed: true, policy } : {}) }, { nodeId: itemId, nodeType: itemId === mapId ? "map" : innerType });
+    if (!policy || policy === "fail" || policy === "ignore" || (policy !== "continue" && !policy.startsWith("route:"))) throw err;
     const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `map item/node "${itemId}" failed: ${error.message}`, impact: "Failed items have no collected value; admitted siblings finish before recovery." }, { nodeId: itemId, nodeType: innerType });
     ctx.events.emit("run.issue", issue, { nodeId: itemId, nodeType: innerType });
     try { appendRunIssue(runScopeOf(lgConfig)?.replayWorkspace ?? (!ctx.embedded ? runScopeOf(lgConfig)?.workspace : undefined) ?? ctx.graphWorkspace, runIssuesKey(meta), issue); } catch { /* the issue is also checkpointed */ }

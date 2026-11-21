@@ -99,7 +99,7 @@ it("publishes the completed state when a deadline finds another process already 
   });
   await original.run({ threadId: "external" });
   const second = await compileGraph(spec, { checkpointer });
-  expect((await second.resume({ threadId: "external", resume: true })).status).toBe("completed");
+  expect((await second.resume({ threadId: "external", resume: "ready" })).status).toBe("completed");
   now += 5000;
   fire();
   expect((await observed).status).toBe("completed");

@@ -191,10 +191,10 @@ nodes:
     with:
       mode: rules
       routes:
-        ok:
+        - name: ok
           when: "{{ state.response != null }}"
           to: END
-        fail:
+        - name: fail
           default: true
           to: END
 

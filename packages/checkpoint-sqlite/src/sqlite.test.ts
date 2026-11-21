@@ -58,7 +58,7 @@ describe("@flowgraph/checkpoint-sqlite durability", () => {
       const snap = await compiled.getState(threadId);
       expect(snap?.next).toContain("gate");
 
-      const r = await compiled.resume({ threadId, resume: { approved: true } });
+      const r = await compiled.resume({ threadId, resume: { signal: "approval", approved: true } });
       expect(r.status).toBe("completed");
       expect(r.state["published"]).toBe(true);
     }

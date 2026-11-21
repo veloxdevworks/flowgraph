@@ -15,15 +15,9 @@ const CHILD_HOOK_PHASES = new Set<HookPhase>([
   "node:before",
   "node:after",
   "node:error",
-  "agent:beforeStep",
   "agent:beforeToolCall",
   "agent:afterToolCall",
-  "skill:beforeRun",
-  "skill:afterRun",
-  "router:beforeDecision",
-  "router:afterDecision",
   "state:beforeUpdate",
-  "checkpoint:beforeWrite",
 ]);
 
 /** Own plain data without changing the identity/behavior of opaque host values. */

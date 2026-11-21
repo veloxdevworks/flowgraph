@@ -24,7 +24,6 @@ import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { assertHostProbeAllowed, assertScriptFileAllowed, nodePolicyOf } from "../node-policy.js";
-import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import { secretScope } from "../runtime/secret-scope.js";
 import { findMissingBins, missingToolIssue } from "../runtime/requires.js";
@@ -33,7 +32,6 @@ import { DEFAULT_INHERITED_ENV, pickHostEnv } from "../runtime/child-env.js";
 const configSchema = ScriptWithSchema;
 type Config = z.infer<typeof configSchema>;
 
-const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_BUFFER = 10 * 1024 * 1024;
 const STDERR_EXCERPT = 500;
 
@@ -83,7 +81,7 @@ export async function runScriptSandboxed(
     throw new Error("script: code is empty");
   }
 
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs;
   // Resolve symlinks (e.g. macOS /tmp → /private/var/folders/…) so Node's
   // permission model can realpath the entry script without needing /var.
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg-script-")));
@@ -120,7 +118,7 @@ export async function runScriptSandboxed(
       args: nodeArgs,
       cwd,
       env,
-      timeoutMs,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
     });
 
@@ -281,12 +279,12 @@ export const scriptNode = defineNode<Config>({
   type: "script",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { sideEffecting: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { sideEffecting: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {
@@ -309,7 +307,6 @@ export const scriptNode = defineNode<Config>({
             )
           : undefined;
 
-        const timeoutMs = config.timeout ? parseDuration(config.timeout) : DEFAULT_TIMEOUT_MS;
         const permissions = normalizeScriptPermissions(config.permissions);
         let code = config.code;
         if (config.file !== undefined) {
@@ -347,7 +344,6 @@ export const scriptNode = defineNode<Config>({
         }
 
         ctx.logger.debug("script exec", {
-          timeoutMs,
           permissions,
           codeLength: code.length,
         });
@@ -357,7 +353,6 @@ export const scriptNode = defineNode<Config>({
           {
             input,
             ...(env ? { env } : {}),
-            timeoutMs,
             ...(permissions ? { permissions } : {}),
             ...(ctx.signal ? { signal: ctx.signal } : {}),
             workspace: ctx.workspace,
@@ -396,7 +391,7 @@ function runProcess(opts: {
   args: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
-  timeoutMs: number;
+  timeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const { command, args, cwd, env, timeoutMs, signal } = opts;
@@ -419,7 +414,7 @@ function runProcess(opts: {
     let settled = false;
     let timedOut = false;
 
-    const timer = setTimeout(() => {
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
     }, timeoutMs);
@@ -427,7 +422,7 @@ function runProcess(opts: {
     const finish = (err?: Error, exitCode = 1) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (err) {
         reject(err);
         return;

@@ -82,13 +82,13 @@ nodes:
     with:
       mode: rules
       routes:
-        prototype:
+        - name: prototype
           when: "{{ state.track == 'prototype' }}"
           to: prototype-build
-        production:
+        - name: production
           when: "{{ state.track == 'production' }}"
           to: chat-design
-        default:
+        - name: default
           default: true
           to: chat-design
 

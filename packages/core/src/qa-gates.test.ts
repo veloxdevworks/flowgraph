@@ -87,10 +87,7 @@ describe("PLAT-319: independent gate deadlines", () => {
           id: "route",
           type: "router",
           with: {
-            routes: {
-              again: { when: "{{ state.outputs.gate.round < 2 }}", to: "gate" },
-              done: { default: true, to: "END" },
-            },
+            routes: [ { name: "again", when: "{{ state.outputs.gate.round < 2 }}", to: "gate" }, { name: "done", default: true, to: "END" } ],
           },
         },
       ],
@@ -102,12 +99,12 @@ describe("PLAT-319: independent gate deadlines", () => {
     const g = await compileGraph(spec, { now: () => now, scheduleTimeout: () => ({ unref() {} }) });
     const first = await g.run({ threadId: "round" });
     now += 20_000;
-    const next = await g.resume({ threadId: "round", resume: { round: 1 } });
+    const next = await g.resume({ threadId: "round", resume: { signal: "ready", round: 1 } });
     expect(next.status).toBe("interrupted");
     expect(
       Date.parse(next.interrupts![0]!.deadlineAt!) - Date.parse(first.interrupts![0]!.deadlineAt!),
     ).toBe(20_000);
-    expect((await g.resume({ threadId: "round", resume: { round: 2 } })).status).toBe("completed");
+    expect((await g.resume({ threadId: "round", resume: { signal: "ready", round: 2 } })).status).toBe("completed");
   });
   it.each([false, true])(
     "preserves a sibling deadline across resume (recompile=%s)",

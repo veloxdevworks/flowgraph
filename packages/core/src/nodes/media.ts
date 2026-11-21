@@ -77,7 +77,6 @@ type Config = Record<string, unknown> & {
   format?: string;
   texture?: boolean;
   params?: Record<string, unknown>;
-  timeout?: string;
   output?: Parameters<typeof applyOutput>[0];
 };
 
@@ -141,7 +140,7 @@ function buildMediaNode(spec: ModalitySpec) {
   return defineNode<Config>({
     type: spec.type,
     configSchema: spec.schema,
-    capabilities: { sideEffecting: true },
+    capabilities: { sideEffecting: true, receivesTimeoutSignal: true },
     ui: spec.ui,
 
     build(_buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
@@ -149,7 +148,7 @@ function buildMediaNode(spec: ModalitySpec) {
 
       return {
         contract: {},
-        capabilities: { sideEffecting: true },
+        capabilities: { sideEffecting: true, receivesTimeoutSignal: true },
 
         async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
           const scope = {
@@ -250,7 +249,7 @@ function buildMediaNode(spec: ModalitySpec) {
                 mctx,
                 journal: createFileJournal({ workspace: ctx.workspace, scope: jobScope, nodeId, fingerprint }),
                 workspace: ctx.workspace,
-                timeout: config.timeout ?? spec.defaultTimeout,
+                timeout: spec.defaultTimeout,
                 ...(ctx.accounting ? { meter: (invoke: () => Promise<import("../media/run-job.js").MediaJobResult>, estimateUSD: number | undefined) => ctx.accounting!.call(ctx, invoke, { kind: "media", reference: fingerprint, estimateUSD, usage: result => result.costKnown || result.usage ? { ...result.usage, ...(result.costKnown ? { costUSD: result.costUSD } : {}) } : undefined, errorUsage: error => (error as {mediaNotBilled?:boolean}|null)?.mediaNotBilled ? {costUSD:0,totalTokens:0,inputTokens:0,outputTokens:0} : undefined }) } : {}),
                 emit: (phase, data) => ctx.emit("custom.media.job", { nodeId, modality, fingerprint, phase, ...data }),
               });

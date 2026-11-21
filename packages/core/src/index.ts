@@ -288,6 +288,8 @@ export {
   reportToolResult,
   requireToolApproval,
 } from "./providers/index.js";
+export { effectiveModel, modelRequest } from "./providers/model-choice.js";
+export type { ModelSource } from "./providers/model-choice.js";
 export type {
   ProviderAdapter,
   ProviderValidateNode,

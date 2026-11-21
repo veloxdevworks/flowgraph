@@ -130,11 +130,7 @@ describe("router model mode", () => {
             mode: "model",
             input: "{{ input.text }}",
             instruction: "Pick a route.",
-            routes: {
-              bug: { to: "handle" },
-              feature: { to: "handle" },
-              other: { default: true, to: "handle" },
-            },
+            routes: [ { name: "bug", to: "handle" }, { name: "feature", to: "handle" }, { name: "other", default: true, to: "handle" } ],
             output: { to: "decision" },
           },
         },

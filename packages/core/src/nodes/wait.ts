@@ -1,15 +1,15 @@
 /**
  * Built-in node type: `wait`
  *
- *  - duration: fixed delay (in-process sleep)
- *  - signal:   durable wait — interrupts until resumed with the named signal
+ *  - deadline: fixed delay (in-process sleep; not durable across a restart)
+ *  - signal:   durable wait — resumes only when the payload names the signal
  *  - until:    re-evaluate a condition; interrupts if not yet satisfied
  *  - webhook:  durable wait — interrupts until an inbound HTTP POST resumes
  */
 
 import { z } from "zod";
 import { WaitWithSchema } from "@flowgraph/spec";
-import { evalGuard } from "@flowgraph/expr";
+import { evalGuard, guardExpression } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { parseDuration, sleep } from "../runtime/duration.js";
@@ -77,12 +77,12 @@ export const waitNode = defineNode<Config>({
           };
         }
 
-        // Fixed delay
-        if (config.duration) {
-          const ms = parseDuration(config.duration);
+        // Fixed delay. This sleep does not survive a process restart.
+        if (config.deadline) {
+          const ms = parseDuration(config.deadline);
           const wakeAt = new Date(Date.now() + ms).toISOString();
-          ctx.logger.debug(`wait: sleeping ${config.duration} (${ms}ms) until ${wakeAt}`);
-          ctx.emit("node.output", { wait: { mode: "duration", durationMs: ms, wakeAt } });
+          ctx.logger.debug(`wait: sleeping ${config.deadline} (${ms}ms) until ${wakeAt}`);
+          ctx.emit("node.output", { wait: { mode: "deadline", durationMs: ms, wakeAt } });
           await sleep(ms, ctx.signal);
           return { update: {} };
         }
@@ -90,9 +90,14 @@ export const waitNode = defineNode<Config>({
         // Conditional wait — re-evaluate after each resume so a later state
         // write (or a retry) can satisfy the guard without a new graph.
         if (config.until) {
-          const expr = config.until.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
+          const expr = guardExpression(config.until);
           for (;;) {
-            const satisfied = evalGuard(expr, { state, config: ctx.config, run: ctx.meta });
+            const satisfied = evalGuard(expr, {
+              state,
+              input: (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {},
+              config: ctx.config,
+              run: ctx.meta,
+            });
             if (satisfied) return { update: {} };
             const payload = ctx.interrupt({
               reason: `Waiting for condition: ${config.until}`,
@@ -115,34 +120,31 @@ export const waitNode = defineNode<Config>({
 
         // Named signal gate — durable interrupt
         if (config.signal) {
-          const payload = ctx.interrupt<unknown>({
-            reason: `Waiting for signal: ${config.signal}`,
-            kind: "custom",
-            data: {
-              mode: "signal",
-              signal: config.signal,
-              ...(config.timeout
-                ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) }
-                : {}),
-            },
-          });
-          if (isTimedOut(payload)) {
-            const result = { timedOut: true };
+          const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
+          for (;;) {
+            const payload = ctx.interrupt<unknown>({
+              reason: `Waiting for signal: ${config.signal}`,
+              kind: "custom",
+              data: {
+                mode: "signal",
+                signal: config.signal,
+                ...(config.timeout
+                  ? { timeout: config.timeout, deadlineAt: deadlineIso(config.timeout) }
+                  : {}),
+              },
+            });
+            if (isTimedOut(payload)) {
+              const result = { timedOut: true };
+              return {
+                update: applyOutput(config.output, result, { nodeId, scope }),
+              };
+            }
+            const taken = signalValue(payload, config.signal);
+            if (!taken.matched) continue;
             return {
-              update: applyOutput(config.output, result, {
-                nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
-                scope,
-              }),
+              update: applyOutput(config.output, taken.value, { nodeId, scope }),
             };
           }
-          // Resume value (if any) is available; surface it as the node output
-          const result = payload && typeof payload === "object" ? payload : { value: payload };
-          return {
-            update: applyOutput(config.output, result, {
-              nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
-              scope,
-            }),
-          };
         }
 
         return { update: {} };
@@ -153,6 +155,19 @@ export const waitNode = defineNode<Config>({
 
 function deadlineIso(timeout: string): string {
   return new Date(Date.now() + parseDuration(timeout)).toISOString();
+}
+
+function signalValue(payload: unknown, name: string): { matched: true; value: unknown } | { matched: false } {
+  if (typeof payload === "string") {
+    return payload === name ? { matched: true, value: { value: payload } } : { matched: false };
+  }
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const record = payload as Record<string, unknown>;
+    if (record.signal !== name) return { matched: false };
+    const { signal: _signal, ...rest } = record;
+    return { matched: true, value: Object.keys(rest).length > 0 ? rest : { signal: name } };
+  }
+  return { matched: false };
 }
 
 function isTimedOut(payload: unknown): boolean {

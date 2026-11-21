@@ -3,7 +3,7 @@ import { GraphSpecSchema } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { validateSpec } from "./loader.js";
 import { templateRefs, templateRootRefs } from "./node-policy.js";
-const graph=()=>GraphSpecSchema.parse({apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"authoring"},nodes:[{id:"end",type:"router",with:{routes:{done:{default:true,to:"END"}}}}],edges:[{from:"START",to:"end"}]});
+const graph=()=>GraphSpecSchema.parse({apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"authoring"},nodes:[{id:"end",type:"router",with:{routes:[ { name: "done", default:true,to:"END" } ]}}],edges:[{from:"START",to:"end"}]});
 it("PLAT-381: undeclared run inputs emit a named warning instead of disappearing silently",async()=>{
   const warn=vi.spyOn(console,"warn").mockImplementation(()=>{});
   try{
@@ -26,7 +26,7 @@ it("validates and scans literal callback bodies, including escaped secret refere
   const text=String.raw`{{ map([1], 'se\cret.TOKEN') }}`;
   expect(templateRefs(text).secret).toBe(true);
   expect(templateRootRefs(text,new Set(["secret"]))).toContain("secret.TOKEN");
-  const spec=graph();spec.nodes[0]!.with={routes:{done:{default:true,to:"END"}},unused:"{{ map([1], 'unknownHelper(item)') }}"};
+  const spec=graph();spec.nodes[0]!.with={routes:[ { name: "done", default:true,to:"END" } ],unused:"{{ map([1], 'unknownHelper(item)') }}"};
   expect(validateSpec(spec)).toContainEqual(expect.objectContaining({code:"EXPR_UNKNOWN_FUNCTION"}));
   spec.nodes[0]!.with.unused="{{ map([1], state.mapper) }}";
   expect(validateSpec(spec)).toContainEqual(expect.objectContaining({code:"EXPR_CALLBACK_LITERAL"}));

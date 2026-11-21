@@ -11,6 +11,7 @@ import type {
   TokenUsage,
   ToolSpec,
 } from "@flowgraph/core";
+import { effectiveModel } from "@flowgraph/core";
 
 export type CursorRuntime = "local" | "cloud";
 
@@ -159,7 +160,7 @@ export function createCursorProvider(options: CursorProviderOptions = {}): Provi
       }
 
       const runtime = options.runtime ?? "local";
-      const model = req.model ?? options.model ?? "composer-2.5";
+      const model = effectiveModel(req, options.model) ?? "composer-2.5";
       const apiKey = options.apiKey ?? process.env[options.apiKeyEnv ?? "CURSOR_API_KEY"];
 
       const agentOptions: Record<string, unknown> = {

@@ -24,8 +24,18 @@ export interface HookBus {
   has(phase: HookPhase): boolean;
 }
 
+const WHERE_KEYS = new Set(["nodeId", "nodeType", "tool", "channel"]);
+
 function matches(where: HookWhere | undefined, payload: HookPayload): boolean {
   if (!where) return true;
+  for (const key of Object.keys(where)) {
+    if (!WHERE_KEYS.has(key)) {
+      throw Object.assign(new Error(`Unknown hook where key "${key}".`), {
+        code: "HOOK_WHERE_UNKNOWN",
+        retryable: false,
+      });
+    }
+  }
   if (where.nodeId !== undefined && payload.nodeId !== where.nodeId) return false;
   if (where.nodeType !== undefined && payload.nodeType !== where.nodeType) return false;
   if (where.tool !== undefined && payload.tool !== where.tool) return false;

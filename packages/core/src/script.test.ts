@@ -7,7 +7,7 @@ import { ScriptWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { runScriptSandboxed } from "./nodes/script.js";
 import { defineProvider } from "./providers/types.js";
 
-function scriptSpec(nodeWith: Record<string, unknown>): GraphSpec {
+function scriptSpec(nodeWith: Record<string, unknown>, node: Record<string, unknown> = {}): GraphSpec {
   return {
     metadata: { name: "script-test" },
     state: {
@@ -21,6 +21,7 @@ function scriptSpec(nodeWith: Record<string, unknown>): GraphSpec {
       {
         id: "run",
         type: "script",
+        ...node,
         with: nodeWith,
       },
     ],
@@ -45,10 +46,9 @@ describe("ScriptWithSchema", () => {
     expect(ScriptWithSchema.safeParse({ code: "export default async () => 1" }).success).toBe(true);
   });
 
-  it("accepts permissions and timeout", () => {
+  it("accepts permissions and rejects with.timeout", () => {
     const r = ScriptWithSchema.safeParse({
       code: "export default async () => ({})",
-      timeout: "5s",
       permissions: {
         fsRead: ["/tmp"],
         fsWrite: ["/tmp/out"],
@@ -59,6 +59,9 @@ describe("ScriptWithSchema", () => {
       env: { MARK: "1" },
     });
     expect(r.success).toBe(true);
+    const timed = ScriptWithSchema.safeParse({ code: "export default async () => ({})", timeout: "5s" });
+    expect(timed.success).toBe(false);
+    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("script with.timeout is not supported");
   });
 });
 
@@ -381,9 +384,8 @@ export default async function() {
     const compiled = await compileGraph(
       scriptSpec({
         code: `export default async function() { await new Promise(r => setTimeout(r, 60_000)); }`,
-        timeout: "200ms",
         output: { to: "out" },
-      }),
+      }, { timeout: "200ms" }),
       {},
     );
     const r = await compiled.run({ input: {} });

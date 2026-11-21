@@ -148,7 +148,7 @@ describe("PLAT-299/321/333/347: provider failures", () => {
             id: "ask",
             type: "router",
             provider: provider.name,
-            with: { mode: "model", input: "route this", routes: { done: { to: "END" } } },
+            with: { mode: "model", input: "route this", routes: [ { name: "done", to: "END" } ] },
           },
         ]),
         { providers: [provider] },

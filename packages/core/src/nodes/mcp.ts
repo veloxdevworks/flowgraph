@@ -20,12 +20,12 @@ export const mcpNode = defineNode<Config>({
   type: "mcp",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { sideEffecting: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { sideEffecting: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const hub = requireMcpHub(ctx);
@@ -45,12 +45,16 @@ export const mcpNode = defineNode<Config>({
             ? (renderDeep(config.arguments, scope) as Record<string, unknown>)
             : {};
           ctx.emit("mcp.tool.call", { server: config.server, tool: config.tool, args });
-          result = assertMcpToolSuccess(await hub.callTool(config.server, config.tool, args), config.server, config.tool);
+          result = assertMcpToolSuccess(
+            await abortable(hub.callTool(config.server, config.tool, args), ctx.signal),
+            config.server,
+            config.tool,
+          );
           ctx.emit("mcp.tool.result", { server: config.server, tool: config.tool, result });
         } else {
           const uri = String(renderDeep(config.resource!, scope));
           ctx.emit("mcp.resource.read", { server: config.server, uri });
-          result = await hub.readResource(config.server, uri);
+          result = await abortable(hub.readResource(config.server, uri), ctx.signal);
         }
 
         return {
@@ -63,3 +67,28 @@ export const mcpNode = defineNode<Config>({
     };
   },
 });
+
+function abortable<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) {
+    const reason = signal.reason;
+    return Promise.reject(reason instanceof Error ? reason : new Error("Aborted"));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      const reason = signal.reason;
+      reject(reason instanceof Error ? reason : new Error("Aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
