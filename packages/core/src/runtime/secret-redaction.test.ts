@@ -7,7 +7,12 @@ describe("credential cookie names", () => {
     (name) => expect(isCredentialCookieName(name)).toBe(true),
   );
 
-  it.each(["monkey", "Access-Mode", "theme", "keyboard_layout", "authority", "consent", "sidebar", "tokenizer"])(
+  it.each(["sessionid", "sessid", "PHPSESSID", "JSESSIONID", "csrftoken", "apikey", "django_sessionid", "x-apikey"])(
+    "compound %s qualifies",
+    (name) => expect(isCredentialCookieName(name)).toBe(true),
+  );
+
+  it.each(["monkey", "Access-Mode", "theme", "keyboard_layout", "authority", "consent", "sidebar", "tokenizer", "sessionless", "apikeys"])(
     "%s does not qualify",
     (name) => expect(isCredentialCookieName(name)).toBe(false),
   );
@@ -17,6 +22,8 @@ describe("credential cookie names", () => {
     expect(setCookieRedactions("Access-Mode=readwrite")).toEqual(["Access-Mode=readwrite"]);
     expect(setCookieRedactions("session_id=abcd1234; HttpOnly")).toEqual(["session_id=abcd1234", "abcd1234"]);
     expect(setCookieRedactions("refreshToken=abcd1234")).toEqual(["refreshToken=abcd1234", "abcd1234"]);
+    expect(setCookieRedactions("PHPSESSID=abcd1234; Path=/")).toEqual(["PHPSESSID=abcd1234", "abcd1234"]);
+    expect(setCookieRedactions("csrftoken=abcd1234")).toEqual(["csrftoken=abcd1234", "abcd1234"]);
     expect(setCookieRedactions("monkey=abcdefghijklmnop")).toEqual(["monkey=abcdefghijklmnop", "abcdefghijklmnop"]);
   });
 });

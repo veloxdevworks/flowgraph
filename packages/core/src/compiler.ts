@@ -20,7 +20,7 @@ import { registry, type NodeFactory } from "./registry.js";
 import { resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { SecretRedaction, SECRET_REDACTION, observeSecret, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
-import { graphEnvExpansion, unexpandedEnvDiagnostics } from "./runtime/config-env.js";
+import { expandedConfigEnvValues, unexpandedEnvDiagnostics } from "./runtime/config-env.js";
 import { DECLARED_SECRETS } from "./runtime/secret-scope.js";
 import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
 import { createEnvSecretProvider, DEFAULT_REDACT_PATTERNS } from "./secrets.js";
@@ -1447,7 +1447,6 @@ async function assembleCompiledLangGraph(
   embedded = false,
 ): Promise<AssembledGraph> {
   const sourceFile = graphFile(spec);
-  const envExpansion = graphEnvExpansion(spec);
   const unexpandedEnv = unexpandedEnvDiagnostics(spec);
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
   // does not silently drop node updates when authors omit state.channels entries.
@@ -1476,8 +1475,7 @@ async function assembleCompiledLangGraph(
     : opts.cwd !== undefined && !spec.runtime?.workspace ? path.resolve(cwd) : resolveGraphWorkspace(spec, graphDir);
   const runId = newRunId();
   const redaction = new SecretRedaction([...DEFAULT_REDACT_PATTERNS, ...(spec.runtime?.secrets?.redact?.patterns ?? []).flatMap(p => { try { return [new RegExp(p, "gi")]; } catch { return []; } })], spec.runtime?.secrets?.redact?.headers);
-  // Values a loaded graph expanded from declared `${VAR}` placeholders are secrets like any other.
-  for (const value of envExpansion?.values ?? []) {
+  for (const value of expandedConfigEnvValues(spec)) {
     redaction.observe(value);
     observeSecret(value);
   }

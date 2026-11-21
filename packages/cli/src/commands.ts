@@ -3,7 +3,7 @@ import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, hostSupportDiagnostics, compileGraph, consoleSink, loadGraphImports, readGraphImportAliases, withUnresolvedImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
-import { isError, generateJsonSchema } from "@flowgraph/spec";
+import { isError, generateJsonSchema, type Diagnostic } from "@flowgraph/spec";
 import { buildRecoveryCommand } from "./recovery-command.js";
 import { buildMediaCommand } from "./media-command.js";
 import {buildReplayCommand} from "./replay-command.js";
@@ -21,6 +21,11 @@ import { loadTargetsFile, placementCompileOptions, placementLines } from "./plac
 import { templateFor, listTemplates } from "./templates.js";
 import { migrateSpec } from "./migrate.js";
 import { printDiagnostics, printBanner, printSuccess, printError, printInfo, printWarning, formatDuration } from "./ui.js";
+
+/** `loadGraph` and `validateSpec` both report an undeclared `${NAME}` in config; show it once. */
+function uniqueDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
+  return [...new Map(diagnostics.map((d) => [`${d.file}:${d.severity}:${d.code}:${d.path}:${d.message}`, d])).values()];
+}
 
 function printFailedUsage(result: RunResult): void {
   if (!["error", "aborted"].includes(result.status)) return;
@@ -203,6 +208,7 @@ program
       }
     }
 
+    allDiags.splice(0, allDiags.length, ...uniqueDiagnostics(allDiags));
     const strict = opts.strict ?? false;
     const hasError = allDiags.some((d) => isError(d) || (strict && d.severity === "warning"));
 
@@ -273,7 +279,7 @@ program
       ...memoryHostDiagnostics(spec, { memoryBackends: CLI_MEMORY_BACKENDS, hostName: "flowgraph CLI" }),
       ...hostSupportDiagnostics(spec, { hostName: "flowgraph CLI" }),
     ];
-    const fatalDiags = [...loadDiags, ...lintDiags].filter(isError);
+    const fatalDiags = uniqueDiagnostics([...loadDiags, ...lintDiags]).filter(isError);
     if (fatalDiags.length > 0) {
       printError("Graph has errors:");
       printDiagnostics(fatalDiags, graphPath);

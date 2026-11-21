@@ -12,36 +12,25 @@ type Segment = string | number;
 export interface GraphEnvExpansion {
   /** `SECRET_UNDECLARED` for each placeholder whose name the graph (or inline subgraph) does not declare. */
   diagnostics: Diagnostic[];
-  /** Values read from the host environment, registered for redaction when the graph compiles. */
-  values: string[];
-  /** Fields where `$${NAME}` was unescaped to a literal `${NAME}`, by location and name. */
-  escapes: Array<{ at: Segment[]; names: string[] }>;
+  /** Strings where `$${` was unescaped, with the offset of each literal `${` that came from an escape. */
+  escapes: Array<{ at: Segment[]; value: string; offsets: number[] }>;
 }
 
 /** `$${` escapes a placeholder; matched first so an escaped one is never read. */
 const PLACEHOLDER = /\$\$\{|\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g;
-const ESCAPED = /\$\$\{([A-Z_][A-Z0-9_]*)/g;
 
-const expansions = new WeakMap<GraphSpec, GraphEnvExpansion>();
-/** Container object → field → names whose literal `${NAME}` came from an escape. */
-const escapedFields = new WeakMap<object, Map<string, Set<string>>>();
+/** Container object → field → the loaded string and the offsets of its escaped `${`. */
+const escapedFields = new WeakMap<object, Map<string, { value: string; offsets: ReadonlySet<number> }>>();
 
 export function recordGraphEnvExpansion(spec: GraphSpec, expansion: GraphEnvExpansion): void {
-  expansions.set(spec, expansion);
-  for (const { at, names } of expansion.escapes) {
+  for (const { at, value, offsets } of expansion.escapes) {
     let container: unknown = spec;
     for (const segment of at.slice(0, -1)) container = isObject(container) ? (container as Record<string, unknown>)[String(segment)] : undefined;
     if (!isObject(container)) continue;
-    const fields = escapedFields.get(container) ?? new Map<string, Set<string>>();
+    const fields = escapedFields.get(container) ?? new Map();
     escapedFields.set(container, fields);
-    const key = String(at[at.length - 1]);
-    fields.set(key, new Set([...(fields.get(key) ?? []), ...names]));
+    fields.set(String(at[at.length - 1]), { value, offsets: new Set(offsets) });
   }
-}
-
-/** What loading this spec expanded or refused; undefined for a spec that was not loaded from a file. */
-export function graphEnvExpansion(spec: GraphSpec): GraphEnvExpansion | undefined {
-  return expansions.get(spec);
 }
 
 function isObject(value: unknown): value is object {
@@ -90,25 +79,32 @@ function forEachGraph(
  * Source text, keys and node bodies are never expanded.
  */
 export function expandGraphEnv(parsed: unknown): GraphEnvExpansion {
-  const out: GraphEnvExpansion = { diagnostics: [], values: [], escapes: [] };
+  const out: GraphEnvExpansion = { diagnostics: [], escapes: [] };
   const env = currentEnvironment();
   forEachGraph(parsed, (graph, prefix, graphAt) => {
     const declared = declaredSecrets(graph);
     const expand = (value: unknown, path: string, at: Segment[]): unknown => {
       if (typeof value === "string") {
-        const escaped = [...value.matchAll(ESCAPED)].map((m) => m[1]!);
-        if (escaped.length > 0) out.escapes.push({ at, names: escaped });
-        return value.replace(PLACEHOLDER, (match, name: string | undefined, fallback: string | undefined) => {
-          if (name === undefined) return "${";
-          if (!declared.has(name)) {
+        let result = "";
+        let last = 0;
+        const offsets: number[] = [];
+        for (const m of value.matchAll(PLACEHOLDER)) {
+          const [match, name, fallback] = m;
+          result += value.slice(last, m.index);
+          last = m.index + match.length;
+          if (name === undefined) {
+            offsets.push(result.length);
+            result += "${";
+          } else if (!declared.has(name)) {
             out.diagnostics.push(undeclared(path, name, match));
-            return match;
+            result += match;
+          } else {
+            result += (Object.hasOwn(env, name) ? env[name] : undefined) ?? fallback ?? "";
           }
-          const found = Object.hasOwn(env, name) ? env[name] : undefined;
-          if (found === undefined) return fallback ?? "";
-          out.values.push(found);
-          return found;
-        });
+        }
+        result += value.slice(last);
+        if (offsets.length > 0) out.escapes.push({ at, value: result, offsets });
+        return result;
       }
       if (Array.isArray(value)) return value.map((item, index) => expand(item, `${path}.${index}`, [...at, index]));
       if (isRecord(value)) {
@@ -131,11 +127,12 @@ export function unexpandedEnvDiagnostics(spec: GraphSpec): Diagnostic[] {
   const out: Diagnostic[] = [];
   forEachGraph(spec, (graph, prefix) => {
     const declared = declaredSecrets(graph);
-    const visit = (value: unknown, path: string, escaped: ReadonlySet<string> | undefined): void => {
+    const visit = (value: unknown, path: string, escaped: { value: string; offsets: ReadonlySet<number> } | undefined): void => {
       if (typeof value === "string") {
+        const fromEscape = escaped?.value === value ? escaped.offsets : undefined;
         for (const match of value.matchAll(PLACEHOLDER)) {
           const name = match[1];
-          if (name !== undefined && !declared.has(name) && !escaped?.has(name)) out.push(undeclared(path, name, match[0]));
+          if (name !== undefined && !declared.has(name) && !fromEscape?.has(match.index)) out.push(undeclared(path, name, match[0]));
         }
       } else if (isObject(value)) {
         const fields = escapedFields.get(value);
@@ -145,4 +142,33 @@ export function unexpandedEnvDiagnostics(spec: GraphSpec): Diagnostic[] {
     for (const key of ["config", "runtime"]) visit(graph[key], `${prefix}${key}`, undefined);
   });
   return out;
+}
+
+/** Shorter expanded values are not redacted: masking `true` or `production` would corrupt unrelated run data. */
+export const MIN_REDACTED_CONFIG_VALUE = 8;
+
+function collectStrings(value: unknown, out: string[]): string[] {
+  if (typeof value === "string") out.push(value);
+  else if (isObject(value)) for (const child of Object.values(value)) collectStrings(child, out);
+  return out;
+}
+
+/**
+ * Host values of names a graph declares under `secrets:` (the root's and each
+ * inline subgraph's) that appear in that graph's own `config` or `runtime`
+ * strings, the only place loading could have expanded them. Re-derived from
+ * the spec content, so it holds for any copy; values shorter than
+ * {@link MIN_REDACTED_CONFIG_VALUE} are left out.
+ */
+export function expandedConfigEnvValues(spec: GraphSpec): string[] {
+  const env = currentEnvironment();
+  const out = new Set<string>();
+  forEachGraph(spec, (graph) => {
+    const strings = collectStrings([graph.config, graph.runtime], []);
+    for (const name of declaredSecrets(graph)) {
+      const value = Object.hasOwn(env, name) ? env[name] : undefined;
+      if (value && value.length >= MIN_REDACTED_CONFIG_VALUE && strings.some((s) => s.includes(value))) out.add(value);
+    }
+  });
+  return [...out];
 }
