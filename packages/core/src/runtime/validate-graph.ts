@@ -1017,8 +1017,31 @@ export function placementAdjacentHopDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
-/** Static successors only. Conditional branches and router routes are omitted. */
+/**
+ * Nodes whose `to` edges the compiler does not install.
+ * A router always declares routes. A `hitl` node does when `with.routes` names targets.
+ * Matches `declaresRoutes` in the compiler.
+ */
+function routeDeclaringIds(spec: GraphSpec): Set<string> {
+  return new Set(
+    spec.nodes
+      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id).length > 0))
+      .map((n) => n.id),
+  );
+}
+
+/**
+ * Static successors only. Conditional branches are omitted, and so are `to`
+ * edges out of a router or a `hitl` node that declares routes. The compiler
+ * skips those edges and follows the declared route, so they are not paths the
+ * run always takes.
+ *
+ * Error-recovery routes stay. On success the compiler still follows the node's
+ * static `to` edges (`normalTargets`). A recovery route replaces them only
+ * when the node fails, so the success path remains a static successor.
+ */
 function staticSuccessors(spec: GraphSpec): Map<string, string[]> {
+  const routed = routeDeclaringIds(spec);
   const adj = new Map<string, string[]>();
   const add = (from: string, to: string) => {
     if (to === "END" || from === "END") return;
@@ -1029,7 +1052,10 @@ function staticSuccessors(spec: GraphSpec): Map<string, string[]> {
   for (const edge of spec.edges) {
     if (!("to" in edge)) continue;
     const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-    for (const from of edgeFromIds(edge.from)) for (const to of tos) add(from, to);
+    for (const from of edgeFromIds(edge.from)) {
+      if (routed.has(from)) continue;
+      for (const to of tos) add(from, to);
+    }
   }
   return adj;
 }
@@ -1122,8 +1148,9 @@ export function unevenFanInDiagnostics(spec: GraphSpec): Diagnostic[] {
 
 /**
  * Errors for a static `from` list: unknown ids, duplicates, reserved ids,
- * a barrier aimed at END, and sources that are only reachable through a
- * conditional branch (the barrier would never fire).
+ * a barrier aimed at END or at one of its own sources, and sources that are
+ * only reachable through a conditional branch or a declared route (the
+ * barrier would never fire).
  */
 export function barrierEdgeDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
@@ -1168,6 +1195,15 @@ export function barrierEdgeDiagnostics(spec: GraphSpec): Diagnostic[] {
 
     if (!isJoinBarrier(edge.from)) return;
     const targets = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : [];
+    for (const target of targets) {
+      if (target === "END" || !seen.has(target)) continue;
+      diagnostics.push({
+        severity: "error",
+        code: "BARRIER_SELF_SOURCE",
+        message: `Barrier edge lists "${target}" in from and also targets it. The join would wait for itself to finish.`,
+        path: `edges[${index}]`,
+      });
+    }
     if (targets.includes("END")) {
       diagnostics.push({
         severity: "error",
@@ -1178,11 +1214,20 @@ export function barrierEdgeDiagnostics(spec: GraphSpec): Diagnostic[] {
     }
     const targetLabel = targets.filter((id) => id !== "END").join(", ") || "the join";
     for (const id of seen) {
-      if (id === "START" || id === "END") {
+      if (id === "END") {
         diagnostics.push({
           severity: "error",
           code: "BARRIER_SOURCE_INVALID",
-          message: `"${id}" cannot be a barrier source. List node ids in from.`,
+          message: `"END" cannot be a barrier source. END is not a node that finishes, so the join would wait forever.`,
+          path: `edges[${index}].from`,
+        });
+        continue;
+      }
+      if (id === "START") {
+        diagnostics.push({
+          severity: "error",
+          code: "BARRIER_SOURCE_INVALID",
+          message: `"START" cannot be a barrier source. List node ids in from.`,
           path: `edges[${index}].from`,
         });
         continue;
@@ -1192,8 +1237,8 @@ export function barrierEdgeDiagnostics(spec: GraphSpec): Diagnostic[] {
         severity: "error",
         code: "BARRIER_CONDITIONAL_SOURCE",
         message:
-          `Barrier source "${id}" on the edge to "${targetLabel}" can only be reached through a conditional branch. ` +
-          "The join waits for every listed source, so it would not run when that branch is skipped.",
+          `Barrier source "${id}" on the edge to "${targetLabel}" can only be reached through a conditional branch or a declared route. ` +
+          "The join waits for every listed source, so it would not run when that path is skipped.",
         path: `edges[${index}].from`,
       });
     }

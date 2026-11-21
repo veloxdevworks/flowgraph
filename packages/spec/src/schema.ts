@@ -1442,7 +1442,7 @@ export const BranchSchema = z.object({
 
 const edgeFromSchema = z.union([
   z.string(),
-  z.array(z.string()).min(1, "from must list at least one node id"),
+  z.array(z.string()).min(2, "from must list at least two node ids"),
 ]).describe(
   "Source node id, or a list of node ids. A list is a barrier: to runs once, after every listed source finishes.",
 );

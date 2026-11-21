@@ -80,6 +80,88 @@ function joinCount(seen: string[]): number {
   return seen.filter((id) => id === "join").length;
 }
 
+/** `x` is listed on a barrier, but the only edges that name it leave a route-declaring node. */
+function routeSpec(kind: "router" | "hitl"): GraphSpec {
+  const gate =
+    kind === "router"
+      ? {
+          id: "gate",
+          type: "router",
+          with: {
+            mode: "rules",
+            routes: {
+              go: { default: true, to: "x" },
+              other: { when: "{{ false }}", to: "y" },
+            },
+          },
+        }
+      : {
+          id: "gate",
+          type: "hitl",
+          with: {
+            mode: "choice",
+            message: "Which way?",
+            choices: ["x", "y"],
+            routes: { x: "x", y: "y" },
+          },
+        };
+  return {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: `barrier-${kind}-route` },
+    state: { channels: { seen: { type: "array", reducer: "append" } } },
+    nodes: [gate, mark("x"), mark("y"), mark("z"), mark("join")],
+    edges: [
+      { from: "START", to: "gate" },
+      { from: "START", to: "z" },
+      { from: "gate", to: ["x", "y"] },
+      { from: ["x", "z"], to: "join" },
+      { from: "y", to: "END" },
+      { from: "join", to: "END" },
+    ],
+    runtime: { checkpoint: { enabled: false } },
+  } as unknown as GraphSpec;
+}
+
+/**
+ * Exclusive routes of different lengths that both draw a plain edge to `join`.
+ * Only one route runs, so this is not an uneven parallel fan-in.
+ */
+function exclusiveSpec(kind: "router" | "hitl"): GraphSpec {
+  const gate =
+    kind === "router"
+      ? {
+          id: "gate",
+          type: "router",
+          with: { mode: "rules", routes: { only: { default: true, to: "short" } } },
+        }
+      : {
+          id: "gate",
+          type: "hitl",
+          with: {
+            mode: "approve",
+            message: "Go?",
+            routes: { approved: "short", rejected: "long" },
+          },
+        };
+  return {
+    apiVersion: "flowgraph/v1",
+    kind: "Graph",
+    metadata: { name: `exclusive-${kind}` },
+    nodes: [gate, mark("short"), mark("mid"), mark("long"), mark("join")],
+    edges: [
+      { from: "START", to: "gate" },
+      { from: "gate", to: "short" },
+      { from: "gate", to: "mid" },
+      { from: "mid", to: "long" },
+      { from: "short", to: "join" },
+      { from: "long", to: "join" },
+      { from: "join", to: "END" },
+    ],
+    runtime: { checkpoint: { enabled: false } },
+  } as unknown as GraphSpec;
+}
+
 describe("join barrier", () => {
   it("runs an uneven join twice without a barrier and once with one", async () => {
     const plain = graph(unevenEdges.plain, "uneven-plain");
@@ -160,7 +242,7 @@ describe("join barrier", () => {
     });
   });
 
-  it("rejects unknown ids, duplicates, START, and a barrier aimed at END", () => {
+  it("rejects unknown ids, duplicates, START, END, a self-target, and a barrier aimed at END", async () => {
     const unknown = graph([
       { from: "START", to: "split" },
       { from: ["short", "missing"], to: "join" },
@@ -195,6 +277,197 @@ describe("join barrier", () => {
       ),
     ).toBe(true);
     expect(validateSpec(toEnd).some((d) => d.code === "BARRIER_TARGET_END")).toBe(true);
+
+    const endSource = graph([
+      { from: "START", to: "split" },
+      { from: ["END", "short"], to: "join" },
+      { from: "join", to: "END" },
+    ]);
+    expect(
+      validateSpec(endSource).some(
+        (d) =>
+          d.code === "BARRIER_SOURCE_INVALID" &&
+          d.severity === "error" &&
+          d.message.includes('"END"') &&
+          d.message.includes("cannot be a barrier source"),
+      ),
+    ).toBe(true);
+
+    const self = graph([
+      { from: "START", to: "split" },
+      { from: ["join", "short"], to: "join" },
+      { from: "join", to: "END" },
+    ]);
+    const selfInList = graph([
+      { from: "START", to: "split" },
+      { from: ["short", "long"], to: ["join", "short"] },
+      { from: "join", to: "END" },
+    ]);
+    expect(
+      validateSpec(self).some(
+        (d) => d.code === "BARRIER_SELF_SOURCE" && d.message.includes('"join"'),
+      ),
+    ).toBe(true);
+    expect(
+      validateSpec(selfInList).some(
+        (d) => d.code === "BARRIER_SELF_SOURCE" && d.message.includes('"short"'),
+      ),
+    ).toBe(true);
+    await expect(compileGraph(self, {})).rejects.toMatchObject({ code: "BARRIER_SELF_SOURCE" });
+  });
+
+  it("does not fire the barrier again when a loop reruns only one source", async () => {
+    const spec = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "barrier-loop" },
+      state: { channels: { seen: { type: "array", reducer: "append" } } },
+      nodes: ["split", "left", "right", "join", "park", "finish"].map(mark),
+      edges: [
+        { from: "START", to: "split" },
+        { from: "split", to: ["left", "right"] },
+        { from: ["left", "right"], to: "join" },
+        { from: "join", to: "left" },
+        {
+          from: "left",
+          branch: [
+            { when: "{{ includes(state.seen, 'join') }}", to: "finish" },
+            { default: true, to: "park" },
+          ],
+        },
+        { from: "finish", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+
+    expect(validateSpec(spec).filter((d) => d.severity === "error")).toEqual([]);
+    const seen = await seenOf(spec);
+    expect(seen.filter((id) => id === "left")).toHaveLength(2);
+    expect(seen.filter((id) => id === "right")).toHaveLength(1);
+    expect(joinCount(seen)).toBe(1);
+    expect(seen.filter((id) => id === "finish")).toHaveLength(1);
+  });
+
+  it("runs the join once after a hitl barrier source resumes", async () => {
+    const spec = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "barrier-hitl-resume" },
+      state: { channels: { seen: { type: "array", reducer: "append" } } },
+      nodes: [
+        mark("left"),
+        { id: "ask", type: "hitl", with: { mode: "approve", message: "Continue?" } },
+        mark("join"),
+      ],
+      edges: [
+        { from: "START", to: "left" },
+        { from: "left", to: "ask" },
+        { from: ["left", "ask"], to: "join" },
+        { from: "join", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: true, backend: "memory" } },
+    } as unknown as GraphSpec;
+
+    expect(validateSpec(spec).filter((d) => d.severity === "error")).toEqual([]);
+    const compiled = await compileGraph(spec, {});
+    const paused = await compiled.run({ threadId: "barrier-hitl-resume", onInterrupt: "fail" });
+    expect(paused.status).toBe("interrupted");
+    expect(joinCount((paused.state["seen"] as string[]) ?? [])).toBe(0);
+
+    const resumed = await compiled.resume({
+      threadId: "barrier-hitl-resume",
+      resume: { approved: true },
+      onInterrupt: "fail",
+    });
+    expect(resumed.status).toBe("completed");
+    const seen = resumed.state["seen"] as string[];
+    expect(seen.filter((id) => id === "left")).toHaveLength(1);
+    expect(joinCount(seen)).toBe(1);
+  });
+
+  it("rejects barrier sources that only a router or a hitl route can reach", async () => {
+    const router = routeSpec("router");
+    const hitl = routeSpec("hitl");
+    for (const spec of [router, hitl]) {
+      const diags = validateSpec(spec).filter((d) => d.code === "BARRIER_CONDITIONAL_SOURCE");
+      expect(diags.map((d) => d.message)).toEqual([expect.stringContaining('"x"')]);
+      expect(diags.every((d) => d.severity === "error" && d.message.includes("declared route"))).toBe(
+        true,
+      );
+      await expect(compileGraph(spec, {})).rejects.toMatchObject({
+        code: "BARRIER_CONDITIONAL_SOURCE",
+      });
+    }
+  });
+
+  it("does not warn about uneven fan-in on exclusive router or hitl routes", () => {
+    expect(validateSpec(exclusiveSpec("router")).some((d) => d.code === "UNEVEN_FAN_IN")).toBe(false);
+    expect(validateSpec(exclusiveSpec("hitl")).some((d) => d.code === "UNEVEN_FAN_IN")).toBe(false);
+  });
+
+  it("runs the join once when a router node is itself a barrier source", async () => {
+    const spec = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "barrier-router-source" },
+      state: { channels: { seen: { type: "array", reducer: "append" } } },
+      nodes: [
+        {
+          id: "route",
+          type: "router",
+          with: { mode: "rules", routes: { go: { default: true, to: "done" } } },
+        },
+        mark("side"),
+        mark("done"),
+        mark("join"),
+      ],
+      edges: [
+        { from: "START", to: "route" },
+        { from: "START", to: "side" },
+        { from: ["route", "side"], to: "join" },
+        { from: "done", to: "END" },
+        { from: "join", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+
+    expect(validateSpec(spec).filter((d) => d.severity === "error")).toEqual([]);
+    const seen = await seenOf(spec);
+    expect(seen.filter((id) => id === "side")).toHaveLength(1);
+    expect(seen.filter((id) => id === "done")).toHaveLength(1);
+    expect(joinCount(seen)).toBe(1);
+  });
+
+  it("still joins on the success path of a node with an error-recovery route", async () => {
+    const spec = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "barrier-recovery" },
+      state: { channels: { seen: { type: "array", reducer: "append" } } },
+      nodes: [
+        { ...mark("a"), on: { error: "route:fallback" } },
+        mark("x"),
+        mark("z"),
+        mark("join"),
+        mark("fallback"),
+      ],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "START", to: "z" },
+        { from: "a", to: "x" },
+        { from: ["x", "z"], to: "join" },
+        { from: "join", to: "END" },
+        { from: "fallback", to: "END" },
+      ],
+      runtime: { checkpoint: { enabled: false } },
+    } as unknown as GraphSpec;
+
+    expect(validateSpec(spec).some((d) => d.code === "BARRIER_CONDITIONAL_SOURCE")).toBe(false);
+    expect(validateSpec(spec).filter((d) => d.severity === "error")).toEqual([]);
+    const seen = await seenOf(spec);
+    expect(seen).toEqual(expect.arrayContaining(["a", "x", "z"]));
+    expect(joinCount(seen)).toBe(1);
+    expect(seen).not.toContain("fallback");
   });
 
   it("parses the uneven-join example", () => {
