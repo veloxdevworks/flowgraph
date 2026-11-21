@@ -468,10 +468,14 @@ describe("RunService upload policy", () => {
       return s;
     };
     process.env["FG_UPLOAD_TEST_SECRET"] = "s3cr3t";
+    process.env["FG_UPLOAD_TEST_CONFIG"] = "config-value";
     const yaml = (name: string) => `
 apiVersion: flowgraph/v1
 kind: Graph
 metadata: { name: ${name} }
+secrets: [FG_UPLOAD_TEST_CONFIG]
+config:
+  vars: { key: "\${FG_UPLOAD_TEST_CONFIG}" }
 state:
   channels:
     approval: { type: object }
@@ -496,8 +500,9 @@ runtime:
       expect(await settle(first, "t3", ["interrupted", "error"])).toBe("interrupted");
       // The graph store, the session and getRun keep the YAML as uploaded.
       const stored = await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8");
-      expect(stored).toContain("${FG_UPLOAD_TEST_SECRET}");
+      expect(stored).toBe(yaml("t-env"));
       expect(stored).not.toContain("s3cr3t");
+      expect(stored).not.toContain("config-value");
       expect(JSON.parse(await fs.readFile(path.join(dir, "t3.graph.yaml.meta.json"), "utf-8"))).toMatchObject({ yamlFormat: "raw" });
       expect(first.registry.get("t3")?.yaml).not.toContain("s3cr3t");
       const detail = await first.getRun("t3", tina);
@@ -506,11 +511,13 @@ runtime:
       cleanup.push(() => first.close());
       const second = first;
 
-      // A trusted resume fills the placeholder at run time only.
+      // A trusted resume leaves a placeholder in a node body literal; only declared config values expand.
       await second.resumeRun({ threadId: "t3", resume: { approved: true } }, tina);
       expect(await settle(second, "t3", ["interrupted", "completed", "error"])).toBe("interrupted");
-      expect(JSON.stringify(second.registry.get("t3")?.events)).toContain("key=s3cr3t");
-      expect(await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8")).not.toContain("s3cr3t");
+      const events = JSON.stringify(second.registry.get("t3")?.events);
+      expect(events).toContain("key=${FG_UPLOAD_TEST_SECRET}");
+      expect(events).not.toContain("s3cr3t");
+      expect(await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8")).not.toContain("config-value");
       expect((await second.getRun("t3", tina))?.yaml).not.toContain("s3cr3t");
       // An author who lost trust cannot run the stored placeholder.
       await expect(second.resumeRun({ threadId: "t3", resume: { approved: true } }, principal("tina", false))).rejects.toMatchObject({
@@ -518,6 +525,7 @@ runtime:
       });
     } finally {
       delete process.env["FG_UPLOAD_TEST_SECRET"];
+      delete process.env["FG_UPLOAD_TEST_CONFIG"];
     }
   });
 

@@ -11,9 +11,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
+  expandGraphEnv,
   normalizeNodeTypeAliases,
+  recordGraphEnvExpansion,
   validateSpec,
   hostSupportDiagnostics,
+  type GraphEnvExpansion,
 } from "@flowgraph/core";
 import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import { GraphStoreError, isSystemError, ServerRequestError } from "./errors.js";
@@ -26,12 +29,6 @@ export interface ParseGraphYamlResult {
   diagnostics: Diagnostic[];
   /** True when the client YAML contained an `imports` block that was stripped. */
   importsStripped: boolean;
-}
-
-function expandEnvVars(yaml: string): string {
-  return yaml.replace(/\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}/g, (_m, name: string, def: string) => {
-    return process.env[name] ?? def ?? "";
-  });
 }
 
 /**
@@ -59,8 +56,13 @@ function stripImports(graph: Record<string, unknown>, depth: number): boolean {
 
 /**
  * Parse uploaded YAML into a GraphSpec. Strips `imports` (on the graph and
- * on inline subgraphs at any depth) so client code modules are never loaded. `${VAR}` placeholders are filled from the server
- * environment unless `expandEnv` is false (untrusted uploads, stored graphs).
+ * on inline subgraphs at any depth) so client code modules are never loaded.
+ * Unless `expandEnv` is false (untrusted uploads, stored graphs), `${VAR}`
+ * placeholders are expanded after parsing exactly as `loadGraph` does: only in
+ * `config` and `runtime` (each inline subgraph's against its own list), only
+ * for names the graph declares under `secrets:`, with `$${VAR}` kept as a
+ * literal `${VAR}`. An undeclared name stays as written and is reported as
+ * `SECRET_UNDECLARED`. The returned `yaml` never holds an expanded value.
  */
 export function parseGraphYaml(raw: string, opts: { expandEnv?: boolean } = {}): ParseGraphYamlResult {
   return parseGraphSource(raw, opts);
@@ -71,10 +73,12 @@ function parseGraphSource(
   opts: { expandEnv?: boolean },
   legacyStored = false,
 ): ParseGraphYamlResult {
-  const expanded = opts.expandEnv === false ? raw : expandEnvVars(raw);
+  const expandEnv = opts.expandEnv !== false;
   let parsed: unknown;
+  let expansion: GraphEnvExpansion = { diagnostics: [], escapes: [] };
   try {
-    parsed = parseYaml(expanded);
+    parsed = parseYaml(raw);
+    if (expandEnv) expansion = expandGraphEnv(parsed);
   } catch (err) {
     return {
       spec: null,
@@ -116,27 +120,28 @@ function parseGraphSource(
     return {
       spec: null,
       yaml: raw,
-      diagnostics: diagnosticsFromZodIssues(result.error.issues, parsed),
+      diagnostics: [...diagnosticsFromZodIssues(result.error.issues, parsed), ...expansion.diagnostics],
       importsStripped,
     };
   }
 
-  const lint = [
+  recordGraphEnvExpansion(result.data, expansion);
+  const lint = uniqueDiagnostics([
+    ...expansion.diagnostics,
     ...validateSpec(result.data),
     ...hostSupportDiagnostics(result.data, { hostName: "flowgraph server" }),
-  ];
-  const errors = lint.filter((d) => d.severity === "error");
-  if (errors.length > 0) {
-    return {
-      spec: null,
-      yaml: stringifyYaml(result.data),
-      diagnostics: lint,
-      importsStripped,
-    };
+  ]);
+  // The spec may hold expanded values; the text handed back must not.
+  const yaml = expandEnv ? raw : stringifyYaml(result.data);
+  if (lint.some((d) => d.severity === "error")) {
+    return { spec: null, yaml, diagnostics: lint, importsStripped };
   }
-
-  const yaml = stringifyYaml(result.data);
   return { spec: result.data, yaml, diagnostics: lint, importsStripped };
+}
+
+/** Expansion and `validateSpec` both report an undeclared `${NAME}`; keep one. */
+function uniqueDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
+  return [...new Map(diagnostics.map((d) => [`${d.file}:${d.code}:${d.path}:${d.message}`, d])).values()];
 }
 
 export async function ensureGraphStoreDir(dir: string): Promise<void> {
@@ -557,9 +562,10 @@ export async function updateGraphMeta(
 
 /**
  * Load a stored graph. `yaml` is the stored text (raw for current files, so
- * no environment value is ever returned). `${VAR}` placeholders are filled
- * into `spec` only when `expandEnv` is set (trusted authors) and the file was
- * stored raw; files from older servers already hold expanded YAML, and
+ * no environment value is ever returned). Declared `${VAR}` placeholders in
+ * `config` and `runtime` are filled into `spec` (see {@link parseGraphYaml})
+ * only when `expandEnv` is set (trusted authors) and the file was stored raw;
+ * files from older servers already hold expanded YAML, and
  * expanding them again would read the environment for text that only looks
  * like a placeholder.
  */

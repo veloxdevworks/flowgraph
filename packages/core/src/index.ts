@@ -223,6 +223,7 @@ export {
   secretNamesIn,
   secretReferenceDiagnostics,
 } from "./runtime/secret-declarations.js";
+export { expandGraphEnv, recordGraphEnvExpansion, type GraphEnvExpansion } from "./runtime/config-env.js";
 
 export {
   createLogger,
