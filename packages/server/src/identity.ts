@@ -144,8 +144,9 @@ export function singleUserPrincipal(config: ServerConfig): Principal {
   const subject = id?.user ?? "token";
   // Anyone holding the shared token is this principal, so it is trusted only on
   // the operator's say-so. A config with neither `auth` nor a token is an
-  // embedded RunService: no caller can present a token, so calls come from the host.
-  const embedded = config.auth === undefined && !config.authToken;
+  // embedded RunService: no caller can present a token, so calls come from the
+  // host. Not with `agentcore`, where /invocations callers reach it unauthenticated.
+  const embedded = config.auth === undefined && !config.authToken && config.agentcore !== true;
   return { id: `token:${subject}`, subject, org, project, teams: [], roles: [], trusted: config.trustTokenCallers === true || embedded, via: "token" };
 }
 

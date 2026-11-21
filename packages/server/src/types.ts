@@ -184,7 +184,8 @@ export interface ServerConfig {
    * FLOWGRAPH_AUTH_MODE / FLOWGRAPH_OIDC_* by `defaultServerConfig`. Unset:
    * `authToken` / `authDisabled` decide; the single principal is trusted with
    * `authDisabled`, and in token mode only with `trustTokenCallers` or when
-   * `authToken` is unset too (an embedded service no caller can authenticate to).
+   * `authToken` is unset too and `agentcore` is off (an embedded service no
+   * caller can authenticate to).
    */
   auth?: ServerAuthConfig;
   /**
@@ -192,8 +193,8 @@ export interface ServerConfig {
    * authors: their uploads may use shell, script and service nodes and other
    * host access, and their graphs' declared `${VAR}` config values are
    * expanded. Default false: token-mode uploads get the untrusted upload
-   * policy (except on an embedded service whose config sets neither `auth`
-   * nor `authToken`). Has no effect in `oidc` mode (FLOWGRAPH_OIDC_TRUSTED_ROLES /
+   * policy (except on an embedded service whose config sets none of `auth`,
+   * `authToken` and `agentcore`). Has no effect in `oidc` mode (FLOWGRAPH_OIDC_TRUSTED_ROLES /
    * TEAMS decide) or `none` mode. Env: `FLOWGRAPH_TRUST_TOKEN_CALLERS=1`.
    */
   trustTokenCallers?: boolean;

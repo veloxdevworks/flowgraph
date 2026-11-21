@@ -72,6 +72,22 @@ function sseEvents(text: string): Array<{ type?: string; runId?: string }> {
 }
 
 describe("/invocations auth", () => {
+  it("treats unauthenticated AgentCore callers of a config with no auth or token as untrusted", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-agentcore-embedded-"));
+    const config = { host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, agentcore: true };
+    const service = new RunService(config);
+    const server = createHttpServer(service, config);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    open.push({ base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, service, server, dir });
+    const yaml = HITL_YAML.replace("agentcore-hitl", "agentcore-shell").replace(
+      "edges: [{ from: START, to: gate }, { from: gate, to: END }]",
+      "  - { id: sh, type: shell, with: { command: id } }\nedges: [{ from: START, to: gate }, { from: gate, to: sh }, { from: sh, to: END }]",
+    );
+    const res = await invoke(open[open.length - 1]!.base, { action: "start", threadId: "ac-embedded", yaml, stream: false });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ code: "UPLOAD_NODE_TYPE_BLOCKED" });
+  });
+
   it("takes REST auth when the server is not on AgentCore", async () => {
     const { base } = await startServer({});
     expect((await invoke(base, { action: "nope" })).status).toBe(401);
