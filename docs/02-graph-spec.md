@@ -73,15 +73,17 @@ triggers:
 
 | Field | Description |
 |-------|-------------|
-| `id` | Stable id within this graph. Required. |
+| `id` | Stable id within this graph, unique among its triggers. Required. |
 | `type` | `cron` \| `interval` \| `startup` \| `flow-complete` \| `flow-failed` \| `webhook` \| `file-watch`. |
 | `enabled` | When `false`, hosts ignore the trigger. Default `true`. |
-| `schedule` | Cron only — 5-field cron expression. |
-| `timezone` | Cron only — optional IANA timezone. |
+| `schedule` | Cron only — 5-field cron expression: minute (0–59), hour (0–23), day of month (1–31), month (1–12 or `JAN`–`DEC`), day of week (0–7, 0 and 7 are Sunday, or `SUN`–`SAT`). Each field takes `*`, a value, a range `a-b`, a list `a,b` and a step `/n`. Macros such as `@daily` and six-field (seconds) forms are not accepted. |
+| `timezone` | Cron only — optional IANA timezone, such as `America/Denver` or `UTC`. |
 | `every` / `unit` | Interval only. |
 | `graph` | Flow-complete / flow-failed — target graph `metadata.name` (kebab-case). |
 | `path` | Webhook (URL path) or file-watch (filesystem path). |
 | `events` | File-watch only — subset of `create` / `change` / `delete`. |
+
+`flowgraph validate` and `compileGraph` reject a repeated trigger id (`DUPLICATE_TRIGGER_ID`), a cron schedule that is not a valid 5-field expression (`TRIGGER_CRON_INVALID`, naming the field at fault), and a `timezone` the runtime does not know (`TRIGGER_TIMEZONE_INVALID`).
 
 Hosts typically guard against a graph triggering itself via `flow-complete` / `flow-failed`. Cascade depth beyond that simple self-loop check is host-defined.
 
@@ -93,7 +95,7 @@ Declare typed parameters that must be supplied **before** a run starts. These ar
 inputs:
   - key: prospectName
     label: Prospect Name
-    type: string          # string | text | number | boolean | select
+    type: string          # string | text | number | boolean | select | json
     required: true
   - key: prospectDescription
     label: Description
@@ -111,13 +113,15 @@ inputs:
 
 | Field | Description |
 |-------|-------------|
-| `key` | Written into the initial run input / state under this name. Required. |
+| `key` | Written into the initial run input / state under this name. Required, and unique among the graph's `inputs`. |
 | `label` | Human-readable name for forms and CLI errors. |
-| `type` | `string` (single-line), `text` (multi-line), `number`, `boolean`, or `select`. Default: `string`. |
+| `type` | `string` (single-line), `text` (multi-line), `number`, `boolean`, `select`, or `json` (any JSON value). Default: `string`. |
 | `required` | When `true`, the run fails fast if the value is missing and no `default` is set. |
-| `default` | Applied when the caller omits the key. |
+| `default` | Applied when the caller omits the key. Must have the field's type: a string for `string`/`text`, a number, `true`/`false`, one of `options` for `select`, and for `json` any YAML value, or a string that is JSON text. |
 | `options` | Required for `type: select` — allowed string values. |
 | `description` | Optional help text for UIs. |
+
+`flowgraph validate` and `compileGraph` check the declarations themselves: a repeated `key` is `DUPLICATE_INPUT_KEY`, a `select` without `options` is `INPUT_OPTIONS_MISSING`, and a `default` of the wrong type is `INPUT_DEFAULT_TYPE`. The run-time coercion below still applies to the values a caller passes.
 
 **Runtime behavior:**
 
@@ -238,7 +242,7 @@ A node whose labels the local host satisfies runs in-process as usual. Otherwise
 
 ## 6. `edges`
 
-Edges define control flow. Two forms: **static** and **conditional**. `START` and `END` are reserved node ids (mapped to LangGraph's `START`/`END`).
+Edges define control flow. Two forms: **static** and **conditional**. `START` and `END` are reserved node ids (mapped to LangGraph's `START`/`END`). `END` is never an edge source (`EDGE_FROM_END`) and `START` is never a target, on a static edge or a branch (`EDGE_TO_START`).
 
 ### Static edges
 
@@ -536,7 +540,19 @@ runtime:
 
 Unknown keys are an error. The graph root, every node, and every inline subgraph `spec:` accept only the fields defined in this document; anything else is reported as `UNKNOWN_FIELD`, one diagnostic per key, with a path such as `nodes.character.runOn`. When the key is within two edits of a real one the message adds `Did you mean "runsOn"?`. Free-form blocks (`metadata`, `with`, `config`, `runtime`) are not affected. The check exists so an engine never silently drops a field it does not understand: a graph that uses a newer field (for example `runsOn`) must fail on an older engine instead of running without it.
 
-The same diagnostics power editor squiggles via the JSON Schema + a future Language Server (post-1.0).
+**Nested graphs are validated like the top level.** The same checks apply at any depth to:
+
+- a `map` body (`with.node`): it is a node spec whose `id` is optional, so a misspelled key or a missing `type` is reported, and its `with` is checked against its own type's schema. A `shell` body with no `command` fails `flowgraph validate` with `NODE_CONFIG_ERROR` at `nodes.<map>.with.node.with.command`, rather than failing on the first item at run time.
+- an inline subgraph `spec`: node types and `with`, duplicate ids, edge references, the `START` edge, reachability, barriers and channel lints, with paths such as `nodes.<sub>.spec.nodes.<id>.with.command`. A subgraph map body's `spec` is covered too.
+- a `uses:` subgraph file: `loadGraph` (and so `flowgraph validate` and `flowgraph run`) validates each file it reads and tags those diagnostics with that file. A plugin type in a file is a `PLUGIN_TYPE_UNRESOLVED` warning when that file or a graph above it declares a `nodes` import.
+
+Deprecated type aliases (`code`, `intelligent`) are rewritten in map bodies and inline `spec` blocks as well.
+
+**`compileGraph` refuses the same errors.** A spec built in code, copied, or loaded without `flowgraph validate` is checked when it compiles: unknown node types and invalid `with` blocks (in map bodies and inline subgraphs too), duplicate ids, unknown edge targets, a missing `START` edge, `END` as a source or `START` as a target, unknown hook phases or directives, and invalid `inputs` or `triggers`. The error lists every problem as `CODE at path: message`; its `code` is the first diagnostic's code and its `diagnostics` holds them all.
+
+`UNDECLARED_OUTPUT_CHANNEL` is a **warning**: a node writes a channel that `state.channels` does not declare. `compileGraph` declares it as `type: any` with last-write-wins, so the write is kept; declare the channel to choose its type and reducer.
+
+The same diagnostics power editor squiggles via the JSON Schema + a future Language Server (post-1.0). `flowgraph schema` prints the JSON Schema, published at `https://veloxdevworks.com/flowgraph/schema/v1.json` (its `$id`). Nodes, inline subgraph `spec` blocks and `map` bodies are recursive definitions (`NodeSpec`, `GraphSpec`, `MapBodyNode`), so editors check nested graphs as they check the top level. Settings the engine rejects as relocated (for example `runsOn.wait` or `config.defaults.retry`) are not offered. Each node type's own `with` fields are not typed in the JSON Schema yet; `flowgraph validate` checks them.
 
 ## 12. Versioning the spec
 
@@ -546,6 +562,6 @@ The same diagnostics power editor squiggles via the JSON Schema + a future Langu
 
 ## File resolution and static validation
 
-Relative graph references and each child graph's module imports resolve against the YAML file that declares them, independently of the working directory and `runtime.workspace`. Child execution inherits the parent's workspace; a child's explicit `runtime.workspace` resolves relative to that inherited workspace. Subgraph aliases declared in `imports` are honored by load, preflight, and execution. Import cycles (including symlink cycles) are rejected with `SUBGRAPH_CYCLE`; sharing a child between DAG branches is supported. Missing relative imports are reported even when their aliases are unused.
+Relative graph references and each child graph's module imports resolve against the YAML file that declares them, independently of the working directory and `runtime.workspace`. Child execution inherits the parent's workspace; a child's explicit `runtime.workspace` resolves relative to that inherited workspace. Subgraph aliases declared in `imports` are honored by load, preflight, and execution. Import cycles (including symlink cycles) are rejected with `SUBGRAPH_CYCLE`; sharing a child between DAG branches is supported. Missing relative imports are reported even when their aliases are unused. Every child graph file that is read, whether used or only declared, is validated with the same lint as the parent ([§11](#11-validation--diagnostics)), and its diagnostics name the file.
 
 Validation checks router and hook route targets, unreachable nodes, channel default types, and expression builtin names. Nodes referenced as agent tools or declared hook targets need no dummy inbound edges. Expression validation is bounded at 256 nesting levels and 2,048 tokens per expression and reports the field path; repeated invalid templates produce at most 50 expression diagnostics per graph. The CLI's ASCII and Mermaid topology includes declared router and HITL routes.

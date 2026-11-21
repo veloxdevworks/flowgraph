@@ -601,6 +601,8 @@ export default async function (input, ctx) {
 
 ### How it runs
 
+`with.code` is never rendered as a template, so `{{` in source (JSX `style={{ color: "red" }}`, an object literal in a template string) is code and `flowgraph validate` does not parse it as an expression. Pass run data through `with.input`, which is rendered. Inside a `map` body the map renders the body's `with` with the item, code included, so there `{{` in code is still checked; use `with.file` for such source.
+
 Choose exactly one of `with.code` or `with.file`. A file path is static and resolves
 relative to the graph file declaring the node, independently of `runtime.workspace`.
 The file must contain the same default-export function as inline code:
@@ -700,7 +702,7 @@ Child events are nested under the parent's span. The parent must use checkpointi
 
 On resume, the parent `subgraph` node re-executes from the top (recomputing `stateMap.in`). Side effects reached before a nested interrupt should use `ctx.once()` so they do not re-fire on replay (same pattern as top-level HITL nodes).
 
-`flowgraph validate` errors when an `out` key is not a parent channel (`UNDECLARED_OUTPUT_CHANNEL`) or an `out` value names a child channel that does not exist (`SUBGRAPH_OUTPUT_UNKNOWN`).
+`flowgraph validate` warns when an `out` key is not a declared parent channel (`UNDECLARED_OUTPUT_CHANNEL`; compile declares it as `type: any`) and errors when an `out` value names a child channel that does not exist (`SUBGRAPH_OUTPUT_UNKNOWN`). An inline `spec` is validated like a top-level graph, and so is a `uses:` file when the graph is loaded ([02 §11](./02-graph-spec.md#11-validation--diagnostics)).
 
 ---
 
@@ -730,6 +732,8 @@ The map renders the inner node's `with` and `input` once per item, with `state`,
     collect:
       to: results                   # results array written via append reducer
 ```
+
+`with.node` is a node spec with the same fields as a graph node, except that `id` is optional (each item runs as `<map>[<index>]`). `flowgraph validate` and `compileGraph` check it like any node: an unknown key, a missing `type`, an unregistered type, or a `with` that does not match the body type's schema (for example a `shell` body without `command`) is an error before the run starts. A body's inline subgraph `spec` is validated like a top-level graph.
 
 Set `with.memoize: true` to reuse completed per-item results when a loop returns to this map. The cache belongs to the thread/map checkpoint; it survives resume with a durable checkpointer and never crosses threads. Reordering items preserves reuse. Failed/unfinished work is not cached, and duplicates in the same dispatch may execute independently. Hits skip execution and side effects, then apply the current inner output projection and collection order.
 
