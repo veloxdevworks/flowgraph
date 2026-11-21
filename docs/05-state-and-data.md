@@ -257,7 +257,7 @@ The stdlib is intentionally small and pure. Anything more complex belongs in a `
 
 | | `${ENV}` interpolation | `{{ expr }}` expressions |
 |---|---|---|
-| When | **Load time** (once, before validation) | **Run time** (per node execution) |
+| When | **Load time** (once, after parsing and before validation) | **Run time** (per node execution) |
 | Scope | names declared under top-level `secrets:` | `state`, `input`, `result`, `config`, `secret`, `env`, `run` |
 | Where allowed | `config`, `runtime` scalar values | node `input`/`with`/`output`, `when`, edge `branch.when` |
 | Purpose | wire declared secrets into config | dynamic data flow during execution |
@@ -272,7 +272,9 @@ nodes:
     with: { prompt: "Summarize {{ state.issue.title }}" }     # {{ }} = expr, per run
 ```
 
-> **Shell bodies:** load-time `${ENV}` expansion touches only `config` and `runtime`, so `${SLUG}` or `${SPEC_SLUG:-}` in a `shell` node's `command` / `args` / `env` is left for the child shell, which sees only its allowed environment and `with.env`. An undeclared `${NAME}` in `config` or `runtime` is not expanded and is reported as `SECRET_UNDECLARED` ([02 §7](./02-graph-spec.md#7-config)).
+The full `${ENV}` rule (undeclared names, `:-default`, the `$${NAME}` escape, redaction) is in [02 §7](./02-graph-spec.md#7-config); the CLI and the server apply the same rule.
+
+> **Shell bodies:** `${ENV}` expansion touches only `config` and `runtime`, so `${SLUG}` or `${SPEC_SLUG:-}` in a `shell` node's `command` / `args` / `env` is left for the child shell, which sees only its allowed environment and `with.env`.
 
 ## 6. Expression scope objects
 
