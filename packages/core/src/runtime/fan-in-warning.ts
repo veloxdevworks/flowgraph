@@ -50,7 +50,7 @@ function fanOutGroups(spec: GraphSpec): Map<string, string[]> {
 
   for (const edge of spec.edges) {
     if (!("to" in edge)) continue;
-    const from = edge.from;
+    const from = Array.isArray(edge.from) ? edge.from.join(", ") : edge.from;
     const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
     let set = byFrom.get(from);
     if (!set) {
