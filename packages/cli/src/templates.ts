@@ -64,10 +64,6 @@ edges:
 runtime:
   checkpoint:
     enabled: false
-  observability:
-    logs:
-      level: info
-      format: pretty
 `,
       },
       {

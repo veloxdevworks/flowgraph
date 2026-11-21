@@ -1711,7 +1711,9 @@ export const RuntimeSchema = z.object({
       enabled: z.boolean().optional().default(true),
       backend: CheckpointBackendSchema.optional().default("memory"),
       path: z.string().optional(),
-      namespace: z.string().optional(),
+      namespace: relocatedField(
+        "runtime.checkpoint.namespace is not supported; checkpoints are already kept per thread. Remove it.",
+      ),
       /** Bound checkpoint history. Omitted means the default retention policy. */
       retention: CheckpointRetentionSchema.optional(),
     })
@@ -1768,7 +1770,9 @@ export const RuntimeSchema = z.object({
     .optional(),
   hitl: z
     .object({
-      onInterrupt: HitlPolicySchema.optional().default("prompt"),
+      onInterrupt: relocatedField(
+        "runtime.hitl.onInterrupt is not a graph setting; the host decides how interrupts are answered (CLI --on-interrupt, or onInterrupt in run options). Remove it.",
+      ),
       breakpoints: z
         .object({
           before: z.array(z.string()).optional(),
@@ -1793,7 +1797,9 @@ export const RuntimeSchema = z.object({
   context: RuntimeContextSchema.optional(),
   secrets: z
     .object({
-      provider: z.union([z.literal("env"), z.literal("dotenv"), z.string()]).optional(),
+      provider: relocatedField(
+        "runtime.secrets.provider is not supported; list the names the graph reads under the top-level secrets: and let the host supply their values.",
+      ),
       redact: z
         .object({
           patterns: z.array(z.string()).optional(),
@@ -1802,22 +1808,9 @@ export const RuntimeSchema = z.object({
         .optional(),
     })
     .optional(),
-  observability: z
-    .object({
-      otel: z
-        .object({
-          enabled: z.boolean().optional(),
-          endpoint: z.string().optional(),
-        })
-        .optional(),
-      logs: z
-        .object({
-          level: z.union([z.literal("debug"), z.literal("info"), z.literal("warn"), z.literal("error")]).optional(),
-          format: z.union([z.literal("auto"), z.literal("pretty"), z.literal("json")]).optional(),
-        })
-        .optional(),
-    })
-    .optional(),
+  observability: relocatedField(
+    "runtime.observability is not a graph setting; configure logging and OpenTelemetry in the host (FLOWGRAPH_LOG_LEVEL, event sinks). Remove it.",
+  ),
   hooks: z
     .array(
       z.object({

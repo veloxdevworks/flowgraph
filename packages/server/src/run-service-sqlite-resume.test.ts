@@ -25,8 +25,6 @@ edges:
   - { from: gate, to: END }
 runtime:
   checkpoint: { enabled: true, backend: memory }
-  hitl:
-    onInterrupt: fail
 `;
 
 const dirs: string[] = [];

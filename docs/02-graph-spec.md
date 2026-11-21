@@ -21,7 +21,7 @@ inputs: [ ... ]             # optional — typed run parameters (collected befor
 input: { ... }              # optional — default seed values for a run
 nodes: [ ... ]              # required — the node list
 edges: [ ... ]              # required — static + conditional edges
-runtime: { ... }            # optional — checkpoint/HITL/retry/observability defaults
+runtime: { ... }            # optional — checkpoint/retry/hook defaults
 ```
 
 `apiVersion` pins the schema contract. The loader rejects unknown major versions and warns on unknown minor fields (forward-compatible).
@@ -38,7 +38,7 @@ metadata:
     domain: github
 ```
 
-`metadata.name` becomes the root OTel span name and the default checkpoint namespace.
+`metadata.name` becomes the root OTel span name.
 
 ## 2a. `triggers` (auto-start conditions)
 
@@ -376,7 +376,7 @@ runtime:
   services:
     terminateOnEnd: true          # stop non-keepAlive `service` processes on completed/error (default)
   hitl:
-    onInterrupt: prompt           # prompt | fail | approve | webhook  (per-environment overridable)
+    breakpoints: { before: [publish] }   # static pause points
   retry:                          # default for every node that omits retry
     maxAttempts: 2
     backoff: exponential
@@ -387,10 +387,16 @@ runtime:
     - on: agent:beforeToolCall
       where: { tool: fs_write }
       do: interrupt
-  observability:
-    otel: { enabled: true }
-    logs: { level: info, format: auto }   # auto = pretty on TTY, json otherwise
 ```
+
+Some settings belong to the host running the graph, not the graph, and are rejected here with a message that names the replacement:
+
+| Field | Set it in the host instead |
+|---|---|
+| `runtime.hitl.onInterrupt` | CLI `--on-interrupt`, or `onInterrupt` in `run()` / `resume()` options. The default is `fail`. |
+| `runtime.observability` | `FLOWGRAPH_LOG_LEVEL`, event sinks, and `@flowgraph/observability-otel`. |
+| `runtime.secrets.provider` | List names under the top-level `secrets:`; the host supplies their values. |
+| `runtime.checkpoint.namespace` | Not needed: checkpoints are kept per thread. |
 
 ## 10. Full example
 
@@ -478,8 +484,6 @@ edges:
 
 runtime:
   checkpoint: { enabled: true, backend: sqlite, path: ".flowgraph/checkpoints.db" }
-  hitl: { onInterrupt: prompt }
-  observability: { otel: { enabled: true } }
 ```
 
 ## 11. Validation & diagnostics

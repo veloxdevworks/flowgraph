@@ -1977,7 +1977,7 @@ async function assembleCompiledLangGraph(
   if (interruptAfter.length) compileOpts["interruptAfter"] = interruptAfter;
   const compiledLg = graph.compile(compileOpts as Parameters<typeof graph.compile>[0]);
 
-  const defaultPolicy: InterruptPolicy = spec.runtime?.hitl?.onInterrupt ?? "fail";
+  const defaultPolicy: InterruptPolicy = "fail";
 
   return {
     spec,

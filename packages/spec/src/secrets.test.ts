@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { GraphSpecSchema } from "./index.js";
+import { GraphSpecSchema, RuntimeSchema } from "./index.js";
 
 const base = {
   apiVersion: "flowgraph/v1",
@@ -38,5 +38,29 @@ describe("top-level secrets", () => {
 
   it("rejects a map in place of the list", () => {
     expect(GraphSpecSchema.safeParse({ ...base, secrets: { GITHUB_TOKEN: true } }).success).toBe(false);
+  });
+});
+
+describe("host-owned runtime settings", () => {
+  it.each([
+    [{ hitl: { onInterrupt: "fail" } }, "hitl.onInterrupt", "the host decides how interrupts are answered"],
+    [{ hitl: { onInterrupt: "prompt" } }, "hitl.onInterrupt", "CLI --on-interrupt"],
+    [{ checkpoint: { namespace: "team" } }, "checkpoint.namespace", "checkpoints are already kept per thread"],
+    [{ secrets: { provider: "env" } }, "secrets.provider", "top-level secrets:"],
+    [{ observability: { logLevel: "info" } }, "observability", "configure logging and OpenTelemetry in the host"],
+  ])("rejects %j with a clear message", (runtime, path, message) => {
+    const r = RuntimeSchema.safeParse(runtime);
+    expect(r.success).toBe(false);
+    const issue = r.error?.issues.find((i) => i.path.join(".") === path);
+    expect(issue?.message).toContain(message);
+  });
+
+  it("keeps hitl breakpoints and secret redaction", () => {
+    const parsed = RuntimeSchema.parse({
+      hitl: { breakpoints: { before: ["a"] } },
+      secrets: { redact: { patterns: ["tok-[0-9]+"] } },
+    });
+    expect(parsed.hitl?.breakpoints?.before).toEqual(["a"]);
+    expect(parsed.secrets?.redact?.patterns).toEqual(["tok-[0-9]+"]);
   });
 });

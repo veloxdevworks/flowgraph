@@ -12,7 +12,7 @@ const result = await runGraph(compiled, {
   threadId: "issue-123",        // checkpoint/resume key; omitted = a new thread for this run only
   config: { /* per-run overrides */ },
   signal,                       // AbortSignal → run.aborted
-  onInterrupt: "prompt",        // override env policy for this run
+  onInterrupt: "prompt",        // how this run answers interrupts (default "fail")
 });
 // result: { state, status: "completed" | "interrupted" | "paused" | "aborted" | "error", interrupts?, usage, runId }
 ```
@@ -54,7 +54,6 @@ runtime:
     enabled: true
     backend: sqlite
     path: ".flowgraph/checkpoints.db"
-    namespace: "{{ metadata.name }}"     # default
     retention:
       maxCheckpoints: 40                 # positive integer; newest checkpoints kept on each branch
       maxInterruptPoints: 8              # non-negative integer; extra interrupt/resume points outside that window
@@ -214,7 +213,7 @@ The **same** interrupting graph behaves differently by environment via `onInterr
 | `approve` | auto-approve with a default/derived value (use carefully) | trusted CI |
 | `webhook` | persist + emit `interrupt.raised`; an external system resumes via API/CLI later | async/CI + ops |
 
-This is set in `runtime.hitl.onInterrupt`, overridable by `--on-interrupt` and per-run options. The graph author writes the interrupt **once**; operators choose how it resolves per environment.
+The host sets it: `--on-interrupt` on the CLI, or `onInterrupt` in `run()` / `resume()` options. Without one a run uses `fail`. A graph cannot choose it; `runtime.hitl.onInterrupt` is rejected. The graph author writes the interrupt **once**; operators choose how it resolves per environment.
 
 ### GUI / service integration
 
@@ -356,11 +355,10 @@ Without a `topology` and `transport` in `CompileOptions.placement`, only the loc
 - Values accessed through `{{ secret.NAME }}` or the secret provider, and sensitive HTTP header values used in a request, are registered without enumerating the host environment. Values shorter than six characters are masked only when they occupy a whole value, so ordinary words and numeric text remain intact; use a redaction pattern for short credentials embedded in text. Returned strings are masked before state updates, checkpoint writes, replay snapshots, event buffering and logging. Configured redaction patterns apply to both state and events. Redaction preserves structured message objects and does not modify the value sent to the child process or HTTP endpoint. Secrets returned under unrelated names without ever being registered cannot be inferred; use secret references and configure patterns for application-specific sensitive data.
 - Skills/nodes declare which secrets they need (`env.vars[].secret`); preflight verifies availability without printing values.
 
-secrets: [JIRA_TOKEN]
 ```yaml
+secrets: [JIRA_TOKEN]
 runtime:
   secrets:
-    provider: env                 # env | dotenv | keychain | <custom>
     redact:
       patterns: ["(?i)token", "(?i)secret", "(?i)password"]
       headers: ["authorization", "cookie"]

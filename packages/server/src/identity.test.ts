@@ -362,7 +362,7 @@ describe("HTTP with OIDC", () => {
         "nodes:",
         "  - { id: gate, type: hitl, with: { mode: approve, message: ok, output: { to: approval } } }",
         "edges: [{ from: START, to: gate }, { from: gate, to: END }]",
-        "runtime: { checkpoint: { enabled: true, backend: memory }, hitl: { onInterrupt: fail } }",
+        "runtime: { checkpoint: { enabled: true, backend: memory } }",
       ].join("\n");
       const started = await fetch(`${base}/runs`, {
         method: "POST",

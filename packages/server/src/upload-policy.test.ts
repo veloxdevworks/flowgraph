@@ -400,7 +400,6 @@ edges:
   - { from: a, to: END }
 runtime:
   checkpoint: { enabled: true, backend: memory }
-  hitl: { onInterrupt: fail }
 `;
 
 describe("RunService upload policy", () => {
