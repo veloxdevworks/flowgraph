@@ -1,31 +1,26 @@
-import { Ajv, type ValidateFunction } from "ajv";
-import addFormats from "ajv-formats";
+import { ContractSchemaError, contractErrors } from "@flowgraph/spec";
 
-const validators = new WeakMap<object, ValidateFunction>();
-
-/** Validate without coercion, default insertion, or dropping unexpected fields. */
+/**
+ * Validate agent output against `with.schema` with the shared contract validator
+ * (JSON Schema draft-07 via Ajv): no coercion, default insertion, or dropping fields.
+ */
 export function validateAgentOutput(
   output: unknown,
   schema: Record<string, unknown> | undefined,
   label: string,
 ): void {
   if (!schema) return;
-  let validate = validators.get(schema);
-  if (!validate) {
-    try {
-      const ajv = new Ajv({ allErrors: true, strictTypes: false, allowUnionTypes: true });
-      addFormats.default(ajv);
-      validate = ajv.compile(schema);
-      validators.set(schema, validate);
-    } catch (cause) {
-      throw Object.assign(
-        new Error(`${label}: invalid output schema: ${String(cause)}`, { cause }),
-        { code: "AGENT_SCHEMA_INVALID", retryable: false },
-      );
-    }
+  let errors: string | undefined;
+  try {
+    errors = contractErrors(output, schema);
+  } catch (cause) {
+    if (!(cause instanceof ContractSchemaError)) throw cause;
+    throw Object.assign(
+      new Error(`${label}: invalid output schema: ${cause.message}`, { cause }),
+      { code: "AGENT_SCHEMA_INVALID", retryable: false },
+    );
   }
-  if (!validate(output)) {
-    const errors = validate.errors?.map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
+  if (errors) {
     throw Object.assign(new Error(`${label}: output does not match schema: ${errors}`), {
       code: "AGENT_OUTPUT_INVALID",
       retryable: false,

@@ -234,7 +234,7 @@ describe("chat", () => {
     await expect(runWorkshopInteractive(interrupt(contractOf()), { io: s.io, model })).rejects.toBeInstanceOf(
       WorkshopAbortError,
     );
-    expect(s.text()).toContain("Cannot end yet: draft: missing required field(s)");
+    expect(s.text()).toContain("Cannot end yet: draft: does not match schema: / must have required property");
     expect(s.left()).toBe(0); // /status after /end was still read
   });
 
@@ -387,7 +387,7 @@ describe("form", () => {
     const resume = (await runWorkshopInteractive(interrupt(contractOf()), { io: s.io, model })) as {
       output: Record<string, unknown>;
     };
-    expect(s.text()).toContain('Not accepted: draft: field "count" expected type integer.');
+    expect(s.text()).toContain("Not accepted: draft: does not match schema: /count must be integer");
     expect(s.text()).toContain("The current value was rejected; enter a new one.");
     expect(resume.output).toEqual({ title: "T", count: 5 });
     expect(s.prompts.filter((p) => p === "count> ")).toHaveLength(4);

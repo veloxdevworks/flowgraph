@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { contractSchemaProblem } from "./validate-json-schema.js";
 
 // ---------------------------------------------------------------------------
 // Primitives & shared
@@ -98,40 +99,70 @@ export type FlowFailedTrigger = z.infer<typeof FlowFailedTriggerSchema>;
 export type WebhookTrigger = z.infer<typeof WebhookTriggerSchema>;
 export type FileWatchTrigger = z.infer<typeof FileWatchTriggerSchema>;
 
-// A JSON-schema-compatible type for channel/contract declarations
+// JSON Schema primitive type names accepted in data contracts.
 export const JsonSchemaTypeSchema = z.union([
   z.literal("string"),
   z.literal("number"),
+  z.literal("integer"),
   z.literal("boolean"),
   z.literal("object"),
   z.literal("array"),
   z.literal("null"),
-  z.literal("any"),
 ]);
 
-// Inline property schema used in skill inputs/outputs and node schema:
-export const PropertySchema: z.ZodType<PropertyDef, z.ZodTypeDef, unknown> = z.lazy(() =>
-  z.object({
-    type: JsonSchemaTypeSchema.optional(),
-    description: z.string().optional(),
-    enum: z.array(z.unknown()).optional(),
-    default: z.unknown().optional(),
-    required: z.boolean().optional(),
-    items: PropertySchema.optional(),
-    properties: z.record(PropertySchema).optional(),
-    $ref: z.string().optional(),
-  }),
-) as z.ZodType<PropertyDef, z.ZodTypeDef, unknown>;
+/**
+ * A data contract: a JSON Schema (draft-07) checked by Ajv. Used for hitl `form` /
+ * `review` schemas, wait webhook payloads, workshop output, agent output, skill inputs /
+ * outputs and channel item / property shapes. Unknown keywords and formats are rejected.
+ * A `{{ … }}` template in a value that affects validation is checked after rendering;
+ * the rest of the schema is checked when the graph is validated.
+ */
+export const ContractSchemaSchema: z.ZodType<PropertyDef, z.ZodTypeDef, unknown> = z
+  .record(z.unknown())
+  .superRefine((schema, ctx) => {
+    const problem = contractSchemaProblem(schema, { templates: true });
+    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
+  }) as unknown as z.ZodType<PropertyDef, z.ZodTypeDef, unknown>;
+
+/** A JSON Schema used in skill inputs / outputs and channel `items` / `properties`. */
+export const PropertySchema = ContractSchemaSchema;
+
+/** A JSON Schema (draft-07) object. Common keywords are typed; any other draft-07 keyword is allowed. */
 export type PropertyDef = {
-  type?: z.infer<typeof JsonSchemaTypeSchema> | undefined;
+  type?: z.infer<typeof JsonSchemaTypeSchema> | z.infer<typeof JsonSchemaTypeSchema>[] | undefined;
+  title?: string;
   description?: string;
   enum?: unknown[];
+  const?: unknown;
   default?: unknown;
-  required?: boolean;
-  items?: PropertyDef;
+  items?: PropertyDef | PropertyDef[];
   properties?: Record<string, PropertyDef>;
+  required?: string[];
+  additionalProperties?: boolean | PropertyDef;
   $ref?: string;
+  [keyword: string]: unknown;
 };
+
+/**
+ * How a form shows one field. Kept apart from the data schema, which only says what a
+ * valid answer is.
+ */
+export const FormFieldHintSchema = z
+  .object({
+    label: z.string().optional(),
+    placeholder: z.string().optional(),
+    help: z.string().optional(),
+    widget: z.enum(["text", "textarea", "password", "select", "radio", "checkbox"]).optional(),
+  })
+  .strict();
+
+/** Presentation hints for a form, keyed by top-level schema property; `order` lists fields first-to-last. */
+export const FormUiSchema = z
+  .object({
+    order: z.array(z.string()).optional(),
+    fields: z.record(FormFieldHintSchema).optional(),
+  })
+  .strict();
 
 // ---------------------------------------------------------------------------
 // State / channels
@@ -445,7 +476,7 @@ export const AgentWithSchema = BaseWithSchema.extend({
       ]),
     )
     .optional(),
-  schema: z.record(z.unknown()).optional(),
+  schema: ContractSchemaSchema.optional(),
   maxSteps: z.number().int().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
   permission: z.union([z.literal("auto"), z.literal("ask"), z.literal("deny")]).optional(),
@@ -1049,8 +1080,10 @@ export const HitlWithSchema = BaseWithSchema.extend({
     .default("approve"),
   message: z.string(),
   choices: z.array(z.string()).optional(),
-  /** JSON Schema for `mode: form` (and optional notes on `mode: review`). */
-  schema: z.record(z.unknown()).optional(),
+  /** JSON Schema (draft-07) for the answer to `mode: form`, and optionally to `mode: review`. */
+  schema: ContractSchemaSchema.optional(),
+  /** Form presentation hints (labels, placeholders, widgets, field order); not part of the schema. */
+  ui: FormUiSchema.optional(),
   /** `mode: review` — compute a git diff at interrupt time, or pass inline before/after. */
   diff: z
     .object({
@@ -1125,8 +1158,10 @@ export const WorkshopWithSchema = BaseWithSchema.extend({
   maxResumeAttempts: z.number().int().positive().optional(),
   /** Agenda items the facilitator must cover. Strings or { id, title, description }. */
   agenda: z.array(WorkshopAgendaItemSchema).optional(),
-  /** JSON Schema for the structured output the session must produce. */
-  schema: z.record(z.unknown()).optional(),
+  /** JSON Schema (draft-07) for the structured output the session must produce. */
+  schema: ContractSchemaSchema.optional(),
+  /** Form presentation hints for the fallback form; not part of the schema. */
+  ui: FormUiSchema.optional(),
   /** Primed research / packet from a prior prepare node (string or object). */
   context: z.union([z.string(), z.record(z.unknown())]).optional(),
   /** System prompt for the facilitator (voice or text). */
@@ -1174,7 +1209,7 @@ export const WaitWithSchema = BaseWithSchema.extend({
   webhook: z
     .union([
       z.literal(true),
-      z.object({ schema: z.record(z.unknown()).optional() }),
+      z.object({ schema: ContractSchemaSchema.optional() }),
     ])
     .optional(),
 });

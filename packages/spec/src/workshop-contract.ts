@@ -29,12 +29,31 @@ export type WorkshopDiff =
   | { cwd: string; base?: string | undefined; patch: string; truncated?: boolean | undefined }
   | { cwd: string; error: string };
 
+/** Presentation hints for a form, keyed by top-level schema property. */
+export type WorkshopFormUi = {
+  order?: string[] | undefined;
+  fields?:
+    | Record<
+        string,
+        {
+          label?: string | undefined;
+          placeholder?: string | undefined;
+          help?: string | undefined;
+          widget?: "text" | "textarea" | "password" | "select" | "radio" | "checkbox" | undefined;
+        }
+      >
+    | undefined;
+};
+
 /** Interrupt payload (`payload.data`) the engine sends to a workshop client. */
 export type WorkshopContract = {
   mode: "workshop";
   agenda: WorkshopAgendaItem[];
   fallback: "form" | "text" | "json";
+  /** JSON Schema (draft-07) the output must satisfy. */
   schema?: Record<string, unknown> | undefined;
+  /** Form presentation hints (labels, placeholders, widgets, field order); not part of the schema. */
+  ui?: WorkshopFormUi | undefined;
   /** A session ended early (`human_ended` / `timeout` / `skipped`) may resume with an unfinished output. */
   allowPartial?: boolean | undefined;
   /** A `completed` session must cover every agenda item. */

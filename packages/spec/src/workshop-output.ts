@@ -4,7 +4,7 @@
  * on an output the engine would reject.
  */
 
-import { validateJsonSchema } from "./validate-json-schema.js";
+import { contractValidationAvailable, validateJsonSchema } from "./validate-json-schema.js";
 
 /** End reasons that may carry an unfinished output when the node sets `allowPartial`. */
 export const WORKSHOP_PARTIAL_END_REASONS: readonly string[] = ["human_ended", "timeout", "skipped"];
@@ -14,6 +14,12 @@ export type WorkshopOutputCheck = {
   complete: boolean;
   /** Why the output cannot be accepted; absent when it can. */
   error?: string;
+  /**
+   * The schema was not checked because this host forbids runtime code generation (a
+   * Content-Security-Policy without `unsafe-eval`). The engine still checks it on resume
+   * and re-prompts with `validationError` when it does not conform.
+   */
+  unverified?: true;
 };
 
 export function checkWorkshopOutput(
@@ -30,6 +36,15 @@ export function checkWorkshopOutput(
   },
 ): WorkshopOutputCheck {
   const label = opts.label ?? "workshop output";
+  if (opts.schema && !contractValidationAvailable()) {
+    const uncovered = opts.requireCoverage ? uncoveredAgendaItems(opts.agenda, opts.coverage) : [];
+    if (uncovered.length === 0) return { complete: true, unverified: true };
+    const error = `${label}: agenda item(s) not covered: ${uncovered.join(", ")}`;
+    if (!opts.allowPartial || !WORKSHOP_PARTIAL_END_REASONS.includes(opts.endedReason ?? "")) {
+      return { complete: false, error, unverified: true };
+    }
+    return { complete: false, unverified: true };
+  }
   let fullError: string;
   try {
     validateJsonSchema(output, opts.schema, label);

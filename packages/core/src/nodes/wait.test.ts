@@ -140,7 +140,7 @@ describe("wait node", () => {
       onInterrupt: "fail",
     });
     expect(r2.status).toBe("error");
-    expect(r2.error?.message).toContain("missing required field(s): approved");
+    expect(r2.error?.message).toContain("must have required property 'approved'");
   });
 
   it("signal mode maps a resume payload to the output channel", async () => {

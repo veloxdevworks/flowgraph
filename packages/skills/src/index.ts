@@ -7,5 +7,9 @@ export {
   EnvVarDeclSchema,
   BinDeclSchema,
   EnvDeclSchema,
+  SkillInputSchema,
+  SkillOutputSchema,
+  isRequiredSkillInput,
+  skillInputValueSchema,
 } from "./schema.js";
-export type { SkillDef, SkillFrontMatter, SkillKind, EnvVarDecl, BinDecl } from "./schema.js";
+export type { SkillDef, SkillFrontMatter, SkillKind, SkillInputDecl, EnvVarDecl, BinDecl } from "./schema.js";

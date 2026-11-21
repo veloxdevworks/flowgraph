@@ -1,62 +1,389 @@
 /**
- * Lightweight JSON Schema checks used by hitl `form` / `workshop` / wait webhook resume.
- * Validates `required` keys and primitive `properties.*.type`. Not a full draft-07 engine.
+ * The one validator for flowgraph data contracts: hitl `form` / `review` schemas, wait
+ * webhook payloads, workshop output, agent `with.schema` output, skill inputs and state
+ * channel item / property shapes.
+ *
+ * Dialect: JSON Schema draft-07, checked by Ajv. Strict about the schema itself — an
+ * unknown keyword or format is an error, not ignored — and never coerces, inserts
+ * defaults or drops fields from the value. Standard annotations (`title`, `description`,
+ * `default`, `examples`, `$comment`, `readOnly`, `writeOnly`) are allowed; presentation
+ * hints for forms belong in the node's `ui` block, not in the schema.
  */
 
+import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
+import addFormatsModule from "ajv-formats";
+
+export const CONTRACT_SCHEMA_DIALECT = "http://json-schema.org/draft-07/schema#";
+
 export type ValidateJsonSchemaOptions = {
-  /** Skip the `required` check (an accepted partial answer); property types still apply. */
+  /** Accept an unfinished value: `required` is not enforced at any depth; everything else is. */
   ignoreRequired?: boolean;
 };
 
+type Json = Record<string, unknown>;
+
+const isObj = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Keywords whose value is a single subschema. */
+const SCHEMA_KEYWORDS = [
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "propertyNames",
+  "if",
+  "then",
+  "else",
+  "not",
+] as const;
+/** Keywords whose value is a map of subschemas. */
+const SCHEMA_MAP_KEYWORDS = ["properties", "patternProperties", "definitions", "$defs"] as const;
+/** Keywords whose value is a list of subschemas. */
+const SCHEMA_LIST_KEYWORDS = ["allOf", "anyOf", "oneOf"] as const;
+
+/** Escape one JSON pointer segment. */
+const seg = (name: string): string => name.replace(/~/g, "~0").replace(/\//g, "~1");
+
+/** Visit `schema` and every nested subschema with its JSON pointer. */
+function walkSchema(schema: unknown, at: string, visit: (s: Json, at: string) => void): void {
+  if (!isObj(schema)) return;
+  visit(schema, at);
+  for (const k of SCHEMA_KEYWORDS) walkSchema(schema[k], `${at}/${k}`, visit);
+  for (const k of SCHEMA_MAP_KEYWORDS) {
+    const m = schema[k];
+    if (isObj(m)) for (const [name, sub] of Object.entries(m)) walkSchema(sub, `${at}/${k}/${seg(name)}`, visit);
+  }
+  for (const k of SCHEMA_LIST_KEYWORDS) {
+    const l = schema[k];
+    if (Array.isArray(l)) l.forEach((sub, i) => walkSchema(sub, `${at}/${k}/${i}`, visit));
+  }
+  const items = schema["items"];
+  if (Array.isArray(items)) items.forEach((sub, i) => walkSchema(sub, `${at}/items/${i}`, visit));
+  else walkSchema(items, `${at}/items`, visit);
+  const deps = schema["dependencies"];
+  if (isObj(deps)) for (const [name, sub] of Object.entries(deps)) walkSchema(sub, `${at}/dependencies/${seg(name)}`, visit);
+}
+
+/** Keywords that apply their subschemas to the same value (they do not step into it). */
+const SAME_VALUE_KEYWORDS = ["not", "if", "then", "else"] as const;
+
+/**
+ * A `$ref` cycle that never steps into the value (for example a root `$ref: "#"`, or
+ * definitions that only refer to each other through `$ref` / `allOf` / `anyOf` / `oneOf`
+ * / `not` / `if`) would recurse forever on any input. Recursion through `properties`,
+ * `items` and the like is fine: each step goes one level into the (finite) value.
+ */
+function refCycleProblem(schema: Json): string | undefined {
+  const nodes = new Map<string, Json>();
+  const ids = new Map<string, string>();
+  walkSchema(schema, "", (s, at) => {
+    nodes.set(at, s);
+    if (typeof s["$id"] === "string" && s["$id"].startsWith("#")) ids.set(s["$id"], at);
+  });
+  const target = (ref: string): string | undefined => {
+    if (ref === "#") return "";
+    if (ref.startsWith("#/")) {
+      let pointer: string;
+      try {
+        pointer = decodeURIComponent(ref.slice(1));
+      } catch {
+        return undefined;
+      }
+      return nodes.has(pointer) ? pointer : undefined;
+    }
+    return ids.get(ref);
+  };
+  const next = (at: string): string[] => {
+    const s = nodes.get(at)!;
+    const out: string[] = [];
+    if (typeof s["$ref"] === "string") {
+      const t = target(s["$ref"]);
+      if (t !== undefined) out.push(t);
+    }
+    for (const k of SAME_VALUE_KEYWORDS) if (isObj(s[k])) out.push(`${at}/${k}`);
+    for (const k of SCHEMA_LIST_KEYWORDS) {
+      const l = s[k];
+      if (Array.isArray(l)) l.forEach((sub, i) => isObj(sub) && out.push(`${at}/${k}/${i}`));
+    }
+    const deps = s["dependencies"];
+    if (isObj(deps)) for (const [name, sub] of Object.entries(deps)) if (isObj(sub)) out.push(`${at}/dependencies/${seg(name)}`);
+    return out;
+  };
+  const state = new Map<string, "open" | "done">();
+  const stack: string[] = [];
+  const visit = (at: string): string[] | undefined => {
+    state.set(at, "open");
+    stack.push(at);
+    for (const n of next(at)) {
+      if (state.get(n) === "open") return [...stack.slice(stack.indexOf(n)), n];
+      if (!state.has(n)) {
+        const cycle = visit(n);
+        if (cycle) return cycle;
+      }
+    }
+    stack.pop();
+    state.set(at, "done");
+    return undefined;
+  };
+  for (const at of nodes.keys()) {
+    if (state.has(at)) continue;
+    const cycle = visit(at);
+    if (cycle) {
+      return `$ref cycle never reaches a value: ${cycle.map((p) => `#${p}`).join(" → ")}; a recursive $ref must go through properties, items or similar`;
+    }
+  }
+  return undefined;
+}
+
+/** Clear messages for shapes older flowgraph versions accepted. */
+function legacyShapeProblems(schema: unknown): string[] {
+  const problems: string[] = [];
+  walkSchema(schema, "", (s, at) => {
+    const where = at || "/";
+    const types = Array.isArray(s["type"]) ? s["type"] : [s["type"]];
+    if (types.includes("any")) {
+      problems.push(`${where}: type "any" is not JSON Schema; omit "type" to accept any value`);
+    }
+    if (typeof s["$ref"] === "string" && !s["$ref"].startsWith("#")) {
+      problems.push(
+        `${where}: $ref "${s["$ref"]}" is not local; a $ref must point inside the same schema (for example "#/definitions/name")`,
+      );
+    }
+    if (typeof s["required"] === "boolean") {
+      problems.push(
+        `${where}: "required" must be a list of property names on the parent object (for example required: [name]), not a boolean`,
+      );
+    }
+  });
+  return problems;
+}
+
+function newAjv(): Ajv {
+  const ajv = new Ajv({
+    allErrors: true,
+    strictSchema: true,
+    strictNumbers: true,
+    strictTypes: false,
+    strictTuples: false,
+    strictRequired: false,
+    allowUnionTypes: true,
+    validateFormats: true,
+    coerceTypes: false,
+    useDefaults: false,
+    removeAdditional: false,
+  });
+  const addFormats =
+    (addFormatsModule as unknown as { default?: typeof addFormatsModule }).default ?? addFormatsModule;
+  (addFormats as unknown as (a: Ajv) => void)(ajv);
+  return ajv;
+}
+
+/** A schema the contract dialect does not accept. */
+export class ContractSchemaError extends Error {
+  readonly code = "CONTRACT_SCHEMA_INVALID";
+  readonly retryable = false;
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ContractSchemaError";
+  }
+}
+
+const MAX_CACHED = 500;
+const compiled = new Map<string, ValidateFunction>();
+
+function stripRequired(schema: Json): Json {
+  const copy = structuredClone(schema);
+  walkSchema(copy, "", (s) => {
+    if (Array.isArray(s["required"])) delete s["required"];
+  });
+  return copy;
+}
+
+/**
+ * Compile a contract schema. Throws {@link ContractSchemaError} for an unknown keyword or
+ * format, a malformed keyword value, an unresolvable `$ref`, or a legacy shape.
+ */
+export function compileContractSchema(
+  schema: Json,
+  opts: ValidateJsonSchemaOptions = {},
+): ValidateFunction {
+  if (!isObj(schema)) throw new ContractSchemaError("schema must be an object");
+  const key = `${opts.ignoreRequired ? "p" : "f"}:${JSON.stringify(schema)}`;
+  const hit = compiled.get(key);
+  if (hit) return hit;
+  const legacy = legacyShapeProblems(schema);
+  if (legacy.length > 0) throw new ContractSchemaError(legacy.join("; "));
+  const cycle = refCycleProblem(schema);
+  if (cycle) throw new ContractSchemaError(cycle);
+  const { $schema, ...rest } = schema;
+  if ($schema !== undefined && $schema !== CONTRACT_SCHEMA_DIALECT && $schema !== "http://json-schema.org/draft-07/schema") {
+    throw new ContractSchemaError(
+      `unsupported $schema "${String($schema)}"; contracts use JSON Schema draft-07 (${CONTRACT_SCHEMA_DIALECT})`,
+    );
+  }
+  let validate: ValidateFunction;
+  try {
+    validate = newAjv().compile(opts.ignoreRequired ? stripRequired(rest) : rest);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    let text = message.replace(/^strict mode: /, "").replace(/ ignored in schema at path "(.*)"$/, ' at "$1"');
+    if (/^unknown keyword/.test(text)) {
+      text += " (contracts accept JSON Schema draft-07 keywords only; put form presentation hints in `ui`)";
+    }
+    throw new ContractSchemaError(text, { cause });
+  }
+  if (compiled.size >= MAX_CACHED) compiled.clear();
+  compiled.set(key, validate);
+  return validate;
+}
+
+const isTemplate = (v: unknown): boolean => typeof v === "string" && v.includes("{{");
+const containsTemplate = (v: unknown): boolean => JSON.stringify(v)?.includes("{{") ?? false;
+
+/** Annotations: a template in their value never changes what is valid. */
+const ANNOTATION_KEYWORDS = new Set(["title", "description", "$comment", "examples", "default"]);
+/** Draft-07 keywords that constrain values (or locate subschemas) — known, so safe to drop when templated. */
+const VALUE_KEYWORDS = new Set([
+  "type", "enum", "const", "multipleOf", "maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum",
+  "maxLength", "minLength", "pattern", "maxItems", "minItems", "uniqueItems", "maxProperties",
+  "minProperties", "required", "format", "contentMediaType", "contentEncoding", "readOnly", "writeOnly",
+  "$ref", "$id", "$schema",
+]);
+
+/**
+ * A copy of `schema` that can be checked before `{{ … }}` templates are rendered. A
+ * template in a value that affects validation (an `enum`, a `type`, a whole subschema, …)
+ * removes just that keyword or subschema from the check; templates in annotations such as
+ * `description` are left as they are; and every other keyword, including unknown ones,
+ * is still checked.
+ */
+function checkableSchema(node: unknown): unknown {
+  if (isTemplate(node)) return {};
+  if (!isObj(node)) return node;
+  const out: Json = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (ANNOTATION_KEYWORDS.has(k)) out[k] = v;
+    else if ((SCHEMA_KEYWORDS as readonly string[]).includes(k)) out[k] = checkableSchema(v);
+    else if ((SCHEMA_MAP_KEYWORDS as readonly string[]).includes(k) || k === "dependencies") {
+      if (isTemplate(v)) continue;
+      if (!isObj(v)) {
+        out[k] = v;
+        continue;
+      }
+      const m: Json = {};
+      for (const [name, sub] of Object.entries(v)) {
+        if (Array.isArray(sub)) {
+          if (!containsTemplate(sub)) m[name] = sub;
+        } else m[name] = checkableSchema(sub);
+      }
+      out[k] = m;
+    } else if ((SCHEMA_LIST_KEYWORDS as readonly string[]).includes(k)) {
+      if (isTemplate(v)) continue;
+      out[k] = Array.isArray(v) ? v.map(checkableSchema) : v;
+    } else if (k === "items") {
+      out[k] = Array.isArray(v) ? v.map(checkableSchema) : checkableSchema(v);
+    } else if (VALUE_KEYWORDS.has(k)) {
+      if (!containsTemplate(v)) out[k] = v;
+    } else out[k] = v;
+  }
+  return out;
+}
+
+export type ContractSchemaProblemOptions = {
+  /**
+   * The schema is rendered with `{{ … }}` templates before use: skip only the parts a
+   * template would change, and check the rest now.
+   */
+  templates?: boolean;
+};
+
+/** Why `schema` is not a valid contract schema, or `undefined` when it is. */
+export function contractSchemaProblem(
+  schema: unknown,
+  opts: ContractSchemaProblemOptions = {},
+): string | undefined {
+  if (!isObj(schema)) return "schema must be an object";
+  try {
+    compileContractSchema(opts.templates ? (checkableSchema(schema) as Json) : schema);
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/** One line per Ajv error: `<instance path> <message>`. */
+export function formatContractErrors(errors: readonly ErrorObject[] | null | undefined): string {
+  return (errors ?? [])
+    .map((e) => {
+      const path = e.instancePath || "/";
+      const params = e.params as Record<string, unknown>;
+      if (e.keyword === "additionalProperties" && typeof params["additionalProperty"] === "string") {
+        return `${path} must NOT have additional property "${params["additionalProperty"]}"`;
+      }
+      if (e.keyword === "enum" && Array.isArray(params["allowedValues"])) {
+        return `${path} ${e.message}: ${(params["allowedValues"] as unknown[]).map((v) => JSON.stringify(v)).join(", ")}`;
+      }
+      return `${path} ${e.message}`;
+    })
+    .join("; ");
+}
+
+/** Errors for `value` against `schema` (formatted), or `undefined` when it conforms. */
+export function contractErrors(
+  value: unknown,
+  schema: Json,
+  opts: ValidateJsonSchemaOptions = {},
+): string | undefined {
+  const validate = compileContractSchema(schema, opts);
+  let ok: boolean;
+  try {
+    ok = validate(value) as boolean;
+  } catch (err) {
+    // Deeply nested (or cyclic) values against a recursive schema can exhaust the stack.
+    // Treat that as a value that does not conform rather than crashing the caller.
+    if (err instanceof RangeError) return "/ is nested too deeply to validate";
+    throw err;
+  }
+  return ok ? undefined : formatContractErrors(validate.errors);
+}
+
+let codegen: boolean | undefined;
+/**
+ * False where the host forbids runtime code generation (a Content-Security-Policy without
+ * `unsafe-eval`), which Ajv needs. Clients there leave the check to the engine.
+ */
+export function contractValidationAvailable(): boolean {
+  if (codegen === undefined) {
+    try {
+      codegen = new Function("return true")() === true;
+    } catch {
+      codegen = false;
+    }
+  }
+  return codegen;
+}
+
+/**
+ * Validate a resume payload (hitl form / review answer, wait webhook body, workshop output)
+ * against its contract. The payload must be an object.
+ */
 export function validateJsonSchema(
   payload: unknown,
-  schema: Record<string, unknown> | undefined,
+  schema: Json | undefined,
   label: string,
   opts: ValidateJsonSchemaOptions = {},
 ): void {
   if (!schema) return;
-  const obj =
-    payload && typeof payload === "object" && !Array.isArray(payload)
-      ? (payload as Record<string, unknown>)
-      : undefined;
-  if (!obj) {
+  if (!isObj(payload)) {
     throw new Error(`${label}: resume payload must be an object.`);
   }
-
-  const required = schema["required"];
-  if (!opts.ignoreRequired && Array.isArray(required)) {
-    const missing = (required as string[]).filter((key) => obj[key] === undefined);
-    if (missing.length > 0) {
-      throw new Error(`${label}: missing required field(s): ${missing.join(", ")}`);
+  let errors: string | undefined;
+  try {
+    errors = contractErrors(payload, schema, opts);
+  } catch (err) {
+    if (err instanceof ContractSchemaError) {
+      throw new ContractSchemaError(`${label}: invalid schema: ${err.message}`, { cause: err });
     }
+    throw err;
   }
-
-  const props = schema["properties"];
-  if (!props || typeof props !== "object" || Array.isArray(props)) return;
-  for (const [key, def] of Object.entries(props as Record<string, { type?: string }>)) {
-    if (obj[key] === undefined || def?.type == null) continue;
-    if (!matchesJsonType(obj[key], def.type)) {
-      throw new Error(`${label}: field "${key}" expected type ${def.type}.`);
-    }
-  }
-}
-
-function matchesJsonType(value: unknown, type: string): boolean {
-  switch (type) {
-    case "string":
-      return typeof value === "string";
-    case "number":
-    case "integer":
-      return typeof value === "number" && (type === "number" || Number.isInteger(value));
-    case "boolean":
-      return typeof value === "boolean";
-    case "array":
-      return Array.isArray(value);
-    case "object":
-      return value != null && typeof value === "object" && !Array.isArray(value);
-    case "null":
-      return value === null;
-    default:
-      return true;
-  }
+  if (errors) throw new Error(`${label}: does not match schema: ${errors}`);
 }

@@ -4,8 +4,15 @@ import { currentEnvironment } from "../environment.js";
  * Used by both the `skill` node and skill-as-tool for intelligent nodes.
  */
 
-import { loadSkill, preflightSkill, type SkillDef } from "@flowgraph/skills";
+import {
+  isRequiredSkillInput,
+  loadSkill,
+  preflightSkill,
+  skillInputValueSchema,
+  type SkillDef,
+} from "@flowgraph/skills";
 import { resolveSkillPath } from "../skill-resolver.js";
+import { contractErrors } from "../runtime/json-schema.js";
 import type { NodeRunContext } from "../context.js";
 
 export async function loadResolvedSkill(uses: string, ctx: NodeRunContext): Promise<SkillDef> {
@@ -38,8 +45,15 @@ export async function runSkill(
 
   const declaredInputs = skill.frontMatter.inputs ?? {};
   for (const [inputName, inputDecl] of Object.entries(declaredInputs)) {
-    if (inputDecl.required && input[inputName] == null) {
-      throw new Error(`skill "${skill.frontMatter.name}": required input "${inputName}" is missing`);
+    if (input[inputName] == null) {
+      if (isRequiredSkillInput(inputDecl)) {
+        throw new Error(`skill "${skill.frontMatter.name}": required input "${inputName}" is missing`);
+      }
+      continue;
+    }
+    const errors = contractErrors(input[inputName], skillInputValueSchema(inputDecl));
+    if (errors) {
+      throw new Error(`skill "${skill.frontMatter.name}": input "${inputName}" does not match schema: ${errors}`);
     }
   }
 
