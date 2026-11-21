@@ -20,7 +20,7 @@ import { registry, type NodeFactory } from "./registry.js";
 import { resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { SecretRedaction, SECRET_REDACTION, observeSecret, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
-import { graphEnvExpansion } from "./runtime/config-env.js";
+import { graphEnvExpansion, unexpandedEnvDiagnostics } from "./runtime/config-env.js";
 import { DECLARED_SECRETS } from "./runtime/secret-scope.js";
 import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
 import { createEnvSecretProvider, DEFAULT_REDACT_PATTERNS } from "./secrets.js";
@@ -1448,6 +1448,7 @@ async function assembleCompiledLangGraph(
 ): Promise<AssembledGraph> {
   const sourceFile = graphFile(spec);
   const envExpansion = graphEnvExpansion(spec);
+  const unexpandedEnv = unexpandedEnvDiagnostics(spec);
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
   // does not silently drop node updates when authors omit state.channels entries.
   spec = ensureDeclaredOutputChannels(spec);
@@ -1582,7 +1583,7 @@ async function assembleCompiledLangGraph(
   if (providerErrors.length > 0) {
     throw new Error(providerErrors.map((d) => `${d.path ?? "providers"}: ${d.message}`).join("\n"));
   }
-  const secretErrors = [...(envExpansion?.diagnostics ?? []), ...secretReferenceDiagnostics(spec)];
+  const secretErrors = [...unexpandedEnv, ...secretReferenceDiagnostics(spec)];
   if (secretErrors.length > 0) {
     throw new Error(secretErrors.map((d) => `${d.path}: ${d.message}`).join("\n"));
   }

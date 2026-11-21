@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadGraph } from "./loader.js";
 import { compileGraph } from "./compiler.js";
+import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "./events.js";
 
 const dirs: string[] = [];
@@ -144,5 +145,39 @@ describe("${VAR} expansion in config and runtime", () => {
     expect(run.status).toBe("completed");
     expect(run.state["out"]).toEqual({ token: "[REDACTED]", label: "public-label-value" });
     expect(JSON.stringify(events)).not.toContain("config-token-value-1234");
+  });
+});
+
+describe("compileGraph refuses undeclared ${NAME} in any spec", () => {
+  const parse = (doc: unknown) => GraphSpecSchema.parse(doc) as GraphSpec;
+
+  it("refuses a spec built in code, including inside an inline subgraph", async () => {
+    const d = await write({});
+    await expect(compileGraph(parse(graph({ config: { vars: { a: "x ${FGQA_CFG_CODE}" } } })), { cwd: d })).rejects.toThrow(
+      'config.vars.a: `${FGQA_CFG_CODE}` reads secret "FGQA_CFG_CODE", which the graph does not declare',
+    );
+    const child = graph({ runtime: { checkpoint: { path: "${FGQA_CFG_PARENT}" } } }, [{ id: "inner", type: "function", with: { fn: "noop" } }]);
+    const nested = parse(graph({ secrets: ["FGQA_CFG_PARENT"] }, [{ id: "sub", type: "subgraph", spec: child }]));
+    await expect(compileGraph(nested, { cwd: d })).rejects.toThrow("nodes.sub.spec.runtime.checkpoint.path: `${FGQA_CFG_PARENT}`");
+  });
+
+  it("accepts $${NAME} and a declared name left unexpanded", async () => {
+    const d = await write({});
+    const spec = parse(graph({ secrets: ["FGQA_CFG_DECLARED"], config: { vars: { a: "$${FGQA_CFG_CODE}", b: "${FGQA_CFG_DECLARED}" } } }));
+    await expect(compileGraph(spec, { cwd: d })).resolves.toBeDefined();
+  });
+
+  it("refuses a deep copy of a loaded spec, and keeps accepting escapes in a shallow copy", async () => {
+    const d = await write({
+      "bad.yaml": graph({ config: { vars: { a: "${FGQA_CFG_UNDECLARED}" } } }),
+      "escaped.yaml": graph({ config: { vars: { a: "$${FGQA_CFG_UNDECLARED}" } } }),
+    });
+    const bad = (await loadGraph(join(d, "bad.yaml"))).spec!;
+    await expect(compileGraph(structuredClone(bad), { cwd: d })).rejects.toThrow('config.vars.a: `${FGQA_CFG_UNDECLARED}` reads secret');
+    const escaped = await loadGraph(join(d, "escaped.yaml"));
+    expect(escaped.diagnostics).toEqual([]);
+    expect(escaped.spec?.config?.vars).toEqual({ a: "${FGQA_CFG_UNDECLARED}" });
+    await expect(compileGraph(escaped.spec!, { cwd: d })).resolves.toBeDefined();
+    await expect(compileGraph({ ...escaped.spec! }, { cwd: d })).resolves.toBeDefined();
   });
 });
