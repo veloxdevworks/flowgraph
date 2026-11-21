@@ -90,9 +90,10 @@ export async function runMapItem(
   const renderedInput = withoutReservedKeys(
     innerSpec["input"] ? (renderDeep(innerSpec["input"], itemScope) as Record<string, unknown>) : {},
   );
-  const mergedConfig = { ...parsedWith, ...renderedWith };
+  const renderedSpec = { ...innerSpec, id: ctx.nodeId, with: { ...parsedWith, ...renderedWith } };
+  assertNodeSpecAllowed(nodePolicyOf(ctx), renderedSpec, `map node "${mapId}" rendered inner node`);
+  const mergedConfig = { ...parsedWith, ...(inertTemplates(renderedWith) as Record<string, unknown>) };
   const innerNodeSpec = { ...innerSpec, id: ctx.nodeId, with: mergedConfig };
-  assertNodeSpecAllowed(nodePolicyOf(ctx), innerNodeSpec, `map node "${mapId}" rendered inner node`);
   const compiledInner = factory.build(buildCtx, innerNodeSpec, mergedConfig);
 
   const childCtx: NodeRunContext & { _input: Record<string, unknown> } = {
@@ -118,6 +119,31 @@ export async function runMapItem(
     return Object.fromEntries(Object.keys(output.map).filter(key => key.trim() && !isReservedChannel(key)).map(key => [key, projected[key]]));
   }
   return unwrapUpdate({ update: projected });
+}
+
+/**
+ * The inner node renders its config again with its own scope, which can hold
+ * `secret`. Values the map already rendered may carry item data, so any string
+ * that still contains `{{` becomes a quoted literal that renders to itself.
+ * A field the inner node does not render would see the quoted form, so this
+ * only touches strings that contain `{{`.
+ */
+function inertTemplates(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (!value.includes("{{")) return value;
+    const quoted = value
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n")
+      .replace(/\r/g, "\\r")
+      .replace(/\t/g, "\\t");
+    return `{{ "${quoted}" }}`;
+  }
+  if (Array.isArray(value)) return value.map(inertTemplates);
+  if (value != null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, inertTemplates(v)]));
+  }
+  return value;
 }
 
 /**

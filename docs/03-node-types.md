@@ -693,6 +693,8 @@ Each entry into a map has a separate collection round, in input order. Looping b
 
 An inner `output.map` always collects one object containing exactly its declared keys per item: `{value: "{{ result }}"}` produces `[{value: ...}, ...]`. Adding another key preserves that shape; the internal `outputs` wrapper is omitted. Inner `output.to` alone still collects the bare result. These item projections do not write separate parent channels; `collect` chooses the parent destination.
 
+The map renders the inner node's `with` and `input` once per item, with `state`, `input`, `config`, `run` and `item` in scope. Item data is never rendered a second time: an item whose text contains `{{ ... }}` reaches the inner node as that literal text, so it cannot evaluate expressions or read secrets. Map bodies have no `secret` scope.
+
 ```yaml
 - id: implement-all
   type: map
