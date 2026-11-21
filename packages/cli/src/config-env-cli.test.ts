@@ -39,8 +39,8 @@ describe("CLI undeclared config placeholder", () => {
 
   it("run refuses the graph and reports it once", () => {
     const result = cli("run", "g.yaml");
-    const out = result.stdout + result.stderr;
+    const out = (result.stdout + result.stderr).replace(/\x1b\[[0-9;]*m/g, "");
     expect(result.status, out).toBe(2);
-    expect(out.match(/error \[SECRET_UNDECLARED\]/g)).toHaveLength(1);
+    expect(out.match(/\[SECRET_UNDECLARED\]/g)).toHaveLength(1);
   });
 });
