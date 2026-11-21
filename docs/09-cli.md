@@ -110,12 +110,14 @@ flowgraph validate ./my.graph.yaml --strict --format json
 ```
 
 - Accepts a **single graph file path** (glob patterns not supported yet).
-- Runs load → parse → validate → resolve imports (offline, no execution).
+- Loads and parses the graph, then lints it. It does not run the graph, call a model, or load `imports` modules (`nodes`, `providers`, `reducers`). Skill, agent and subgraph aliases are read as data.
+- A node type that is not already registered, on a graph that declares a `nodes` import, is reported as `PLUGIN_TYPE_UNRESOLVED`. A `custom:` reducer that would come from an import is reported as `UNREGISTERED_REDUCER`. `flowgraph run` loads those modules when the graph executes.
 - `--strict` promotes warnings to errors.
 - `--format json` emits machine-readable diagnostics.
 - Exit `2` on errors; `0` on success.
+- `--preflight` also checks skill environment dependencies, agent definitions and toolchain binaries. Binary names are looked up with `which` or `where` and no shell. Import modules are still not loaded.
 
-> **`--preflight`:** The flag exists but **does not yet run skill env checks** during validate. Use `flowgraph skills doctor` for env readiness.
+`flowgraph skills doctor` checks skill environment readiness on its own.
 
 ## 4. `flowgraph graph` — **shipped**
 

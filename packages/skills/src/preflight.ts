@@ -1,9 +1,9 @@
-import * as childProcess from "node:child_process";
-import * as util from "node:util";
-import type { SkillDef, EnvVarDecl, BinDecl } from "./schema.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { Diagnostic } from "@flowgraph/spec";
+import { BIN_NAME_PATTERN, type BinDecl, type EnvVarDecl, type SkillDef } from "./schema.js";
 
-const exec = util.promisify(childProcess.exec);
+const execFileAsync = promisify(execFile);
 
 export interface PreflightResult {
   ok: boolean;
@@ -47,8 +47,17 @@ export async function preflightSkill(
     }
   }
 
-  // Check binaries on PATH
+  // Check binaries on PATH. The name is an argument, never part of a shell command.
   for (const binDecl of envDecl?.bin ?? []) {
+    if (!BIN_NAME_PATTERN.test(binDecl.name)) {
+      bins[binDecl.name] = false;
+      diagnostics.push({
+        severity: "error",
+        code: "BIN_NAME_INVALID",
+        message: `Skill "${skill.frontMatter.name}" bin name "${binDecl.name}" must be a single executable name, not a path or a shell command`,
+      });
+      continue;
+    }
     const onPath = await checkBin(binDecl.name);
     bins[binDecl.name] = onPath;
     if (!onPath && !binDecl.optional) {
@@ -84,9 +93,10 @@ export async function preflightSkill(
 }
 
 async function checkBin(name: string): Promise<boolean> {
+  if (!BIN_NAME_PATTERN.test(name)) return false;
+  const program = process.platform === "win32" ? "where" : "which";
   try {
-    const cmd = process.platform === "win32" ? `where ${name}` : `which ${name}`;
-    await exec(cmd);
+    await execFileAsync(program, [name], { windowsHide: true });
     return true;
   } catch {
     return false;

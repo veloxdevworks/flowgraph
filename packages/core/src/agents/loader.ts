@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import matter from "gray-matter";
+import { parseYamlFrontMatter, YamlFrontMatterError } from "@flowgraph/skills";
 import type { Diagnostic } from "@flowgraph/spec";
 import { AgentFrontMatterSchema, type AgentDef } from "./schema.js";
 
@@ -40,18 +40,24 @@ export async function loadAgentDef(
     return { agent: null, diagnostics };
   }
 
-  let parsed: ReturnType<typeof matter>;
+  let parsed: { data: unknown; content: string };
   try {
-    parsed = matter(raw);
+    parsed = parseYamlFrontMatter(raw);
   } catch (cause) {
+    const detail =
+      cause instanceof YamlFrontMatterError
+        ? cause.message
+        : `Front matter must be YAML. ${cause instanceof Error ? cause.message : String(cause)}`;
     return {
       agent: null,
-      diagnostics: [{
-        severity: "error",
-        code: "AGENT_FRONT_MATTER_ERROR",
-        file: resolvedPath,
-        message: `${resolvedPath}: invalid agent front matter: ${cause instanceof Error ? cause.message : String(cause)}`,
-      }],
+      diagnostics: [
+        {
+          severity: "error",
+          code: "AGENT_FRONT_MATTER_ERROR",
+          file: resolvedPath,
+          message: `${resolvedPath}: ${detail}`,
+        },
+      ],
     };
   }
   const frontMatterResult = AgentFrontMatterSchema.safeParse(parsed.data);
