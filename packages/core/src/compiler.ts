@@ -84,6 +84,7 @@ import {
 import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
 import { cleanupWorktrees } from "./nodes/worktree.js";
 import { registerProvider, providerConfigDiagnostics, type ProviderAdapter } from "./providers/index.js";
+import { hostSupportDiagnostics } from "./runtime/host-support.js";
 import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
 import { GRAPH_MEDIA_PROVIDERS, deriveMediaProviders, type GraphMediaProviders } from "./media/registry.js";
 import type { MediaProvider } from "./media/types.js";
@@ -205,6 +206,13 @@ export interface CompileOptions {
    * subgraphs; run/interrupt lifecycle hooks remain at the root invocation.
    */
   hooks?: Hook[];
+  /**
+   * When true, this host starts runs from `triggers` and compiled.run() will
+   * not warn that it ignores them. Default: false (CLI, server, programmatic).
+   */
+  interpretsTriggers?: boolean;
+  /** Name of the host in host-support run issues (default "compiled.run()"), e.g. "flowgraph CLI". */
+  hostName?: string;
   /** MCP hub for mcp nodes and intelligent MCP tools (built from mcpServers by CLI). */
   mcp?: McpHub;
   /**
@@ -762,6 +770,29 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
     events.emit(startEvent, {
       graphName: graphSpec.metadata.name,
     });
+
+    if (mode === "start") {
+      // Recorded like any other run issue, so RunResult.issues, the server's issue list and
+      // --fail-on-issues see it, not only event subscribers.
+      for (const d of hostSupportDiagnostics(graphSpec, {
+        hostName: opts.hostName ?? "compiled.run()",
+        ...(opts.interpretsTriggers ? { interpretsTriggers: true } : {}),
+      })) {
+        const issue = stampIssue(
+          {
+            code: d.code,
+            severity: d.severity === "error" ? "error" : "warning",
+            message: d.message,
+            impact: "Runs are started only by this call; the graph's triggers do nothing on this host.",
+            remediation: "Run the graph on a host that interprets triggers, or remove them.",
+            ...(d.path ? { detail: { path: d.path } } : {}),
+          },
+          {},
+        );
+        try { appendRunIssue(workspace, runIssuesKey({ threadId, runId }), issue); } catch { /* the event still reports it */ }
+        events.emit("run.issue", issue);
+      }
+    }
 
     const requestedCheckpoint = (runOpts as ResumeOptions).checkpointId;
     if (requestedCheckpoint && checkpointer) {

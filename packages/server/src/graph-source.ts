@@ -13,6 +13,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   normalizeNodeTypeAliases,
   validateSpec,
+  hostSupportDiagnostics,
 } from "@flowgraph/core";
 import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import { GraphStoreError, isSystemError, ServerRequestError } from "./errors.js";
@@ -120,7 +121,10 @@ function parseGraphSource(
     };
   }
 
-  const lint = validateSpec(result.data);
+  const lint = [
+    ...validateSpec(result.data),
+    ...hostSupportDiagnostics(result.data, { hostName: "flowgraph server" }),
+  ];
   const errors = lint.filter((d) => d.severity === "error");
   if (errors.length > 0) {
     return {

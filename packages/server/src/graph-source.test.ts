@@ -240,3 +240,30 @@ describe("stored graph YAML", () => {
     }
   });
 });
+describe("host-support triggers", () => {
+  it("warns that the server ignores triggers and still returns the spec", () => {
+    const yaml = `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: hello
+triggers:
+  - { id: nightly, type: cron, schedule: "0 2 * * *" }
+nodes:
+  - id: echo
+    type: function
+    with:
+      fn: missing
+edges:
+  - { from: START, to: echo }
+  - { from: echo, to: END }
+`;
+    const result = parseGraphYaml(yaml);
+    expect(result.spec).not.toBeNull();
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "TRIGGERS_HOST_UNSUPPORTED", severity: "warning" }),
+    );
+    expect(result.diagnostics.find((d) => d.code === "TRIGGERS_HOST_UNSUPPORTED")?.message).toContain("flowgraph server");
+    expect(result.diagnostics.find((d) => d.code === "TRIGGERS_HOST_UNSUPPORTED")?.message).not.toMatch(/phase/i);
+  });
+});
