@@ -1429,7 +1429,7 @@ export function graphShapeDiagnostics(spec: GraphSpec): Diagnostic[] {
       severity: "error",
       code: "GRAPH_TOO_LARGE",
       path: "nodes",
-      message: `The graph expands to ${shape.nodes} nodes, counting each nested graph and map body at every place it is used, more than ${MAX_GRAPH_NODES}; use the nested graphs in fewer places or flatten the nesting`,
+      message: `The graph expands to more than ${MAX_GRAPH_NODES.toLocaleString("en-US")} nodes, counting each nested graph and map body at every place it is used; use the nested graphs in fewer places or flatten the nesting`,
     }];
   }
   return [];
