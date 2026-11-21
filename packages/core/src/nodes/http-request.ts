@@ -2,7 +2,13 @@
  * Shared outbound HTTP request helper used by the `http` and `demo` nodes.
  */
 
-import { maskSensitiveHeaders, observeSensitiveHeaders, REDACTED } from "../runtime/secret-redaction.js";
+import {
+  maskSensitiveHeaders,
+  observeSensitiveHeaders,
+  REDACTED,
+  SecretRedaction,
+  setCookieRedactions,
+} from "../runtime/secret-redaction.js";
 import { guardedFetch, type OutboundHttpPolicy } from "../outbound-http.js";
 
 /** Mask sensitive header values, including names in `runtime.secrets.redact.headers`, before emitting them in events. */
@@ -13,6 +19,32 @@ export function redactHeaders(headers: Record<string, string> | undefined): Reco
 /** Field and query-parameter names whose values are masked in saved transcripts. */
 const SENSITIVE_NAME =
   /pass(word|wd|phrase)?$|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|^auth$|authorization|credential|cookie|session|signature|^sig$|^code$/i;
+
+/**
+ * The response as an event shows it: headers that are sensitive by name (built-in, listed in
+ * `runtime.secrets.redact.headers`, or auth/token-like) are masked, and their values and each
+ * Set-Cookie (with the cookie rule) are masked in the body too. Nothing is registered run-wide, so
+ * state keeps the real values and a later node can still forward a cookie.
+ */
+export function maskResponseForEvent(response: {
+  headers: Record<string, string>;
+  setCookies: string[];
+  body: unknown;
+}): { headers: Record<string, string>; body: unknown } {
+  const local = new SecretRedaction();
+  const byPolicy = maskSensitiveHeaders(response.headers);
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(response.headers)) {
+    const sensitive = byPolicy[key] === REDACTED || SENSITIVE_NAME.test(key);
+    headers[key] = sensitive ? REDACTED : value;
+    if (sensitive) local.observe(value);
+  }
+  for (const cookie of response.setCookies) {
+    local.observe(cookie);
+    for (const part of setCookieRedactions(cookie)) local.observe(part);
+  }
+  return { headers, body: local.redact(response.body) };
+}
 
 /** URL serialization percent-encodes the brackets in {@link REDACTED}; this stand-in survives it. */
 const URL_PLACEHOLDER = "FLOWGRAPHREDACTEDURLPART";

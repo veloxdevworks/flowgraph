@@ -12,8 +12,7 @@ import type { NodeRunContext } from "../context.js";
 import { nodePolicyOf } from "../node-policy.js";
 import type { NodeResult } from "../registry.js";
 import { applyOutput } from "./output.js";
-import { performHttpRequest, redactHeaders, redactUrlSecrets } from "./http-request.js";
-import { observeSensitiveHeaders } from "../runtime/secret-redaction.js";
+import { maskResponseForEvent, performHttpRequest, redactHeaders, redactUrlSecrets } from "./http-request.js";
 import { secretScope } from "../runtime/secret-scope.js";
 
 export { redactHeaders } from "./http-request.js";
@@ -66,10 +65,6 @@ export const httpNode = defineNode<Config>({
           outbound: nodePolicyOf(ctx)?.outboundHttp,
         });
 
-        // Registered values are redacted wherever they appear later, including in state.
-        observeSensitiveHeaders(result.headers);
-        for (const cookie of result.setCookies) observeSensitiveHeaders({ "set-cookie": cookie });
-
         ctx.emit("node.output", {
           request: {
             method: result.method,
@@ -77,11 +72,7 @@ export const httpNode = defineNode<Config>({
             headers: redactHeaders(result.requestHeaders),
             ...(result.requestBody !== undefined ? { body: result.requestBody } : {}),
           },
-          response: {
-            status: result.status,
-            headers: redactHeaders(result.headers),
-            body: result.body,
-          },
+          response: { status: result.status, ...maskResponseForEvent(result) },
         });
 
         const out = { status: result.status, body: result.body, headers: result.headers };
