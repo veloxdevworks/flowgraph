@@ -21,7 +21,8 @@ The published JSON Schema has `$id` `https://veloxdevworks.com/flowgraph/schema/
 
 - Map bodies are full node specs with an optional `id`. Fix any unknown key, missing `type`, or `with` that does not match the body type (for example a `shell` body without `command`); these now fail validation and compile. A programmatic inline subgraph `spec` inside a map body needs `apiVersion: flowgraph/v1` and `kind: Graph`, like any other inline spec.
 - `compileGraph` throws `Invalid graph: <CODE> at <path>: <message>; ...` for structural errors. The error's `code` is the first diagnostic's code and `diagnostics` lists them all. Code that matched the old `Node "<id>" config error` message should match the code or the new message.
-- Remove edges from `END` or into `START`, and point router and hitl routes at the first node instead of `START`.
+- Remove edges from `END` or into `START`.
+- A router or hitl route to `START` never compiled: LangGraph failed with an error that had no code. It now gets a coded `ROUTE_TO_START` diagnostic from validate and compile. Point the route at the first node instead.
 - For `flowgraph validate`: give each `select` input `options`, make input keys unique, and make each `default` match its type. Give triggers unique ids, and spell each time zone as an IANA name, such as `America/New_York` instead of `EST`. These do not affect `compileGraph`.
 - Flatten programmatic specs that nest graphs or map bodies more than 32 levels deep, or that expand past 10,000 nodes by reusing inline specs.
 - `flowgraph validate` without `--strict` no longer fails on `UNDECLARED_OUTPUT_CHANNEL`; with `--strict` it still does. Tools that filter diagnostics by severity should expect a warning.
