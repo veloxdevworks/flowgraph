@@ -140,7 +140,7 @@ flowgraph graph ./triage.graph.yaml --format json
 flowgraph schema --out schema/v1.json
 ```
 
-Prints or writes the Graph JSON Schema (draft-07) from `@flowgraph/spec`. Its `$id` is `https://veloxdevworks.com/flowgraph/schema/v1.json`; a breaking schema change is published at a new versioned path. Nodes, inline subgraph `spec` blocks and `map` bodies are recursive definitions, so nested graphs get the same completion and checks as the top level. Per-type `with` fields are not typed yet. Use in YAML headers for editor autocomplete:
+Prints or writes the Graph JSON Schema (draft-07) from `@flowgraph/spec`. Its `$id` is `https://veloxdevworks.com/flowgraph/schema/v1.json`; a breaking schema change is published at a new versioned path. The root refers to the `GraphSpec` definition through `allOf`, and the schema compiles under Ajv strict mode with `allowUnionTypes`. Nodes, inline subgraph `spec` blocks and `map` bodies are recursive definitions, so nested graphs get the same completion and checks as the top level. Per-type `with` fields are not typed yet. Use in YAML headers for editor autocomplete:
 
 ```yaml
 # yaml-language-server: $schema=https://veloxdevworks.com/flowgraph/schema/v1.json

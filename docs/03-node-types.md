@@ -238,6 +238,7 @@ Model-based routing:
       default:   { default: true, to: fallback }
 ```
 
+- A route's `to` is a node id or `END`. A route to `START` is rejected by `flowgraph validate` and `compileGraph` (`ROUTE_TO_START`); route to the first node instead.
 - `with.match: firstMatch` (default) selects the first matching route. `with.match: allMatches` fans out to every matching destination, deduplicates destinations, and writes an array of chosen route keys as the router output. The default route is used only when no condition matches. `allMatches` is only valid with `mode: rules`. A router with `mode: model` and `match: allMatches` is rejected; model routers select one route.
 - Model-based routers receive every declared route key and description, including the default as an explicit "none of the above" choice (enforced via structured output).
 - `mode: model` requires `with.input`, the text the model routes on. The model sees that rendered text, the instruction and the routes, never the whole state.
@@ -793,7 +794,7 @@ For `approve`, `choice` and `review`, the human's answer *is* the routing decisi
 
 - Keys are the outcomes: `approved` / `rejected` for `approve`, each entry of `choices` for `choice`, each decision for `review` (`approve` / `request-changes` unless `decision` lists others). A value is a node id, or `{ to, description }`.
 - A `default` route catches any outcome without its own. It is required when `choices` are templated, since the answers are only known at run time. An answer with no route and no `default` fails the run.
-- Lint (`validateSpec` / `flowgraph validate`) errors on a literal outcome with no route (`HITL_ROUTE_MISSING`), on routes for `question` / `form` (`HITL_ROUTES_MODE`) and on unknown targets, and warns about routes that never match.
+- Lint (`validateSpec` / `flowgraph validate`) errors on a literal outcome with no route (`HITL_ROUTE_MISSING`), on routes for `question` / `form` (`HITL_ROUTES_MODE`) and on unknown targets, and warns about routes that never match. These lints apply the same way to a gate in an inline subgraph `spec`, and `compileGraph` does not check them at any level. A route to `START` is an error in validate and compile (`ROUTE_TO_START`).
 - Like a router, a gate with `routes` is the source of truth: edges leaving it that aren't route targets are ignored, and the decision is reported as a `router.decision` event (`mode: "hitl"`). You don't need a `branch` edge, and the desktop canvas draws one cell per route on the node.
 - For logic over state or model-based choices, keep using a [`router`](#3-router--intelligent--rule-based-routing).
 - A `router` right after a gate that only compares the gate's answer is flagged by lint as `HITL_ROUTER_MERGEABLE` (an `info` recommendation). Fold it in by moving its routes onto the gate — the desktop Builder does this with **Merge into HITL** (node right-click menu, or the Lint tab). Routers that test anything beyond the answer, take several routes, or write state are left alone.

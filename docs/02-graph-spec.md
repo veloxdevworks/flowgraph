@@ -76,14 +76,14 @@ triggers:
 | `id` | Stable id within this graph, unique among its triggers. Required. |
 | `type` | `cron` \| `interval` \| `startup` \| `flow-complete` \| `flow-failed` \| `webhook` \| `file-watch`. |
 | `enabled` | When `false`, hosts ignore the trigger. Default `true`. |
-| `schedule` | Cron only — 5-field cron expression: minute (0–59), hour (0–23), day of month (1–31), month (1–12 or `JAN`–`DEC`), day of week (0–7, 0 and 7 are Sunday, or `SUN`–`SAT`). Each field takes `*`, a value, a range `a-b`, a list `a,b` and a step `/n`. Macros such as `@daily` and six-field (seconds) forms are not accepted. |
-| `timezone` | Cron only — optional IANA timezone, such as `America/Denver` or `UTC`. |
+| `schedule` | Cron only — 5-field cron expression: minute (0–59), hour (0–23), day of month (1–31), month (1–12 or `JAN`–`DEC`), day of week (0–7, 0 and 7 are Sunday, or `SUN`–`SAT`). Each field takes `*`, a value, a range `a-b`, a list `a,b` and a step `/n`. An optional leading seconds field (0–59) makes six fields. The macros `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily` and `@hourly` are also accepted. |
+| `timezone` | Cron only — optional canonical IANA time zone name, such as `America/Denver` or `UTC`, spelled with its exact case. Abbreviations (`EST`), offsets (`+05:00`) and lowercase spellings are rejected. |
 | `every` / `unit` | Interval only. |
 | `graph` | Flow-complete / flow-failed — target graph `metadata.name` (kebab-case). |
 | `path` | Webhook (URL path) or file-watch (filesystem path). |
 | `events` | File-watch only — subset of `create` / `change` / `delete`. |
 
-`flowgraph validate` and `compileGraph` reject a repeated trigger id (`DUPLICATE_TRIGGER_ID`), a cron schedule that is not a valid 5-field expression (`TRIGGER_CRON_INVALID`, naming the field at fault), and a `timezone` the runtime does not know (`TRIGGER_TIMEZONE_INVALID`).
+`flowgraph validate` reports a repeated trigger id (`DUPLICATE_TRIGGER_ID`), a cron schedule it cannot parse (`TRIGGER_CRON_INVALID`, naming the field at fault), and a `timezone` that is not a canonical name in the runtime's `Intl.supportedValuesOf("timeZone")` list or `UTC` (`TRIGGER_TIMEZONE_INVALID`). These are validate-time errors only: the engine does not schedule triggers, so `compileGraph` does not check them.
 
 Hosts typically guard against a graph triggering itself via `flow-complete` / `flow-failed`. Cascade depth beyond that simple self-loop check is host-defined.
 
@@ -121,7 +121,7 @@ inputs:
 | `options` | Required for `type: select` — allowed string values. |
 | `description` | Optional help text for UIs. |
 
-`flowgraph validate` and `compileGraph` check the declarations themselves: a repeated `key` is `DUPLICATE_INPUT_KEY`, a `select` without `options` is `INPUT_OPTIONS_MISSING`, and a `default` of the wrong type is `INPUT_DEFAULT_TYPE`. The run-time coercion below still applies to the values a caller passes.
+`flowgraph validate` checks the declarations themselves (`compileGraph` does not): a repeated `key` is `DUPLICATE_INPUT_KEY`, a `select` without `options` is `INPUT_OPTIONS_MISSING`, and a `default` of the wrong type is `INPUT_DEFAULT_TYPE`. The run-time coercion below still applies to the values a caller passes.
 
 **Runtime behavior:**
 
@@ -242,7 +242,7 @@ A node whose labels the local host satisfies runs in-process as usual. Otherwise
 
 ## 6. `edges`
 
-Edges define control flow. Two forms: **static** and **conditional**. `START` and `END` are reserved node ids (mapped to LangGraph's `START`/`END`). `END` is never an edge source (`EDGE_FROM_END`) and `START` is never a target, on a static edge or a branch (`EDGE_TO_START`).
+Edges define control flow. Two forms: **static** and **conditional**. `START` and `END` are reserved node ids (mapped to LangGraph's `START`/`END`). `END` is never an edge source (`EDGE_FROM_END`) and `START` is never a target, on a static edge or a branch (`EDGE_TO_START`) or in a router or hitl `with.routes` (`ROUTE_TO_START`).
 
 ### Static edges
 
@@ -548,7 +548,9 @@ Unknown keys are an error. The graph root, every node, and every inline subgraph
 
 Deprecated type aliases (`code`, `intelligent`) are rewritten in map bodies and inline `spec` blocks as well.
 
-**`compileGraph` refuses the same errors.** A spec built in code, copied, or loaded without `flowgraph validate` is checked when it compiles: unknown node types and invalid `with` blocks (in map bodies and inline subgraphs too), duplicate ids, unknown edge targets, a missing `START` edge, `END` as a source or `START` as a target, unknown hook phases or directives, and invalid `inputs` or `triggers`. The error lists every problem as `CODE at path: message`; its `code` is the first diagnostic's code and its `diagnostics` holds them all.
+Graphs and map bodies may nest up to 32 levels, counting the top level. A deeper spec, or a spec built in code whose inline `spec` or map body refers back to itself, is reported once as `GRAPH_NESTING_TOO_DEEP` at the first level past the limit, and the other checks are skipped.
+
+**`compileGraph` refuses the structural errors.** A spec built in code, copied, or loaded without `flowgraph validate` is checked when it compiles, at every depth: nesting past the limit, unknown node types and invalid `with` blocks (in map bodies and inline subgraphs too), duplicate ids, unknown edge targets, a missing `START` edge, `END` as a source or `START` as an edge, router or hitl route target, and unknown hook phases or directives. The error lists every problem as `CODE at path: message`; its `code` is the first diagnostic's code and its `diagnostics` holds them all. The other lints, including `inputs`, `triggers`, hitl routes and reachability, are `flowgraph validate` diagnostics only, with the same severity for a nested graph as for the top level; the engine does not schedule triggers, so compile does not check them.
 
 `UNDECLARED_OUTPUT_CHANNEL` is a **warning**: a node writes a channel that `state.channels` does not declare. `compileGraph` declares it as `type: any` with last-write-wins, so the write is kept; declare the channel to choose its type and reducer.
 
