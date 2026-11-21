@@ -392,7 +392,7 @@ state:
     approval: { type: object }
 nodes:
   - { id: gate, type: hitl, with: { mode: approve, message: "ok?", output: { to: approval } } }
-  - { id: a, type: shell, with: { command: "echo hi", output: { to: out } } }
+  - { id: a, type: shell, with: { command: echo, args: [hi], output: { to: out } } }
 edges:
   - { from: START, to: gate }
   - { from: gate, to: a }

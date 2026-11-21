@@ -323,13 +323,15 @@ The primary escape hatch for custom logic: run any CLI, script, or shell pipelin
 
 | Config | How it runs | Use when |
 |---|---|---|
-| `args` set | `execFile(command, args)` — no shell, argv-safe | You have a discrete binary + arguments |
-| `args` omitted | OS shell (`/bin/sh -c` / `cmd.exe`) | You need pipes, `&&`, globs, or shell builtins |
+| default | `execFile(command, args)` — no shell; `command` names one program | You have a discrete binary + arguments |
+| `shell: true` | OS shell (`/bin/sh -c` / `cmd.exe`) runs `command` as a command line | You need pipes, `&&`, globs, or shell builtins |
 
-Each argument is one argv value. Whole-argument templates preserve their value until conversion: objects and arrays become JSON, while scalar values become text. Literal arguments in YAML must be strings. Use argv mode to pass structured data without shell quoting.
+`command` is never a template: a `{{ }}` in it is a config error in both modes, so run data cannot become shell syntax. Without `shell: true`, a `command` that contains whitespace needs `args` (use `args: []` for a program path with spaces); otherwise the graph fails validation and asks for `shell: true`. `args` cannot be combined with `shell: true`.
+
+Each argument is one argv value. Whole-argument templates preserve their value until conversion: objects and arrays become JSON, while scalar values become text. Literal arguments in YAML must be strings. Use argv mode to pass structured data without shell quoting. Rendered `args` and `env` values reach the child exactly as rendered.
 
 ```yaml
-# Safe argv mode (recommended)
+# Argv mode (default)
 - id: greet
   type: shell
   with:
@@ -337,10 +339,11 @@ Each argument is one argv value. Whole-argument templates preserve their value u
     args: ["Hello, {{ input.name }}!"]
     output: { to: message }
 
-# Shell-string mode (pipes / chaining)
+# Shell mode (pipes / chaining)
 - id: build
   type: shell
   with:
+    shell: true
     command: "npm run build && npm test"
     cwd: "{{ state.repoDir }}"
     timeout: 5m
@@ -379,14 +382,15 @@ Declare toolchains with `requires` so missing binaries are caught at preflight a
 
 `onMissingTool: skip` returns `{ ok: false, skipped: true }` and records a `TOOL_NOT_FOUND` run issue so later agents can see that verification never ran. Even in `fail` mode, a missing binary (ENOENT / exit 127) is reported as `TOOL_NOT_FOUND` rather than a raw spawn error.
 
-**Injection caveat:** shell-string mode interpolates templates into the command line. Treat untrusted state values the same way you would for `http` URL/body templates — prefer argv mode (`args`) when values come from external input.
+**Run data in shell mode:** pass values through `env` and quote them in the command (`"$NAME"`), so the shell treats them as data. Typographic quotes (`“ ” ‘ ’`) in the authored command line are converted to ASCII quotes; rendered values are not touched. On Windows, `cmd.exe` expands `%NAME%` before it parses the line, so an env value can still change a `cmd.exe` command line — use argv mode there when values come from external input.
 
-**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values. In argv mode there is no shell expansion; use a `{{ ... }}` template to supply a value.
+**Shell environment:** `${MY_VAR}` / `${MY_VAR:-default}` in node bodies are preserved until the child shell runs, using its allowed environment. Load-time interpolation applies only to `config` / `runtime` scalar values. In argv mode there is no shell expansion; use a `{{ ... }}` template in `args` or `env` to supply a value.
 
 ```yaml
 - id: materialize
   type: shell
   with:
+    shell: true
     env:
       SLUG: "{{ state.specsDraft.slug }}"
     # $SLUG and ${SLUG} both expand when the child shell runs
@@ -1414,7 +1418,7 @@ OpenAI image dimensions are checked offline and again after rendering, before in
 | `demo` | Best-effort artifact capture (HTTP / screenshot / video / simulator / file) | side-effecting | core (+ optional `playwright`; simulators need Xcode/adb) |
 | `mcp` | MCP tool/resource call | side-effecting | core (+ `@flowgraph/mcp` at runtime) |
 | `webhook` | Outbound HTTP notify | side-effecting | core |
-| `shell` | Run a local command / shell string | side-effecting | core |
+| `shell` | Run a local program, or a shell command line with `shell: true` | side-effecting | core |
 | `service` | Start/stop long-running background processes | side-effecting | core |
 | `port` | Allocate free TCP port(s) at run time | — | core |
 | `script` | Sandboxed inline Node.js (ESM) | side-effecting | core |

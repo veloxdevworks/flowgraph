@@ -1,8 +1,10 @@
 /**
  * Built-in node type: `shell`
  *
- * Runs a local command. When `args` is set, uses execFile (no shell, argv-safe).
- * When `args` is omitted, runs `command` through the OS shell (pipes / && / globs).
+ * Runs a local program with `args` as its argv, without a shell. With
+ * `shell: true`, runs the fixed `command` line through the OS shell (pipes /
+ * && / globs). `command` is never rendered, so run data reaches the process
+ * only as argv, environment values or stdin, never as shell syntax.
  */
 
 import * as path from "node:path";
@@ -35,7 +37,8 @@ const MAX_BUFFER = 10 * 1024 * 1024;
 
 /**
  * macOS / rich-text editors often insert curly quotes. `/bin/sh` only understands
- * ASCII `'` / `"`, so normalize common typography quotes before exec.
+ * ASCII `'` / `"`, so normalize common typography quotes in an authored shell
+ * command line. Never applied to rendered data, which keeps its exact text.
  */
 export function normalizeShellText(text: string): string {
   return text
@@ -63,17 +66,18 @@ export const shellNode = defineNode<Config>({
           secret: secretScope(ctx),
         };
 
-        const command = normalizeShellText(String(renderDeep(config.command, scope)));
-        const args = config.args
-          ? config.args.map((a) => {
+        const useShell = config.shell === true;
+        const command = useShell ? normalizeShellText(config.command) : config.command;
+        const args = useShell
+          ? undefined
+          : (config.args ?? []).map((a) => {
               const value = renderDeep(a, scope);
               if (value !== null && typeof value === "object") {
                 try { return JSON.stringify(value); }
                 catch { throw Object.assign(new Error(`shell node "${ctx.nodeId}": argument cannot be serialized as JSON`), { code: "SHELL_ARG_INVALID", retryable: false }); }
               }
-              return normalizeShellText(String(value));
-            })
-          : undefined;
+              return String(value);
+            });
         const cwd = config.cwd
           ? String(renderDeep(config.cwd, scope))
           : ctx.workspace;
@@ -82,7 +86,7 @@ export const shellNode = defineNode<Config>({
           : undefined;
         const renderedEnv = renderedEnvRaw
           ? Object.fromEntries(
-              Object.entries(renderedEnvRaw).map(([k, v]) => [k, normalizeShellText(String(v))]),
+              Object.entries(renderedEnvRaw).map(([k, v]) => [k, String(v)]),
             )
           : undefined;
         // `with.input` wins; otherwise the node's `input` (or tool arguments) is passed.
@@ -132,9 +136,6 @@ export const shellNode = defineNode<Config>({
           env.FLOWGRAPH_INPUT = payload;
           stdinData = payload;
         }
-
-        const useShell = args === undefined;
-
 
         const runScope=runScopeOf((ctx as NodeRunContext&{_lgConfig?:unknown})._lgConfig);
         const replay=runScope?.replay??new ReplayStore(),key=replayNodeKey(runScope?.path??[],ctx.nodeId),slot=`shell:${ctx.attempt}`;
@@ -321,6 +322,9 @@ function runProcess(opts: {
     child.on("error", (err) => finish(err));
     child.on("close", (code) => finish(undefined, code ?? 1));
 
+    // A program that exits without reading stdin closes the pipe (EPIPE).
+    // The exit code decides the result, so a write error is not a failure.
+    child.stdin?.on("error", () => {});
     if (stdin !== undefined && child.stdin) {
       child.stdin.write(stdin);
       child.stdin.end();
