@@ -126,6 +126,23 @@ describe("edges into START and out of END", () => {
   });
 });
 
+describe("body lints have the same severity at compile time at every level", () => {
+  // Approve mode answers approved or rejected; this gate routes only one of them.
+  const gate = { id: "h", type: "hitl", with: { message: "ok?", routes: { approved: "END" } } };
+
+  it("reports a hitl with a missing route at validate time, at the top level and nested", () => {
+    const top = errors(validateSpec(graph([gate]))).find((d) => d.path?.startsWith("nodes.h.with.routes"));
+    const nestedOne = errors(validateSpec(graph([inline([gate])]))).find((d) => d.path?.startsWith("nodes.sub.spec.nodes.h.with.routes"));
+    expect(top).toBeDefined();
+    expect(nestedOne).toMatchObject({ code: top!.code, severity: "error" });
+  });
+
+  it("compiles the same way whether the gate is top level or nested", async () => {
+    const outcome = async (spec: GraphSpec) => compileGraph(spec, { checkpointer: "none" }).then(() => "compiled", (err: Error) => err.message);
+    expect(await outcome(graph([inline([gate])]))).toBe(await outcome(graph([gate])));
+  });
+});
+
 describe("undeclared output channels", () => {
   it("are a warning, and compile keeps the write", async () => {
     const spec = graph([{ id: "a", type: "function", with: { fn: "noop", output: { to: "result" } } }]);
@@ -162,6 +179,11 @@ describe("graph inputs", () => {
       ["INPUT_DEFAULT_TYPE", "inputs[6].default"],
     ]);
     expect(found.every((d) => d.severity === "error")).toBe(true);
+  });
+
+  it("are validate-time only: compile still accepts malformed inputs", async () => {
+    const spec = graph([{ id: "a", ...echo }], { inputs: [{ key: "mode", type: "select" }, { key: "mode" }] });
+    await expect(compileGraph(spec, { checkpointer: "none" })).resolves.toBeDefined();
   });
 
   it("accepts well-formed inputs", () => {
@@ -212,6 +234,16 @@ describe("triggers", () => {
       ],
     });
     expect(validateSpec(spec).filter((d) => d.path?.startsWith("triggers"))).toEqual([]);
+  });
+
+  it("are validate-time only: compile still accepts a graph whose triggers fail validation", async () => {
+    const spec = graph([{ id: "a", ...echo }], {
+      triggers: [
+        { id: "t", type: "cron", schedule: "not cron", timezone: "Mars/Olympus" },
+        { id: "t", type: "startup" },
+      ],
+    });
+    await expect(compileGraph(spec, { checkpointer: "none" })).resolves.toBeDefined();
   });
 });
 

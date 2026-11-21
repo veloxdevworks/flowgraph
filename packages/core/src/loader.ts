@@ -247,7 +247,7 @@ export function normalizeNodeTypeAliases(parsed: unknown): unknown {
  * `graphStructureDiagnostics`); `loadGraph` applies it to `uses` files.
  */
 export function validateSpec(spec: GraphSpec): Diagnostic[] {
-  const diagnostics: Diagnostic[] = graphStructureDiagnostics(spec);
+  const diagnostics: Diagnostic[] = graphStructureDiagnostics(spec, { lints: true });
 
   if (spec.runtime?.budget?.maxUSD !== undefined) walkNodes(spec, node => {
     const provider = typeof node.provider === "string" ? node.provider : spec.config?.defaults?.provider;

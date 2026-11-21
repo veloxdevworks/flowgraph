@@ -1290,6 +1290,16 @@ function nested(d: Diagnostic, prefix: string): Diagnostic {
   return { ...d, path: d.path ? `${prefix}${d.path}` : prefix.replace(/\.$/, "") };
 }
 
+export interface GraphStructureOptions {
+  /**
+   * Also report the authoring checks that do not stop a compile: graph
+   * `inputs` and `triggers` at every level, and the body lints of
+   * {@link graphBodyLintDiagnostics} for nested graphs (the top level gets
+   * those from `graphLintDiagnostics`).
+   */
+  lints?: boolean;
+}
+
 /**
  * The checks a graph must pass before it compiles, applied to the graph and
  * to every graph nested in it at any depth: each inline subgraph `spec` and
@@ -1297,21 +1307,20 @@ function nested(d: Diagnostic, prefix: string): Diagnostic {
  *
  * - hook phases and directives are known
  * - node ids are unique; edges name known nodes; `END` is never a source and
- *   `START` never a target; there is an edge from `START`
+ *   `START` never an edge target; there is an edge from `START`
  * - every node type is registered and its `with` matches that type's schema
- * - graph `inputs` and `triggers` are well formed
  *
- * Nested graphs also get {@link graphBodyLintDiagnostics}. `validateSpec`
- * reports these with the other lints, `compileGraph` refuses a spec with any
- * error among them, and `loadGraph` applies `validateSpec` to `uses` files.
+ * `compileGraph` refuses a spec with any error among these. `validateSpec`
+ * passes `lints: true` and reports the rest of its lints alongside, and
+ * `loadGraph` applies `validateSpec` to `uses` files.
  */
-export function graphStructureDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function graphStructureDiagnostics(spec: GraphSpec, options: GraphStructureOptions = {}): Diagnostic[] {
   const out: Diagnostic[] = [];
-  graphStructure(spec, "", out);
+  graphStructure(spec, "", out, options.lints === true);
   return out;
 }
 
-function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[]): void {
+function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean): void {
   const push = (...items: Diagnostic[]) => out.push(...(prefix ? items.map((d) => nested(d, prefix)) : items));
   const nodes = Array.isArray(spec.nodes) ? spec.nodes : [];
   const edges = Array.isArray(spec.edges) ? spec.edges : [];
@@ -1364,14 +1373,16 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[]): voi
     if (!allTargets.has(node.id)) push({ severity: "warning", code: "NO_INBOUND_EDGE", message: `Node "${node.id}" has no inbound edges`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
   }
 
-  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out);
+  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out, lints);
 
-  push(...inputFieldDiagnostics(spec), ...triggerDiagnostics(spec));
-  if (prefix) push(...graphBodyLintDiagnostics(spec));
+  if (lints) {
+    push(...inputFieldDiagnostics(spec), ...triggerDiagnostics(spec));
+    if (prefix) push(...graphBodyLintDiagnostics(spec));
+  }
 }
 
 /** Type registration and `with` shape for one node, then the graphs nested in it. */
-function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[]): void {
+function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean): void {
   const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
   const factory = registry.get(node.type);
   if (!factory) {
@@ -1395,11 +1406,11 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
     // A body without a type is already reported against the map's own `with`.
     if (isRecord(body) && typeof body.type === "string") {
       const id = typeof body.id === "string" ? body.id : undefined;
-      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out);
+      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out, lints);
     }
   }
   if (node.type === "subgraph" && isRecord(node.spec) && Array.isArray(node.spec.nodes)) {
-    graphStructure(node.spec, `${prefix}${path}.spec.`, out);
+    graphStructure(node.spec, `${prefix}${path}.spec.`, out, lints);
   }
 }
 

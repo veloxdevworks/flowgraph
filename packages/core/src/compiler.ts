@@ -1519,7 +1519,8 @@ async function assembleCompiledLangGraph(
     });
     assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
   }
-  // The errors validateSpec reports for the graph, its map bodies and inline subgraphs.
+  // The structural errors validateSpec reports for the graph, its map bodies and inline
+  // subgraphs; lints such as inputs, triggers and hitl routes stay validate-time at every level.
   // After imports and extra factories, so plugin types resolve.
   const invalid = graphStructureDiagnostics(spec).filter((d) => d.severity === "error");
   if (invalid.length) {
