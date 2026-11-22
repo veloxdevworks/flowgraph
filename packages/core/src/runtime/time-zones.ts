@@ -1,14 +1,14 @@
 /**
  * IANA time zone names from tzdata 2026f, which is in the public domain.
  *
- * Source: https://data.iana.org/time-zones/releases/tzdata2026f.tar.gz
- * Names are the Zone and Link entries in africa, antarctica, asia,
- * australasia, europe, northamerica, southamerica, etcetera, and backward.
- * backzone and the Factory zone are not included.
+ * Refresh by hand, not in CI:
+ *   node scripts/generate-time-zones.mjs path/to/tzdata.zi
  *
- * The abbreviations CET, EET, EST, HST, MET, MST, and WET appear there as
- * links and are left out. cron-schedule.ts lists every abbreviation this
- * check rejects.
+ * Source: https://data.iana.org/time-zones/releases/tzdata2026f.tar.gz
+ * `tzdata.zi` is the text file from `make tzdata.zi` in that release.
+ * The script keeps Zone and Link names and drops Factory and the abbreviations
+ * listed in cron-schedule.ts. UTC and GMT stay. backzone is not part of that file.
+ * This list was generated from 2026f.
  */
 export const TIME_ZONE_NAMES: readonly string[] = [
   "Africa/Abidjan",
