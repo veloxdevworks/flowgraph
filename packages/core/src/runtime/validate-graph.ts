@@ -1297,11 +1297,46 @@ export function defaultModelDiagnostics(spec: GraphSpec): Diagnostic[] {
 }
 
 /**
+ * True when every node, edge, and hook has the strings the body lints read.
+ * A missing or non-string field is left to the schema diagnostic.
+ */
+function lintableGraph(spec: GraphSpec): boolean {
+  if (!Array.isArray(spec.nodes) || !Array.isArray(spec.edges)) return false;
+  for (const node of spec.nodes) {
+    if (!isRecord(node) || typeof node.id !== "string" || typeof node.type !== "string") return false;
+    const onError = (node.on as { error?: unknown } | undefined)?.error;
+    if (onError !== undefined && typeof onError !== "string") return false;
+    const routes = (node.with as { routes?: unknown } | undefined)?.routes;
+    if (routes !== undefined && (typeof routes !== "object" || routes === null)) return false;
+  }
+  for (const edge of spec.edges) {
+    if (!isRecord(edge)) return false;
+    const from = edge.from;
+    if (typeof from !== "string" && !(Array.isArray(from) && from.every((item) => typeof item === "string"))) return false;
+    if ("to" in edge) {
+      const to = edge.to;
+      if (typeof to !== "string" && !(Array.isArray(to) && to.every((item) => typeof item === "string"))) return false;
+    } else if (!Array.isArray(edge.branch) || edge.branch.some((entry) => !isRecord(entry) || typeof entry.to !== "string")) {
+      return false;
+    }
+  }
+  const hooks = spec.runtime?.hooks;
+  if (hooks !== undefined && !Array.isArray(hooks)) return false;
+  if (Array.isArray(hooks)) {
+    for (const hook of hooks) {
+      if (!isRecord(hook) || typeof hook.on !== "string" || typeof hook.do !== "string") return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Lints that read only one graph's own nodes, edges and channels. Run on each
  * nested graph (inline subgraph `spec`); the top level gets them, and the lints
  * that walk the whole tree, from {@link graphLintDiagnostics}.
  */
 export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+  if (!lintableGraph(spec)) return [];
   return [
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
@@ -1469,17 +1504,56 @@ export function graphStructureDiagnostics(spec: GraphSpec, options: GraphStructu
   return out;
 }
 
+function stringOrStrings(value: unknown): value is string | string[] {
+  return typeof value === "string" || (Array.isArray(value) && value.every((item) => typeof item === "string"));
+}
+
+function isNodeSpec(value: unknown): value is NodeSpec {
+  return isRecord(value) && typeof value.id === "string" && typeof value.type === "string";
+}
+
+function isEdgeSpec(value: unknown): value is GraphSpec["edges"][number] {
+  if (!isRecord(value) || !stringOrStrings(value.from)) return false;
+  if ("to" in value) return stringOrStrings(value.to);
+  return Array.isArray(value.branch) && value.branch.every((entry) => isRecord(entry) && typeof entry.to === "string");
+}
+
+function edgeTargets(edge: GraphSpec["edges"][number]): string[] {
+  if ("to" in edge) return Array.isArray(edge.to) ? edge.to : [edge.to];
+  return edge.branch.map((entry) => entry.to);
+}
+
 function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean): void {
   const push = (...items: Diagnostic[]) => out.push(...(prefix ? items.map((d) => nested(d, prefix)) : items));
-  const nodes = Array.isArray(spec.nodes) ? spec.nodes : [];
-  const edges = Array.isArray(spec.edges) ? spec.edges : [];
+  const rawNodes = (Array.isArray(spec.nodes) ? spec.nodes : []) as unknown[];
+  const rawEdges = (Array.isArray(spec.edges) ? spec.edges : []) as unknown[];
+  const rawHooks = spec.runtime?.hooks as unknown;
 
-  for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
-    if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook event "${hook.on}".` });
+  if (rawHooks !== undefined && !Array.isArray(rawHooks)) {
+    push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: "runtime.hooks", message: "Expected array" });
   }
-  for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
+  for (const [index, hook] of (Array.isArray(rawHooks) ? rawHooks : []).entries()) {
+    if (!isRecord(hook) || typeof hook.on !== "string") {
+      push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: isRecord(hook) && hook.on !== undefined ? "Expected string" : "Required" });
+      continue;
+    }
+    if (typeof hook.do !== "string") {
+      push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: hook.do === undefined ? "Required" : "Expected string" });
+      continue;
+    }
+    if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook event "${hook.on}".` });
     if (!knownHookDirective(hook.do, hook.on)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Hook directive "${hook.do}" is not valid for ${hook.on}. ${hookVerbMessage(hook.on)}` });
   }
+
+  for (const [index, node] of rawNodes.entries()) {
+    if (!isRecord(node) || typeof node.id !== "string") {
+      push({ severity: "error", code: "UNKNOWN_NODE_REF", path: `nodes[${index}].id`, message: isRecord(node) && node.id !== undefined ? "Expected string" : "Required" });
+    }
+    if (!isRecord(node) || typeof node.type !== "string") {
+      push({ severity: "error", code: "UNKNOWN_NODE_TYPE", path: `nodes[${index}].type`, message: isRecord(node) && node.type !== undefined ? "Expected string" : "Required" });
+    }
+  }
+  const nodes = rawNodes.filter(isNodeSpec);
 
   const nodeIds = new Set(nodes.map((n) => n.id));
   const seen = new Set<string>();
@@ -1488,12 +1562,25 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
     seen.add(node.id);
   }
 
-  for (const [index, edge] of edges.entries()) {
+  for (const [index, edge] of rawEdges.entries()) {
+    if (isEdgeSpec(edge)) continue;
+    const from = isRecord(edge) ? edge.from : undefined;
+    const to = isRecord(edge) && "to" in edge ? edge.to : undefined;
+    if (!isRecord(edge) || !stringOrStrings(from)) {
+      push({ severity: "error", code: "UNKNOWN_NODE_REF", path: `edges[${index}].from`, message: isRecord(edge) && from !== undefined ? "Expected string" : "Required" });
+    }
+    if (!isRecord(edge) || ("to" in edge ? !stringOrStrings(to) : !Array.isArray(edge.branch))) {
+      push({ severity: "error", code: "UNKNOWN_NODE_REF", path: `edges[${index}].to`, message: isRecord(edge) && to !== undefined ? "Expected string" : "Required" });
+    }
+  }
+  const edges = rawEdges.flatMap((edge, index) => (isEdgeSpec(edge) ? [{ edge, index }] : []));
+
+  for (const { edge, index } of edges) {
     const check = (ref: string) => {
       if (ref === "START" || ref === "END") return;
       if (!nodeIds.has(ref)) push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"`, ...(prefix ? { path: `edges[${index}]` } : {}) });
     };
-    const targets = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : edge.branch.map((b) => b.to);
+    const targets = edgeTargets(edge);
     // A `from` list is checked in barrierEdgeDiagnostics, including unknown ids, START and END.
     if (!Array.isArray(edge.from)) {
       check(edge.from);
@@ -1507,14 +1594,13 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
     }
   }
 
-  if (!edges.some((e) => (Array.isArray(e.from) ? e.from : [e.from]).includes("START"))) {
+  if (!edges.some(({ edge }) => (Array.isArray(edge.from) ? edge.from : [edge.from]).includes("START"))) {
     push({ severity: "error", code: "NO_START_EDGE", message: 'Graph has no edge from "START"', ...(prefix ? { path: "edges" } : {}) });
   }
 
   const allTargets = new Set<string>();
-  for (const edge of edges) {
-    if ("to" in edge) for (const t of Array.isArray(edge.to) ? edge.to : [edge.to]) allTargets.add(t);
-    if ("branch" in edge) for (const b of edge.branch) allTargets.add(b.to);
+  for (const { edge } of edges) {
+    for (const target of edgeTargets(edge)) allTargets.add(target);
   }
   // A router's or routing hitl's own `with.routes` also lead somewhere.
   for (const node of nodes) {
@@ -1551,7 +1637,13 @@ function graphStructureChecksHook(value: unknown, issuePath: ReadonlyArray<Prope
     if (!cursor || typeof cursor !== "object") return false;
     cursor = (cursor as Record<PropertyKey, unknown>)[segment];
   }
-  return !!cursor && typeof cursor === "object" && Array.isArray((cursor as { nodes?: unknown }).nodes);
+  if (!cursor || typeof cursor !== "object" || !Array.isArray((cursor as { nodes?: unknown }).nodes)) return false;
+  const index = issuePath[hooksAt + 1];
+  const hooks = (cursor as { runtime?: { hooks?: unknown } }).runtime?.hooks;
+  if (typeof index !== "number" || !Array.isArray(hooks)) return false;
+  const hook = hooks[index];
+  // A missing or non-string field keeps the schema message, such as "Required".
+  return isRecord(hook) && typeof hook[field] === "string";
 }
 
 /** Type registration and `with` shape for one node, then the graphs nested in it. */
