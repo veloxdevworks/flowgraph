@@ -205,7 +205,7 @@ state:
 
 `type` is shorthand for a schema with just that type. `schema` adds a draft-07 JSON Schema that every write to the channel must satisfy; a write that does not throws `ChannelWriteError` (code `CHANNEL_WRITE_INVALID`). The channel `items` and `properties` fields were removed in favour of `schema`; `flowgraph migrate` rewrites them. See [05 — Channel contracts](./05-state-and-data.md#channel-contracts).
 
-If `state` is omitted, a default single `messages` channel is assumed (chat-style graph).
+If `state` is omitted, no `messages` channel is created automatically — only the reserved `outputs` channel (plus any declared `inputs` keys and auto-declared `output` targets) is created. Declare a `type: messages` channel explicitly if the graph needs chat history.
 
 A `messages` channel appends messages and updates or deletes them by id. A `RemoveMessage` whose id is not in the channel does nothing — it used to throw — and the run emits a warning log. An id added earlier in the same write still counts, so `[m3, Remove(m3)]` removes `m3`. A repeated removal of an id that is already gone is ignored.
 
@@ -260,12 +260,12 @@ nodes:
 
 - A label is `namespace:value`, for example `os:windows`, `app:cc5`, `plugin:@acme/cc5-nodes`, `flowgraph:0.42`. The namespace starts with a lowercase letter; the value starts with a letter, digit or `@`.
 - `labels` is all-of. The graph never names hosts or URLs; `target` is a name that the host's topology resolves.
-- `runsOn` on `hitl`, `workshop` or `wait` is an error (`PLACEMENT_NOT_ALLOWED`): gates run on the coordinator, and a gate inside a placed subgraph is forwarded to it.
+- `runsOn` on `hitl`, `workshop` or `wait` is an error (`PLACEMENT_NOT_ALLOWED`): gates run on the coordinator, and gates inside a placed subgraph are not forwarded.
 - A subgraph with `runsOn` may not contain a node with `runsOn`, inline or through `uses:` (`PLACEMENT_NESTED`).
 - Only top-level nodes are placed. `runsOn` on a node inside an unplaced subgraph (inline, through `uses:`, or a `map` inner node) is an error (`PLACEMENT_NOT_TOP_LEVEL`): it would be ignored and the node run on the coordinator. Set `runsOn` on the top-level subgraph node instead.
 - Two directly connected nodes with the same labels and `target` produce the warning `PLACEMENT_ADJACENT_HOPS`: each is its own round trip through the coordinator, so group them in a subgraph.
 
-A node whose labels the local host satisfies runs in-process as usual. Otherwise the engine dispatches it to a matching worker from the host's topology, or fails before the run starts with `PLACEMENT_UNSATISFIED`. How placed nodes are resolved, named, reconnected and reported is in [07 — Runtime §6a](./07-runtime-and-execution.md#6a-node-placement); the design is [ADR-0020](./adr/0020-node-placement.md). `runsOn.wait` is rejected: queueing for a matching worker is not available. Gates inside a placed subgraph are not forwarded (`PLACEMENT_GATE_NOT_FORWARDED` warns), and artifacts are not staged.
+A node whose labels the local host satisfies runs in-process as usual. Otherwise the engine dispatches it to a matching worker from the host's topology, or fails before the run starts with `PLACEMENT_UNSATISFIED`. How placed nodes are resolved, named, reconnected and reported is in [07 — Runtime §6a](./07-runtime-and-execution.md#6a-node-placement); the design is [ADR-0020](./adr/0020-node-placement.md). `runsOn.wait` is rejected: queueing for a matching worker is not available. Gates inside a placed subgraph are not forwarded (`PLACEMENT_GATE_NOT_FORWARDED` warns). Only `Artifact` records are staged across machines (by `sha256`); bare path strings are passed as-is.
 
 ## 6. `edges`
 
@@ -323,7 +323,7 @@ edges:
 
 `from` must be a node id or a list of at least two distinct node ids. The same syntax is in [examples/join-barrier](../examples/join-barrier/uneven-join.graph.yaml). A barrier cannot target `END`, cannot list `END` or `START` as a source, and cannot list its own target in `from` (`BARRIER_SELF_SOURCE`): the join would wait for itself to finish. Every source must be reachable by static edges. A source that can only be reached through a conditional branch, a router, or a `hitl` node that declares `with.routes` is an error (`BARRIER_CONDITIONAL_SOURCE`): the join waits for every listed source, so a path that is skipped would leave it waiting. Edges out of those nodes are not static. The compiler follows the declared route and does not install their `to` edges.
 
-A node listed in `from` cannot carry a recovery route (`BARRIER_RECOVERY_SOURCE`). That is `on.error: route:...` on the node, the same field on a `map` item, or a hook whose `do` is `route:...`. If that node failed, the barrier would still see it finish, and the join would run at the same time as the recovery route.
+A node listed in `from` cannot carry a recovery route (`BARRIER_RECOVERY_SOURCE`). That is `on.error: route:...` on the node, the same field on a `map` item, or a hook whose `do` is `route:...`. If that node failed, the barrier would still see it finish, and the join would run at the same time as the recovery route. The same check applies to programmatic `node:error` hooks passed via `compileGraph(spec, { hooks })`: because a programmatic hook chooses its target at run time, a `node:error` hook with no `where` (or a `where` matching a barrier source) makes every barrier in the graph fail with `BARRIER_RECOVERY_SOURCE`. Scope programmatic `node:error` hooks with `where: { nodeId }` or `where: { nodeType }` to avoid matching barrier sources.
 
 A recovery route on a node that is not itself a barrier source stays allowed. Its ordinary `to` edges still run when the node succeeds. If that node fails before a downstream barrier source is reached, the source never finishes, so the join does not run. The run still reports completed when the recovery route reaches the end of the graph.
 
@@ -422,7 +422,7 @@ nodes:
 | `{ to: X }` and/or `{ map: {…} }` | Apply those projections **and** still write `state.outputs.<nodeId>` |
 | `{ to: X }` and/or `{ map: {…} }` with `raw: false` | Apply only those projections; `state.outputs.<nodeId>` is not written |
 
-- `input:` is the node's one input path. It accepts any value (an object, a string, a list, a number or `null`), and every `{{ … }}` template inside it is rendered, at any depth. The rendered value is available to the node's `with` expressions as `{{ input }}` (`{{ input.name }}` when it is an object), and it is the payload the node executes with: a skill gets it as its declared inputs, a `function` handler and a `script` get it as their argument, and a `shell` command gets it as `FLOWGRAPH_INPUT` and stdin. `input` and `when` render without `secret` in scope; `flowgraph validate` reports `{{ secret.X }}` there as `SECRET_OUT_OF_SCOPE`, so read secrets in `with`. `with.input` was removed from `function`, `script` and `shell`; `flowgraph migrate` moves it to `input:`. When a node is exposed as a tool, the model's arguments are its input and the node's own `input:` is not used.
+- `input:` is the node's one input path. It accepts any value (an object, a string, a list, a number or `null`), and every `{{ … }}` template inside it is rendered, at any depth. The rendered value is available to the node's `with` expressions as `{{ input }}` (`{{ input.name }}` when it is an object), and it is the payload the node executes with: a skill gets it as its declared inputs, a `function` handler and a `script` get it as their argument (for `function` nodes, `input: null` reaches the handler as `{}`), and a `shell` command gets it as `FLOWGRAPH_INPUT` and stdin. `input` and `when` render without `secret` in scope; `flowgraph validate` reports `{{ secret.X }}` there as `SECRET_OUT_OF_SCOPE`, so read secrets in `with`. `with.input` was removed from `function`, `script` and `shell`; `flowgraph migrate` moves it to `input:`. When a node is exposed as a tool, the model's arguments are its input and the node's own `input:` is not used.
 - `to` / `map` are optional overrides for shared/typed/reducer-backed channels (e.g. parallel fan-in into one `append` channel) or field projection.
 - **Exception — `subgraph`:** when `output` and `stateMap.out` are both omitted, channels that **share a name** merge back and the parent's reducer combines only the child's new values. Use `output: none` to write nothing, `output.to` / `output.map` for a normal node projection, or `stateMap.out` (`parentChannel: childChannel`) for an explicit mapping. `stateMap.out` and `output` are alternatives: a node that sets both is rejected. See [05 — Subgraph merge-back](./05-state-and-data.md#subgraph-merge-back).
 - `raw: false` keeps large or sensitive results out of state and checkpoints while still passing on the fields you project. It needs `to` or `map`; to write nothing, use `output: none`. Anything that reads `state.outputs.<nodeId>` (for example a gate's `round`) then sees no previous value.
@@ -451,7 +451,7 @@ runtime:
     maxAttempts: 2
     backoff: exponential
   timeoutDefault: 300s            # default for every node that omits timeout
-  recursionLimit: 50            # max supersteps for graph-level loops (default: 25)
+  recursionLimit: 50            # max supersteps for graph-level loops (default: 1000)
   concurrency: 4                # max parallel branches per superstep
   hooks:
     - on: agent:beforeToolCall

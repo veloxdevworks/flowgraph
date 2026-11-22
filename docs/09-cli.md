@@ -242,15 +242,15 @@ See [15 — MCP operations](./15-mcp-operations.md) for OAuth, token storage, an
 ```
 flowgraph new my-flow                    # default: hello (zero-code skill graph)
 flowgraph new my-api --template http
-flowgraph new my-agent --template intelligent
+flowgraph new my-agent --template agent
 flowgraph new my-code --template minimal
 flowgraph init my-flow                   # alias for new
 ```
 
-Templates: `hello` (default), `minimal`, `http`, `intelligent`.
+Templates: `hello` (default), `minimal`, `http`, `agent`.
 
 - **`hello`** — writes `<name>.graph.yaml` plus `skills/hello/` (SKILL.md + handler.js). Runnable immediately with `flowgraph run` — no TypeScript registration.
-- **`minimal`**, **`http`**, **`intelligent`** — single `<name>.graph.yaml` only.
+- **`minimal`**, **`http`**, **`agent`** — single `<name>.graph.yaml` only.
 
 **Planned:** Full project scaffold (`package.json`, `graphs/`, `skills/`, `.env.example`, `flowgraph.config.ts`) and `flowgraph new skill <name>`.
 

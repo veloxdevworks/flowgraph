@@ -61,7 +61,7 @@ flowgraph validate my-flow.graph.yaml
 flowgraph run my-flow.graph.yaml --stream --input 'name=World'
 ```
 
-The default **`hello`** template scaffolds a graph plus `skills/hello/` — runnable immediately with no TypeScript registration. Other templates: `minimal`, `http`, `intelligent`. See [09 — CLI](./09-cli.md).
+The default **`hello`** template scaffolds a graph plus `skills/hello/` — runnable immediately with no TypeScript registration. Other templates: `minimal`, `http`, `agent`. See [09 — CLI](./09-cli.md).
 
 ## Editor autocomplete (JSON Schema)
 
@@ -94,7 +94,7 @@ flowgraph uses a **hybrid model**: YAML declares topology and config; logic live
 | **`agent` node** | LLM agent with tool loop | LangChain vendor SDK (e.g. `@langchain/openai`) + API key — adapter is built into `@flowgraph/core` / CLI |
 | **`mcp` node** or agent MCP tools | External tool servers | MCP config + optional OAuth |
 
-**Rule of thumb:** If your handler can be a plain ESM module on disk, use a **skill**. If you need tight integration with your app's runtime, use **`code`** with registration.
+**Rule of thumb:** If your handler can be a plain ESM module on disk, use a **skill**. If you need tight integration with your app's runtime, use **`function`** with registration.
 
 ## Next steps
 

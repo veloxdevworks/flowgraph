@@ -233,7 +233,7 @@ nodes:
       collect: { to: findings }
 ```
 
-**Graph-level loops** (edges that route back to an earlier node) are bounded by `runtime.recursionLimit` (LangGraph supersteps; default 25):
+**Graph-level loops** (edges that route back to an earlier node) are bounded by `runtime.recursionLimit` (LangGraph supersteps; default 1000):
 
 ```yaml
 runtime:
