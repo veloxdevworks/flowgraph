@@ -6,7 +6,7 @@ version: 0.1.0
 description: >
   Count words, characters, and sentences in a piece of text.
 
-kind_of: executable
+kindOf: executable
 handler: ./handler.js
 
 inputs:
@@ -26,7 +26,6 @@ outputs:
     type: number
     description: Number of sentences
 
-sideEffecting: false
 timeout: 5s
 ---
 

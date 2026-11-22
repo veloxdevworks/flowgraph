@@ -294,14 +294,15 @@ async function loadChild(
     });
   };
 
+  const hostOpts = subgraphHostOptions(ctx);
   const extraContext: Record<symbol, unknown> = {};
   const ctxSymbols = ctx as unknown as Record<symbol, unknown>;
-  for (const sym of registry.subgraphContextSymbols()) {
+  for (const sym of (hostOpts.registry ?? registry).subgraphContextSymbols()) {
     if (sym in ctxSymbols) extraContext[sym] = ctxSymbols[sym];
   }
 
   const { compiledLg } = await compileGraphForEmbedding(spec, {
-    ...subgraphHostOptions(ctx),
+    ...hostOpts,
     cwd,
     workspace: resolveGraphWorkspace(spec, ctx.workspace),
     sinks: [forwardSink],
@@ -330,13 +331,9 @@ async function loadChild(
 
 /**
  * The child shares the parent's long-term store (one store per run tree), so memory
- * written by a subgraph is visible to the parent and vice versa. A child that opts out
- * (`runtime.store.enabled: false` or `backend: none`) gets no store; otherwise the child's
- * own `runtime.store.backend` is ignored — the host decides the backend, not the child.
+ * written by a subgraph is visible to the parent and vice versa.
  */
-function childStore(spec: GraphSpec, ctx: NodeRunContext): BaseStore | "none" {
-  const childRuntime = spec.runtime?.store;
-  if (childRuntime?.enabled === false || childRuntime?.backend === "none") return "none";
+function childStore(_spec: GraphSpec, ctx: NodeRunContext): BaseStore | "none" {
   return ctx.store ?? "none";
 }
 

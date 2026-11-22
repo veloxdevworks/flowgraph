@@ -1,6 +1,8 @@
 import type { NodeRunContext, RunConfig } from "../context.js";
 import type { Hook, HookPhase } from "../hooks/types.js";
 import type { McpHub } from "../mcp/types.js";
+import type { NodeRegistry } from "../registry.js";
+import type { ProviderPlugin } from "../providers/types.js";
 
 /** Compile-time host options, separate from a graph's effective runtime config. */
 export const SUBGRAPH_HOST_CONTEXT = Symbol.for("flowgraph.subgraphHostContext");
@@ -8,6 +10,10 @@ export const SUBGRAPH_HOST_CONTEXT = Symbol.for("flowgraph.subgraphHostContext")
 interface SubgraphHostContext {
   hooks: Hook[];
   runConfig: Pick<RunConfig, "vars" | "defaults" | "permission">;
+  registry?: NodeRegistry;
+  providerPlugins?: ProviderPlugin[];
+  providerPluginSources?: Record<string, string>;
+  providerSources?: Record<string, string>;
 }
 
 // A child executes nodes within the root invocation, not another run/interrupt lifecycle.
@@ -54,12 +60,24 @@ function copyHostOverrides(
 export function captureSubgraphHostContext(options: {
   hooks?: Hook[];
   runConfig?: RunConfig;
+  registry?: NodeRegistry;
+  providerPlugins?: ProviderPlugin[];
+  providerPluginSources?: Record<string, string>;
+  providerSources?: Record<string, string>;
 }): SubgraphHostContext {
   return {
     hooks: (options.hooks ?? [])
       .filter((hook) => CHILD_HOOK_PHASES.has(hook.phase))
       .map((hook) => ({ ...hook, ...(hook.where ? { where: { ...hook.where } } : {}) })),
     runConfig: copyHostOverrides(options.runConfig),
+    ...(options.registry ? { registry: options.registry } : {}),
+    ...(options.providerPlugins?.length ? { providerPlugins: [...options.providerPlugins] } : {}),
+    ...(options.providerPluginSources && Object.keys(options.providerPluginSources).length > 0
+      ? { providerPluginSources: { ...options.providerPluginSources } }
+      : {}),
+    ...(options.providerSources && Object.keys(options.providerSources).length > 0
+      ? { providerSources: { ...options.providerSources } }
+      : {}),
   };
 }
 
@@ -72,11 +90,24 @@ export function subgraphHostOptions(ctx: NodeRunContext): {
   mcp?: McpHub;
   hooks?: Hook[];
   runConfig?: RunConfig;
+  registry?: NodeRegistry;
+  providerPlugins?: ProviderPlugin[];
+  providerPluginSources?: Record<string, string>;
+  providerSources?: Record<string, string>;
 } {
   const host = (ctx as unknown as Record<symbol, unknown>)[SUBGRAPH_HOST_CONTEXT] as
     SubgraphHostContext | undefined;
   return {
     ...(ctx.mcp ? { mcp: ctx.mcp } : {}),
-    ...(host ? { hooks: host.hooks, runConfig: copyHostOverrides(host.runConfig) } : {}),
+    ...(host
+      ? {
+          hooks: host.hooks,
+          runConfig: copyHostOverrides(host.runConfig),
+          ...(host.registry ? { registry: host.registry } : {}),
+          ...(host.providerPlugins ? { providerPlugins: host.providerPlugins } : {}),
+          ...(host.providerPluginSources ? { providerPluginSources: { ...host.providerPluginSources } } : {}),
+          ...(host.providerSources ? { providerSources: { ...host.providerSources } } : {}),
+        }
+      : {}),
   };
 }

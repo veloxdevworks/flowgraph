@@ -395,30 +395,42 @@ edges:
   });
 });
 
-describe("normalizeNodeTypeAliases", () => {
-  it("rewrites deprecated code/intelligent types and hook phases", async () => {
-    const { normalizeNodeTypeAliases } = await import("./loader.js");
-    const parsed = normalizeNodeTypeAliases({
-      nodes: [
-        { id: "a", type: "code", with: { fn: "x" } },
-        { id: "b", type: "intelligent", with: { prompt: "hi" } },
-        {
-          id: "m",
-          type: "map",
-          with: { items: "{{ state.xs }}", node: { type: "code", with: { fn: "y" } } },
-        },
-      ],
-      runtime: {
-        hooks: [{ on: "intelligent:beforeToolCall", do: "interrupt" }],
-      },
-    }) as {
-      nodes: Array<{ type: string; with?: { node?: { type: string } } }>;
-      runtime: { hooks: Array<{ on: string }> };
-    };
-    expect(parsed.nodes[0]!.type).toBe("function");
-    expect(parsed.nodes[1]!.type).toBe("agent");
-    expect(parsed.nodes[2]!.with?.node?.type).toBe("function");
-    expect(parsed.runtime.hooks[0]!.on).toBe("agent:beforeToolCall");
+describe("pre-v1 node type and hook aliases are removed", () => {
+  it("rejects code, intelligent, and intelligent:* hook events", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-aliases-removed-"));
+    try {
+      const file = path.join(dir, "legacy.graph.yaml");
+      await fs.writeFile(
+        file,
+        `apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: legacy-aliases
+nodes:
+  - id: a
+    type: code
+    with: { fn: x }
+  - id: b
+    type: intelligent
+    with: { prompt: hi }
+edges:
+  - { from: START, to: a }
+  - { from: a, to: b }
+  - { from: b, to: END }
+runtime:
+  hooks:
+    - on: intelligent:beforeToolCall
+      do: interrupt
+`,
+      );
+      const { spec, diagnostics } = await loadGraph(file, { cwd: dir });
+      expect(spec).toBeNull();
+      expect(diagnostics.some((d) => d.code === "UNKNOWN_NODE_TYPE" && d.message.includes('"code"'))).toBe(true);
+      expect(diagnostics.some((d) => d.code === "UNKNOWN_NODE_TYPE" && d.message.includes('"intelligent"'))).toBe(true);
+      expect(diagnostics.some((d) => d.message.includes('Unknown hook event "intelligent:beforeToolCall"'))).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

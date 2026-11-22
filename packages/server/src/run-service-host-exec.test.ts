@@ -182,8 +182,8 @@ nodes:
   - { id: gate, type: hitl, with: { mode: approve, message: "ok?", output: { to: approval } } }
   - id: a
     type: agent
+    provider: mock
     with:
-      provider: mock
       prompt: "check services"
       tools: [{ function: list_services }]
       output: { to: out }

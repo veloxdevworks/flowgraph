@@ -8,7 +8,18 @@ import { hookEventFires, hookVerbAllowed, hookVerbMessage } from "./hooks.js";
 // ---------------------------------------------------------------------------
 
 export const VersionSchema = z.literal("flowgraph/v1");
-export const KindSchema = z.union([z.literal("Graph"), z.literal("Skill"), z.literal("Subgraph")]);
+export const KindSchema = z.literal("Graph");
+
+/**
+ * Namespaced plugin node type: `<namespace>:<name>`, `<namespace>/<name>`,
+ * or `@<scope>/<pkg>:<name>` / `@<scope>/<pkg>/<name>`.
+ */
+export const PLUGIN_NODE_TYPE_PATTERN =
+  /^(?:@[a-z0-9][a-z0-9-]*\/)?[a-z][a-z0-9-]*[:/][a-z][a-z0-9-]*$/;
+
+export function isNamespacedPluginType(type: string): boolean {
+  return PLUGIN_NODE_TYPE_PATTERN.test(type);
+}
 
 export const MetadataSchema = z.object({
   name: z
@@ -282,8 +293,6 @@ export const ChannelSchema = z
 export const StateSchema = z.object({
   channels: z.record(ChannelSchema),
 });
-
-
 // ---------------------------------------------------------------------------
 // Output mapping
 // ---------------------------------------------------------------------------
@@ -531,24 +540,11 @@ export const AgentWithSchema = BaseWithSchema.extend({
   maxSteps: z.number().int().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
   permission: z.union([z.literal("auto"), z.literal("ask"), z.literal("deny")]).optional(),
-  /**
-   * Optional hub implementation for this agent node. `deepagents` reuses the
-   * graph's LangChain ChatModel/key (see `@flowgraph/provider-deepagents`).
-   */
-  hub: z.enum(["deepagents"]).optional(),
   /** Long-term memory: recall into the prompt within a token budget, and the `remember` tool. */
   memory: AgentMemorySchema.optional(),
   /** Context budget and history management (see AgentContextSchema). */
   context: AgentContextSchema.optional(),
-  // provider-namespaced escape hatches (any shape)
-  claude: z.record(z.unknown()).optional(),
-  cursor: z.record(z.unknown()).optional(),
-  langchain: z.record(z.unknown()).optional(),
-  deepagents: z.record(z.unknown()).optional(),
-});
-
-/** @deprecated Use AgentWithSchema */
-export const IntelligentWithSchema = AgentWithSchema;
+}).strict();
 
 // skill node
 export const SkillWithSchema = BaseWithSchema;
@@ -593,7 +589,6 @@ export const RouterWithSchema = z
     mode: z.union([z.literal("rules"), z.literal("model")]).default("rules"),
     input: z.string().optional(),
     instruction: z.string().optional(),
-    provider: z.string().optional(),
     routes: z.array(RouterRouteSchema, {
       invalid_type_error: "routes must be a list of - name: entries",
       required_error: "routes must be a list of - name: entries",
@@ -601,6 +596,7 @@ export const RouterWithSchema = z
     match: z.union([z.literal("firstMatch"), z.literal("allMatches")]).optional().default("firstMatch"),
     output: OutputMappingSchema.optional(),
   })
+  .strict()
   .superRefine((value, ctx) => {
     if (value.mode === "model" && value.match === "allMatches") {
       ctx.addIssue({
@@ -680,13 +676,7 @@ export const HttpWithSchema = BaseWithSchema.extend({
     .boolean()
     .optional()
     .describe("Send at most once per run (idempotent across checkpoint replays)"),
-  timeout: relocatedField(
-    "http with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-  ),
-  retry: relocatedField(
-    "http with.retry is not supported; set retry on the node, or runtime.retry as a graph default",
-  ),
-});
+}).strict();
 
 export const ToolRequireSchema = z.object({
   bin: z.string().min(1).describe("Binary that must be on PATH"),
@@ -745,9 +735,6 @@ export const MemoryWithSchema = BaseWithSchema.extend({
   }
 });
 
-/** @deprecated Use FunctionWithSchema */
-export const CodeWithSchema = FunctionWithSchema;
-
 // shell node — run a program with argv (no shell), or a fixed command line through the OS shell with `shell: true`
 export const ShellWithSchema = BaseWithSchema.extend({
   command: z
@@ -762,13 +749,10 @@ export const ShellWithSchema = BaseWithSchema.extend({
   env: z.record(z.string()).optional(),
   inheritEnv: z.array(z.string().min(1)).optional().describe("Host environment variable names to pass to the child, in addition to the default allowlist (PATH, HOME, TMPDIR, TEMP, TMP, LANG, LC_ALL, and Windows SystemRoot/WINDIR)"),
   input: relocatedField(NODE_INPUT_MOVED),
-  timeout: relocatedField(
-    "shell with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-  ),
   expect: z.object({ exitCode: z.array(z.number()).optional() }).optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
-}).superRefine((v, ctx) => {
+}).strict().superRefine((v, ctx) => {
   if (v.command.includes("{{")) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -856,13 +840,10 @@ export const ScriptWithSchema = BaseWithSchema.extend({
   file: z.string().trim().min(1).optional().describe("Self-contained ESM source file, relative to the declaring graph; mutually exclusive with code."),
   input: relocatedField(NODE_INPUT_MOVED),
   env: z.record(z.string()).optional().describe("Environment variables available to the child process"),
-  timeout: relocatedField(
-    "script with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-  ),
   permissions: ScriptPermissionsSchema.optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
-}).superRefine((value, ctx) => {
+}).strict().superRefine((value, ctx) => {
   if ((value.code !== undefined) === (value.file !== undefined)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["code"], message: "script: provide exactly one of code or file" });
   }
@@ -998,7 +979,6 @@ export const HitlWithSchema = BaseWithSchema.extend({
 // wait node — deadline / until / signal / webhook (inbound HTTP resume)
 export const WaitWithSchema = BaseWithSchema.extend({
   deadline: DurationSchema.optional().describe("In-process sleep. Not durable across a restart."),
-  duration: relocatedField("wait with.duration is not supported; rename it to deadline"),
   until: z.string().optional(),
   signal: z.string().optional().describe("Resume only when the payload names this signal"),
   timeout: DurationSchema.optional(),
@@ -1009,7 +989,7 @@ export const WaitWithSchema = BaseWithSchema.extend({
       z.object({ schema: ContractSchemaSchema.optional() }),
     ])
     .optional(),
-});
+}).strict();
 
 // mcp node — deterministic MCP tool/resource call
 export const McpWithSchema = BaseWithSchema.extend({
@@ -1081,9 +1061,6 @@ export const RunsOnObjectSchema = z
       .enum(["error", "local"])
       .optional()
       .describe("`local` runs the node here when no worker matches (default: error)"),
-    wait: relocatedField(
-      "runsOn.wait is not supported; queueing for a matching worker is not available. Remove wait, or make a matching worker available now.",
-    ),
   })
   .strict();
 
@@ -1102,11 +1079,12 @@ export interface NormalizedRunsOn {
 /** Canonical form of `runsOn`: object shape, labels deduped in order, `fallback` defaulted. */
 export function normalizeRunsOn(value: RunsOn): NormalizedRunsOn {
   if (Array.isArray(value)) return { labels: [...new Set(value)], fallback: "error" };
+  const wait = (value as { wait?: unknown }).wait;
   return {
     labels: [...new Set(value.labels)],
     ...(value.target !== undefined ? { target: value.target } : {}),
     fallback: value.fallback ?? "error",
-    ...(value.wait !== undefined ? { wait: value.wait } : {}),
+    ...(typeof wait === "string" ? { wait } : {}),
   };
 }
 
@@ -1289,19 +1267,14 @@ export const ConfigSchema = z.object({
     .object({
       provider: z.string().optional(),
       model: z.string().optional(),
-      retry: relocatedField(
-        "config.defaults.retry is not supported; set retry on the node, or runtime.retry as a graph default",
-      ),
-      timeout: relocatedField(
-        "config.defaults.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-      ),
     })
+    .strict()
     .optional(),
   vars: z.record(z.unknown()).optional(),
 });
 
 // ---------------------------------------------------------------------------
-// Providers block (LLM backends for intelligent nodes)
+// Providers block (LLM backends for agent and model-router nodes)
 // ---------------------------------------------------------------------------
 
 export const LangChainVendorSchema = z.enum([
@@ -1371,12 +1344,26 @@ export const DeepAgentsProviderConfigSchema = z.object({
   options: z.record(z.unknown()).optional(),
 });
 
+/**
+ * Third-party or custom provider plugin loaded via `imports[].providers` or registered
+ * in the host. `options` are validated by the plugin adapter at compile time.
+ */
+export const PluginProviderConfigSchema = z.object({
+  kind: z.literal("plugin"),
+  /** Registered provider plugin name; defaults to the key under `providers:`. */
+  plugin: z.string().min(1).optional(),
+  model: z.string().optional(),
+  apiKeyEnv: z.string().optional(),
+  options: z.record(z.unknown()).optional(),
+});
+
 export const CoreProviderConfigSchema = z.discriminatedUnion("kind", [
   LangChainProviderConfigSchema,
   ClaudeProviderConfigSchema,
   CursorProviderConfigSchema,
   CliProviderConfigSchema,
   DeepAgentsProviderConfigSchema,
+  PluginProviderConfigSchema,
 ]);
 
 const extensionProviderKindSchemas = new Map<string, z.ZodTypeAny>();
@@ -1427,18 +1414,6 @@ export const CheckpointBackendSchema = z.enum(["memory", "sqlite", "postgres"], 
   errorMap: (issue, ctx) =>
     issue.code === "invalid_enum_value"
       ? { message: `must be one of memory | sqlite | postgres (got "${String(issue.received)}")` }
-      : { message: ctx.defaultError },
-});
-
-/**
- * Long-term store backends. `memory` is process-local and ephemeral; `none` disables
- * `ctx.store`. `sqlite` / `postgres` are reserved for the durable store and fail at
- * compile time until a store instance is injected — there is no silent in-memory fallback.
- */
-export const StoreBackendSchema = z.enum(["memory", "none", "sqlite", "postgres"], {
-  errorMap: (issue, ctx) =>
-    issue.code === "invalid_enum_value"
-      ? { message: `must be one of memory | none | sqlite | postgres (got "${String(issue.received)}")` }
       : { message: ctx.defaultError },
 });
 
@@ -1536,20 +1511,12 @@ export const RuntimeSchema = z.object({
       enabled: z.boolean().optional().default(true),
       backend: CheckpointBackendSchema.optional().default("memory"),
       path: z.string().optional(),
-      namespace: relocatedField(
-        "runtime.checkpoint.namespace is not supported; checkpoints are already kept per thread. Remove it.",
-      ),
       /** Bound checkpoint history. Omitted means the default retention policy. */
       retention: CheckpointRetentionSchema.optional(),
     })
+    .strict()
     .optional(),
-  store: z
-    .object({
-      enabled: z.boolean().optional().default(true),
-      backend: StoreBackendSchema.optional().default("memory"),
-    })
-    .optional(),
-  /** Scoped durable memory (see RuntimeMemorySchema). Mutually exclusive with `store`. */
+  /** Scoped durable memory (see RuntimeMemorySchema). */
   memory: RuntimeMemorySchema.optional(),
   /** Embedded HTTP ingress for `wait` nodes with `webhook: true`. */
   webhookServer: z
@@ -1595,9 +1562,6 @@ export const RuntimeSchema = z.object({
     .optional(),
   hitl: z
     .object({
-      onInterrupt: relocatedField(
-        "runtime.hitl.onInterrupt is not a graph setting; the host decides how interrupts are answered (CLI --on-interrupt, or onInterrupt in run options). Remove it.",
-      ),
       breakpoints: z
         .object({
           before: z.array(z.string()).optional(),
@@ -1605,6 +1569,7 @@ export const RuntimeSchema = z.object({
         })
         .optional(),
     })
+    .strict()
     .optional(),
   retry: RetrySchema.optional(),
   timeoutDefault: DurationSchema.optional(),
@@ -1622,9 +1587,6 @@ export const RuntimeSchema = z.object({
   context: RuntimeContextSchema.optional(),
   secrets: z
     .object({
-      provider: relocatedField(
-        "runtime.secrets.provider is not supported; list the names the graph reads under the top-level secrets: and let the host supply their values.",
-      ),
       redact: z
         .object({
           patterns: z.array(z.string()).optional(),
@@ -1632,10 +1594,8 @@ export const RuntimeSchema = z.object({
         })
         .optional(),
     })
+    .strict()
     .optional(),
-  observability: relocatedField(
-    "runtime.observability is not a graph setting; configure logging and OpenTelemetry in the host (FLOWGRAPH_LOG_LEVEL, event sinks). Remove it.",
-  ),
   hooks: z
     .array(
       z
@@ -1672,7 +1632,7 @@ export const RuntimeSchema = z.object({
         }),
     )
     .optional(),
-});
+}).strict();
 
 // ---------------------------------------------------------------------------
 // Run `inputs` schema (pre-start parameters — not HITL)
@@ -1853,6 +1813,7 @@ export type ClaudeProviderConfig = z.infer<typeof ClaudeProviderConfigSchema>;
 export type CursorProviderConfig = z.infer<typeof CursorProviderConfigSchema>;
 export type CliProviderConfig = z.infer<typeof CliProviderConfigSchema>;
 export type DeepAgentsProviderConfig = z.infer<typeof DeepAgentsProviderConfigSchema>;
+export type PluginProviderConfig = z.infer<typeof PluginProviderConfigSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
 export type CliVendor = z.infer<typeof CliVendorSchema>;
 export type LangChainVendor = z.infer<typeof LangChainVendorSchema>;

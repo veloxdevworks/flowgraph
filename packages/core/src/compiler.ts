@@ -16,7 +16,7 @@ import {mkdir, realpath} from "node:fs/promises";
 import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, guardExpression, renderDeep } from "@flowgraph/expr";
-import { registry, type NodeFactory } from "./registry.js";
+import { registry, type NodeFactory, type NodeRegistry } from "./registry.js";
 import { InputValidationError, resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { SecretRedaction, SECRET_REDACTION, observeSecret, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
@@ -84,7 +84,7 @@ import {
   getWebhookRoute,
   type WebhookServerConfig,
 } from "./runtime/webhook-server.js";
-import { registerProvider, providerConfigDiagnostics, type ProviderAdapter } from "./providers/index.js";
+import { createPluginProvider, providerConfigDiagnostics, type ProviderAdapter, type ProviderPlugin } from "./providers/index.js";
 import { hostSupportDiagnostics } from "./runtime/host-support.js";
 import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
 import { ReplayStore, RUN_SCOPE_KEY, replayNodeKey, replayStoreFromInterrupts, runScopeOf, runSignalOf, type RunScope } from "./providers/replay-cache.js";
@@ -189,7 +189,15 @@ export interface CompileOptions {
    */
   placement?: CompilePlacementOptions;
   extraFactories?: NodeFactory[];
+  /** Base node/reducer registry to fork for this compile (defaults to the global base registry). */
+  registry?: NodeRegistry;
   providers?: ProviderAdapter[];
+  /** Provider plugins available to `providers.<name>: { kind: plugin }` entries in this compile. */
+  providerPlugins?: ProviderPlugin[];
+  /** Optional import provenance for inherited provider plugins (internal; propagated to subgraphs). */
+  providerPluginSources?: Record<string, string>;
+  /** Optional import provenance for inherited providers (internal; propagated to subgraphs). */
+  providerSources?: Record<string, string>;
   /**
    * Optional media providers passed through to `@flowgraph/media` when registered.
    */
@@ -430,6 +438,8 @@ interface AssembledGraph {
   interruptAfter: string[];
   defaultPolicy: InterruptPolicy;
   warnings: Diagnostic[];
+  stateChannelKeys: string[];
+  compileRegistry: NodeRegistry;
 }
 
 /** A compile warning as a run issue, so run results report it with the run's own issues. */
@@ -464,7 +474,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   const compiledAt = new Date().toISOString();
   const compileIssues = assembled.warnings.map((d) => compileWarningIssue(d, compiledAt));
   const declaredInputKeys = new Set([
-    ...Object.keys(buildStateAnnotation(graphSpec).spec),
+    ...assembled.stateChannelKeys,
     ...(Array.isArray(graphSpec.inputs) ? graphSpec.inputs : []).flatMap((field) => (field && typeof field.key === "string" ? [field.key] : [])),
   ]);
 
@@ -535,7 +545,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const update = collectMapResults(parsed.data, items, node.id, { state: values, config: baseCtx.config ?? {}, run: baseCtx.meta ?? {} });
       for (const [channel, value] of Object.entries(update)) {
         const definition = graphSpec.state?.channels[channel];
-        values[channel] = definition ? channelReducerAndDefault(channel, definition).reducer(values[channel], value) : value;
+        values[channel] = definition
+          ? channelReducerAndDefault(channel, definition, undefined, assembled.compileRegistry).reducer(values[channel], value)
+          : value;
       }
     }
     // LangGraph can retain old interrupt writes after a task finishes in a
@@ -722,6 +734,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       await hydrateDurableRuntime(snap, threadId, graphSpec, {
         executeInvoke,
         nodePolicy: opts.nodePolicy,
+        registry: assembled.compileRegistry,
         rehydrateWebhooks: mode !== "resume",
         ...(runOpts.signal ? { signal: runOpts.signal } : {}),
         ...(runOpts.sinks ? { sinks: runOpts.sinks } : {}),
@@ -941,7 +954,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
             await hooks.run("run:after", { state: clean, run: runMeta, payload: { update: clean } });
           }
           events.emit("run.end", { state: clean, durationMs: Date.now() - startMs });
-          await maybeTerminateServices(graphSpec, threadId, result, opts.nodePolicy);
+          await maybeTerminateServices(graphSpec, threadId, result, opts.nodePolicy, assembled.compileRegistry);
           return finish({ status: "completed", state: clean, runId, threadId, durationMs: Date.now() - startMs });
         }
 
@@ -1102,7 +1115,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
       if (isAbortFailure(err, runOpts.signal)) {
         events.emit("run.aborted", { message: error.message, error: error.message, durationMs: Date.now() - startMs });
-        await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
+        await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy, assembled.compileRegistry);
         return finish({ status: "aborted", state: {}, runId, threadId, error, durationMs: Date.now() - startMs });
       }
       if (hooks.has("run:error")) {
@@ -1110,7 +1123,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       }
       const terminal = flowFailure(error);
       events.emit("run.error", { ...errorInfo(error), ...(terminal ? { code: terminal.code, reason: terminal.reason } : {}), durationMs: Date.now() - startMs });
-      await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy);
+      await maybeTerminateServices(graphSpec, threadId, undefined, opts.nodePolicy, assembled.compileRegistry);
       // A thread that moved on belongs to someone else now: release this run
       // without writing its status over theirs.
       const movedOn = (err as { code?: unknown } | null)?.code === THREAD_MOVED_ON;
@@ -1163,7 +1176,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         }
         const head=await checkpointer.getTuple({configurable:{thread_id:threadId}});
         if(checkpointId&&checkpointId!==head?.checkpoint.id){
-          const sideEffects=graphSpec.nodes.some(node=>registry.get(node.type)?.capabilities?.sideEffecting||node.type==="map"||node.type==="subgraph");
+          const sideEffects=graphSpec.nodes.some(node=>assembled.compileRegistry.get(node.type)?.capabilities?.sideEffecting||node.type==="map"||node.type==="subgraph");
           if(sideEffects){
             const target=(runOpts as ResumeOptions).replayWorkspace;
             if (target) await mkdir(path.resolve(target), { recursive: true });
@@ -1384,7 +1397,7 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return toSnapshot(snap as any, threadId);
       }
-      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, nodePolicy: opts.nodePolicy, rehydrateWebhooks: true });
+      await hydrateDurableRuntime(snap, threadId, graphSpec, { executeInvoke, nodePolicy: opts.nodePolicy, registry: assembled.compileRegistry, rehydrateWebhooks: true });
       const expired = timeoutResumeCommand(snap, clock());
       if (expired) {
         try {
@@ -1480,10 +1493,6 @@ async function assembleCompiledLangGraph(
       retryable: false,
     });
   }
-  const policyNodes = (Array.isArray(spec.nodes) ? spec.nodes : []).filter((node) => node != null);
-  const policyEdges = policyNodes.flatMap((node) => recoveryTargets(spec, node, opts.hooks).map((to) => ({ from: node.id, to })));
-  const invalidTopology = topologyDiagnostics({ ...spec, edges: [...spec.edges, ...policyEdges] }).filter((d) => d.severity === "error");
-  if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
 
   const cwd = opts.cwd ?? process.cwd();
   const graphDir =
@@ -1502,24 +1511,99 @@ async function assembleCompiledLangGraph(
   const events = createEventBus({ runId, graph: spec.metadata.name, redact: value => redactSecrets(value, redaction) });
   for (const sink of opts.sinks ?? []) events.subscribe(sink);
 
+  // Fork a per-compile registry so extra factories and imported plugins/reducers
+  // never leak across compiles or mutate the global base registry.
+  const compileRegistry = (opts.registry ?? registry).fork();
   for (const extra of opts.extraFactories ?? []) {
-    if (!registry.has(extra.type)) registry.register(extra);
+    compileRegistry.register(extra);
   }
-  // Providers stay with this graph (see GRAPH_PROVIDERS below). Without a
-  // policy they are also registered process-wide, as before, for code that
-  // looks them up by name outside a run.
-  if (!opts.nodePolicy) for (const provider of opts.providers ?? []) registerProvider(provider);
 
-  // Refused before anything is loaded: imports register modules for the whole process.
+  // Refused before anything is loaded when a node policy forbids module imports.
   assertImportsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
-  const imported = await loadGraphImports(spec, { cwd: graphDir });
+  const imported = await loadGraphImports(spec, { cwd: graphDir, registry: compileRegistry });
+  const policyNodes = (Array.isArray(spec.nodes) ? spec.nodes : []).filter((node) => node != null);
+  const policyEdges = policyNodes.flatMap((node) => recoveryTargets(spec, node, opts.hooks).map((to) => ({ from: node.id, to })));
+  const invalidTopology = topologyDiagnostics(
+    { ...spec, edges: [...spec.edges, ...policyEdges] },
+    compileRegistry,
+  ).filter((d) => d.severity === "error");
+  if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
   const skillAliases: Record<string, string> = { ...(opts.runConfig?.skills ?? {}), ...imported.skillAliases };
   const agentAliases: Record<string, string> = { ...(opts.runConfig?.agents ?? {}), ...imported.agentAliases };
   const subgraphAliases: Record<string, string> = { ...(opts.runConfig?.subgraphs ?? {}), ...imported.subgraphAliases };
 
-  const StateAnnotation = buildStateAnnotation(spec, (msg, data) => {
-    events.emit("log", { level: "warn", msg, ...data }, {});
-  });
+  const compileProviderPlugins = new Map<string, ProviderPlugin>();
+  const compileProviderPluginSources = new Map<string, string>(
+    Object.entries(opts.providerPluginSources ?? {}),
+  );
+  for (const plugin of opts.providerPlugins ?? []) compileProviderPlugins.set(plugin.name, plugin);
+  for (const [name, plugin] of imported.providerPlugins) {
+    const existing = compileProviderPlugins.get(name);
+    if (existing !== undefined) {
+      if (existing === plugin) continue;
+      const existingSource = compileProviderPluginSources.get(name);
+      const target = existingSource
+        ? `provider plugin imported from "${existingSource}"`
+        : "built-in or host provider plugin";
+      throw Object.assign(
+        new Error(`Provider plugin "${name}" collides with an already-registered ${target}.`),
+        { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
+      );
+    }
+    compileProviderPlugins.set(name, plugin);
+    const source = imported.providerPluginSources.get(name);
+    if (source) compileProviderPluginSources.set(name, source);
+  }
+
+  const pluginProviders: ProviderAdapter[] = [];
+  const pluginWarnings: Array<{ severity: "warning"; code: string; message: string; path: string }> = [];
+  for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
+    if (cfg?.kind !== "plugin") continue;
+    const { adapter, warnings } = await createPluginProvider(name, cfg, {
+      plugins: compileProviderPlugins,
+      allowGlobal: !opts.nodePolicy,
+    });
+    pluginProviders.push(adapter);
+    for (const msg of warnings) {
+      pluginWarnings.push({
+        severity: "warning",
+        code: "PROVIDER_CONFIG_UNSUPPORTED",
+        message: `Provider "${name}": ${msg}`,
+        path: `providers.${name}.options`,
+      });
+    }
+  }
+
+  const allCompileProviders = new Map<string, ProviderAdapter>();
+  const compileProviderSources = new Map<string, string>(
+    Object.entries(opts.providerSources ?? {}),
+  );
+  for (const p of opts.providers ?? []) allCompileProviders.set(p.name, p);
+  for (const p of imported.providers) {
+    const existing = allCompileProviders.get(p.name);
+    if (existing !== undefined && existing !== p) {
+      const existingSource = compileProviderSources.get(p.name);
+      const target = existingSource
+        ? `provider imported from "${existingSource}"`
+        : "built-in or host provider";
+      throw Object.assign(
+        new Error(`Provider "${p.name}" collides with an already-registered ${target}.`),
+        { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
+      );
+    }
+    allCompileProviders.set(p.name, p);
+    const source = imported.providerSources.get(p.name);
+    if (source) compileProviderSources.set(p.name, source);
+  }
+  for (const p of pluginProviders) allCompileProviders.set(p.name, p);
+
+  const StateAnnotation = buildStateAnnotation(
+    spec,
+    (msg, data) => {
+      events.emit("log", { level: "warn", msg, ...data }, {});
+    },
+    compileRegistry,
+  );
   const graph = new StateGraph(StateAnnotation);
   const executionLimit = createExecutionLimit(spec.runtime?.concurrency);
 
@@ -1541,8 +1625,8 @@ async function assembleCompiledLangGraph(
   // The structural errors validateSpec reports for the graph, its map bodies and inline
   // subgraphs; lints such as inputs, triggers and hitl routes stay validate-time at every level.
   // After imports and extra factories, so plugin types resolve.
-  throwIfInvalid(graphStructureDiagnostics(spec));
-  const pluginCompileError = registry.runCompileValidators(spec).find((d) => d.severity === "error");
+  throwIfInvalid(graphStructureDiagnostics(spec, { registry: compileRegistry }));
+  const pluginCompileError = compileRegistry.runCompileValidators(spec).find((d) => d.severity === "error");
   if (pluginCompileError) throw new Error(`${pluginCompileError.path ?? "graph"}: ${pluginCompileError.message}`);
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
   const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
@@ -1579,12 +1663,18 @@ async function assembleCompiledLangGraph(
   };
   (baseCtx as Record<symbol, unknown>)[SECRET_REDACTION] = redaction;
   (baseCtx as Record<symbol, unknown>)[DECLARED_SECRETS] = new Set(spec.secrets ?? []);
-  (baseCtx as Record<symbol, unknown>)[SUBGRAPH_HOST_CONTEXT] = captureSubgraphHostContext(opts);
+  (baseCtx as Record<symbol, unknown>)[SUBGRAPH_HOST_CONTEXT] = captureSubgraphHostContext({
+    ...opts,
+    registry: compileRegistry,
+    providerPlugins: [...compileProviderPlugins.values()],
+    providerPluginSources: Object.fromEntries(compileProviderPluginSources),
+    providerSources: Object.fromEntries(compileProviderSources),
+  });
   if (memoryRuntime) (baseCtx as Record<symbol, unknown>)[MEMORY_RUNTIME] = memoryRuntime;
   if (opts.nodePolicy) (baseCtx as Record<symbol, unknown>)[NODE_POLICY] = opts.nodePolicy;
-  if (opts.providers?.length || opts.nodePolicy) {
+  if (allCompileProviders.size > 0 || opts.nodePolicy) {
     const graphProviders: GraphProviders = {
-      byName: new Map((opts.providers ?? []).map((p) => [p.name, p])),
+      byName: allCompileProviders,
       // Under a policy, nothing outside what the graph was compiled with.
       exclusive: !!opts.nodePolicy,
     };
@@ -1595,13 +1685,16 @@ async function assembleCompiledLangGraph(
       (baseCtx as Record<symbol, unknown>)[sym] = opts.extraContext[sym];
     }
   }
-  registry.applyCompileContexts({
+  compileRegistry.applyCompileContexts({
     spec,
     opts: opts as Record<string, unknown>,
     contextBag: baseCtx as Record<symbol, unknown>,
   });
 
-  const providerDiags = providerConfigDiagnostics(spec, opts.providers ?? []);
+  const providerDiags = [
+    ...pluginWarnings,
+    ...providerConfigDiagnostics(spec, [...allCompileProviders.values()], { checkPluginOptions: false }),
+  ];
   const providerErrors = providerDiags.filter((d) => d.severity === "error");
   if (providerErrors.length > 0) {
     throw new Error(providerErrors.map((d) => `${d.path ?? "providers"}: ${d.message}`).join("\n"));
@@ -1619,16 +1712,16 @@ async function assembleCompiledLangGraph(
   const routeNodes = nodesById(spec);
 
   for (const nodeSpec of spec.nodes) {
-    assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
+    assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`, compileRegistry);
     assertHostProbeAllowed(opts.nodePolicy, (nodeSpec.with as { requires?: unknown[] } | undefined)?.requires, `node "${nodeSpec.id}"`);
     assertNodeSpecAllowed(opts.nodePolicy, nodeSpec, `node "${nodeSpec.id}"`);
     if (nodeSpec.type === "map") {
       const inner = (nodeSpec.with as { node?: { type?: unknown; with?: { requires?: unknown[] } } } | undefined)?.node;
-      if (typeof inner?.type === "string") assertNodeTypeAllowed(opts.nodePolicy, inner.type, `map node "${nodeSpec.id}" inner node`);
+      if (typeof inner?.type === "string") assertNodeTypeAllowed(opts.nodePolicy, inner.type, `map node "${nodeSpec.id}" inner node`, compileRegistry);
       assertHostProbeAllowed(opts.nodePolicy, inner?.with?.requires, `map node "${nodeSpec.id}" inner node`);
       if (inner) assertNodeSpecAllowed(opts.nodePolicy, inner, `map node "${nodeSpec.id}" inner node`);
     }
-    const factory = registry.get(nodeSpec.type);
+    const factory = compileRegistry.get(nodeSpec.type);
     if (!factory) throw new Error(`Node type "${nodeSpec.type}" is not registered.`);
 
     const configResult = factory.configSchema.safeParse(nodeSpec.with ?? {});
@@ -1657,6 +1750,7 @@ async function assembleCompiledLangGraph(
           defaultTimeout,
           executionLimit,
           externalHooks: opts.hooks,
+          compileRegistry,
         },
         mapJoinById,
       );
@@ -1667,6 +1761,7 @@ async function assembleCompiledLangGraph(
     const built = factory.build(
       {
         graphName: spec.metadata.name,
+        registry: compileRegistry,
         toolWiring,
         ...(remoteExec ? { remote: remoteExec } : {}),
         ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
@@ -1906,7 +2001,7 @@ async function assembleCompiledLangGraph(
       throw Object.assign(new Error(`node-as-tool: map node "${id}" cannot be called as a tool; put it in a subgraph and call that instead.`), { code: "NODE_TOOL_UNSUPPORTED", retryable: false });
     }
     // Reached only by a tool list the compiler can't see, such as a reusable agent definition.
-    const toolInvokeRefusal = registry.checkToolInvoke(spec.nodes.find((n) => n.id === id) as Record<string, unknown> | undefined);
+    const toolInvokeRefusal = compileRegistry.checkToolInvoke(spec.nodes.find((n) => n.id === id) as Record<string, unknown> | undefined);
     if (toolInvokeRefusal) throw new Error(toolInvokeRefusal);
     const target = compiledNodes.get(id);
     if (!target) throw new Error(`node-as-tool: no node "${id}" in this graph.`);
@@ -2078,6 +2173,8 @@ async function assembleCompiledLangGraph(
     interruptAfter,
     defaultPolicy,
     warnings: compileWarnings,
+    stateChannelKeys: Object.keys(StateAnnotation.spec),
+    compileRegistry,
   };
 }
 
@@ -2236,29 +2333,14 @@ function memoryUnavailable(what: string, checkpoint: string | undefined, hostHin
  *
  * ctx.store: an injected BaseStore instance wins (documented as unscoped);
  * otherwise a graph-scoped adapter over the memory runtime's backend.
- * ctx.memory: only when runtime.memory is declared (or runtime.store names a
- * durable backend, which is an alias for runtime.memory.backend: checkpoint).
+ * ctx.memory: only when runtime.memory is declared.
  */
 function resolveMemory(
   spec: GraphSpec,
   opts: CompileOptions,
 ): { runtime: MemoryRuntime | undefined; store: BaseStore | undefined } {
   const memCfg = spec.runtime?.memory as RuntimeMemoryConfig | undefined;
-  const storeCfg = spec.runtime?.store;
-  const storeEnabled = storeCfg?.enabled !== false;
-  const storeBackend: string = storeCfg?.backend ?? "memory";
-  if (memCfg && storeCfg) {
-    throw new MemoryError(
-      "MEMORY_STORE_AND_MEMORY",
-      "runtime.store and runtime.memory are mutually exclusive; move to runtime.memory (ctx.store keeps working on top of it)",
-    );
-  }
-  if (!["memory", "none", "sqlite", "postgres"].includes(storeBackend)) {
-    throw new MemoryError("MEMORY_BACKEND_UNKNOWN", `Unknown store backend "${storeBackend}". Expected memory | none | sqlite | postgres.`);
-  }
-  const storeAlias =
-    storeEnabled && opts.store !== "none" && (storeBackend === "sqlite" || storeBackend === "postgres");
-  const exposeMemory = !!memCfg || storeAlias;
+  const exposeMemory = !!memCfg;
   const injectedStore = opts.store && typeof opts.store === "object" ? opts.store : undefined;
 
   let runtime: MemoryRuntime | undefined;
@@ -2271,16 +2353,15 @@ function resolveMemory(
     const host: MemoryHostOptions | undefined =
       m && typeof m === "object" ? ("backend" in m ? (m as MemoryHostOptions) : { backend: m as MemoryBackend }) : undefined;
     const graph = spec.metadata.name;
-    const wantsDurable = memCfg ? (memCfg.backend ?? "checkpoint") === "checkpoint" : storeAlias;
+    const wantsDurable = !!memCfg && (memCfg.backend ?? "checkpoint") === "checkpoint";
     const fallbackIdentity = opts.memoryIdentity ?? LOCAL_MEMORY_IDENTITY;
     const ephemeral = () =>
       createEphemeralMemoryRuntime(graph, { config: memCfg, exposeMemory, identity: host?.identity ?? fallbackIdentity });
     if (memCfg?.backend === "memory") {
       runtime = ephemeral();
     } else if (host && exposeMemory) {
-      // Only graphs that opt into durable memory (runtime.memory, or
-      // runtime.store.backend sqlite|postgres) land in the host backend; a
-      // plain graph keeps its process-local ctx.store as before.
+      // Only graphs that opt into durable memory (runtime.memory) land in the
+      // host backend; a plain graph keeps its process-local ctx.store as before.
       runtime = new MemoryRuntime({
         backend: host.backend,
         identity: host.identity ?? fallbackIdentity,
@@ -2289,14 +2370,9 @@ function resolveMemory(
         exposeMemory,
       });
     } else if (wantsDurable && !ephemeralOk) {
-      if (storeAlias && injectedStore) {
-        // Programmatic host injected a raw BaseStore for runtime.store: sqlite|postgres.
-        runtime = undefined;
-      } else {
-        const ck = spec.runtime?.checkpoint;
-        const ckBackend = ck && ck.enabled !== false ? (ck.backend ?? "memory") : undefined;
-        throw memoryUnavailable(memCfg ? "runtime.memory" : `runtime.store.backend "${storeBackend}"`, ckBackend, opts.memoryUnavailableHint);
-      }
+      const ck = spec.runtime?.checkpoint;
+      const ckBackend = ck && ck.enabled !== false ? (ck.backend ?? "memory") : undefined;
+      throw memoryUnavailable("runtime.memory", ckBackend, opts.memoryUnavailableHint);
     } else if (opts.legacyStoreBackend && !exposeMemory) {
       runtime = new MemoryRuntime({
         backend: opts.legacyStoreBackend,
@@ -2312,7 +2388,7 @@ function resolveMemory(
 
   let store: BaseStore | undefined;
   if (injectedStore) store = injectedStore;
-  else if (!storeEnabled || opts.store === "none" || storeBackend === "none") store = undefined;
+  else if (opts.store === "none") store = undefined;
   else store = runtime?.legacyStore();
   return { runtime, store };
 }
@@ -2734,8 +2810,9 @@ export async function maybeTerminateServices(
   threadId: string,
   state?: Record<string, unknown>,
   policy?: NodePolicy,
+  reg: NodeRegistry = registry,
 ): Promise<void> {
-  await registry.runEndHooks({ spec, threadId, state, policy });
+  await reg.runEndHooks({ spec, threadId, state, policy });
 }
 
 function buildNodeCtx(
@@ -3022,6 +3099,7 @@ export async function hydrateDurableRuntime(
     sinks?: EventSink[];
     rehydrateWebhooks?: boolean;
     nodePolicy?: NodePolicy | undefined;
+    registry?: NodeRegistry | undefined;
   },
 ): Promise<void> {
   if (!snap) return;
@@ -3040,7 +3118,7 @@ export async function hydrateDurableRuntime(
     });
   }
 
-  await registry.runHydrateHooks({
+  await (opts.registry ?? registry).runHydrateHooks({
     spec: graphSpec,
     threadId,
     snapshotValues: snap.values,
@@ -3065,6 +3143,7 @@ function addCheckpointedMap(
     defaultTimeout: unknown;
     executionLimit: ExecutionLimit;
     externalHooks?: Hook[] | undefined;
+    compileRegistry: NodeRegistry;
   },
   mapJoinById: Map<string, string>,
 ): void {
@@ -3081,10 +3160,11 @@ function addCheckpointedMap(
   mapJoinById.set(mapId, joinId);
 
   const innerType = String((config.node as Record<string, unknown>)["type"] ?? "");
-  const innerStopsOnTimeout = registry.get(innerType)?.capabilities?.stopsOnTimeout === true;
-  const innerReceivesTimeoutSignal = innerStopsOnTimeout || registry.get(innerType)?.capabilities?.receivesTimeoutSignal === true;
+  const innerStopsOnTimeout = ctx.compileRegistry.get(innerType)?.capabilities?.stopsOnTimeout === true;
+  const innerReceivesTimeoutSignal = innerStopsOnTimeout || ctx.compileRegistry.get(innerType)?.capabilities?.receivesTimeoutSignal === true;
   const buildCtx = {
     graphName: spec.metadata.name,
+    registry: ctx.compileRegistry,
     toolWiring: ctx.toolWiring,
     ...(spec.runtime?.worktrees?.root ? { worktreeRoot: spec.runtime.worktrees.root } : {}),
     ...(spec.runtime?.context ? { contextDefaults: spec.runtime.context } : {}),

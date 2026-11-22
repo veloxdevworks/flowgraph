@@ -229,7 +229,7 @@ nodes:
     type: map
     with:
       over: "{{ state.items }}"
-      node: { type: intelligent, with: { prompt: "Analyze {{ item }}" } }
+      node: { type: agent, with: { prompt: "Analyze {{ item }}" } }
       collect: { to: findings }
 ```
 
@@ -403,7 +403,7 @@ registerFunction("learnFix", async (input, ctx) => {
 });
 ```
 
-`ctx.memory` exists only when the graph declares `runtime.memory` (or the `runtime.store` alias below). `increment`, `patch`, `append` and `delete` are atomic in the database; `update(scope, key, fn)` is a compare-and-set loop. Writes are **replay-safe**: a node that writes and is then retried or resumed (for example after `ctx.interrupt`) does not apply the same write twice. The replay id is the write itself — scope, key, operation and canonical arguments (object key order does not matter) — plus how many times that same write has already run in this attempt. A retry may reorder those writes, skip one or insert one; an `increment` or `append` that already ran is left as it was, and a write the retry adds runs once. Two identical writes in one attempt both run, and a retry of both still runs them once each. `update` dedupes on the scope and key, so a replay whose computed value changed still counts once. A top-level node uses its own id. A node under another node includes that path. A tool call's identity is its path (`tool:<n>` under the caller, the same path tool replay uses) plus the tool name and a hash of the arguments, so two calls do not share an occurrence count, and a later call at the same index with different arguments does not take an earlier call's result. A resume that skips a cached call still matches the call that runs again.
+`ctx.memory` exists only when the graph declares `runtime.memory`. `increment`, `patch`, `append` and `delete` are atomic in the database; `update(scope, key, fn)` is a compare-and-set loop. Writes are **replay-safe**: a node that writes and is then retried or resumed (for example after `ctx.interrupt`) does not apply the same write twice. The replay id is the write itself — scope, key, operation and canonical arguments (object key order does not matter) — plus how many times that same write has already run in this attempt. A retry may reorder those writes, skip one or insert one; an `increment` or `append` that already ran is left as it was, and a write the retry adds runs once. Two identical writes in one attempt both run, and a retry of both still runs them once each. `update` dedupes on the scope and key, so a replay whose computed value changed still counts once. A top-level node uses its own id. A node under another node includes that path. A tool call's identity is its path (`tool:<n>` under the caller, the same path tool replay uses) plus the tool name and a hash of the arguments, so two calls do not share an occurrence count, and a later call at the same index with different arguments does not take an earlier call's result. A resume that skips a cached call still matches the call that runs again.
 
 In code, pass `idempotencyKey` when the payload is not stable across attempts (a timestamp, a fresh id) but the operation is. The key is bound to that operation's kind, scope and memory key. The first payload stored for that operation is the one a retry returns; a different payload does not write again. Reusing the key for a different kind, scope or memory key fails with `MEMORY_IDEMPOTENCY_CONFLICT` and writes nothing. A second call for the same operation in one attempt is a second write. The key is scoped to the node attempt (checkpoint thread and task), and it is a `ctx.memory` option, not a field of the `memory` node.
 
@@ -476,14 +476,14 @@ This gives the agent a `remember({ scope, key, value, attrs? })` tool. `scope` i
 
 ### `ctx.store` (LangGraph Store) compatibility
 
-`ctx.store` keeps working. It is now a view onto **graph** scope: namespaces become key prefixes, so two graphs never see each other's `ctx.store` items.
+`ctx.store` keeps working as a graph-scoped view onto the memory runtime: namespaces become key prefixes, so two graphs never see each other's `ctx.store` items.
 
-- No `runtime.store` / `backend: memory` (default) — process-local, lost on exit, as before.
-- `runtime.store.backend: sqlite | postgres` — an alias for `runtime.memory` on the checkpoint database: `ctx.store` and `ctx.memory` become durable. The backend must match `runtime.checkpoint.backend`.
-- `runtime.store.enabled: false`, `backend: none`, or `compileGraph(…, { store: "none" })` — no `ctx.store`.
+- By default (when `runtime.memory` is omitted or `backend: memory`), `ctx.store` is process-local and lost on exit.
+- When `runtime.memory` uses `backend: checkpoint`, `ctx.store` and `ctx.memory` share the durable checkpoint database.
+- `compileGraph(…, { store: "none" })` disables `ctx.store`.
 - A `BaseStore` instance passed as `compileGraph(spec, { store })` is used as-is.
 
-`runtime.store` and `runtime.memory` together is an error (`MEMORY_STORE_AND_MEMORY`).
+The pre-v1 `runtime.store` YAML field was removed; use `runtime.memory` (or run `flowgraph migrate`).
 
 ### Hosts
 

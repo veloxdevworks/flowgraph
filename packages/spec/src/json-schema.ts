@@ -73,7 +73,7 @@ function mapBodyRule(): Record<string, unknown> {
 }
 
 /**
- * Relocated settings (`runsOn.wait`, `http` `with.timeout`, `config.defaults.retry`, …)
+ * Relocated settings (`channel.items`, `with.input`, `map.with.output`, …)
  * are rejected by the Zod schema with a message naming the canonical field, but
  * would appear in the generated JSON Schema as `{}` and show up in editors.
  * Drop the properties so editors do not offer them.

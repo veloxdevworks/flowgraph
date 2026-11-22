@@ -7,7 +7,7 @@ it.skipIf(process.platform === "win32").each(["running","webhook"])("SIGHUP clea
   const dir=mkdtempSync(join(tmpdir(),"fg-hangup-")),pidFile=join(dir,"service.pid");
   const graph={apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"hangup"},nodes:[
     {id:"server",type:"service",with:{name:"server",command:process.execPath,args:["-e",`require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); console.log('ready'); setInterval(()=>{},1000)`],ready:{log:"ready"},readyInterval:"10ms"}},
-    mode==="running"?{id:"hold",type:"shell",with:{command:process.execPath,args:["-e","setTimeout(()=>{},30000)"]}}:{id:"hold",type:"wait",with:{mode:"webhook",webhook:true}},
+    mode==="running"?{id:"hold",type:"shell",with:{command:process.execPath,args:["-e","setTimeout(()=>{},30000)"]}}:{id:"hold",type:"wait",with:{webhook:true}},
   ],edges:[{from:"START",to:"server"},{from:"server",to:"hold"},{from:"hold",to:"END"}]};
   writeFileSync(join(dir,"g.yaml"),JSON.stringify(graph));
   const child=spawn(process.execPath,[resolve(import.meta.dirname,"../dist/bin.js"),"run","g.yaml","--thread","hup","--json"],{cwd:dir,detached:true,stdio:["ignore","pipe","pipe"]});

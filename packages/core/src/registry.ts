@@ -1,10 +1,11 @@
 /**
  * Node Registry — maps type strings to NodeFactory implementations.
- * Third-party node plugins register factories here.
+ * Each graph compilation forks from the base registry so imported plugins stay
+ * scoped to that compile rather than leaking into process-wide state.
  */
 
 import { z } from "zod";
-import { zodToConfigJsonSchema, type Diagnostic, type GraphSpec } from "@flowgraph/spec";
+import { isNamespacedPluginType, zodToConfigJsonSchema, type Diagnostic, type GraphSpec } from "@flowgraph/spec";
 import type { ContextConfigInput } from "./context/types.js";
 import type { NodeRunContext } from "./context.js";
 import type { NodePolicy } from "./node-policy.js";
@@ -62,6 +63,8 @@ export interface CompiledNode {
 
 export interface BuildContext {
   graphName: string;
+  /** Per-compile node & reducer registry (defaults to the global base registry). */
+  registry?: NodeRegistry;
   /**
    * Set when this node was placed on a remote worker (ADR-0020). Only `subgraph` reads it:
    * it replaces the in-process child run with a dispatch, keeping its state seeding and merge.
@@ -118,6 +121,22 @@ export interface NodeFactory<Config = any> {
 
 export type ReducerFn = (current: unknown, incoming: unknown) => unknown;
 
+export interface RegisterNodeOptions {
+  /** When true, require a namespaced plugin type (e.g. `acme:greet` or `@acme/pkg:greet`). */
+  plugin?: boolean;
+  /** Optional import specifier or origin describing where this node type was registered from. */
+  source?: string;
+}
+
+export interface RegisterReducerOptions {
+  /** Optional import specifier or origin describing where this reducer was registered from. */
+  source?: string;
+}
+
+function registryError(code: string, message: string): Error & { code: string; retryable: false } {
+  return Object.assign(new Error(message), { code, retryable: false as const });
+}
+
 export interface RunEndHookContext {
   spec: GraphSpec;
   threadId: string;
@@ -149,9 +168,12 @@ export type CompileContextHookFn = (input: CompileContextHookInput) => void;
 export type ProviderSecretResolverFn = (cfg: Record<string, unknown>) => string | undefined;
 export type PreflightNodeCheckFn = (node: { id?: string; type?: string; with?: unknown }, path: string, cwd: string) => Promise<Diagnostic[]>;
 
-class Registry {
+export class NodeRegistry {
+  private readonly parent?: NodeRegistry | undefined;
   private factories = new Map<string, NodeFactory>();
+  private factorySources = new Map<string, string>();
   private reducers = new Map<string, ReducerFn>();
+  private reducerSources = new Map<string, string>();
   private validators = new Map<string, { fn: GraphValidatorFn; compile: boolean }>();
   private toolInvokeChecks = new Map<string, ToolInvokeCheckFn>();
   private runLifecycles = new Map<string, RunLifecycleHooks>();
@@ -160,19 +182,50 @@ class Registry {
   private providerSecretResolvers = new Map<string, ProviderSecretResolverFn>();
   private preflightChecks = new Map<string, PreflightNodeCheckFn>();
 
-  register(factory: NodeFactory): void {
-    if (this.factories.has(factory.type)) {
-      throw new Error(`Node type "${factory.type}" is already registered`);
+  constructor(parent?: NodeRegistry) {
+    this.parent = parent;
+  }
+
+  /** Create an isolated child registry that reads from this registry without mutating it. */
+  fork(): NodeRegistry {
+    return new NodeRegistry(this);
+  }
+
+  private getFactorySource(type: string): string | undefined {
+    return this.factorySources.get(type) ?? this.parent?.getFactorySource(type);
+  }
+
+  register(factory: NodeFactory, opts: RegisterNodeOptions = {}): void {
+    const existing = this.get(factory.type);
+    if (existing !== undefined) {
+      if (existing === factory) return;
+      const existingSource = this.getFactorySource(factory.type);
+      const target = existingSource
+        ? `node type imported from "${existingSource}"`
+        : this.parent?.has(factory.type)
+          ? "built-in or host node type"
+          : "node type";
+      throw registryError(
+        "PLUGIN_TYPE_COLLISION",
+        `Node type "${factory.type}" collides with an already-registered ${target}.`,
+      );
+    }
+    if (opts.plugin && !isNamespacedPluginType(factory.type)) {
+      throw registryError(
+        "PLUGIN_TYPE_INVALID",
+        `Plugin node type "${factory.type}" must be namespaced (for example "acme:my-node" or "@acme/pkg:my-node").`,
+      );
     }
     this.factories.set(factory.type, factory);
+    if (opts.source) this.factorySources.set(factory.type, opts.source);
   }
 
   get(type: string): NodeFactory | undefined {
-    return this.factories.get(type);
+    return this.factories.get(type) ?? this.parent?.get(type);
   }
 
   has(type: string): boolean {
-    return this.factories.has(type);
+    return this.factories.has(type) || (this.parent?.has(type) ?? false);
   }
 
   /**
@@ -181,22 +234,47 @@ class Registry {
    * defaults to unsafe for untrusted uploads.
    */
   isUntrustedSafe(type: string): boolean {
-    return this.factories.get(type)?.capabilities?.hostAccess === false;
+    return this.get(type)?.capabilities?.hostAccess === false;
   }
 
   types(): string[] {
-    return [...this.factories.keys()];
+    if (!this.parent) return [...this.factories.keys()];
+    return [...new Set([...this.parent.types(), ...this.factories.keys()])];
   }
 
-  registerReducer(name: string, fn: ReducerFn): void {
-    if (this.reducers.has(name)) {
-      throw new Error(`Reducer "${name}" is already registered`);
+  private getReducerSource(name: string): string | undefined {
+    return this.reducerSources.get(name) ?? this.parent?.getReducerSource(name);
+  }
+
+  registerReducer(name: string, fn: ReducerFn, opts: RegisterReducerOptions = {}): void {
+    const existing = this.getReducer(name);
+    if (existing !== undefined) {
+      if (existing === fn) return;
+      const existingSource = this.getReducerSource(name);
+      const target = existingSource
+        ? `reducer imported from "${existingSource}"`
+        : "built-in or host reducer";
+      throw registryError(
+        "PLUGIN_REDUCER_COLLISION",
+        `Reducer "${name}" collides with an already-registered ${target}.`,
+      );
     }
     this.reducers.set(name, fn);
+    if (opts.source) this.reducerSources.set(name, opts.source);
   }
 
   getReducer(name: string): ReducerFn | undefined {
-    return this.reducers.get(name);
+    return this.reducers.get(name) ?? this.parent?.getReducer(name);
+  }
+
+  hasReducer(name: string): boolean {
+    return this.reducers.has(name) || (this.parent?.hasReducer(name) ?? false);
+  }
+
+  private collectValidators(): Map<string, { fn: GraphValidatorFn; compile: boolean }> {
+    const merged = this.parent ? this.parent.collectValidators() : new Map<string, { fn: GraphValidatorFn; compile: boolean }>();
+    for (const [id, entry] of this.validators) merged.set(id, entry);
+    return merged;
   }
 
   registerValidator(id: string, fn: GraphValidatorFn, opts: { compile?: boolean } = {}): void {
@@ -205,16 +283,22 @@ class Registry {
 
   runValidators(spec: GraphSpec): Diagnostic[] {
     const out: Diagnostic[] = [];
-    for (const { fn } of this.validators.values()) out.push(...fn(spec));
+    for (const { fn } of this.collectValidators().values()) out.push(...fn(spec));
     return out;
   }
 
   runCompileValidators(spec: GraphSpec): Diagnostic[] {
     const out: Diagnostic[] = [];
-    for (const { fn, compile } of this.validators.values()) {
+    for (const { fn, compile } of this.collectValidators().values()) {
       if (compile) out.push(...fn(spec));
     }
     return out;
+  }
+
+  private collectToolInvokeChecks(): Map<string, ToolInvokeCheckFn> {
+    const merged = this.parent ? this.parent.collectToolInvokeChecks() : new Map<string, ToolInvokeCheckFn>();
+    for (const [id, fn] of this.toolInvokeChecks) merged.set(id, fn);
+    return merged;
   }
 
   registerToolInvokeCheck(id: string, fn: ToolInvokeCheckFn): void {
@@ -223,11 +307,17 @@ class Registry {
 
   checkToolInvoke(nodeSpec: Record<string, unknown> | undefined): string | undefined {
     if (!nodeSpec) return undefined;
-    for (const fn of this.toolInvokeChecks.values()) {
+    for (const fn of this.collectToolInvokeChecks().values()) {
       const msg = fn(nodeSpec);
       if (msg) return msg;
     }
     return undefined;
+  }
+
+  private collectRunLifecycles(): Map<string, RunLifecycleHooks> {
+    const merged = this.parent ? this.parent.collectRunLifecycles() : new Map<string, RunLifecycleHooks>();
+    for (const [id, hooks] of this.runLifecycles) merged.set(id, hooks);
+    return merged;
   }
 
   registerRunLifecycle(id: string, hooks: RunLifecycleHooks): void {
@@ -235,15 +325,21 @@ class Registry {
   }
 
   async runEndHooks(ctx: RunEndHookContext): Promise<void> {
-    for (const { onRunEnd } of this.runLifecycles.values()) {
+    for (const { onRunEnd } of this.collectRunLifecycles().values()) {
       if (onRunEnd) await onRunEnd(ctx);
     }
   }
 
   async runHydrateHooks(ctx: HydrateHookContext): Promise<void> {
-    for (const { onHydrate } of this.runLifecycles.values()) {
+    for (const { onHydrate } of this.collectRunLifecycles().values()) {
       if (onHydrate) await onHydrate(ctx);
     }
+  }
+
+  private collectCompileContexts(): Map<string, CompileContextHookFn> {
+    const merged = this.parent ? this.parent.collectCompileContexts() : new Map<string, CompileContextHookFn>();
+    for (const [id, fn] of this.compileContexts) merged.set(id, fn);
+    return merged;
   }
 
   registerCompileContext(id: string, fn: CompileContextHookFn): void {
@@ -251,7 +347,7 @@ class Registry {
   }
 
   applyCompileContexts(input: CompileContextHookInput): void {
-    for (const fn of this.compileContexts.values()) fn(input);
+    for (const fn of this.collectCompileContexts().values()) fn(input);
   }
 
   registerSubgraphContextSymbol(sym: symbol): void {
@@ -259,7 +355,8 @@ class Registry {
   }
 
   subgraphContextSymbols(): symbol[] {
-    return [...this.subgraphSymbols];
+    if (!this.parent) return [...this.subgraphSymbols];
+    return [...new Set([...this.parent.subgraphContextSymbols(), ...this.subgraphSymbols])];
   }
 
   registerProviderSecretResolver(kind: string, fn: ProviderSecretResolverFn): void {
@@ -269,7 +366,9 @@ class Registry {
   resolveProviderDefaultSecret(cfg: Record<string, unknown>): string | undefined {
     const kind = typeof cfg.kind === "string" ? cfg.kind : undefined;
     if (!kind) return undefined;
-    return this.providerSecretResolvers.get(kind)?.(cfg);
+    const fn = this.providerSecretResolvers.get(kind);
+    if (fn) return fn(cfg);
+    return this.parent?.resolveProviderDefaultSecret(cfg);
   }
 
   registerPreflightCheck(nodeType: string, fn: PreflightNodeCheckFn): void {
@@ -282,11 +381,12 @@ class Registry {
     cwd: string,
   ): Promise<Diagnostic[]> {
     const fn = typeof node.type === "string" ? this.preflightChecks.get(node.type) : undefined;
-    return fn ? fn(node, path, cwd) : [];
+    if (fn) return fn(node, path, cwd);
+    return this.parent ? this.parent.runPreflightChecks(node, path, cwd) : [];
   }
 }
 
-export const registry = new Registry();
+export const registry = new NodeRegistry();
 
 /** Helper for defining a node factory with proper typing */
 export function defineNode<Config>(factory: NodeFactory<Config>): NodeFactory<Config> {
@@ -307,9 +407,9 @@ export interface NodeTypeDescriptor {
 }
 
 /** Every registered node type (built-in and plugin) as UI descriptors. */
-export function describeNodeTypes(): NodeTypeDescriptor[] {
-  return registry.types().map((type) => {
-    const f = registry.get(type)!;
+export function describeNodeTypes(reg: NodeRegistry = registry): NodeTypeDescriptor[] {
+  return reg.types().map((type) => {
+    const f = reg.get(type)!;
     let configSchema: Record<string, unknown> | undefined;
     try {
       configSchema = zodToConfigJsonSchema(f.configSchema);

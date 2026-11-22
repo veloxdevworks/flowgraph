@@ -133,7 +133,7 @@ async function runModelRouter(
   nodeProvider: string | undefined,
   nodeModel: string | undefined,
 ): Promise<import("../registry.js").NodeResult> {
-  const providerName = nodeProvider ?? config.provider ?? ctx.config.defaults?.provider ?? (providerNamesFor(ctx).includes("mock") ? "mock" : providerNamesFor(ctx)[0]);
+  const providerName = nodeProvider ?? ctx.config.defaults?.provider ?? (providerNamesFor(ctx).includes("mock") ? "mock" : providerNamesFor(ctx)[0]);
   if (!providerName) {
     throw new Error(`router "${nodeId}" mode=model: no provider available. Register a provider or set provider/config.defaults.provider.`);
   }

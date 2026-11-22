@@ -129,7 +129,7 @@ describe("skill inputs", () => {
     try {
       await fs.writeFile(
         path.join(dir, "SKILL.md"),
-        "---\nname: s\nkind_of: executable\nhandler: ./handler.mjs\ninputs:\n  count:\n    type: integer\n    minimum: 1\n    required: true\n  tags:\n    type: array\n    items: { type: string }\n---\n",
+        "---\nname: s\nkindOf: executable\nhandler: ./handler.mjs\ninputs:\n  count:\n    type: integer\n    minimum: 1\n    required: true\n  tags:\n    type: array\n    items: { type: string }\n---\n",
       );
       await fs.writeFile(path.join(dir, "handler.mjs"), "export default (input) => ({ got: input });\n");
       const { skill } = await loadSkill(dir);

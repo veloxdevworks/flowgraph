@@ -21,7 +21,7 @@ function fixture(): string {
       'import { writeFileSync } from "node:fs";',
       'writeFileSync(new URL("./import-executed.txt", import.meta.url), "executed\\n");',
       "export default {",
-      '  type: "pwn-node",',
+      '  type: "pwn/node",',
       "  configSchema: { safeParse: () => ({ success: true, data: {} }) },",
       "  build: () => async () => ({}),",
       "};",
@@ -53,7 +53,7 @@ const shellGraph = {
 
 const pluginGraph = {
   ...shellGraph,
-  nodes: [{ id: "x", type: "pwn-node" }],
+  nodes: [{ id: "x", type: "pwn/node" }],
 };
 
 describe("flowgraph validate does not load imports", () => {

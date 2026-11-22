@@ -98,8 +98,6 @@ nodes:
     type: agent
     provider: coder
     with:
-      cursor:
-        runtime: local
       system: >
         You implement a single small improvement in the flowgraph repo. Follow GUARDRAILS.md rules
         embedded in the plan context. Do not edit automation/self-improve/** or protected paths.
@@ -145,8 +143,6 @@ nodes:
     type: agent
     provider: coder
     with:
-      cursor:
-        runtime: local
       system: >
         You review a proposed change set for the flowgraph repo against the plan and guardrails.
         Approve only if the diff is small, on-strategy, and quality gates passed.

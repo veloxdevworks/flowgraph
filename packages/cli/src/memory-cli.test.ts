@@ -123,10 +123,15 @@ describe("flowgraph CLI memory", () => {
     expect(v.out).toMatch(/MEMORY_BACKEND_UNAVAILABLE/);
   }, 60_000);
 
-  it("a memory node needs runtime.memory; the runtime.store alias alone is not enough", () => {
-    const d = project(counter("sqlite").replace("  memory: {}", "  store:\n    backend: sqlite"));
-    const v = cli(d, "validate", "g.graph.yaml");
-    expect(v.out).toMatch(/MEMORY_NOT_CONFIGURED/);
-    expect(v.out).not.toMatch(/MEMORY_BACKEND_UNAVAILABLE/);
+  it("rejects the removed runtime.store field and requires runtime.memory for memory nodes", () => {
+    const withStore = project(counter("sqlite").replace("  memory: {}", "  store:\n    backend: sqlite"));
+    const vStore = cli(withStore, "validate", "g.graph.yaml");
+    expect(vStore.code).not.toBe(0);
+    expect(vStore.out).toMatch(/store/);
+
+    const withoutMem = project(counter("sqlite").replace("  memory: {}\n", ""));
+    const vNoMem = cli(withoutMem, "validate", "g.graph.yaml");
+    expect(vNoMem.code).not.toBe(0);
+    expect(vNoMem.out).toMatch(/MEMORY_NOT_CONFIGURED/);
   }, 60_000);
 });

@@ -4,7 +4,6 @@ import { compileGraph } from "./compiler.js";
 import type { FlowgraphEvent } from "./events.js";
 import { registerFunction } from "./nodes/function.js";
 import { createHookBus } from "./hooks/bus.js";
-import { normalizeNodeTypeAliases } from "./loader.js";
 import { runScriptSandboxed } from "./nodes/script.js";
 import { effectiveModel } from "./providers/model-choice.js";
 import { createScriptedProvider } from "./providers/index.js";
@@ -244,17 +243,18 @@ describe("hooks", () => {
     })).toThrow(expect.objectContaining({ code: "HOOK_WHERE_UNKNOWN" }));
   });
 
-  it("keeps a rejected hook event under the name that was written", () => {
-    const rewritten = normalizeNodeTypeAliases({
-      runtime: {
-        hooks: [
-          { on: "intelligent:beforeStep", do: "allow" },
-          { on: "intelligent:beforeToolCall", do: "deny" },
-        ],
-      },
-    }) as { runtime: { hooks: Array<{ on: string }> } };
-    expect(rewritten.runtime.hooks[0]?.on).toBe("intelligent:beforeStep");
-    expect(rewritten.runtime.hooks[1]?.on).toBe("agent:beforeToolCall");
+  it("rejects removed intelligent:* hook events", () => {
+    for (const on of ["intelligent:beforeStep", "intelligent:beforeToolCall", "intelligent:afterToolCall"]) {
+      const parsed = GraphSpecSchema.safeParse({
+        apiVersion: "flowgraph/v1",
+        kind: "Graph",
+        metadata: { name: "hooks" },
+        nodes: [{ id: "a", type: "function", with: { fn: "x" } }],
+        edges: [{ from: "START", to: "a" }, { from: "a", to: "END" }],
+        runtime: { hooks: [{ on, do: "deny" }] },
+      });
+      expect(parsed.success, on).toBe(false);
+    }
   });
 
   it("continues on an error verb and fails even when on.error is continue", async () => {

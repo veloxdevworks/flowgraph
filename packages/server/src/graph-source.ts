@@ -13,7 +13,6 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   expandGraphEnv,
   MIN_REDACTED_CONFIG_VALUE,
-  normalizeNodeTypeAliases,
   recordGraphEnvExpansion,
   validateSpec,
   hostSupportDiagnostics,
@@ -95,7 +94,6 @@ function parseGraphSource(
     };
   }
 
-  parsed = normalizeNodeTypeAliases(parsed);
   let importsStripped = false;
 
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {

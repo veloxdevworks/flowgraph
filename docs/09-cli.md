@@ -155,17 +155,26 @@ flowgraph migrate ./old.graph.yaml          # dry-run
 flowgraph migrate ./old.graph.yaml --write  # apply in place
 ```
 
-Upgrades a graph spec toward `apiVersion: flowgraph/v1`, canonicalizes `kind`, and rewrites legacy `type: webhook` nodes to `type: http` with `once: true` (and `method: POST` if absent). Prints migration notes; use `--write` to persist changes.
+Upgrades a graph or skill spec toward `apiVersion: flowgraph/v1`, canonicalizes `kind`, and rewrites legacy `type: webhook` nodes to `type: http` with `once: true` (and `method: POST` if absent). Prints migration notes; use `--write` to persist changes.
 
-The data-contract migration rewrites the fields that were removed, on the YAML document so comments and layout survive:
+Pre-v1 alias rewrites:
+
+- `apiVersion` → `flowgraph/v1` and `kind: Subgraph` → `kind: Graph`;
+- node types `code` → `function`, `intelligent` → `agent`;
+- hook events `intelligent:beforeToolCall` / `intelligent:afterToolCall` → `agent:beforeToolCall` / `agent:afterToolCall`;
+- `runtime.store` → `runtime.memory`;
+- `SKILL.md` front-matter `kind_of` → `kindOf`.
+
+Data-contract rewrites (applied on the YAML document so comments and layout survive):
 
 - channel `items` / `properties` → `schema`;
 - input `label` → `ui.label`, and input `type: text` → `type: string` with `ui: { widget: textarea }`;
 - top-level `input:` seed values → `default` on the matching `inputs` entries;
 - `function` / `script` / `shell` `with.input` → the node's `input:`;
+- `agent` / `router` `with.provider` / `with.model` → node-level `provider:` / `model:`;
 - map `{{ item.<as> }}` → `{{ <as> }}`, including inside the map body.
 
-Anything that needs a decision is left as it is and printed as a manual item: a node that has both `input` and `with.input`, a subgraph that sets both `stateMap.out` and `output`, and a map `with.output`.
+Anything that needs a decision is left as it is and printed as a manual item: a node that has both `input` and `with.input`, an `agent` / `router` that sets both node-level and `with.` `provider` or `model` to different values, a subgraph that sets both `stateMap.out` and `output`, and a map `with.output`.
 
 ## 7. Exit codes
 

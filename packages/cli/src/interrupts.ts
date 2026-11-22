@@ -87,9 +87,7 @@ function memoryIdentity(extras: CheckpointerOptionExtras): MemoryIdentity {
 /** True when the graph keeps memory in the checkpoint database. */
 function usesDurableMemory(spec: GraphSpec): boolean {
   const mem = spec.runtime?.memory;
-  if (mem) return (mem.backend ?? "checkpoint") === "checkpoint";
-  const st = spec.runtime?.store;
-  return !!st && st.enabled !== false && (st.backend === "sqlite" || st.backend === "postgres");
+  return !!mem && (mem.backend ?? "checkpoint") === "checkpoint";
 }
 
 function interruptData(it: InterruptInfo): Record<string, unknown> | undefined {

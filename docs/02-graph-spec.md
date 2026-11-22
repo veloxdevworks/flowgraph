@@ -216,7 +216,7 @@ Each node has a stable `id`, a `type` (resolved via the registry), and type-spec
 ```yaml
 nodes:
   - id: summarize                 # required; unique; referenced by edges
-    type: intelligent             # required; must resolve in the Node Registry
+    type: agent                   # required; must resolve in the Node Registry
     name: "Summarize issue"       # optional; human label (UI/traces)
     description: "..."            # optional
     provider: claude              # type-specific top-level fields (see node docs)

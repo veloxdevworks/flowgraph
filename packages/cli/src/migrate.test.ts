@@ -1,6 +1,353 @@
 import { describe, expect, it } from "vitest";
-import { parse } from "yaml";
+import { parse, parse as parseYaml } from "yaml";
+import { GraphSpecSchema } from "@flowgraph/spec";
 import { migrateSpec } from "./migrate.js";
+
+describe("flowgraph migrate", () => {
+  it("rewrites pre-v1 aliases (apiVersion, kind, code/intelligent, hook events, runtime.store, kind_of)", () => {
+    const legacy = `apiVersion: flowgraph/v0
+kind: Subgraph
+metadata:
+  name: legacy-graph
+nodes:
+  - id: fn
+    type: code
+    with:
+      fn: transform
+  - id: ai
+    type: intelligent
+    provider: mock
+    with:
+      prompt: hello
+edges:
+  - { from: START, to: fn }
+  - { from: fn, to: ai }
+  - { from: ai, to: END }
+runtime:
+  hooks:
+    - on: intelligent:beforeToolCall
+      do: allow
+  checkpoint:
+    backend: sqlite
+  store:
+    backend: sqlite
+`;
+
+    const first = migrateSpec(legacy);
+    expect(first.changed).toBe(true);
+    expect(first.output).toContain("apiVersion: flowgraph/v1");
+    expect(first.output).toContain("kind: Graph");
+    expect(first.output).toContain("type: function");
+    expect(first.output).toContain("type: agent");
+    expect(first.output).toContain("on: agent:beforeToolCall");
+    expect(first.output).toContain("memory:");
+    expect(first.output).not.toContain("store:");
+
+    // Also verifies intelligent:afterToolCall rewrite
+    const afterHook = migrateSpec("on: intelligent:afterToolCall\n");
+    expect(afterHook.changed).toBe(true);
+    expect(afterHook.output).toBe("on: agent:afterToolCall\n");
+
+    // The migrated YAML parses cleanly under the current v1 GraphSpecSchema.
+    const parsed = GraphSpecSchema.safeParse(parseYaml(first.output));
+    expect(parsed.success, JSON.stringify(parsed.success ? null : parsed.error.issues)).toBe(true);
+
+    // Idempotent: running migrate again produces no changes.
+    const second = migrateSpec(first.output);
+    expect(second.changed).toBe(false);
+    expect(second.output).toBe(first.output);
+  });
+
+  it("rewrites inline node types and SKILL.md kind_of to kindOf", () => {
+    const inline = `apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: inline-legacy }
+nodes:
+  - { id: a, type: code, with: { fn: f } }
+  - { id: b, type: intelligent, provider: mock, with: { prompt: hi } }
+edges:
+  - { from: START, to: a }
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const migrated = migrateSpec(inline);
+    expect(migrated.changed).toBe(true);
+    expect(migrated.output).toContain("type: function");
+    expect(migrated.output).toContain("type: agent");
+    expect(GraphSpecSchema.safeParse(parseYaml(migrated.output)).success).toBe(true);
+
+    const skill = `---
+apiVersion: flowgraph/v1
+kind: Skill
+name: old-skill
+version: 0.1.0
+kind_of: command
+command: ["echo", "hi"]
+---
+`;
+    const migratedSkill = migrateSpec(skill);
+    expect(migratedSkill.changed).toBe(true);
+    expect(migratedSkill.output).toContain("kindOf: command");
+    expect(migratedSkill.output).not.toContain("kind_of:");
+  });
+
+  it("applies pre-v1 alias rewrites and data-contract rewrites together in one pass", () => {
+    const combined = `apiVersion: flowgraph/v0
+kind: Subgraph
+metadata:
+  name: combined-legacy
+inputs:
+  - key: topic
+    type: text
+    label: Topic
+input:
+  topic: default-topic
+state:
+  channels:
+    tags:
+      type: array
+      items: { type: string }
+nodes:
+  - id: fn
+    type: code
+    with:
+      fn: transform
+      input:
+        topic: "{{ state.topic }}"
+  - id: ai
+    type: intelligent
+    provider: mock
+    with:
+      prompt: "{{ state.tags }}"
+edges:
+  - { from: START, to: fn }
+  - { from: fn, to: ai }
+  - { from: ai, to: END }
+runtime:
+  checkpoint:
+    backend: sqlite
+  store:
+    backend: sqlite
+`;
+
+    const first = migrateSpec(combined);
+    expect(first.changed).toBe(true);
+    expect(first.manual).toEqual([]);
+    expect(first.output).toContain("type: function");
+    expect(first.output).toContain("type: agent");
+    expect(first.output).toContain("memory:");
+    expect(first.output).not.toContain("store:");
+    expect(first.output).toContain("widget: textarea");
+    expect(first.output).toContain("schema:");
+    const parsed = GraphSpecSchema.safeParse(parseYaml(first.output));
+    expect(parsed.success, JSON.stringify(parsed.success ? null : parsed.error.issues)).toBe(true);
+
+    const second = migrateSpec(first.output);
+    expect(second.changed).toBe(false);
+    expect(second.output).toBe(first.output);
+  });
+
+  it("moves agent and router with.provider and with.model to node level and is idempotent", () => {
+    const legacy = `apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: provider-move
+nodes:
+  - id: ask
+    type: intelligent
+    with:
+      provider: anthropic
+      model: claude-sonnet-4-6
+      prompt: hello
+  - id: route
+    type: router
+    with:
+      mode: model
+      provider: openai
+      model: gpt-4o
+      input: "{{ state.text }}"
+      routes:
+        - name: a
+          to: ask
+  - id: dup
+    type: agent
+    provider: mock
+    model: m1
+    with:
+      provider: mock
+      model: m1
+      prompt: same
+  - id: fan
+    type: map
+    with:
+      over: "{{ state.items }}"
+      node:
+        type: agent
+        with:
+          provider: mock
+          model: fast
+          prompt: "{{ item }}"
+edges:
+  - { from: START, to: route }
+  - { from: ask, to: dup }
+  - { from: dup, to: fan }
+  - { from: fan, to: END }
+`;
+
+    const first = migrateSpec(legacy);
+    expect(first.changed).toBe(true);
+    expect(first.manual).toEqual([]);
+    expect(first.notes).toEqual(
+      expect.arrayContaining([
+        "nodes.ask: with.provider → provider",
+        "nodes.ask: with.model → model",
+        "nodes.route: with.provider → provider",
+        "nodes.route: with.model → model",
+        "nodes.dup: removed duplicate with.provider (matches provider)",
+        "nodes.dup: removed duplicate with.model (matches model)",
+        "nodes.fan.with.node: with.provider → provider",
+        "nodes.fan.with.node: with.model → model",
+      ]),
+    );
+
+    const parsedDoc = parseYaml(first.output) as {
+      nodes: Array<{ id: string; provider?: string; model?: string; with?: Record<string, unknown> }>;
+    };
+    expect(parsedDoc.nodes[0]).toMatchObject({ id: "ask", provider: "anthropic", model: "claude-sonnet-4-6" });
+    expect(parsedDoc.nodes[0]?.with).not.toHaveProperty("provider");
+    expect(parsedDoc.nodes[0]?.with).not.toHaveProperty("model");
+    expect(parsedDoc.nodes[1]).toMatchObject({ id: "route", provider: "openai", model: "gpt-4o" });
+    expect(parsedDoc.nodes[1]?.with).not.toHaveProperty("provider");
+    expect(parsedDoc.nodes[1]?.with).not.toHaveProperty("model");
+    expect(parsedDoc.nodes[2]).toMatchObject({ id: "dup", provider: "mock", model: "m1" });
+    expect(parsedDoc.nodes[2]?.with).not.toHaveProperty("provider");
+    expect(parsedDoc.nodes[2]?.with).not.toHaveProperty("model");
+
+    const parsed = GraphSpecSchema.safeParse(parsedDoc);
+    expect(parsed.success, JSON.stringify(parsed.success ? null : parsed.error.issues)).toBe(true);
+
+    const second = migrateSpec(first.output);
+    expect(second.changed).toBe(false);
+    expect(second.manual).toEqual([]);
+    expect(second.output).toBe(first.output);
+  });
+
+  it("reports a manual item when node-level and with provider or model differ", () => {
+    const conflicting = `apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: provider-conflict
+nodes:
+  - id: ask
+    type: agent
+    provider: anthropic
+    model: claude-sonnet-4-6
+    with:
+      provider: openai
+      model: gpt-4o
+      prompt: hello
+  - id: route
+    type: router
+    provider: mock
+    with:
+      mode: model
+      provider: openai
+      routes:
+        - name: a
+          to: ask
+edges:
+  - { from: START, to: route }
+  - { from: ask, to: END }
+`;
+
+    const first = migrateSpec(conflicting);
+    expect(first.changed).toBe(false);
+    expect(first.output).toBe(conflicting);
+    expect(first.manual).toEqual([
+      "nodes.ask: has both provider and with.provider with different values; keep one",
+      "nodes.ask: has both model and with.model with different values; keep one",
+      "nodes.route: has both provider and with.provider with different values; keep one",
+    ]);
+
+    const second = migrateSpec(first.output);
+    expect(second.changed).toBe(false);
+    expect(second.manual).toEqual(first.manual);
+  });
+
+  it("runs webhook, alias, provider/model, and data-contract rewrites together idempotently", () => {
+    const legacy = `apiVersion: flowgraph/v0
+kind: Subgraph
+metadata:
+  name: all-migrations
+inputs:
+  - key: topic
+    type: text
+    label: Topic
+input:
+  topic: news
+state:
+  channels:
+    tags:
+      type: array
+      items: { type: string }
+nodes:
+  - id: prep
+    type: code
+    with:
+      fn: prepare
+      input:
+        topic: "{{ state.topic }}"
+  - id: ask
+    type: intelligent
+    with:
+      provider: mock
+      model: fast
+      prompt: "{{ state.tags }}"
+  - id: notify
+    type: webhook
+    with:
+      url: https://example.com/hook
+      body: { ok: true }
+edges:
+  - { from: START, to: prep }
+  - { from: prep, to: ask }
+  - { from: ask, to: notify }
+  - { from: notify, to: END }
+runtime:
+  hooks:
+    - on: intelligent:beforeToolCall
+      do: allow
+  checkpoint:
+    backend: sqlite
+  store:
+    backend: sqlite
+`;
+
+    const first = migrateSpec(legacy);
+    expect(first.changed).toBe(true);
+    expect(first.manual).toEqual([]);
+    const parsedDoc = parseYaml(first.output) as {
+      apiVersion: string;
+      kind: string;
+      nodes: Array<{ id: string; type: string; provider?: string; model?: string; with?: Record<string, unknown>; input?: unknown }>;
+    };
+    expect(parsedDoc.apiVersion).toBe("flowgraph/v1");
+    expect(parsedDoc.kind).toBe("Graph");
+    expect(parsedDoc.nodes[0]).toMatchObject({ id: "prep", type: "function", input: { topic: "{{ state.topic }}" } });
+    expect(parsedDoc.nodes[1]).toMatchObject({ id: "ask", type: "agent", provider: "mock", model: "fast" });
+    expect(parsedDoc.nodes[1]?.with).not.toHaveProperty("provider");
+    expect(parsedDoc.nodes[1]?.with).not.toHaveProperty("model");
+    expect(parsedDoc.nodes[2]).toMatchObject({ id: "notify", type: "http", with: { method: "POST", once: true } });
+
+    const validated = GraphSpecSchema.safeParse(parsedDoc);
+    expect(validated.success, JSON.stringify(validated.success ? null : validated.error.issues)).toBe(true);
+
+    const second = migrateSpec(first.output);
+    expect(second.changed).toBe(false);
+    expect(second.manual).toEqual([]);
+    expect(second.output).toBe(first.output);
+  });
+});
 
 describe("migrateSpec", () => {
   it("rewrites type: webhook to type: http with once: true and default method: POST", () => {

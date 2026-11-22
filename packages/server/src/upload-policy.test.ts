@@ -48,7 +48,7 @@ describe("checkUntrustedUpload", () => {
         type === "shell"
           ? `  - { id: a, type: shell, with: { command: "id" } }`
           : type === "script"
-            ? `  - { id: a, type: script, with: { language: js, code: "1" } }`
+            ? `  - { id: a, type: script, with: { code: "1" } }`
             : type === "service"
               ? `  - { id: a, type: service, with: { name: svc, command: "sleep 1" } }`
               : type === "worktree"
@@ -737,7 +737,7 @@ describe("untrusted agent tools, function nodes and host programs", () => {
     expect(parsed.diagnostics.filter((d) => d.severity === "error"), JSON.stringify(parsed.diagnostics)).toEqual([]);
     return checkUntrustedUpload(yaml, parsed.spec!, opts).map((v) => `${v.code} ${v.path}`);
   };
-  const agent = (tools: string) => graph(`  - { id: a, type: agent, with: { provider: mock, prompt: hi, tools: ${tools} } }`);
+  const agent = (tools: string) => graph(`  - { id: a, type: agent, provider: mock, with: { prompt: hi, tools: ${tools} } }`);
 
   it("refuses service tools and other registered tools outside the allow list", () => {
     for (const t of ["start_service", "restart_service", "stop_service", "fs_bash", "my_tool"]) {
@@ -751,7 +751,7 @@ describe("untrusted agent tools, function nodes and host programs", () => {
     type: map
     with:
       over: "{{ state.items }}"
-      node: { id: inner, type: agent, with: { provider: mock, prompt: hi, tools: [ { function: start_service } ] } }`);
+      node: { id: inner, type: agent, provider: mock, with: { prompt: hi, tools: [ { function: start_service } ] } }`);
     expect(codes(mapped)).toContain("UPLOAD_AGENT_TOOL_BLOCKED nodes.a.map.inner.with.tools[0]");
     expect(codes(agent(`[ { function: ask_human }, { function: list_services }, { function: service_status } ]`))).toEqual([]);
     expect(codes(agent(`[ { function: my_tool } ]`), { allowTools: ["my_tool"] })).toEqual([]);

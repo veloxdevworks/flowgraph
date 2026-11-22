@@ -1,8 +1,9 @@
 /**
- * Provider registry and tool-function registry for intelligent nodes.
+ * Provider registry, provider plugin registry, and tool-function registry for agent nodes.
  */
 
-import type { ProviderAdapter } from "./types.js";
+import type { PluginProviderConfig } from "@flowgraph/spec";
+import type { ProviderAdapter, ProviderPlugin, ProviderPluginContext } from "./types.js";
 import type { NodeRunContext } from "../context.js";
 
 const providers = new Map<string, ProviderAdapter>();
@@ -21,6 +22,115 @@ export function hasProvider(name: string): boolean {
 
 export function listProviders(): string[] {
   return [...providers.keys()];
+}
+
+// ---------------------------------------------------------------------------
+// Provider plugins (`providers.<name>: { kind: plugin, options: ... }`)
+// ---------------------------------------------------------------------------
+
+const providerPlugins = new Map<string, ProviderPlugin>();
+
+export function registerProviderPlugin(plugin: ProviderPlugin): void {
+  providerPlugins.set(plugin.name, plugin);
+}
+
+export function unregisterProviderPlugin(name: string): void {
+  providerPlugins.delete(name);
+}
+
+export function getProviderPlugin(name: string): ProviderPlugin | undefined {
+  return providerPlugins.get(name);
+}
+
+export function listProviderPlugins(): string[] {
+  return [...providerPlugins.keys()];
+}
+
+export interface PluginOptionsValidationResult<Options = unknown> {
+  ok: boolean;
+  options: Options;
+  errors: string[];
+  warnings: string[];
+}
+
+export function validatePluginProviderOptions<Options = unknown>(
+  plugin: ProviderPlugin<Options>,
+  rawOptions: Record<string, unknown> | undefined,
+  ctx: ProviderPluginContext,
+): PluginOptionsValidationResult<Options> {
+  const input = rawOptions ?? {};
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  let parsed: unknown = input;
+
+  if (plugin.optionsSchema) {
+    const res = plugin.optionsSchema.safeParse(input);
+    if (!res.success) {
+      for (const issue of res.error.issues) {
+        const at = issue.path.join(".");
+        errors.push(at ? `${at}: ${issue.message}` : issue.message);
+      }
+      return { ok: false, options: input as Options, errors, warnings };
+    }
+    parsed = res.data;
+  }
+
+  if (plugin.validateOptions) {
+    for (const diag of plugin.validateOptions(parsed as Options, ctx)) {
+      if (diag.severity === "error") errors.push(diag.message);
+      else warnings.push(diag.message);
+    }
+  }
+
+  return { ok: errors.length === 0, options: parsed as Options, errors, warnings };
+}
+
+export async function createPluginProvider(
+  name: string,
+  cfg: PluginProviderConfig,
+  opts: {
+    plugins?: ReadonlyMap<string, ProviderPlugin>;
+    env?: Record<string, string | undefined>;
+    allowGlobal?: boolean;
+  } = {},
+): Promise<{ adapter: ProviderAdapter; warnings: string[] }> {
+  const pluginName = cfg.plugin ?? name;
+  const plugin =
+    opts.plugins?.get(pluginName) ??
+    (opts.allowGlobal === false ? undefined : providerPlugins.get(pluginName));
+  if (!plugin) {
+    throw Object.assign(
+      new Error(
+        `Provider "${name}" references plugin "${pluginName}", which is not registered. ` +
+          `Import it via imports[].providers or call registerProviderPlugin().`,
+      ),
+      { code: "PROVIDER_PLUGIN_NOT_FOUND", retryable: false },
+    );
+  }
+  const env = opts.env ?? process.env;
+  const apiKey = cfg.apiKeyEnv ? env[cfg.apiKeyEnv] : undefined;
+  const ctx: ProviderPluginContext = {
+    name,
+    ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+    ...(cfg.apiKeyEnv !== undefined ? { apiKeyEnv: cfg.apiKeyEnv } : {}),
+    ...(apiKey !== undefined ? { apiKey } : {}),
+  };
+  const checked = validatePluginProviderOptions(plugin, cfg.options, ctx);
+  if (!checked.ok) {
+    throw Object.assign(
+      new Error(
+        `Provider "${name}" (plugin "${pluginName}") has invalid options: ${checked.errors.join("; ")}`,
+      ),
+      { code: "PROVIDER_OPTIONS_INVALID", retryable: false },
+    );
+  }
+  const built = await plugin.create(checked.options, ctx);
+  const adapter: ProviderAdapter = {
+    ...built,
+    name,
+    capabilities: built.capabilities ?? { streaming: false, toolCalling: false, structuredOutput: false },
+  };
+  return { adapter, warnings: checked.warnings };
 }
 
 /**

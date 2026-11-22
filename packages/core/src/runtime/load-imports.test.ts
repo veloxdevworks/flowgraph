@@ -28,21 +28,22 @@ describe("loadGraphImports — reducers", () => {
     // so CLI/sidecar (plain Node) can load register.ts the same way.
     expect(pluginPath.endsWith(".ts")).toBe(true);
     const spec = specWithImport();
-    await loadGraphImports(spec, { cwd: __dirname });
-    expect(registry.getReducer("uniqueById")).toBeTypeOf("function");
+    const imported = await loadGraphImports(spec, { cwd: __dirname });
+    expect(imported.registry.getReducer("uniqueById")).toBeTypeOf("function");
+    expect(registry.getReducer("uniqueById")).toBeUndefined();
   });
 
   it("loads reducers from default export record", async () => {
     const spec = specWithImport();
-    await loadGraphImports(spec, { cwd: __dirname });
-    expect(registry.getReducer("uniqueById")).toBeTypeOf("function");
-    expect(() => buildStateAnnotation(spec)).not.toThrow();
+    const imported = await loadGraphImports(spec, { cwd: __dirname });
+    expect(imported.registry.getReducer("uniqueById")).toBeTypeOf("function");
+    expect(() => buildStateAnnotation(spec, undefined, imported.registry)).not.toThrow();
   });
 
   it("validateSpec passes after imports load custom reducer", async () => {
     const spec = specWithImport();
-    await loadGraphImports(spec, { cwd: __dirname });
-    const diags = validateSpec(spec);
+    const imported = await loadGraphImports(spec, { cwd: __dirname });
+    const diags = validateSpec(spec, { registry: imported.registry });
     expect(diags.filter((d) => d.code === "UNREGISTERED_REDUCER")).toHaveLength(0);
   });
 
@@ -51,7 +52,7 @@ describe("loadGraphImports — reducers", () => {
     const marker = path.join(dir, "import-executed.txt");
     await fs.writeFile(
       path.join(dir, "pwn.mjs"),
-      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "executed"); export default { type: "pwn-node" };\n`,
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "executed"); export default { type: "pwn/node" };\n`,
     );
     const spec = {
       metadata: { name: "aliases-only" },
@@ -60,7 +61,7 @@ describe("loadGraphImports — reducers", () => {
         { skill: "./skills/file-bug", as: "file-bug" },
         { reducers: "./register.ts" },
       ],
-      nodes: [{ id: "x", type: "pwn-node" }],
+      nodes: [{ id: "x", type: "pwn/node" }],
       edges: [
         { from: "START", to: "x" },
         { from: "x", to: "END" },
@@ -106,7 +107,7 @@ describe("loadGraphImports — reducers", () => {
     );
   });
 
-  it("warns on a mistyped node type when a nodes import is declared", () => {
+  it("keeps a mistyped unnamespaced node type an error even when a nodes import is declared", () => {
     const spec = {
       metadata: { name: "typo" },
       imports: [{ nodes: "./plugin.mjs" }],
@@ -119,12 +120,11 @@ describe("loadGraphImports — reducers", () => {
     const diags = withUnresolvedImports(spec, validateSpec(spec));
     expect(diags).toContainEqual(
       expect.objectContaining({
-        code: "PLUGIN_TYPE_UNRESOLVED",
-        severity: "warning",
+        code: "UNKNOWN_NODE_TYPE",
+        severity: "error",
         path: "nodes.x.type",
       }),
     );
-    expect(diags.some((d) => d.code === "UNKNOWN_NODE_TYPE")).toBe(false);
   });
 
   it("keeps an unknown type an error when no nodes import is declared", () => {

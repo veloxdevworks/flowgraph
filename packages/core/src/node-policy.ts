@@ -10,7 +10,7 @@
 import { literalCallbackExpr, evalExpr, parseExpr, scanTemplate, type Expr } from "@flowgraph/expr";
 import type { NodeRunContext } from "./context.js";
 import type { OutboundHttpPolicy } from "./outbound-http.js";
-import { registry } from "./registry.js";
+import { registry, type NodeRegistry } from "./registry.js";
 
 /** Key of the policy on the run context (copied into every node context). */
 export const NODE_POLICY = Symbol.for("flowgraph.nodePolicy");
@@ -110,12 +110,17 @@ function suffix(policy: NodePolicy): string {
 }
 
 /** Throws NODE_TYPE_BLOCKED when the policy blocks `type`. `where` names the node for the message. */
-export function assertNodeTypeAllowed(policy: NodePolicy | undefined, type: string, where: string): void {
+export function assertNodeTypeAllowed(
+  policy: NodePolicy | undefined,
+  type: string,
+  where: string,
+  reg: NodeRegistry = registry,
+): void {
   if (!policy) return;
   if (policy.blockedTypes?.includes(type)) {
     throw new NodePolicyError("NODE_TYPE_BLOCKED", `${where}: node type "${type}" is not allowed here${suffix(policy)}`);
   }
-  if (policy.requireSafeNodeTypes && !registry.isUntrustedSafe(type)) {
+  if (policy.requireSafeNodeTypes && !reg.isUntrustedSafe(type)) {
     throw new NodePolicyError(
       "NODE_TYPE_BLOCKED",
       `${where}: node type "${type}" is not marked safe for untrusted graphs${suffix(policy)}`,

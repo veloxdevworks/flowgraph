@@ -14,6 +14,7 @@ export interface DataContractMigration {
 }
 
 const INPUT_TYPES_WITH_NODE_INPUT = new Set(["function", "script", "shell"]);
+const PROVIDER_MODEL_NODE_TYPES = new Set(["agent", "router"]);
 
 export function migrateDataContracts(raw: string): DataContractMigration {
   const doc = parseDocument(raw);
@@ -141,6 +142,14 @@ function migrateRootInput(doc: Document, graph: YAMLMap, where: string, notes: s
   notes.push(`${where}input → default on the matching inputs entries`);
 }
 
+function yamlValue(node: unknown): unknown {
+  if (isScalar(node)) return node.value;
+  if (node && typeof (node as { toJSON?: unknown }).toJSON === "function") {
+    return (node as { toJSON: () => unknown }).toJSON();
+  }
+  return node;
+}
+
 function migrateNode(doc: Document, node: YAMLMap, label: string, notes: string[], manual: string[]): void {
   const type = stringAt(node, "type");
   const config = mapAt(node, "with");
@@ -152,6 +161,22 @@ function migrateNode(doc: Document, node: YAMLMap, label: string, notes: string[
       node.set("input", config.get("input", true));
       config.delete("input");
       notes.push(`${label}: with.input → input`);
+    }
+  }
+
+  if (type && PROVIDER_MODEL_NODE_TYPES.has(type) && config) {
+    for (const field of ["provider", "model"] as const) {
+      if (!config.has(field)) continue;
+      if (!node.has(field)) {
+        node.set(field, config.get(field, true));
+        config.delete(field);
+        notes.push(`${label}: with.${field} → ${field}`);
+      } else if (JSON.stringify(yamlValue(node.get(field, true))) === JSON.stringify(yamlValue(config.get(field, true)))) {
+        config.delete(field);
+        notes.push(`${label}: removed duplicate with.${field} (matches ${field})`);
+      } else {
+        manual.push(`${label}: has both ${field} and with.${field} with different values; keep one`);
+      }
     }
   }
 

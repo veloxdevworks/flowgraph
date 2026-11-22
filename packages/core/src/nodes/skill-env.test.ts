@@ -19,7 +19,7 @@ apiVersion: flowgraph/v1
 kind: Skill
 name: env-dump
 version: 0.1.0
-kind_of: command
+kindOf: command
 command: ${JSON.stringify(command)}
 env:
   vars:
