@@ -83,6 +83,45 @@ beforeAll(async () => {
     `export default { mergeTags: (a, b) => b ?? a };\n`,
   );
 
+  // Terminal plugin node (no outgoing edge to END required)
+  await fs.writeFile(
+    path.join(fixtureDir, "plugin-terminal.mjs"),
+    `export default [{
+  type: "acme/stop",
+  configSchema: { safeParse: (d) => ({ success: true, data: d }) },
+  capabilities: { terminal: true },
+  build() {
+    return {
+      async run() { return { update: { out: "stopped-cleanly" } }; }
+    };
+  },
+}];
+`,
+  );
+
+  // Map worker plugin that completes for normal items and interrupts for "pause"
+  await fs.writeFile(
+    path.join(fixtureDir, "plugin-map-worker.mjs"),
+    `export default [{
+  type: "acme/map-item",
+  configSchema: { safeParse: (d) => ({ success: true, data: d }) },
+  capabilities: { interruptible: true },
+  build() {
+    return {
+      async run(_state, ctx) {
+        const value = ctx._input?.value;
+        if (value === "pause") {
+          const answer = ctx.interrupt({ reason: "need-item", payload: { value } });
+          return { update: { result: answer } };
+        }
+        return { update: { result: "done:" + String(value) } };
+      }
+    };
+  },
+}];
+`,
+  );
+
   // Provider plugin module A
   await fs.writeFile(
     path.join(fixtureDir, "provider-plugin.mjs"),
@@ -308,6 +347,8 @@ describe("namespaced plugins, collision errors, per-compile registry and plugin 
     const collidingRes = await (await compileGraph(collidingSpec, { cwd: fixtureDir })).run();
     expect(collidingRes.status).toBe("error");
     expect((collidingRes.error as Error & { code?: string })?.code).toBe("PLUGIN_TYPE_COLLISION");
+    expect(collidingRes.error?.message).toContain("./plugin-a.mjs");
+    expect(collidingRes.error?.message).not.toContain("built-in or host");
   });
 
   it("allows parent and file subgraph to import the same provider plugin, but fails on different plugins", async () => {
@@ -390,7 +431,71 @@ describe("namespaced plugins, collision errors, per-compile registry and plugin 
     });
     await expect(compileGraph(spec, { cwd: fixtureDir })).rejects.toMatchObject({
       code: "PLUGIN_TYPE_COLLISION",
+      message: expect.stringContaining("built-in or host"),
     });
+  });
+
+  it("recognizes a plugin node's terminal capability during compile-time topology validation", async () => {
+    const spec = baseSpec({
+      imports: [{ nodes: "./plugin-terminal.mjs" }],
+      nodes: [{ id: "stop", type: "acme/stop" }],
+      edges: [{ from: "START", to: "stop" }],
+    });
+    const compiled = await compileGraph(spec, { cwd: fixtureDir });
+    const res = await compiled.run();
+    expect(res.status).toBe("completed");
+    expect(res.state["out"]).toBe("stopped-cleanly");
+  });
+
+  it("collects map results into an imported custom reducer for both run results and getState", async () => {
+    const spec = baseSpec({
+      imports: [{ nodes: "./plugin-map-worker.mjs" }, { reducers: "./reducer-1.mjs" }],
+      runtime: { checkpoint: { enabled: true, backend: "memory" } },
+      state: {
+        channels: {
+          items: { type: "array", default: ["ok", "pause"] },
+          tags: { type: "array", reducer: "custom:mergeTags", default: ["seed"] },
+        },
+      },
+      nodes: [
+        {
+          id: "fan",
+          type: "map",
+          with: {
+            over: "{{ state.items }}",
+            as: "entry",
+            node: {
+              type: "acme/map-item",
+              input: { value: "{{ entry }}" },
+            },
+            collect: { to: "tags" },
+          },
+        },
+      ],
+      edges: [
+        { from: "START", to: "fan" },
+        { from: "fan", to: "END" },
+      ],
+    });
+
+    const compiled = await compileGraph(spec, { cwd: fixtureDir });
+    expect(registry.getReducer("mergeTags")).toBeUndefined();
+
+    const threadId = "map-imported-reducer";
+    const parked = await compiled.run({ threadId, onInterrupt: "fail" });
+    expect(parked.error).toBeUndefined();
+    expect(parked.status).toBe("interrupted");
+    expect(parked.state["tags"]).toEqual(["seed", "done:ok"]);
+
+    const parkedSnap = await compiled.getState(threadId);
+    expect(parkedSnap?.values["tags"]).toEqual(["seed", "done:ok"]);
+
+    const completed = await compiled.resume({ threadId, resume: "done:resumed", onInterrupt: "fail" });
+    expect(completed.status).toBe("completed");
+    expect(completed.state["tags"]).toEqual(["seed", "done:ok", "done:resumed"]);
+
+    const finalSnap = await compiled.getState(threadId);
+    expect(finalSnap?.values["tags"]).toEqual(["seed", "done:ok", "done:resumed"]);
   });
 
   it("rejects colliding reducer names with PLUGIN_REDUCER_COLLISION", async () => {

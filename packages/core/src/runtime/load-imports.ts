@@ -255,7 +255,7 @@ export async function loadGraphImports(
       const mod = await importModuleSpecifier(imp.nodes, cwd);
       const factories = normalizeDefaultExport<NodeFactory>(mod["default"]);
       for (const f of factories) {
-        targetRegistry.register(f, { plugin: true });
+        targetRegistry.register(f, { plugin: true, source: imp.nodes });
       }
     } else if ("providers" in imp) {
       const mod = await importModuleSpecifier(imp.providers, cwd);

@@ -109,6 +109,8 @@ export type ReducerFn = (current: unknown, incoming: unknown) => unknown;
 export interface RegisterNodeOptions {
   /** When true, require a namespaced plugin type (e.g. `acme:greet` or `@acme/pkg:greet`). */
   plugin?: boolean;
+  /** Optional import specifier or origin describing where this node type was registered from. */
+  source?: string;
 }
 
 function registryError(code: string, message: string): Error & { code: string; retryable: false } {
@@ -118,6 +120,7 @@ function registryError(code: string, message: string): Error & { code: string; r
 export class NodeRegistry {
   private readonly parent?: NodeRegistry | undefined;
   private factories = new Map<string, NodeFactory>();
+  private factorySources = new Map<string, string>();
   private reducers = new Map<string, ReducerFn>();
 
   constructor(parent?: NodeRegistry) {
@@ -129,11 +132,20 @@ export class NodeRegistry {
     return new NodeRegistry(this);
   }
 
+  private getFactorySource(type: string): string | undefined {
+    return this.factorySources.get(type) ?? this.parent?.getFactorySource(type);
+  }
+
   register(factory: NodeFactory, opts: RegisterNodeOptions = {}): void {
     const existing = this.get(factory.type);
     if (existing !== undefined) {
       if (existing === factory) return;
-      const target = this.parent?.has(factory.type) ? "built-in or host node type" : "node type";
+      const existingSource = this.getFactorySource(factory.type);
+      const target = existingSource
+        ? `node type imported from "${existingSource}"`
+        : this.parent?.has(factory.type)
+          ? "built-in or host node type"
+          : "node type";
       throw registryError(
         "PLUGIN_TYPE_COLLISION",
         `Node type "${factory.type}" collides with an already-registered ${target}.`,
@@ -146,6 +158,7 @@ export class NodeRegistry {
       );
     }
     this.factories.set(factory.type, factory);
+    if (opts.source) this.factorySources.set(factory.type, opts.source);
   }
 
   get(type: string): NodeFactory | undefined {

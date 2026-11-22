@@ -546,7 +546,9 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
       const update = collectMapResults(parsed.data, items, node.id, { state: values, config: baseCtx.config ?? {}, run: baseCtx.meta ?? {} });
       for (const [channel, value] of Object.entries(update)) {
         const definition = graphSpec.state?.channels[channel];
-        values[channel] = definition ? channelReducerAndDefault(channel, definition).reducer(values[channel], value) : value;
+        values[channel] = definition
+          ? channelReducerAndDefault(channel, definition, undefined, assembled.compileRegistry).reducer(values[channel], value)
+          : value;
       }
     }
     // LangGraph can retain old interrupt writes after a task finishes in a
@@ -1491,10 +1493,6 @@ async function assembleCompiledLangGraph(
       retryable: false,
     });
   }
-  const policyNodes = (Array.isArray(spec.nodes) ? spec.nodes : []).filter((node) => node != null);
-  const policyEdges = policyNodes.flatMap((node) => recoveryTargets(spec, node, opts.hooks).map((to) => ({ from: node.id, to })));
-  const invalidTopology = topologyDiagnostics({ ...spec, edges: [...spec.edges, ...policyEdges] }).filter((d) => d.severity === "error");
-  if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
 
   const cwd = opts.cwd ?? process.cwd();
   const graphDir =
@@ -1523,6 +1521,13 @@ async function assembleCompiledLangGraph(
   // Refused before anything is loaded when a node policy forbids module imports.
   assertImportsAllowed(opts.nodePolicy, spec, `graph "${spec.metadata?.name ?? "graph"}"`);
   const imported = await loadGraphImports(spec, { cwd: graphDir, registry: compileRegistry });
+  const policyNodes = (Array.isArray(spec.nodes) ? spec.nodes : []).filter((node) => node != null);
+  const policyEdges = policyNodes.flatMap((node) => recoveryTargets(spec, node, opts.hooks).map((to) => ({ from: node.id, to })));
+  const invalidTopology = topologyDiagnostics(
+    { ...spec, edges: [...spec.edges, ...policyEdges] },
+    compileRegistry,
+  ).filter((d) => d.severity === "error");
+  if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
   const skillAliases: Record<string, string> = { ...(opts.runConfig?.skills ?? {}), ...imported.skillAliases };
   const agentAliases: Record<string, string> = { ...(opts.runConfig?.agents ?? {}), ...imported.agentAliases };
   const subgraphAliases: Record<string, string> = { ...(opts.runConfig?.subgraphs ?? {}), ...imported.subgraphAliases };
