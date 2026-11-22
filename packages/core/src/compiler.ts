@@ -468,7 +468,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   } = assembled;
   const compiledAt = new Date().toISOString();
   const compileIssues = assembled.warnings.map((d) => compileWarningIssue(d, compiledAt));
-  const declaredInputKeys = new Set([...Object.keys(buildStateAnnotation(graphSpec).spec), ...(graphSpec.inputs ?? []).map(field => field.key)]);
+  const declaredInputKeys = new Set([
+    ...Object.keys(buildStateAnnotation(graphSpec).spec),
+    ...(Array.isArray(graphSpec.inputs) ? graphSpec.inputs : []).flatMap((field) => (field && typeof field.key === "string" ? [field.key] : [])),
+  ]);
 
   const authoredMapNames = new Map<string, string>();
   for (const node of graphSpec.nodes) {

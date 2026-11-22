@@ -93,7 +93,7 @@ export function channelReducerAndDefault(
     };
   }
 
-  if (ch.reducer?.startsWith("custom:")) {
+  if (typeof ch.reducer === "string" && ch.reducer.startsWith("custom:")) {
     const reducerName = ch.reducer.slice("custom:".length);
     const fn = registry.getReducer(reducerName);
     if (!fn) {
@@ -131,6 +131,7 @@ export function buildStateAnnotation(
   const fields: Record<string, unknown> = {};
 
   for (const [name, ch] of Object.entries(channels)) {
+    if (!ch || typeof ch !== "object") continue;
     const { reducer, default: defaultFn } = channelReducerAndDefault(name, ch, warn);
     fields[name] = Annotation<unknown>({
       reducer,

@@ -598,7 +598,7 @@ describe("malformed nested graphs", () => {
         message: "node.spec.nodes.0.id: Required",
       },
       {
-        spec: nestedSpec({ nodes: [{ id: "y", type: 5, with: {} }], edges: [{ from: "START", to: "END" }] }),
+        spec: nestedSpec({ nodes: [{ id: "a", type: 5, with: {} }], edges: [{ from: "START", to: "a" }, { from: "a", to: "END" }] }),
         path: `${body}.nodes.0.type`,
         message: "node.spec.nodes.0.type: Expected string, received number",
       },
@@ -623,7 +623,7 @@ describe("malformed nested graphs", () => {
     const cases: Array<{ spec: Record<string, unknown>; row: ErrorRow }> = [
       {
         spec: nestedSpec({ runtime: { hooks: [{ on: "node:before" }] } }),
-        row: { code: "HOOK_DIRECTIVE_UNKNOWN", path: `${spec}.runtime.hooks[0].do`, message: "Required" },
+        row: { code: "SCHEMA_ERROR", path: `${spec}.runtime.hooks[0].do`, message: "Required" },
       },
       {
         spec: nestedSpec({ runtime: { hooks: { on: "node:before", do: "allow" } } }),
@@ -678,6 +678,11 @@ describe("malformed nested graphs", () => {
       { name: "nodes object", spec: () => ({ ...head, metadata: { name: "g" }, nodes: { y: { id: "y", ...echo } }, edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }] }) },
       { name: "router when", spec: broken },
       { name: "branch when", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", branch: [{ to: "y", when: 5 }, { to: "END", default: true }] }, { from: "y", to: "END" }] }) },
+      { name: "null trigger", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], triggers: [null] }) },
+      { name: "cron schedule", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], triggers: [{ id: "t", type: "cron", schedule: 5 }] }) },
+      { name: "null input", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], inputs: [null] }) },
+      { name: "null channel", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], state: { channels: { out: null } } }) },
+      { name: "reducer type", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], state: { channels: { out: { type: "string", reducer: 5 } } } }) },
     ];
     const place = (kind: (typeof places)[number], inner: Record<string, unknown>): GraphSpec => {
       if (kind === "top") return inner as GraphSpec;

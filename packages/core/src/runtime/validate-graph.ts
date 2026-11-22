@@ -226,8 +226,16 @@ export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
   const channels = spec.state?.channels ?? {};
 
   for (const [name, ch] of Object.entries(channels)) {
-    const reducer = ch.reducer;
     const path = `state.channels.${name}`;
+    if (!ch || typeof ch !== "object") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path, message: "Expected object" });
+      continue;
+    }
+    const reducer = ch.reducer;
+    if (reducer !== undefined && typeof reducer !== "string") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path: `${path}.reducer`, message: "Expected string" });
+      continue;
+    }
 
     if (reducer === "append") {
       if (ch.type !== "array" && ch.type !== "any") {
@@ -251,7 +259,7 @@ export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
       }
     }
 
-    if (reducer?.startsWith("custom:")) {
+    if (typeof reducer === "string" && reducer.startsWith("custom:")) {
       const reducerName = reducer.slice("custom:".length);
       if (!registry.getReducer(reducerName)) {
         diagnostics.push({
@@ -1572,7 +1580,7 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
       continue;
     }
     if (typeof hook.do !== "string") {
-      shape("HOOK_DIRECTIVE_UNKNOWN", `runtime.hooks[${index}].do`, hook.do === undefined ? "Required" : "Expected string");
+      shape(hook.do === undefined ? "SCHEMA_ERROR" : "HOOK_DIRECTIVE_UNKNOWN", `runtime.hooks[${index}].do`, hook.do === undefined ? "Required" : "Expected string");
       continue;
     }
     if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook event "${hook.on}".` });
@@ -1596,7 +1604,8 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
   }
   const nodes = rawNodes.filter(isNodeSpec);
 
-  const nodeIds = new Set(nodes.map((n) => n.id));
+  const nodeIds = new Set<string>();
+  for (const node of rawNodes) if (isRecord(node) && typeof node.id === "string") nodeIds.add(node.id);
   const seen = new Set<string>();
   for (const node of nodes) {
     if (seen.has(node.id)) push({ severity: "error", code: "DUPLICATE_NODE_ID", message: `Duplicate node id: "${node.id}"`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
@@ -1620,7 +1629,7 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
   for (const { edge, index } of edges) {
     const check = (ref: string) => {
       if (ref === "START" || ref === "END") return;
-      if (!nodeIds.has(ref)) push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"`, ...(prefix ? { path: `edges[${index}]` } : {}) });
+      if (!nodeIds.has(ref)) push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"`, path: `edges[${index}]` });
     };
     const targets = edgeTargets(edge);
     // A `from` list is checked in barrierEdgeDiagnostics, including unknown ids, START and END.
@@ -1699,10 +1708,12 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
   } else {
     const configResult = factory.configSchema.safeParse(node.with ?? {});
     if (!configResult.success) {
-      for (const issue of configResult.error.issues) {
-        // A map schema parses the nested graph, including its hooks. The walk
-        // below reports that same event or verb, so the config issue is not repeated.
-        if (node.type === "map" && graphStructureChecksHook(node.with, issue.path)) continue;
+      const issues = configResult.error.issues;
+      // A string hook event or verb is reported by the walk. Any other schema
+      // failure is the diagnostic for this body, so the nested lints do not run.
+      const hookWalk = node.type === "map" && issues.every((issue) => graphStructureChecksHook(node.with, issue.path));
+      for (const issue of issues) {
+        if (hookWalk && graphStructureChecksHook(node.with, issue.path)) continue;
         const fieldPath = issue.path.join(".");
         push({
           severity: "error",
@@ -1711,6 +1722,7 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
           path: fieldPath ? `${path}.with.${fieldPath}` : `${path}.with`,
         });
       }
+      if (node.type === "map" && !hookWalk) return;
     }
   }
   if (node.type === "map") {
@@ -1761,6 +1773,10 @@ export function inputFieldDiagnostics(spec: GraphSpec): Diagnostic[] {
   const seen = new Set<string>();
   for (const [index, field] of (Array.isArray(spec.inputs) ? spec.inputs : []).entries()) {
     const path = `inputs[${index}]`;
+    if (!field || typeof field !== "object") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path, message: "Expected object" });
+      continue;
+    }
     if (seen.has(field.key)) {
       diagnostics.push({ severity: "error", code: "DUPLICATE_INPUT_KEY", path: `${path}.key`, message: `Input "${field.key}" is declared more than once` });
     }
@@ -1782,11 +1798,19 @@ export function triggerDiagnostics(spec: GraphSpec): Diagnostic[] {
   const seen = new Set<string>();
   for (const [index, trigger] of (Array.isArray(spec.triggers) ? spec.triggers : []).entries()) {
     const path = `triggers[${index}]`;
+    if (!trigger || typeof trigger !== "object") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path, message: "Expected object" });
+      continue;
+    }
     if (seen.has(trigger.id)) {
       diagnostics.push({ severity: "error", code: "DUPLICATE_TRIGGER_ID", path: `${path}.id`, message: `Trigger id "${trigger.id}" is used more than once; hosts use it to tell triggers apart` });
     }
     seen.add(trigger.id);
     if (trigger.type !== "cron") continue;
+    if (typeof trigger.schedule !== "string") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path: `${path}.schedule`, message: trigger.schedule === undefined ? "Required" : "Expected string" });
+      continue;
+    }
     const problem = cronScheduleProblem(trigger.schedule);
     if (problem) {
       diagnostics.push({ severity: "error", code: "TRIGGER_CRON_INVALID", path: `${path}.schedule`, message: `Trigger "${trigger.id}" schedule "${trigger.schedule}": ${problem}` });

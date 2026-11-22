@@ -123,6 +123,7 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
       }
     }
   for (const [name, channel] of Object.entries(spec.state?.channels ?? {})) {
+    if (!channel || typeof channel !== "object") continue;
     const value = channel.default;
     if (value === undefined || channel.type === "any") continue;
     const matches =
