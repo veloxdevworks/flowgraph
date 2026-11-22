@@ -28,17 +28,33 @@ state:
 | `messages` | `BaseMessage[]` | special: uses LangGraph's message reducer (append + id-based update) |
 | `any` | unknown | escape hatch; loses type checking |
 
-A channel may also describe its contents with `items` (arrays) or `properties` (objects). Both are [data contracts](#data-contracts-json-schema):
+### Channel contracts
+
+A channel's `type` is shorthand for a schema with just that type. For more, add a `schema:` — draft-07 JSON Schema, the [same dialect as every other contract](#data-contracts-json-schema):
 
 ```yaml
 findings:
   type: array
-  items:
-    type: object
-    properties: { severity: { type: string, enum: [low, high] }, line: { type: integer } }
-    required: [severity]
+  schema:
+    type: array
+    items:
+      type: object
+      properties: { severity: { type: string, enum: [low, high] }, line: { type: integer } }
+      required: [severity]
   reducer: append
 ```
+
+The contract is checked on **every write**, against the value the channel would hold after its reducer runs (so an `append` channel checks the whole list, not just the new item). That covers node results, `output.to` / `output.map`, subgraph merge-back, seeded run input and resumed values. A write that fails throws a `ChannelWriteError` (code `CHANNEL_WRITE_INVALID`) that names the channel and the failures, one `<path> <problem>` per failure:
+
+```text
+Channel "findings" rejected a write: the value does not match its schema: /1/severity must be equal to one of the allowed values: "low", "high"
+```
+
+- `null` is every channel's empty value, so a channel that has not been written yet, or is written `null`, always passes.
+- `type` and `schema` must agree: `type: string` with `schema: { type: number }` is rejected when the graph loads. Use `type: any` when the schema alone should decide.
+- `default` must satisfy the contract; `flowgraph validate` reports `CHANNEL_DEFAULT_TYPE` otherwise.
+- `messages` channels keep their message reducer and are not checked against `type`.
+- The old channel `items` and `properties` fields were removed. `flowgraph migrate` rewrites them into `schema`.
 
 ### Data contracts (JSON Schema)
 
@@ -49,7 +65,8 @@ Every schema that describes data uses one dialect: **JSON Schema draft-07**, che
 - workshop `with.schema` (session output),
 - agent `with.schema` (structured output),
 - skill `inputs` / `outputs` ([04 §2](./04-skills.md#2-skillmd-front-matter)),
-- channel `items` / `properties` (above).
+- channel `schema` ([above](#channel-contracts)),
+- graph `inputs` (`type: json` `schema`) and `outputs`.
 
 Rules:
 
@@ -132,9 +149,20 @@ A `subgraph` node writes child results into the parent through the same reducers
 | set | Each **key** is a parent channel. Each **value** is a child channel or `{{ }}` expression (`approval: gateResult` writes the child's `gateResult` into the parent's `approval`). |
 | omitted | Channels that share a name. Child-only channels are not kept on the parent. The reserved `outputs` bag is not copied. |
 
+`stateMap.out` and the node's `output` are two ways to say the same thing, so setting both is rejected when the graph loads (`output.to` / `output.map` project the child's result like any other node; `stateMap.out` maps child channels to parent channels).
+
 The child is seeded with the matching parent values (or `stateMap.in`). The update is only the **new** portion, then the **parent's** reducer combines it: an `append` channel receives the suffix the child added, and a `merge` / `mergeDeep` channel receives the keys the child changed. Unchanged seeded channels are left alone, so a parallel branch is not overwritten with a stale copy.
 
 Parallel subgraphs in one superstep merge in node-id order (map items merge in input order). `flowgraph validate` warns with `UNDECLARED_OUTPUT_CHANNEL` when an `out` key is not a declared parent channel, and errors with `SUBGRAPH_OUTPUT_UNKNOWN` when an `out` value names a child channel that does not exist.
+
+### Subgraph call boundary
+
+A subgraph file declares its interface with `inputs` and `outputs` ([02 §2b](./02-graph-spec.md#2b-inputs-run-parameters), [§2c](./02-graph-spec.md#2c-outputs-what-a-subgraph-file-returns)). The call is checked on both sides:
+
+- **Going in.** The values the parent passes (the node's `input:` and `stateMap.in`, plus same-name channels copied in) are validated against the child's `inputs`: defaults are applied, required and type checks run, and a key the child declares neither as an input nor as a channel is rejected with `INPUT_INVALID` instead of being dropped. A same-name parent channel that is copied in implicitly and still holds `null` is skipped. The node's `input:` must be an object (or omitted); anything else is `SUBGRAPH_INPUT_INVALID`.
+- **Coming back.** When the child declares `outputs`, only those channels return to the parent. Each must have been produced (unless `required: false`) and must match its `type` / `schema`, otherwise the node fails with `SUBGRAPH_OUTPUT_INVALID`. A child that declares no `outputs` returns its whole state, as before, and `stateMap.out` / same-name merge-back then work on that.
+
+`flowgraph validate` catches the mismatches it can see without running: `SUBGRAPH_INPUT_UNKNOWN` (the parent passes a key the child does not declare), `SUBGRAPH_INPUT_MISSING` (a required child input is not passed and has no default) and `SUBGRAPH_OUTPUT_UNKNOWN` (`stateMap.out` reads a channel the child does not declare as an output).
 
 ## 3. Reading & writing state
 
@@ -201,7 +229,7 @@ nodes:
     type: map
     with:
       over: "{{ state.items }}"
-      node: { type: intelligent, with: { prompt: "Analyze {{ item.item }}", output: { to: "_item" } } }
+      node: { type: intelligent, with: { prompt: "Analyze {{ item }}" } }
       collect: { to: findings }
 ```
 
@@ -281,9 +309,10 @@ The full `${ENV}` rule (undeclared names, `:-default`, the `$${NAME}` escape, re
 | Scope | Contents |
 |---|---|
 | `state` | current graph channels |
-| `input` | this node's mapped input object |
+| `input` | this node's rendered `input` (any value) |
 | `result` | this node's raw output (only in `output` mapping) |
-| `item` | current item inside a `map` node (`item.<as>`) |
+| `<as>` | current item inside a `map` node, bound under the name `as` (default `item`): `{{ item }}`, `{{ task.title }}` |
+| `index` | position of the current item inside a `map` node |
 | `config` | `config.vars.*` and resolved `config.defaults.*` |
 | `secret` | secret accessor — `secret.JIRA_TOKEN`, for names listed in top-level `secrets:` (values redacted in events/logs/checkpoints) |
 | `env` | non-secret environment values explicitly exposed to the graph |
@@ -501,6 +530,6 @@ Array callbacks in YAML use expression strings: `map(state.rows, 'item.price * s
 
 `range(n)` returns `0` to `n - 1`; `range(start, end, step)` stops before `end`. Both return at most 10,000 items.
 
-Undeclared run input keys produce an `INPUT_UNKNOWN_KEY` warning when they would be discarded by state storage. Declare intended keys in `inputs` or `state.channels`. Unknown `runtime.hooks[].on` values fail validation.
+An undeclared run input key is rejected with `INPUT_INVALID` before the run starts: declare intended keys in `inputs` or `state.channels`. Only input that a `run:before` hook replaces is not rejected; its undeclared keys produce an `INPUT_UNKNOWN_KEY` warning because state storage would discard them. Unknown `runtime.hooks[].on` values fail validation.
 
 Array callback source must be a quoted literal inside the expression. Runtime strings from input/state and concatenated strings are rejected. Literal callback bodies (including nested callbacks) participate in expression validation and secret/reserved-channel checks. A hook verb is checked against its event. `node:before` and `agent:beforeToolCall` take `allow`, `deny`, or `interrupt`. `node:error` takes `retry`, `continue`, `fail`, or `route:<node>`. `node:after` and `state:beforeUpdate` take `redact`. `where` accepts only `nodeId`, `nodeType`, `tool`, and `channel`.

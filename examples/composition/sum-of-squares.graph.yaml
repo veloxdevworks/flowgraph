@@ -27,7 +27,7 @@ nodes:
         uses: square
         with:
           stateMap:
-            in: { n: "{{ item.n }}" }
+            in: { n: "{{ n }}" }
             out: { squared: squared }
       collect: { to: squares }
 
@@ -35,8 +35,8 @@ nodes:
     type: function
     with:
       fn: sumList
-      input: { values: "{{ state.squares }}" }
       output: { to: total }
+    input: { values: "{{ state.squares }}" }
 
 edges:
   - { from: START, to: square-each }
