@@ -77,7 +77,7 @@ kind: Graph
 metadata: { name: pd-slow }
 state: { channels: { out: { type: object } } }
 nodes:
-  - { id: w, type: wait, with: { duration: 30s } }
+  - { id: w, type: wait, with: { deadline: 30s } }
   - { id: n, type: function, with: { fn: pdAdd, output: { to: out } } }
 edges: [ { from: START, to: w }, { from: w, to: n }, { from: n, to: END } ]
 `);

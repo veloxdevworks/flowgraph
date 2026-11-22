@@ -2,7 +2,7 @@
  * Offline graph lint helpers used by validateSpec.
  */
 
-import { findMergeableRouters, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
+import { findMergeableRouters, hookVerbMessage, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
 import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
 import { templateRootRefs } from "../node-policy.js";
@@ -42,8 +42,12 @@ export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
   if (node.type === "hitl") return hitlRouteTargets(w);
   if (node.type !== "router") return [];
   const routes = w["routes"];
-  if (!routes || typeof routes !== "object" || Array.isArray(routes)) return [];
-  return Object.values(routes as Record<string, unknown>).flatMap((r) =>
+  const values = Array.isArray(routes)
+    ? routes
+    : routes && typeof routes === "object"
+      ? Object.values(routes as Record<string, unknown>)
+      : [];
+  return values.flatMap((r) =>
     r && typeof r === "object" && typeof (r as { to?: unknown }).to === "string"
       ? [(r as { to: string }).to]
       : [],
@@ -80,7 +84,7 @@ export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
   const targets = declaredRouteTargets(spec, id);
   if (node?.on?.error?.startsWith("route:")) targets.push(node.on.error.slice(6));
   for (const hook of spec.runtime?.hooks ?? []) {
-    if (!hook.do.startsWith("route:") || !["node:before", "node:after", "node:error"].includes(hook.on)) continue;
+    if (!hook.do.startsWith("route:") || hook.on !== "node:error") continue;
     if (hook.where?.nodeId !== undefined && hook.where.nodeId !== id) continue;
     if (hook.where?.nodeType !== undefined && hook.where.nodeType !== node?.type) continue;
     targets.push(hook.do.slice(6));
@@ -100,9 +104,18 @@ export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; l
     } else for (const branch of edge.branch) edges.push({ from: edge.from, to: branch.to, ...(branch.when ? { label: branch.when } : branch.default ? { label: "default" } : {}) });
   }
   for (const node of spec.nodes) {
-    const routes = node.type === "hitl" ? normalizeHitlRoutes(node.with?.routes) : node.type === "router" ? node.with?.routes as Record<string,{to?:string}> | undefined : undefined;
     const labelled = new Set<string>();
-    for (const [label,route] of Object.entries(routes ?? {})) if (typeof route?.to === "string") {edges.push({from:node.id,to:route.to,label});labelled.add(route.to);}
+    if (node.type === "router" && Array.isArray(node.with?.routes)) {
+      for (const [index, route] of (node.with.routes as Array<{ name?: string; when?: string; default?: boolean; to?: string }>).entries()) {
+        if (typeof route?.to !== "string") continue;
+        const label = route.name ?? (route.default === true ? "default" : route.when) ?? String(index);
+        edges.push({ from: node.id, to: route.to, label });
+        labelled.add(route.to);
+      }
+    } else {
+      const routes = node.type === "hitl" ? normalizeHitlRoutes(node.with?.routes) : undefined;
+      for (const [label, route] of Object.entries(routes ?? {})) if (typeof route?.to === "string") { edges.push({ from: node.id, to: route.to, label }); labelled.add(route.to); }
+    }
     for (const to of nodeRouteTargets(spec, node.id)) if (!labelled.has(to)) edges.push({ from: node.id, to, label: "route" });
   }
   return [...new Map(edges.map((edge) => [`${edge.from}:${edge.to}:${edge.label ?? ""}`, edge])).values()];
@@ -486,24 +499,36 @@ export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
           path: `edges[${i}]`,
         });
       }
-      continue;
-    }
-    if ("to" in edge) {
-      const targets = Array.isArray(edge.to) ? edge.to : [edge.to];
-      if (targets.length >= 2) {
+      if (!edge.branch.some((entry) => entry.default === true)) {
         diagnostics.push({
           severity: "warning",
-          code: "UNCONDITIONAL_FANOUT",
-          message:
-            `Node "${edgeFromIds(edge.from).join(", ")}" fans out to ${targets.length} targets with no conditions — ` +
-            `all branches run in parallel. Click an edge in the builder to set when/default, ` +
-            `or use a router node for exclusive routing.`,
+          code: "BRANCH_NO_DEFAULT",
+          message: `Edge from "${edge.from}" has no default. A run with no matching when fails.`,
           path: `edges[${i}]`,
         });
       }
+      continue;
     }
   }
 
+  return diagnostics;
+}
+
+export function routerNoDefaultDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const node of spec.nodes) {
+    if (node.type !== "router") continue;
+    const withBlock = node.with as { mode?: string; routes?: Array<{ default?: boolean }> } | undefined;
+    const routes = withBlock?.routes;
+    if ((withBlock?.mode ?? "rules") !== "rules" || !Array.isArray(routes)) continue;
+    if (routes.some((route) => route?.default === true)) continue;
+    diagnostics.push({
+      severity: "warning",
+      code: "ROUTER_NO_DEFAULT",
+      message: `Router "${node.id}" has no default. A run with no matching when fails.`,
+      path: `nodes.${node.id}.with.routes`,
+    });
+  }
   return diagnostics;
 }
 
@@ -1260,6 +1285,17 @@ export function barrierEdgeDiagnostics(spec: GraphSpec, hooks: Hook[] = []): Dia
   return diagnostics;
 }
 
+export function defaultModelDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const defaults = spec.config?.defaults;
+  if (!defaults?.model || defaults.provider) return [];
+  return [{
+    severity: "warning",
+    code: "DEFAULT_MODEL_IGNORED",
+    message: "config.defaults.model is ignored unless config.defaults.provider is set",
+    path: "config.defaults.model",
+  }];
+}
+
 /**
  * Lints that read only one graph's own nodes, edges and channels. Run on each
  * nested graph (inline subgraph `spec`); the top level gets them, and the lints
@@ -1277,6 +1313,8 @@ export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...unevenFanInDiagnostics(spec),
     ...barrierEdgeDiagnostics(spec),
     ...unconditionalFanOutDiagnostics(spec),
+    ...routerNoDefaultDiagnostics(spec),
+    ...defaultModelDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
   ];
 }
@@ -1391,7 +1429,7 @@ export function graphShapeDiagnostics(spec: GraphSpec): Diagnostic[] {
       severity: "error",
       code: "GRAPH_TOO_LARGE",
       path: "nodes",
-      message: `The graph expands to ${shape.nodes} nodes, counting each nested graph and map body at every place it is used, more than ${MAX_GRAPH_NODES}; use the nested graphs in fewer places or flatten the nesting`,
+      message: `The graph expands to more than ${MAX_GRAPH_NODES.toLocaleString("en-US")} nodes, counting each nested graph and map body at every place it is used; use the nested graphs in fewer places or flatten the nesting`,
     }];
   }
   return [];
@@ -1414,7 +1452,7 @@ export interface GraphStructureOptions {
  *
  * - nesting and expanded size stay within {@link MAX_GRAPH_NESTING} and
  *   {@link MAX_GRAPH_NODES} (otherwise only that is reported)
- * - hook phases and directives are known
+ * - hook events and verbs are known
  * - node ids are unique; edges name known nodes; `END` is never a source and
  *   `START` never an edge, router or hitl route target; there is an edge from `START`
  * - every node type is registered and its `with` matches that type's schema
@@ -1437,10 +1475,10 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
   const edges = Array.isArray(spec.edges) ? spec.edges : [];
 
   for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
-    if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook phase "${hook.on}". Allowed phases: ${[...KNOWN_PHASES].join(", ")}` });
+    if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook event "${hook.on}".` });
   }
   for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
-    if (!knownHookDirective(hook.do)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Unknown hook directive "${hook.do}". Use retry, continue, ignore, interrupt, fail, redact or route:<node>.` });
+    if (!knownHookDirective(hook.do, hook.on)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Hook directive "${hook.do}" is not valid for ${hook.on}. ${hookVerbMessage(hook.on)}` });
   }
 
   const nodeIds = new Set(nodes.map((n) => n.id));
@@ -1498,6 +1536,24 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
   }
 }
 
+/**
+ * True when this config issue is a hook event or verb on a nested graph the
+ * map walk will check itself. The schema path runs through that graph's
+ * `runtime.hooks`, and the graph has `nodes`, so `graphStructure` reports it.
+ */
+function graphStructureChecksHook(value: unknown, issuePath: ReadonlyArray<PropertyKey>): boolean {
+  const field = issuePath[issuePath.length - 1];
+  if (field !== "on" && field !== "do") return false;
+  const hooksAt = issuePath.lastIndexOf("hooks");
+  if (hooksAt < 2 || issuePath[hooksAt - 1] !== "runtime") return false;
+  let cursor = value;
+  for (const segment of issuePath.slice(0, hooksAt - 1)) {
+    if (!cursor || typeof cursor !== "object") return false;
+    cursor = (cursor as Record<PropertyKey, unknown>)[segment];
+  }
+  return !!cursor && typeof cursor === "object" && Array.isArray((cursor as { nodes?: unknown }).nodes);
+}
+
 /** Type registration and `with` shape for one node, then the graphs nested in it. */
 function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean): void {
   const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
@@ -1508,6 +1564,9 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
     const configResult = factory.configSchema.safeParse(node.with ?? {});
     if (!configResult.success) {
       for (const issue of configResult.error.issues) {
+        // A map schema parses the nested graph, including its hooks. The walk
+        // below reports that same event or verb, so the config issue is not repeated.
+        if (node.type === "map" && graphStructureChecksHook(node.with, issue.path)) continue;
         const fieldPath = issue.path.join(".");
         push({
           severity: "error",
@@ -1603,6 +1662,7 @@ export function triggerDiagnostics(spec: GraphSpec): Diagnostic[] {
 
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   return [
+    ...defaultModelDiagnostics(spec),
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
     ...hitlRouterMergeDiagnostics(spec),
@@ -1616,6 +1676,7 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...unevenFanInDiagnostics(spec),
     ...barrierEdgeDiagnostics(spec),
     ...unconditionalFanOutDiagnostics(spec),
+    ...routerNoDefaultDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
     ...subgraphOutputMappingDiagnostics(spec),
     ...placementDiagnostics(spec),

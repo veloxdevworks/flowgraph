@@ -43,7 +43,7 @@ describe("PLAT-300/301: recovery policies", () => {
     expect(r.status).toBe("completed");
     expect(r.state.seen).toEqual(["recover"]);
   });
-  it.each(["continue", "ignore"])(
+  it.each(["continue"])(
     "honors on.error %s without abandoning siblings",
     async (policy) => {
       register();
@@ -164,12 +164,7 @@ describe("PLAT-303: all matching routes", () => {
           type: "router",
           with: {
             match: "allMatches",
-            routes: {
-              a: { when: "{{ true }}", to: "a" },
-              duplicate: { when: "{{ true }}", to: "a" },
-              b: { when: "{{ true }}", to: "b" },
-              fallback: { default: true, to: "fallback" },
-            },
+            routes: [ { name: "a", when: "{{ true }}", to: "a" }, { name: "duplicate", when: "{{ true }}", to: "a" }, { name: "b", when: "{{ true }}", to: "b" }, { name: "fallback", default: true, to: "fallback" } ],
           },
         },
         ...["a", "b", "fallback"].map(mark),
@@ -199,10 +194,7 @@ describe("PLAT-320: recursion policy", () => {
           id: "route",
           type: "router",
           with: {
-            routes: {
-              again: { when: `{{ state.n < ${stop} }}`, to: "tick" },
-              done: { default: true, to: "END" },
-            },
+            routes: [ { name: "again", when: `{{ state.n < ${stop} }}`, to: "tick" }, { name: "done", default: true, to: "END" } ],
           },
         },
       ],

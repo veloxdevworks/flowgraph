@@ -217,10 +217,7 @@ describe("router merge recommendation", () => {
           type: "router",
           with: {
             mode: "rules",
-            routes: {
-              retry: { when: "{{ state.choice.choice == 'retry' }}", to: "fetch" },
-              abort: { default: true, to: "END" },
-            },
+            routes: [ { name: "retry", when: "{{ state.choice.choice == 'retry' }}", to: "fetch" }, { name: "abort", default: true, to: "END" } ],
           },
         },
       ],
@@ -228,7 +225,7 @@ describe("router merge recommendation", () => {
         { from: "START", to: "fetch" },
         { from: "fetch", to: "ask" },
         { from: "ask", to: "decide" },
-        { from: "decide", branch: [{ to: "fetch" }, { to: "END" }] },
+        { from: "decide", branch: [{ when: "{{ state.choice.choice == 'retry' }}", to: "fetch" }, { default: true, to: "END" }] },
       ],
     }) as unknown as GraphSpec;
 
@@ -240,8 +237,9 @@ describe("router merge recommendation", () => {
 
   it("stays quiet when the router decides on more than the answer", () => {
     const s = retry();
-    (s.nodes[2]!.with as { routes: Record<string, { when?: string }> }).routes["retry"]!.when =
-      "{{ state.choice.choice == 'retry' && state.tries < 3 }}";
+    const routes = (s.nodes[2]!.with as { routes: Array<{ name?: string; when?: string }> }).routes;
+    const retryRoute = routes.find((route) => route.name === "retry");
+    retryRoute!.when = "{{ state.choice.choice == 'retry' && state.tries < 3 }}";
     expect(graphLintDiagnostics(s).some((x) => x.code === "HITL_ROUTER_MERGEABLE")).toBe(false);
   });
 });

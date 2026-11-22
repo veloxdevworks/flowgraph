@@ -77,13 +77,13 @@ triggers:
 | `type` | `cron` \| `interval` \| `startup` \| `flow-complete` \| `flow-failed` \| `webhook` \| `file-watch`. |
 | `enabled` | When `false`, hosts ignore the trigger. Default `true`. |
 | `schedule` | Cron only — 5-field cron expression: minute (0–59), hour (0–23), day of month (1–31), month (1–12 or `JAN`–`DEC`), day of week (0–7, 0 and 7 are Sunday, or `SUN`–`SAT`). Each field takes `*`, a value, a range `a-b`, a list `a,b` and a step `/n`. An optional leading seconds field (0–59) makes six fields. The macros `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily` and `@hourly` are also accepted. |
-| `timezone` | Cron only — optional IANA time zone name, such as `America/Denver`, `Asia/Kolkata`, `Etc/GMT+5` or `UTC`, spelled with its exact case. Abbreviations (`EST`), offsets (`+05:00`) and other spellings (`america/denver`) are rejected. |
+| `timezone` | Cron only — optional IANA time zone name from the tzdata Zone and Link tables, such as `America/Denver`, `Asia/Kathmandu`, `US/Eastern`, `Etc/GMT+5`, `GMT` or `UTC`, spelled with its exact case. `UTC` and `GMT` are accepted. Abbreviations are rejected: `ADT`, `AEDT`, `AEST`, `AKDT`, `AKST`, `AST`, `BST`, `CDT`, `CEST`, `CET`, `CST`, `EDT`, `EET`, `EEST`, `EST`, `HST`, `IST`, `JST`, `KST`, `MDT`, `MET`, `MST`, `PDT`, `PST`, `WEST`, and `WET`. Offsets (`+05:00`) and other spellings (`america/denver`, `Asia/KOLKATA`) are rejected. |
 | `every` / `unit` | Interval only. |
 | `graph` | Flow-complete / flow-failed — target graph `metadata.name` (kebab-case). |
 | `path` | Webhook (URL path) or file-watch (filesystem path). |
 | `events` | File-watch only — subset of `create` / `change` / `delete`. |
 
-`flowgraph validate` reports a repeated trigger id (`DUPLICATE_TRIGGER_ID`), a cron schedule it cannot parse (`TRIGGER_CRON_INVALID`, naming the field at fault), and a `timezone` that is not `UTC` or an `Area/Location` IANA name the runtime's `Intl` time zone data knows (`TRIGGER_TIMEZONE_INVALID`). These are validate-time errors only: the engine does not schedule triggers, so `compileGraph` does not check them.
+`flowgraph validate` reports a repeated trigger id (`DUPLICATE_TRIGGER_ID`), a cron schedule it cannot parse (`TRIGGER_CRON_INVALID`, naming the field at fault), and a `timezone` that is not a tzdata Zone or Link name in its exact case (`TRIGGER_TIMEZONE_INVALID`). `UTC` and `GMT` are accepted. The abbreviations listed above are rejected. These are validate-time errors only: the engine does not schedule triggers, so `compileGraph` does not check them.
 
 Hosts typically guard against a graph triggering itself via `flow-complete` / `flow-failed`. Cascade depth beyond that simple self-loop check is host-defined.
 
@@ -266,7 +266,7 @@ edges:
       - { default: true,                           to: needs-human }
 ```
 
-A guard that evaluates to false moves on to the next entry, and the `default` entry (or `END` when there is none) is taken when nothing matches. A guard that cannot be evaluated at run time, for example one that calls an unknown function, fails the run with error code `EDGE_GUARD_ERROR`. The run does not fall through to `default` or `END`. The error names the edge and the expression, and the run records an `EDGE_GUARD_ERROR` issue (severity `error`, `detail: { from, to, when }`). A path that does not exist, such as `state.review.approved` before `review` is written, evaluates to null and does not raise this error. `flowgraph validate` reports expressions that do not parse (`EXPR_PARSE_ERROR`) before the run starts.
+Each branch entry needs exactly one of `when` or `default: true`. The first true `when` wins, and the single `default` is the fallback. If nothing matches and there is no default, the run fails with `NO_MATCH` (`Edge "<from>" has no matching route and no default`). A guard that cannot be evaluated at run time, for example one that calls an unknown function, fails the run with error code `EDGE_GUARD_ERROR`. The run does not fall through to `default` or `END`. The error names the edge and the expression, and the run records an `EDGE_GUARD_ERROR` issue (severity `error`, `detail: { from, to, when }`). Guards read `state`, `input` (empty on an edge), `config`, and `run`. A string that is exactly one `{{ expr }}` uses that expression; any other string is a bare expression. A path that does not exist, such as `state.review.approved` before `review` is written, evaluates to null and does not raise this error. `flowgraph validate` reports expressions that do not parse (`EXPR_PARSE_ERROR`) before the run starts. Parallel fan-out is `to: [a, b]`, not a branch list.
 
 ### Fan-out (parallel) edges
 

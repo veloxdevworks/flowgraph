@@ -11,6 +11,7 @@ import { renderDeep, stringifyRendered } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { providerFor, providerNamesFor } from "../providers/registry.js";
+import { modelRequest } from "../providers/model-choice.js";
 import { normalizeTools, mergeTools, type ToolRef, type ToolWiring } from "../providers/tools.js";
 import { expandMcpTools, requireMcpHub } from "../mcp/expand.js";
 import type { AgentRequest, ProviderRunContext, TokenUsage } from "../providers/types.js";
@@ -143,7 +144,7 @@ export const agentNode = defineNode<Config>({
           system,
           tools: specs,
           schema: config.schema,
-          model: nodeModel ?? ctx.config.defaults?.model,
+          ...modelRequest(nodeModel, providerName, ctx.config.defaults),
           maxSteps: config.maxSteps,
           maxTokens: config.maxTokens,
           permission: config.permission ?? ctx.config.permission ?? "auto",

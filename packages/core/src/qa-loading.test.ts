@@ -43,7 +43,7 @@ describe("PLAT-302 / PLAT-335: validate before execution", () => {
         {
           id: "route",
           type: "router",
-          with: { routes: { bad: { default: true, to: "missing" } } },
+          with: { routes: [ { name: "bad", default: true, to: "missing" } ] },
         },
       ],
       [{ from: "START", to: "route" }],

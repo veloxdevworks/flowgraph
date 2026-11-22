@@ -45,10 +45,7 @@ it("reuses completed map items after closing and reopening SQLite at a loop gate
         id: "route",
         type: "router",
         with: {
-          routes: {
-            again: { when: "{{ state.answer.approved }}", to: "fan" },
-            done: { default: true, to: "END" },
-          },
+          routes: [ { name: "again", when: "{{ state.answer.approved }}", to: "fan" }, { name: "done", default: true, to: "END" } ],
         },
       },
     ],

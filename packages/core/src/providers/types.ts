@@ -83,6 +83,8 @@ export interface AgentRequest {
   tools: ToolSpec[];
   schema?: Record<string, unknown> | undefined;
   model?: string | undefined;
+  /** `node` wins over the provider model. `default` applies only when that provider has no model of its own. */
+  modelSource?: "node" | "default" | undefined;
   maxSteps?: number | undefined;
   maxTokens?: number | undefined;
   permission: "auto" | "ask" | "deny";

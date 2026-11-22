@@ -21,7 +21,7 @@ function graph(node: unknown, runtime = {}, concurrency = 1) {
 }
 
 describe("PLAT-388 / PLAT-396 / PLAT-397 map controls", () => {
-  it.each(["continue", "ignore"])("persists ordinary %s failures through the same issue journal as map items", async policy => {
+  it.each(["continue"])("persists ordinary %s failures through the same issue journal as map items", async policy => {
     registerFunction("round3OrdinaryFailure", () => { throw new Error("bad row"); });
     const spec = graph({ type: "function", with: { fn: "round3OrdinaryFailure" } });
     spec.nodes = [{ id: "bad", type: "function", on: { error: policy }, with: { fn: "round3OrdinaryFailure" } }] as typeof spec.nodes;

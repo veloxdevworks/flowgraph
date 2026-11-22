@@ -44,6 +44,36 @@ function asRecord(v: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/** Router routes are a list. Older records are still read, in key order. */
+function orderedRoutes(raw: unknown): Array<{ key: string; route: Record<string, unknown> }> | undefined {
+  if (Array.isArray(raw)) {
+    const out: Array<{ key: string; route: Record<string, unknown> }> = [];
+    for (const [index, item] of raw.entries()) {
+      const route = asRecord(item);
+      if (!route) return undefined;
+      const name = typeof route["name"] === "string" && route["name"].trim() ? route["name"] : String(index);
+      out.push({ key: name, route });
+    }
+    return out;
+  }
+  const record = asRecord(raw);
+  if (!record) return undefined;
+  return Object.entries(record).flatMap(([key, value]) => {
+    const route = asRecord(value);
+    return route ? [{ key, route }] : [];
+  });
+}
+
+function routePointsAt(raw: unknown, id: string): boolean {
+  const points = (value: unknown): boolean => {
+    if (typeof value === "string") return value === id;
+    return asRecord(value)?.["to"] === id;
+  };
+  if (Array.isArray(raw)) return raw.some(points);
+  const record = asRecord(raw);
+  return record ? Object.values(record).some(points) : false;
+}
+
 /** Every answer the gate can give, or undefined when that is not a closed, known set. */
 function gateAnswers(w: Record<string, unknown>): string[] | undefined {
   const mode = typeof w["mode"] === "string" ? w["mode"] : "approve";
@@ -118,20 +148,15 @@ export function analyzeRouterMerge(
   if (rw["match"] === "allMatches") return no("The router can take several routes at once.");
   if (rw["output"] != null)
     return no("The router writes its choice to state, which a gate would not.");
-  const routes = asRecord(rw["routes"]);
-  if (!routes || Object.keys(routes).length === 0) return no("The router has no routes.");
+  const routes = orderedRoutes(rw["routes"]);
+  if (!routes || routes.length === 0) return no("The router has no routes.");
 
   // Exactly one node feeds the router, and it is a hitl.
   const feeders = new Set<string>();
   for (const e of spec.edges) if (targetsOf(e).includes(routerId)) feeders.add(e.from);
   for (const n of spec.nodes) {
     if (n.id === routerId) continue;
-    const r = asRecord(n.with?.["routes"]);
-    if (!r) continue;
-    for (const v of Object.values(r)) {
-      const to = typeof v === "string" ? v : asRecord(v)?.["to"];
-      if (to === routerId) feeders.add(n.id);
-    }
+    if (routePointsAt(n.with?.["routes"], routerId)) feeders.add(n.id);
   }
   if (feeders.size !== 1) return no("Something other than a single gate leads into the router.");
   const hitlId = [...feeders][0]!;
@@ -166,10 +191,9 @@ export function analyzeRouterMerge(
       ? { to, description: route["description"] }
       : to;
   };
-  for (const [key, raw] of Object.entries(routes)) {
-    const route = asRecord(raw);
-    const v = route ? value(route) : undefined;
-    if (!route || v === undefined) return no(`Route "${key}" has no target.`);
+  for (const { key, route } of routes) {
+    const v = value(route);
+    if (v === undefined) return no(`Route "${key}" has no target.`);
     if (route["default"] === true) {
       fallback ??= v;
       continue;

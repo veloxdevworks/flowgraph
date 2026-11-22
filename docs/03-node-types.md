@@ -208,10 +208,18 @@ nodes:
       mode: rules                    # rules | model
       input: "{{ state.testResults }}"
       routes:
-        passed:  { when: "{{ state.testResults.failed == 0 }}", to: open-pr }
-        failed:  { when: "{{ state.testResults.failed > 0 }}",  to: fix-loop }
-        flaky:   { when: "{{ state.testResults.flaky }}",       to: rerun-tests }
-        default: { default: true, to: needs-human }
+        - name: passed
+          when: "{{ state.testResults.failed == 0 }}"
+          to: open-pr
+        - name: failed
+          when: "{{ state.testResults.failed > 0 }}"
+          to: fix-loop
+        - name: flaky
+          when: "{{ state.testResults.flaky }}"
+          to: rerun-tests
+        - name: default
+          default: true
+          to: needs-human
 
 edges:
   - { from: START, to: route-by-result }
@@ -233,11 +241,18 @@ Model-based routing:
     input: "{{ state.userMessage }}"
     instruction: "Pick the route that best matches the user's intent."
     routes:
-      billing:   { description: "Questions about invoices/payments", to: billing-flow }
-      technical: { description: "Bug reports / how-to", to: tech-flow }
-      default:   { default: true, to: fallback }
+      - name: billing
+        description: "Questions about invoices/payments"
+        to: billing-flow
+      - name: technical
+        description: "Bug reports / how-to"
+        to: tech-flow
+      - name: default
+        default: true
+        to: fallback
 ```
 
+- `routes` is an ordered list. Each rules entry has exactly one of `when` or `default: true`. The first matching `when` wins; a throwing `when` fails the run. No match and no default fails with `NO_MATCH`. Model entries need a unique `name` and do not take `when`.
 - A route's `to` is a node id or `END`. A route to `START` is rejected by `flowgraph validate` and `compileGraph` (`ROUTE_TO_START`); route to the first node instead.
 - `with.match: firstMatch` (default) selects the first matching route. `with.match: allMatches` fans out to every matching destination, deduplicates destinations, and writes an array of chosen route keys as the router output. The default route is used only when no condition matches. `allMatches` is only valid with `mode: rules`. A router with `mode: model` and `match: allMatches` is rejected; model routers select one route.
 - Model-based routers receive every declared route key and description, including the default as an explicit "none of the above" choice (enforced via structured output).
@@ -301,7 +316,7 @@ See `examples/mcp/` for a runnable walkthrough.
 
 The `node.output` event and the debug log show the request URL with credentials and sensitive query parameters masked. In the event, request headers that are sensitive or listed in `runtime.secrets.redact.headers` show as `[REDACTED]`, and so do response headers that are sensitive, listed there, or auth/token-like by name (`Set-Cookie`, `X-Auth-Token`, `X-Session-Id`, …). The event's response body also masks those headers' values and each `Set-Cookie`'s `name=value` and credential-like bare value (the same cookie rule as `webhook`). This masking applies to the event only: `result.headers`, the response body and the node's output keep the real values, so a later node can forward a session cookie, for example `Cookie: "{{ split(state.login.headers['set-cookie'], ';')[0] }}"`.
 
-`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.retry` and `with.timeout` on `http` are rejected, with an error that names those fields. Other node types that take a `with.timeout` (for example `shell`, `script`, `wait`, `demo`, and media) still enforce that setting as their operation deadline, inside the node's own `timeout`.
+`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.timeout` on `http`, `webhook`, `shell`, `script`, and media is rejected, with an error that names the node `timeout`. `http`, `webhook`, `shell`, `script`, `skill`, `mcp`, and `service` stop when that timeout aborts. An `mcp` node passes that abort signal into `callTool` / `readResource`, and the hub cancels the client request so a retry does not overlap it. Media uses the node `timeout` or `runtime.timeoutDefault` as the job deadline (otherwise the per-type default), keeps the vendor job on a node timeout so a retry can re-attach, and still cancels it when the run itself is cancelled. `demo` keeps its own capture timing. Shell and script with neither a node `timeout` nor `runtime.timeoutDefault` are unbounded.
 
 ### `webhook` — outbound HTTP notification
 
@@ -346,11 +361,11 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 # Shell mode (pipes / chaining)
 - id: build
   type: shell
+  timeout: 5m
   with:
     shell: true
     command: "npm run build && npm test"
     cwd: "{{ state.repoDir }}"
-    timeout: 5m
     env: { CI: "1" }
     expect: { exitCode: [0] }
     output:
@@ -370,7 +385,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 
 **Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"` (with `MY_TOKEN` in the graph's top-level `secrets:`). Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
 
-**Defaults:** timeout `30s`, `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
+**Defaults:** with no node `timeout` and no `runtime.timeoutDefault`, a shell command is unbounded. `maxBuffer` 10MB, allowed exit codes `[0]`. Non-matching exit codes fail the node (include the code in `expect.exitCode` to allow it).
 
 Declare toolchains with `requires` so missing binaries are caught at preflight and (optionally) skipped instead of failing the run:
 
@@ -581,6 +596,7 @@ export default async function (input, ctx) {
 ```yaml
 - id: greet
   type: script
+  timeout: 30s
   with:
     code: |
       export default async function (input) {
@@ -588,7 +604,6 @@ export default async function (input, ctx) {
       }
     input:
       name: "{{ state.name }}"
-    timeout: 30s
     # Optional: widen the sandbox (denied by default)
     # permissions:
     #   fsRead: ["/path/to/data"]
@@ -632,7 +647,7 @@ file sources; untrusted server uploads retain their script restrictions.
 2. It spawns `node --permission … entry.mjs` in that temp directory (no `node_modules` on the resolution path).
 3. The wrapper calls your default export with the rendered `input` and writes the JSON-serialized return value to a result file, which is mapped via `output`.
 
-**Defaults:** timeout `30s`, stdout/stderr capped at 10MB. Non-zero exit, timeout, or a missing/invalid result file fail the node (stderr excerpt included).
+**Defaults:** with no node `timeout` and no `runtime.timeoutDefault`, a script is unbounded. Stdout and stderr are capped at 10MB. Non-zero exit, a node timeout, or a missing/invalid result file fail the node (stderr excerpt included). A timeout or abort stops the script process group. If the direct child is still running, the group gets SIGKILL about 2 seconds after SIGTERM. If the direct child has already exited, the group is SIGKILLed immediately.
 
 File sources remain self-contained modules: their contents run in the same temp
 sandbox as inline code. Loading a source file grants the child no access to its
@@ -746,7 +761,7 @@ The default FIFO cache retains at most 128 JSON-compatible results / 16 MiB per 
 
 ## 8. `hitl` — human gates (approve / question / choice)
 
-Deterministic pause points for human input. Unlike `wait` (duration/signal/condition), `hitl` is for explicit operator interaction with a typed resume value.
+Deterministic pause points for human input. Unlike `wait` (deadline/signal/condition), `hitl` is for explicit operator interaction with a typed resume value.
 
 ```yaml
 - id: approve-deploy
@@ -1003,9 +1018,9 @@ Prefer cheap `hitl` `approve` / `review` when a single decision is enough. Use `
 - id: cool-down
   type: wait
   with:
-    duration: 30s                   # fixed delay (in-process sleep)
+    deadline: 30s                   # fixed delay (in-process sleep; not durable)
     # or: until: "{{ state.ready }}"  (durable interrupt until condition is true on resume)
-    # or: signal: deploy-finished    (durable interrupt until resumed with that signal)
+    # or: signal: deploy-finished    (durable interrupt; resume with that signal name)
     # or: webhook: true              (durable interrupt; embedded HTTP listener resumes)
     # optional on until/signal/webhook:
     timeout: 24h                    # informational deadline (see below)
@@ -1035,14 +1050,14 @@ Malformed percent-encoded paths return HTTP 400. Each route registration is clai
 
 | Mode | Behavior | Survives process restart? |
 |---|---|---|
-| `duration` | In-process sleep for the given duration | No — same as any in-flight node |
+| `deadline` | In-process sleep for the given duration | No — same as any in-flight node |
 | `until` | Interrupt if the guard is false; re-evaluate on resume | Yes (checkpointed interrupt) |
-| `signal` | Interrupt until resumed with a payload for the named signal | Yes (checkpointed interrupt) |
+| `signal` | Interrupt until resumed with the signal name (a string, or `{ signal }`). A wrong resume warns and waits again. The output is `{ value: <resume> }` | Yes (checkpointed interrupt) |
 | `webhook` | Interrupt until inbound HTTP POST resumes (required keys and property types checked) | Interrupt yes; listening URL requires a live process and route rehydration |
 
 ### Observability
 
-- **`duration`:** emits a `node.output` event before sleeping: `{ wait: { mode: "duration", durationMs, wakeAt } }`. Use `wakeAt` (ISO timestamp) in CLIs/TUIs to show when the run will continue.
+- **`deadline`:** emits a `node.output` event before sleeping: `{ wait: { mode: "deadline", durationMs, wakeAt } }`. Use `wakeAt` (ISO timestamp) in CLIs/TUIs to show when the run will continue. The sleep does not survive a process restart.
 - **`until` / `signal` / `webhook`:** optional `timeout` is included in the interrupt `data` payload (visible via `flowgraph resume --list --json`) so operators can see the intended deadline.
 - **`webhook`:** interrupt `data` also includes `mode: "webhook"` and `webhookUrl`.
 
@@ -1405,7 +1420,7 @@ nodes:
 | `seed`, `negativePrompt` | all | Passed when the vendor supports them. |
 | `variant` | all | String or number (templated). Part of the job fingerprint, **never sent to the vendor**. Looping back to a media node with an unchanged request re-attaches to the finished job (no new call); change `variant`, for example `"{{ state.check.round }}"`, to force a new one. Unset, null or empty (such as before the first answer) keeps the fingerprint identical to a node without `variant`, so in-flight journal entries still match after an upgrade. |
 | `params` | all | Vendor passthrough options. |
-| `timeout` | all | Whole-job limit (defaults: image 5m, audio 10m, video/model3d 15m). On timeout the job is left running and a retry re-attaches. |
+| `timeout` | all | Whole-job limit. A node `timeout` or `runtime.timeoutDefault` is that deadline; otherwise image 5m, audio 10m, video/model3d 15m. On timeout the job is left running and a retry re-attaches. |
 
 **Output** (`state.outputs.<id>`, or per `output:`):
 

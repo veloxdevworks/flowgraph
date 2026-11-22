@@ -20,12 +20,12 @@ export const mcpNode = defineNode<Config>({
   type: "mcp",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { sideEffecting: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { sideEffecting: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const hub = requireMcpHub(ctx);
@@ -45,12 +45,20 @@ export const mcpNode = defineNode<Config>({
             ? (renderDeep(config.arguments, scope) as Record<string, unknown>)
             : {};
           ctx.emit("mcp.tool.call", { server: config.server, tool: config.tool, args });
-          result = assertMcpToolSuccess(await hub.callTool(config.server, config.tool, args), config.server, config.tool);
+          result = assertMcpToolSuccess(
+            await (ctx.signal
+              ? hub.callTool(config.server, config.tool, args, { signal: ctx.signal })
+              : hub.callTool(config.server, config.tool, args)),
+            config.server,
+            config.tool,
+          );
           ctx.emit("mcp.tool.result", { server: config.server, tool: config.tool, result });
         } else {
           const uri = String(renderDeep(config.resource!, scope));
           ctx.emit("mcp.resource.read", { server: config.server, uri });
-          result = await hub.readResource(config.server, uri);
+          result = ctx.signal
+            ? await hub.readResource(config.server, uri, { signal: ctx.signal })
+            : await hub.readResource(config.server, uri);
         }
 
         return {

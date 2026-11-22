@@ -15,15 +15,9 @@ export type HookPhase =
   | "node:before"
   | "node:after"
   | "node:error"
-  | "agent:beforeStep"
   | "agent:beforeToolCall"
   | "agent:afterToolCall"
-  | "skill:beforeRun"
-  | "skill:afterRun"
-  | "router:beforeDecision"
-  | "router:afterDecision"
   | "state:beforeUpdate"
-  | "checkpoint:beforeWrite"
   | "interrupt:beforeRaise"
   | "interrupt:beforeResume";
 
@@ -67,6 +61,8 @@ export interface HookContext {
 export type HookDirective =
   | { kind: "mutate"; payload: Partial<HookPayload> }
   | { kind: "veto"; reason: string }
+  | { kind: "continue" }
+  | { kind: "fail"; reason?: string }
   | { kind: "retry"; delayMs?: number }
   | { kind: "route"; to: string }
   | { kind: "interrupt"; reason: string; payload?: unknown };

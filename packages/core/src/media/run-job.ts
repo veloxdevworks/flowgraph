@@ -7,6 +7,7 @@ import type { TokenUsage } from "../providers/types.js";
 import type { Artifact } from "@flowgraph/spec";
 import { randomUUID } from "node:crypto";
 import { parseDuration, sleep } from "../runtime/duration.js";
+import { isTimeoutError } from "../runtime/retry.js";
 import { artifactsExist } from "./artifacts.js";
 import type { Journal, JournalEntry } from "./journal.js";
 import type { JobHandle, JobStatus, MediaCallContext, MediaProvider, MediaRequest } from "./types.js";
@@ -155,7 +156,8 @@ async function runActiveJob(opts: RunMediaJobOptions, existing: JournalEntry | u
       delay = Math.min(Math.round(delay * 1.5), cap);
     }
   } catch (err) {
-    if (mctx.signal?.aborted) {
+    const timedOut = isTimeoutError(err) || isTimeoutError(mctx.signal?.reason);
+    if (mctx.signal?.aborted && !timedOut) {
       await provider.cancel?.(handle, mctx).catch(() => undefined);
       // Cancellation is best-effort; retain the handle until the vendor confirms
       // a terminal state, so a later resume cannot silently purchase again.

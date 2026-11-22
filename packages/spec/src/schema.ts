@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { contractSchemaProblem } from "./validate-json-schema.js";
+import { hookEventFires, hookVerbAllowed, hookVerbMessage } from "./hooks.js";
 
 // ---------------------------------------------------------------------------
 // Primitives & shared
@@ -525,13 +526,40 @@ export const IntelligentWithSchema = AgentWithSchema;
 // skill node
 export const SkillWithSchema = BaseWithSchema;
 
-// router node
+// router node — routes are an ordered list so YAML order is the match order
 export const RouterRouteSchema = z.object({
+  name: z.string().min(1).optional(),
   when: z.string().optional(),
   default: z.boolean().optional(),
-  to: z.string(),
+  to: z.string().min(1),
   description: z.string().optional(),
 });
+
+function guardEntryProblem(
+  entry: { when?: string | undefined; default?: boolean | undefined },
+): string | undefined {
+  const hasWhen = typeof entry.when === "string" && entry.when.trim().length > 0;
+  const isDefault = entry.default === true;
+  if (hasWhen && isDefault) return "takes when or default, not both";
+  if (!hasWhen && !isDefault) return "needs when or default";
+  return undefined;
+}
+
+function oneDefault(
+  entries: Array<{ default?: boolean | undefined }>,
+  ctx: z.RefinementCtx,
+  path: Array<string | number>,
+  label: string,
+): void {
+  const defaults = entries.filter((entry) => entry.default === true);
+  if (defaults.length > 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path,
+      message: `${label} allows one default`,
+    });
+  }
+}
 
 export const RouterWithSchema = z
   .object({
@@ -539,7 +567,10 @@ export const RouterWithSchema = z
     input: z.string().optional(),
     instruction: z.string().optional(),
     provider: z.string().optional(),
-    routes: z.record(RouterRouteSchema),
+    routes: z.array(RouterRouteSchema, {
+      invalid_type_error: "routes must be a list of - name: entries",
+      required_error: "routes must be a list of - name: entries",
+    }).min(1),
     match: z.union([z.literal("firstMatch"), z.literal("allMatches")]).optional().default("firstMatch"),
     output: OutputMappingSchema.optional(),
   })
@@ -560,6 +591,45 @@ export const RouterWithSchema = z
           "router mode: model requires input: the text the model routes on, e.g. input: \"{{ state.request }}\". The router does not send the whole state.",
       });
     }
+    const names = new Set<string>();
+    value.routes.forEach((route, index) => {
+      if (route.name) {
+        if (names.has(route.name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["routes", index, "name"],
+            message: `Duplicate route name "${route.name}"`,
+          });
+        }
+        names.add(route.name);
+      }
+      if (value.mode === "model") {
+        if (!route.name) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["routes", index, "name"],
+            message: "model routes need a name",
+          });
+        }
+        if (route.when?.trim()) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["routes", index, "when"],
+            message: "model routes do not take when; the model chooses by name",
+          });
+        }
+      } else {
+        const problem = guardEntryProblem(route);
+        if (problem) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["routes", index],
+            message: `A route ${problem}`,
+          });
+        }
+      }
+    });
+    oneDefault(value.routes, ctx, ["routes"], "A route list");
   });
 
 // http node
@@ -841,7 +911,9 @@ export const ShellWithSchema = BaseWithSchema.extend({
   env: z.record(z.string()).optional(),
   inheritEnv: z.array(z.string().min(1)).optional().describe("Host environment variable names to pass to the child, in addition to the default allowlist (PATH, HOME, TMPDIR, TEMP, TMP, LANG, LC_ALL, and Windows SystemRoot/WINDIR)"),
   input: z.record(z.unknown()).optional().describe("Rendered, passed via FLOWGRAPH_INPUT env + stdin JSON"),
-  timeout: DurationSchema.optional(),
+  timeout: relocatedField(
+    "shell with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
+  ),
   expect: z.object({ exitCode: z.array(z.number()).optional() }).optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
@@ -950,7 +1022,9 @@ const MediaCommonWithSchema = BaseWithSchema.extend({
       "Templated cache-buster. Part of the job fingerprint but never sent to the vendor: change it (for example `{{ state.check.round }}`) to force a new job for an otherwise identical request. Unset, null or empty keeps the previous fingerprint.",
     ),
   params: z.record(z.unknown()).optional().describe("Vendor passthrough options"),
-  timeout: DurationSchema.optional().describe("Max wall time for the whole job (default per node type)"),
+  timeout: relocatedField(
+    "media with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
+  ),
 });
 
 // image node
@@ -1073,7 +1147,9 @@ export const ScriptWithSchema = BaseWithSchema.extend({
   file: z.string().trim().min(1).optional().describe("Self-contained ESM source file, relative to the declaring graph; mutually exclusive with code."),
   input: z.record(z.unknown()).optional().describe("Structured input, with templates rendered recursively and value types preserved"),
   env: z.record(z.string()).optional().describe("Environment variables available to the child process"),
-  timeout: DurationSchema.optional(),
+  timeout: relocatedField(
+    "script with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
+  ),
   permissions: ScriptPermissionsSchema.optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
@@ -1277,11 +1353,12 @@ export const WorkshopWithSchema = BaseWithSchema.extend({
   transcript: z.union([z.literal("keep"), z.literal("omit")]).optional(),
 });
 
-// wait node — duration / until / signal / webhook (inbound HTTP resume)
+// wait node — deadline / until / signal / webhook (inbound HTTP resume)
 export const WaitWithSchema = BaseWithSchema.extend({
-  duration: DurationSchema.optional(),
+  deadline: DurationSchema.optional().describe("In-process sleep. Not durable across a restart."),
+  duration: relocatedField("wait with.duration is not supported; rename it to deadline"),
   until: z.string().optional(),
-  signal: z.string().optional(),
+  signal: z.string().optional().describe("Resume only when the payload names this signal"),
   timeout: DurationSchema.optional(),
   /** When set, interrupt and listen for an inbound HTTP POST to resume. */
   webhook: z
@@ -1466,8 +1543,14 @@ export const NodeSpecSchema = z.object({
         .union([
           z.literal("fail"),
           z.literal("continue"),
-          z.literal("ignore"),
-          z.string().startsWith("route:"),
+          z.string({
+            errorMap: (_issue, ctx) => {
+              if (ctx.data === "ignore") {
+                return { message: "on.error ignore was removed; use continue" };
+              }
+              return { message: "on.error must be fail | continue | route:<node>" };
+            },
+          }).startsWith("route:"),
         ])
         .optional(),
     })
@@ -1493,7 +1576,7 @@ export const MapBodyNodeSchema = NodeSpecSchema.extend({
 export const BranchSchema = z.object({
   when: z.string().optional(),
   default: z.boolean().optional(),
-  to: z.string(),
+  to: z.string().min(1),
   description: z.string().optional(),
 });
 
@@ -1524,10 +1607,22 @@ export const EdgeSpecSchema = z.union([
       seen.add(id);
     });
   }),
-  // conditional edge
+  // conditional edge — each entry is when or default, and fan-out uses to: [...]
   z.object({
     from: z.string(),
-    branch: z.array(BranchSchema),
+    branch: z.array(BranchSchema).min(1),
+  }).superRefine((edge, ctx) => {
+    edge.branch.forEach((entry, index) => {
+      const problem = guardEntryProblem(entry);
+      if (problem) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["branch", index],
+          message: `A branch entry ${problem}`,
+        });
+      }
+    });
+    oneDefault(edge.branch, ctx, ["branch"], "A branch list");
   }),
 ]);
 
@@ -1891,12 +1986,38 @@ export const RuntimeSchema = z.object({
   ),
   hooks: z
     .array(
-      z.object({
-        on: z.string(),
-        where: z.record(z.unknown()).optional(),
-        do: z.string(),
-        reason: z.string().optional(),
-      }),
+      z
+        .object({
+          on: z.string(),
+          where: z
+            .object({
+              nodeId: z.string().optional(),
+              nodeType: z.string().optional(),
+              tool: z.string().optional(),
+              channel: z.string().optional(),
+            })
+            .strict()
+            .optional(),
+          do: z.string(),
+          reason: z.string().optional(),
+        })
+        .superRefine((hook, ctx) => {
+          if (!hookEventFires(hook.on)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["on"],
+              message: `Unknown hook event "${hook.on}".`,
+            });
+            return;
+          }
+          if (!hookVerbAllowed(hook.on, hook.do)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["do"],
+              message: `Hook directive "${hook.do}" is not valid for ${hook.on}. ${hookVerbMessage(hook.on)}`,
+            });
+          }
+        }),
     )
     .optional(),
 });

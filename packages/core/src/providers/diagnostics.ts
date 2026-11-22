@@ -3,6 +3,7 @@ import type { ProviderAdapter } from "./types.js";
 import { getProvider } from "./registry.js";
 import { langchainConfigDiagnostics } from "./langchain/provider.js";
 import { providerSecretDiagnostics } from "../runtime/secret-declarations.js";
+import { effectiveModel } from "./model-choice.js";
 
 /** The parts of a provider adapter that config diagnostics read. */
 export type ProviderValidation = Pick<ProviderAdapter, "name" | "validate"> & {
@@ -77,7 +78,13 @@ export function providerConfigDiagnostics(
       name === "langchain";
 
     if (adapter?.validate) {
-      const requested = typeof node.model === "string" ? node.model : spec.config?.defaults?.model;
+      const providerModel = declared && "model" in declared && typeof declared.model === "string" ? declared.model : undefined;
+      const requested = effectiveModel(
+        name && name === spec.config?.defaults?.provider
+          ? { model: typeof node.model === "string" ? node.model : spec.config?.defaults?.model, modelSource: typeof node.model === "string" ? "node" : "default" }
+          : { model: typeof node.model === "string" ? node.model : undefined, modelSource: "node" },
+        providerModel,
+      );
       const validateNode = { id: node.id, ...(typeof requested === "string" ? { model: requested } : {}) };
       for (const diag of adapter.validate(node.with ?? {}, validateNode)) {
         out.push({

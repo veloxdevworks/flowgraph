@@ -3,6 +3,10 @@
  * not schedule triggers; these only reject values a host could not run.
  */
 
+import { TIME_ZONE_NAMES } from "./time-zones.js";
+
+export { TIME_ZONE_NAMES } from "./time-zones.js";
+
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 const DAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 
@@ -78,25 +82,55 @@ export function cronScheduleProblem(schedule: string): string | undefined {
   return undefined;
 }
 
-/** `Area/Location` segments as IANA spells them, e.g. "America/Argentina/Buenos_Aires" or "Etc/GMT+5". */
-const IANA_NAME = /^[A-Z][A-Za-z]*(?:\/[A-Z][A-Za-z0-9_+-]*)+$/;
+/**
+ * Abbreviations a cron timezone cannot use. Some engines accept them, and
+ * tzdata links CET, EET, EST, HST, MET, MST, and WET, but they are not
+ * Area/Location names. `UTC` and `GMT` are not in this list.
+ */
+export const REJECTED_TIME_ZONE_ABBREVIATIONS = [
+  "ADT",
+  "AEDT",
+  "AEST",
+  "AKDT",
+  "AKST",
+  "AST",
+  "BST",
+  "CDT",
+  "CEST",
+  "CET",
+  "CST",
+  "EDT",
+  "EET",
+  "EEST",
+  "EST",
+  "HST",
+  "IST",
+  "JST",
+  "KST",
+  "MDT",
+  "MET",
+  "MST",
+  "PDT",
+  "PST",
+  "WEST",
+  "WET",
+] as const;
+
+const REJECTED_TIME_ZONES = new Set<string>(REJECTED_TIME_ZONE_ABBREVIATIONS);
+const KNOWN_TIME_ZONES = new Set<string>(TIME_ZONE_NAMES);
 
 /**
- * True when `timeZone` is an IANA name the runtime knows, such as
- * "America/Denver", "Asia/Kolkata", "Etc/GMT+5" or "UTC". Abbreviations
- * ("EST"), offsets ("+05:00") and other spellings ("america/denver",
- * "America/DENVER"), which `Intl.DateTimeFormat` also accepts, are rejected.
- * Not matched against `Intl.supportedValuesOf`, which lists ICU's own names
- * and leaves out valid IANA names such as "Asia/Kolkata" and "Etc/UTC".
+ * True when `timeZone` is a tzdata Zone or Link name in its own case and
+ * `Intl.DateTimeFormat` accepts it. `UTC` and `GMT` are in that set. A
+ * different letter case ("Asia/KOLKATA", "Etc/Utc"), an abbreviation
+ * ("EST", "CET", "MST"), and an offset ("+05:00") are rejected.
  */
 export function isKnownTimeZone(timeZone: string): boolean {
-  if (timeZone !== "UTC" && !IANA_NAME.test(timeZone)) return false;
-  let resolved: string;
+  if (REJECTED_TIME_ZONES.has(timeZone) || !KNOWN_TIME_ZONES.has(timeZone)) return false;
   try {
-    resolved = new Intl.DateTimeFormat("en-US", { timeZone }).resolvedOptions().timeZone;
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
   } catch {
     return false;
   }
-  // The same zone in different letter case: Intl ignores case, IANA names do not.
-  return resolved === timeZone || resolved.toLowerCase() !== timeZone.toLowerCase();
 }

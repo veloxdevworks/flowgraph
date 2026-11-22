@@ -113,6 +113,17 @@ export {
   isError,
 } from "./schema.js";
 
+export {
+  HOOK_EVENTS,
+  HOOK_EVENT_ALIASES,
+  HOOK_WHERE_KEYS,
+  canonicalHookEvent,
+  hookEventFires,
+  hookVerbAllowed,
+  hookVerbMessage,
+} from "./hooks.js";
+export type { HookEventName } from "./hooks.js";
+
 export type {
   RunsOn,
   NormalizedRunsOn,

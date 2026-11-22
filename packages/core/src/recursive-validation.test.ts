@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { loadGraph, validateSpec } from "./loader.js";
-import { cronScheduleProblem, isKnownTimeZone } from "./runtime/cron-schedule.js";
+import { REJECTED_TIME_ZONE_ABBREVIATIONS, TIME_ZONE_NAMES, cronScheduleProblem, isKnownTimeZone } from "./runtime/cron-schedule.js";
 import { graphShapeDiagnostics, MAX_GRAPH_NESTING } from "./runtime/validate-graph.js";
 
 const head = { apiVersion: "flowgraph/v1", kind: "Graph" } as const;
@@ -88,6 +88,53 @@ describe("inline subgraph specs are validated like the top-level graph", () => {
       expect.objectContaining({ code: "NODE_CONFIG_ERROR", path: "nodes.sub.spec.nodes.x.with.command" }),
     ]));
     await expect(compileGraph(spec)).rejects.toThrow(/Invalid graph: .*nodes\.sub\.spec\.nodes\.x\.with\.command/);
+  });
+
+  it("reports each hook problem inside a map body once, including a nested map", () => {
+    const body = (hook: { on: string; do: string }) => ({
+      type: "subgraph",
+      spec: {
+        ...head,
+        metadata: { name: "item" },
+        nodes: [{ id: "y", ...echo }],
+        edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }],
+        runtime: { hooks: [hook] },
+      },
+    });
+    const hookReports = (diagnostics: Diagnostic[]) => diagnostics.filter((d) => /hook/i.test(`${d.code} ${d.path ?? ""} ${d.message}`));
+    const cases = [
+      { on: "node:before", do: "retry", path: "do", message: "Use allow, deny or interrupt." },
+      { on: "node:after", do: "route:next", path: "do", message: "Use redact." },
+      { on: "node:before", do: "ignore", path: "do", message: "Use allow, deny or interrupt." },
+      { on: "intelligent:beforeStep", do: "allow", path: "on", message: 'Unknown hook event "intelligent:beforeStep".' },
+    ];
+    for (const hook of cases) {
+      const found = hookReports(validateSpec(graph([mapOf(body(hook))])));
+      expect(found, `${hook.on} ${hook.do}`).toEqual([
+        expect.objectContaining({
+          path: `nodes.m.with.node.spec.runtime.hooks[0].${hook.path}`,
+          message: expect.stringContaining(hook.message),
+        }),
+      ]);
+    }
+    const nestedMap = hookReports(validateSpec(graph([
+      mapOf({ type: "map", with: { over: "{{ item.xs }}", node: body({ on: "node:before", do: "retry" }) } }),
+    ])));
+    expect(nestedMap).toEqual([
+      expect.objectContaining({
+        path: "nodes.m.with.node.with.node.spec.runtime.hooks[0].do",
+        message: expect.stringContaining("Use allow, deny or interrupt."),
+      }),
+    ]);
+    const spec = graph([inline([{ id: "a", ...echo }])]);
+    const nested = spec.nodes[0] as { spec: { runtime?: unknown } };
+    nested.spec.runtime = { hooks: [{ on: "node:before", do: "retry" }] };
+    expect(hookReports(validateSpec(spec))).toEqual([
+      expect.objectContaining({
+        path: "nodes.sub.spec.runtime.hooks[0].do",
+        message: expect.stringContaining("Use allow, deny or interrupt."),
+      }),
+    ]);
   });
 
   it("checks a subgraph body's inline spec inside a map", () => {
@@ -278,17 +325,23 @@ describe("cronScheduleProblem", () => {
 });
 
 describe("isKnownTimeZone", () => {
-  it("accepts IANA names, including ones ICU lists under an older name, and UTC", () => {
-    const zones = ["America/Denver", "Europe/London", "Asia/Tokyo", "UTC", "Etc/UTC", "Asia/Kolkata", "Europe/Kyiv", "America/Nuuk", "Asia/Ho_Chi_Minh", "Etc/GMT+5", "US/Mountain", "America/Argentina/Buenos_Aires", "America/Port-au-Prince"];
-    for (const zone of zones) expect(isKnownTimeZone(zone), zone).toBe(true);
+  it("accepts every tzdata Zone and Link name, including UTC and GMT", () => {
+    expect(TIME_ZONE_NAMES).toEqual(expect.arrayContaining(["UTC", "GMT", "Asia/Kathmandu", "Asia/Yangon", "Atlantic/Faroe", "America/Indiana/Indianapolis", "America/Kentucky/Louisville", "America/Argentina/Cordoba", "US/Eastern", "US/Pacific", "Canada/Eastern", "Australia/NSW", "Etc/Greenwich"]));
+    for (const zone of TIME_ZONE_NAMES) expect(isKnownTimeZone(zone), zone).toBe(true);
   });
 
-  it("rejects abbreviations, offsets, other spellings and unknown names", () => {
-    for (const zone of ["EST", "GMT", "+05:00", "america/denver", "AMERICA/DENVER", "America/DENVER", "utc", " UTC", "", "Mars/Olympus"]) {
+  it("rejects abbreviations and a different letter case", () => {
+    for (const zone of REJECTED_TIME_ZONE_ABBREVIATIONS) {
+      expect(TIME_ZONE_NAMES, zone).not.toContain(zone);
+      expect(isKnownTimeZone(zone), zone).toBe(false);
+    }
+    for (const zone of ["Asia/KOLKATA", "US/MOUNTAIN", "Etc/Utc", "Europe/KYIV", "Asia/KATHMANDU", "america/denver", "AMERICA/DENVER", "America/DENVER", "utc", "gmt", " UTC", "", "+05:00", "Mars/Olympus"]) {
       expect(isKnownTimeZone(zone), zone).toBe(false);
     }
   });
 });
+
+
 
 describe("nesting depth", () => {
   function nestedTo(levels: number): GraphSpec {

@@ -212,7 +212,7 @@ nodes:
       kind: Graph
       metadata: { name: child-${name} }
       nodes:
-        - { id: w, type: wait, with: { duration: "1ms" } }
+        - { id: w, type: wait, with: { deadline: "1ms" } }
       edges:
         - { from: START, to: w }
         - { from: w, to: END }

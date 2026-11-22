@@ -23,11 +23,11 @@ function routerOnlySpec(_flag: string): GraphSpec {
         type: "router",
         with: {
           mode: "rules",
-          routes: {
-            yes: { when: "{{ state.flag == 'yes' }}", to: "take-yes" },
-            no: { when: "{{ state.flag == 'no' }}", to: "take-no" },
-            default: { default: true, to: "take-no" },
-          },
+          routes: [
+            { name: "yes", when: "{{ state.flag == 'yes' }}", to: "take-yes" },
+            { name: "no", when: "{{ state.flag == 'no' }}", to: "take-no" },
+            { name: "default", default: true, to: "take-no" },
+          ],
         },
       },
       {
@@ -58,11 +58,11 @@ describe("router Command.goto", () => {
     spec.nodes[0]!.with = {
       mode: "model",
       input: "What a lovely sunny day, thanks for the flowers!",
-      routes: {
-        bills: { to: "take-yes", description: "Payments and invoices" },
-        repairs: { to: "take-yes" },
-        other: { to: "take-no", default: true, description: "None of the household tasks above" },
-      },
+      routes: [
+        { name: "bills", to: "take-yes", description: "Payments and invoices" },
+        { name: "repairs", to: "take-yes" },
+        { name: "other", to: "take-no", default: true, description: "None of the household tasks above" },
+      ],
     };
     const provider = defineProvider({
       name: "classifier", capabilities: { toolCalling: false, structuredOutput: true, streaming: false },
@@ -86,7 +86,7 @@ describe("router Command.goto", () => {
     spec.nodes[0]!.with = {
       mode: "model",
       input: "Request: {{ state.flag }}",
-      routes: { yes: { to: "take-yes" }, other: { to: "take-no", default: true } },
+      routes: [{ name: "yes", to: "take-yes" }, { name: "other", to: "take-no", default: true }],
     };
     const prompts: string[] = [];
     const provider = defineProvider({
@@ -107,7 +107,7 @@ describe("router Command.goto", () => {
   it("refuses a model router without input at compile time", async () => {
     const spec = routerOnlySpec("maybe");
     spec.nodes[0]!.provider = "classifier";
-    spec.nodes[0]!.with = { mode: "model", routes: { yes: { to: "take-yes" }, other: { to: "take-no", default: true } } };
+    spec.nodes[0]!.with = { mode: "model", routes: [{ name: "yes", to: "take-yes" }, { name: "other", to: "take-no", default: true }] };
     await expect(compileGraph(spec, {})).rejects.toThrow(/router mode: model requires input/);
   });
 

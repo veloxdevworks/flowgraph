@@ -5,7 +5,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { GraphSpecSchema, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
+import { GraphSpecSchema, HOOK_EVENT_ALIASES, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import {
   envExpansionCollisionDiagnostics,
 } from "./runtime/env-expansion-lint.js";
@@ -183,17 +183,10 @@ const NODE_TYPE_ALIASES: Readonly<Record<string, string>> = {
   intelligent: "agent",
 };
 
-/** Deprecated YAML hook phase → canonical phase. */
-const HOOK_PHASE_ALIASES: Readonly<Record<string, string>> = {
-  "intelligent:beforeStep": "agent:beforeStep",
-  "intelligent:beforeToolCall": "agent:beforeToolCall",
-  "intelligent:afterToolCall": "agent:afterToolCall",
-};
-
 /**
- * Rewrite deprecated `type: code` / `type: intelligent` plus legacy
- * `intelligent:*` hook phases to their canonical names, in the graph, in map
- * bodies and in inline subgraph `spec` blocks at any depth.
+ * Rewrite deprecated `type: code` / `type: intelligent` and hook events listed
+ * in `HOOK_EVENT_ALIASES`, in the graph, in map bodies and in inline subgraph
+ * `spec` blocks at any depth.
  * Exported for tests and for UI-side YAML parsers that want the same mapping.
  */
 export function normalizeNodeTypeAliases(parsed: unknown): unknown {
@@ -230,8 +223,8 @@ export function normalizeNodeTypeAliases(parsed: unknown): unknown {
       rt.hooks = rt.hooks.map((hook) => {
         if (!hook || typeof hook !== "object") return hook;
         const h = { ...(hook as Record<string, unknown>) };
-        if (typeof h.on === "string" && HOOK_PHASE_ALIASES[h.on]) {
-          h.on = HOOK_PHASE_ALIASES[h.on];
+        if (typeof h.on === "string" && HOOK_EVENT_ALIASES[h.on]) {
+          h.on = HOOK_EVENT_ALIASES[h.on];
         }
         return h;
       });

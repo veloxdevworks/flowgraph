@@ -19,7 +19,7 @@ const graph = {
   kind: "Graph",
   metadata: { name: "hosted" },
   triggers: [{ id: "nightly", type: "cron", schedule: "0 2 * * *" }],
-  nodes: [{ id: "step", type: "router", with: { routes: { done: { default: true, to: "END" } } } }],
+  nodes: [{ id: "step", type: "router", with: { routes: [ { name: "done", default: true, to: "END" } ] } }],
   edges: [
     { from: "START", to: "step" },
     { from: "step", to: "END" },

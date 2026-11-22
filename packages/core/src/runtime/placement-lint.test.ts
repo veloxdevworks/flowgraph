@@ -34,7 +34,7 @@ describe("placementDiagnostics", () => {
     for (const k of ["until", "signal", "webhook"]) {
       expect(codes(placed({ id: "w", type: "wait", with: { [k]: "x" } })), k).toEqual(["PLACEMENT_GATE_NOT_FORWARDED"]);
     }
-    expect(codes(placed({ id: "w", type: "wait", with: { duration: "1s" } }))).toEqual([]);
+    expect(codes(placed({ id: "w", type: "wait", with: { deadline: "1s" } }))).toEqual([]);
     expect(codes(placed({ id: "a", type: "agent", with: { tools: [{ function: "ask_human" }] } }))).toEqual(["PLACEMENT_GATE_NOT_FORWARDED"]);
     expect(codes(placed({ id: "a", type: "agent", with: { tools: [] } }))).toEqual([]);
     expect(codes(placed({ id: "m", type: "map", with: { node: { id: "g", type: "hitl" } } }))).toEqual(["PLACEMENT_GATE_NOT_FORWARDED"]);

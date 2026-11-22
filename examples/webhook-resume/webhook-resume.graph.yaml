@@ -15,7 +15,7 @@ nodes:
   - id: finish
     type: wait
     with:
-      duration: 1ms
+      deadline: 1ms
 edges:
   - { from: START, to: await-event }
   - { from: await-event, to: finish }

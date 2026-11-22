@@ -24,8 +24,23 @@ export interface HookBus {
   has(phase: HookPhase): boolean;
 }
 
+const WHERE_KEYS = new Set(["nodeId", "nodeType", "tool", "channel"]);
+
+function assertWhere(where: HookWhere | undefined): void {
+  if (!where) return;
+  for (const key of Object.keys(where)) {
+    if (!WHERE_KEYS.has(key)) {
+      throw Object.assign(new Error(`Unknown hook where key "${key}".`), {
+        code: "HOOK_WHERE_UNKNOWN",
+        retryable: false,
+      });
+    }
+  }
+}
+
 function matches(where: HookWhere | undefined, payload: HookPayload): boolean {
   if (!where) return true;
+  assertWhere(where);
   if (where.nodeId !== undefined && payload.nodeId !== where.nodeId) return false;
   if (where.nodeType !== undefined && payload.nodeType !== where.nodeType) return false;
   if (where.tool !== undefined && payload.tool !== where.tool) return false;
@@ -40,6 +55,7 @@ export function createHookBus(events?: EventBus): HookBus {
   const byPhase = new Map<HookPhase, Hook[]>();
 
   function register(hook: Hook): () => void {
+    assertWhere(hook.where);
     const list = byPhase.get(hook.phase) ?? [];
     list.push(hook);
     list.sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));

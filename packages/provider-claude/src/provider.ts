@@ -12,6 +12,7 @@ import type {
   TokenUsage,
   ToolSpec,
 } from "@flowgraph/core";
+import { effectiveModel } from "@flowgraph/core";
 
 export const CLAUDE_BUILTIN_TOOLS = [
   "Read",
@@ -264,8 +265,9 @@ export function createClaudeProvider(options: ClaudeProviderOptions = {}): Provi
         abortController: ctx.signal ? { signal: ctx.signal } : undefined,
       };
 
-      if (options.model ?? req.model) {
-        queryOptions["model"] = req.model ?? options.model;
+      const model = effectiveModel(req, options.model);
+      if (model) {
+        queryOptions["model"] = model;
       }
       if (options.apiKey) {
         queryOptions["apiKey"] = options.apiKey;

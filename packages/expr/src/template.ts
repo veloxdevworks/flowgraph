@@ -89,6 +89,14 @@ export function evalGuard(expr: string, scope: EvalScope, strict = false): boole
 }
 
 /**
+ * The expression inside a guard. A string that is exactly one `{{ expr }}`
+ * uses that expression; every other string is a bare expression.
+ */
+export function guardExpression(source: string): string {
+  return (soleTemplateExpr(source) ?? source).trim();
+}
+
+/**
  * Static analysis: collect all top-level identifier names referenced in a
  * template string (e.g. "state", "config"). Used to validate channel refs.
  */

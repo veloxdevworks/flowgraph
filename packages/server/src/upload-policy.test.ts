@@ -218,7 +218,7 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
       metadata: { name: child }
       state: { channels: { x: { type: string } } }
       nodes:
-        - { id: w, type: wait, with: { duration: "1ms" } }
+        - { id: w, type: wait, with: { deadline: "1ms" } }
       edges:
         - { from: START, to: w }
         - { from: w, to: END }
@@ -251,7 +251,7 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
       kind: Graph
       metadata: { name: child }
       nodes:
-        - { id: w, type: wait, with: { duration: "1ms" } }
+        - { id: w, type: wait, with: { deadline: "1ms" } }
       edges:
         - { from: START, to: w }
         - { from: w, to: END }`;

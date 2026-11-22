@@ -10,7 +10,7 @@ export type { EvalScope } from "./evaluator.js";
 export { scanTemplate, soleTemplateExpr } from "./scan.js";
 export type { TemplateScan, TemplateSpan } from "./scan.js";
 
-export { renderTemplate, renderDeep, stringifyRendered, evalGuard, collectRefs } from "./template.js";
+export { renderTemplate, renderDeep, stringifyRendered, evalGuard, guardExpression, collectRefs } from "./template.js";
 
 export { stdlib } from "./stdlib.js";
 export type { Stdlib, StdlibFn } from "./stdlib.js";

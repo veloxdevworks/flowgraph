@@ -18,14 +18,14 @@ type Config = z.infer<typeof SkillWithSchema>;
 export const skillNode = defineNode<Config>({
   type: "skill",
   configSchema,
-  capabilities: { sideEffecting: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
   build(_buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const uses = String(nodeSpec["uses"] ?? "");
 
     return {
       contract: {},
-      capabilities: { sideEffecting: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
       async run(state: Record<string, unknown>, runCtx: NodeRunContext): Promise<NodeResult> {
         let skill;
