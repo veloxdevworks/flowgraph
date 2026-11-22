@@ -885,8 +885,9 @@ export class RunService {
         resolveGraphInput(spec, runInput);
       } catch (err) {
         this.registry.remove(req.threadId);
+        await this.patchMeta(req.threadId, { status: "error" });
         if (isInputValidationError(err)) {
-          throw new Error(err.message);
+          throw new ServerRequestError(400, err.code, err.message);
         }
         throw err;
       }
