@@ -23,12 +23,12 @@ export const mapNode = defineNode<Config>({
   type: "map",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, hostAccess: false },
 
   build(): CompiledNode {
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, hostAccess: false },
       async run(): Promise<NodeResult> {
         throw new Error("map node was not expanded at compile time (internal error).");
       },
@@ -69,9 +69,10 @@ export async function runMapItem(
   const itemScope = { ...baseScope, [as]: task.item, index: task.index };
   const innerSpec = config.node as Record<string, unknown>;
   const innerType = String(innerSpec["type"] ?? "");
-  assertNodeTypeAllowed(nodePolicyOf(ctx), innerType, `map node "${mapId}" inner node`);
+  const effectiveRegistry = buildCtx.registry ?? registry;
+  assertNodeTypeAllowed(nodePolicyOf(ctx), innerType, `map node "${mapId}" inner node`, effectiveRegistry);
   assertNodeSpecAllowed(nodePolicyOf(ctx), innerSpec, `map node "${mapId}" inner node`);
-  const factory = (buildCtx.registry ?? registry).get(innerType);
+  const factory = effectiveRegistry.get(innerType);
   if (!factory) {
     throw new Error(`map node "${mapId}": inner node type "${innerType}" is not registered.`);
   }

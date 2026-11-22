@@ -25,10 +25,9 @@ import {
   type OutputField,
 } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
-import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
+import { defineNode, registry, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { BaseStore } from "@langchain/langgraph";
 import { graphProviderList } from "../providers/registry.js";
-import { mediaProviderList } from "../media/registry.js";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import type { NodeRunContext } from "../context.js";
 import { assertSubgraphFileAllowed, isReservedChannel, nodePolicyOf, withoutReservedKeys } from "../node-policy.js";
@@ -88,7 +87,7 @@ export const subgraphNode = defineNode<Config>({
   type: "subgraph",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, hostAccess: false },
 
   build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const uses = String(nodeSpec["uses"] ?? "");
@@ -100,7 +99,7 @@ export const subgraphNode = defineNode<Config>({
 
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const nodeCtx = ctx as NodeCtx;
@@ -295,8 +294,15 @@ async function loadChild(
     });
   };
 
+  const hostOpts = subgraphHostOptions(ctx);
+  const extraContext: Record<symbol, unknown> = {};
+  const ctxSymbols = ctx as unknown as Record<symbol, unknown>;
+  for (const sym of (hostOpts.registry ?? registry).subgraphContextSymbols()) {
+    if (sym in ctxSymbols) extraContext[sym] = ctxSymbols[sym];
+  }
+
   const { compiledLg } = await compileGraphForEmbedding(spec, {
-    ...subgraphHostOptions(ctx),
+    ...hostOpts,
     cwd,
     workspace: resolveGraphWorkspace(spec, ctx.workspace),
     sinks: [forwardSink],
@@ -304,7 +310,7 @@ async function loadChild(
     ...(nodePolicyOf(ctx) ? { nodePolicy: nodePolicyOf(ctx)! } : {}),
     // The parent's own providers, so the child answers with the same ones.
     providers: graphProviderList(ctx),
-    mediaProviders: mediaProviderList(ctx),
+    extraContext,
     ...(parentMemoryRuntime(ctx) ? { memory: parentMemoryRuntime(ctx)! } : { memory: "ephemeral" as const }),
   });
 

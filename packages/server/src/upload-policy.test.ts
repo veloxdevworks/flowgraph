@@ -4,6 +4,13 @@ import * as http from "node:http";
 import * as path from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import "@flowgraph/media";
+import "@flowgraph/node-demo";
+import "@flowgraph/node-port";
+import "@flowgraph/node-service";
+import "@flowgraph/node-workshop";
+import "@flowgraph/node-worktree";
+import "@flowgraph/tools-fs";
 import { parseGraphYaml } from "./graph-source.js";
 import { checkUntrustedUpload, untrustedNodePolicy, UNTRUSTED_NODE_POLICY } from "./upload-policy.js";
 import { buildServerProviders } from "./providers.js";
@@ -35,8 +42,8 @@ describe("checkUntrustedUpload", () => {
     expect(codesOf(graph(`  - { id: a, type: hitl, with: { mode: approve, message: "ok?" } }`))).toEqual([]);
   });
 
-  it("blocks host-command node types, including map inners and inline subgraphs", () => {
-    for (const type of ["shell", "script", "service", "worktree"]) {
+  it("blocks host-command and moved product node types, including map inners and inline subgraphs", () => {
+    for (const type of ["shell", "script", "service", "worktree", "demo", "port"]) {
       const node =
         type === "shell"
           ? `  - { id: a, type: shell, with: { command: "id" } }`
@@ -44,8 +51,12 @@ describe("checkUntrustedUpload", () => {
             ? `  - { id: a, type: script, with: { code: "1" } }`
             : type === "service"
               ? `  - { id: a, type: service, with: { name: svc, command: "sleep 1" } }`
-              : `  - { id: a, type: worktree, with: { action: status, path: wt } }`;
-      expect(codesOf(graph(node))).toContain("UPLOAD_NODE_TYPE_BLOCKED nodes.a");
+              : type === "worktree"
+                ? `  - { id: a, type: worktree, with: { action: status, path: wt } }`
+                : type === "demo"
+                  ? `  - { id: a, type: demo, with: { file: { path: "out.txt" } } }`
+                  : `  - { id: a, type: port, with: { output: { to: out } } }`;
+      expect(codesOf(graph(node)), type).toContain("UPLOAD_NODE_TYPE_BLOCKED nodes.a");
     }
     const mapped = graph(`  - id: a
     type: map
@@ -115,6 +126,87 @@ runtime:
       ].sort(),
     );
   });
+
+  it("blocks newly registered plugin node types by default unless explicitly marked hostAccess: false", async () => {
+    const { compileGraph, defineNode, registry } = await import("@flowgraph/core");
+    const passthrough = { safeParse: (v: unknown) => ({ success: true as const, data: v }) } as never;
+    const unsafeType = "test-plugin-unsafe-host";
+    const safeType = "test-plugin-explicit-safe";
+    if (!registry.has(unsafeType)) {
+      registry.register(
+        defineNode({
+          type: unsafeType,
+          configSchema: passthrough,
+          capabilities: { sideEffecting: true },
+          build: () => ({ contract: {}, capabilities: { sideEffecting: true }, run: async () => ({ update: {} }) }),
+        }),
+      );
+    }
+    if (!registry.has(safeType)) {
+      registry.register(
+        defineNode({
+          type: safeType,
+          configSchema: passthrough,
+          capabilities: { hostAccess: false },
+          build: () => ({ contract: {}, capabilities: { hostAccess: false }, run: async () => ({ update: {} }) }),
+        }),
+      );
+    }
+
+    const unsafeYaml = graph(`  - { id: a, type: ${unsafeType}, with: {} }`);
+    const safeYaml = graph(`  - { id: a, type: ${safeType}, with: {} }`);
+
+    expect(codesOf(unsafeYaml)).toEqual(["UPLOAD_NODE_TYPE_BLOCKED nodes.a"]);
+    expect(codesOf(safeYaml)).toEqual([]);
+
+    expect(UNTRUSTED_NODE_POLICY.requireSafeNodeTypes).toBe(true);
+    const unsafeSpec = parseGraphYaml(unsafeYaml, { expandEnv: false }).spec!;
+    await expect(
+      compileGraph(unsafeSpec, { checkpointer: "none", nodePolicy: UNTRUSTED_NODE_POLICY }),
+    ).rejects.toMatchObject({ code: "NODE_TYPE_BLOCKED" });
+
+    const safeSpec = parseGraphYaml(safeYaml, { expandEnv: false }).spec!;
+    await expect(
+      compileGraph(safeSpec, { checkpointer: "none", nodePolicy: UNTRUSTED_NODE_POLICY }),
+    ).resolves.toBeDefined();
+  });
+
+  it("rejects absolute paths and .. traversal in image node input paths", () => {
+    const img = (inputYaml: string) =>
+      graph(`  - { id: a, type: image, with: { prompt: "draw", input: ${inputYaml} } }`);
+
+    expect(codesOf(img(`"/etc/passwd"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
+    expect(codesOf(img(`"../secret.png"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
+    expect(codesOf(img(`"nested/../../secret.png"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
+    expect(codesOf(img(`["ok.png", "../escape.png"]`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input[1]"]);
+    expect(codesOf(img(`"file:///etc/passwd"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
+    expect(codesOf(img(`"~/secret.png"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
+    expect(codesOf(img(`"~root/secret.png"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
+
+    // Safe relative paths, public URLs, and templates stay allowed at upload time.
+    expect(codesOf(img(`"assets/ref.png"`))).toEqual([]);
+    expect(codesOf(img(`"https://example.com/ref.png"`))).toEqual([]);
+    expect(codesOf(img(`"{{ state.out }}"`))).toEqual([]);
+
+    // Also check raw spec with `inputs` field and `{ artifact }` / `{ artifacts }` wrappers.
+    const parsed = parseGraphYaml(graph(`  - { id: a, type: image, with: { prompt: "draw" } }`), { expandEnv: false });
+    const node = parsed.spec!.nodes[0] as unknown as { with: Record<string, unknown> };
+    node.with.inputs = [
+      "/etc/shadow",
+      "../escape.png",
+      "~/keys.png",
+      { artifact: { kind: "artifact", path: "/etc/passwd" } },
+      { artifacts: [{ kind: "artifact", path: "../secret.png" }, { kind: "artifact", path: "~/home.png" }] },
+    ];
+    expect(checkUntrustedUpload("", parsed.spec!).map((v) => `${v.code} ${v.path}`)).toEqual([
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[0]",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[1]",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[2]",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[3].artifact.path",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[4].artifacts[0].path",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[4].artifacts[1].path",
+    ]);
+  });
 });
 
 describe("untrusted outbound targets and provider endpoints", () => {
@@ -139,7 +231,9 @@ describe("untrusted outbound targets and provider endpoints", () => {
     ]) {
       expect(codesOf(graph(httpNode(url))), url).toEqual(["UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url"]);
     }
-    expect(codesOf(graph(httpNode("http://10.0.0.5/hook", "webhook")))).toEqual(["UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url"]);
+    expect(codesOf(graph(`  - { id: a, type: http, with: { url: "http://10.0.0.5/hook", method: POST, once: true } }`))).toEqual([
+      "UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url",
+    ]);
   });
 
   it("allows public and templated URLs, and allow-listed hosts but never metadata", () => {

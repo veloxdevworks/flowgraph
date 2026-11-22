@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { MediaCallContext, MediaOutput, MediaRequest } from "@flowgraph/core";
+import type { MediaCallContext, MediaOutput, MediaRequest } from "../runtime/types.js";
 import { VendorHttpError } from "../http.js";
 import { elevenlabsVendor } from "./elevenlabs.js";
 

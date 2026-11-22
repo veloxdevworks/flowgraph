@@ -122,6 +122,26 @@ beforeAll(async () => {
 `,
   );
 
+  // File subgraph importing a colliding reducer
+  await fs.writeFile(
+    path.join(fixtureDir, "child-other-reducer.graph.yaml"),
+    `apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: child-other-reducer
+imports:
+  - reducers: ./reducer-2.mjs
+state:
+  channels:
+    tags:
+      type: array
+      reducer: "custom:mergeTags"
+nodes: []
+edges:
+  - { from: START, to: END }
+`,
+  );
+
   // Provider plugin module A
   await fs.writeFile(
     path.join(fixtureDir, "provider-plugin.mjs"),
@@ -403,6 +423,35 @@ describe("namespaced plugins, collision errors, per-compile registry and plugin 
     const collidingRes = await (await compileGraph(collidingSpec, { cwd: fixtureDir })).run();
     expect(collidingRes.status).toBe("error");
     expect((collidingRes.error as Error & { code?: string })?.code).toBe("PLUGIN_PROVIDER_COLLISION");
+    expect(collidingRes.error?.message).toContain("./provider-plugin.mjs");
+    expect(collidingRes.error?.message).not.toContain("built-in or host");
+
+    // Host-provided provider plugin colliding with an imported plugin says "built-in or host"
+    const hostPlugin = defineProviderPlugin({
+      name: "acme/custom-llm",
+      create: (_opts, ctx) => ({
+        name: ctx.name,
+        capabilities: { streaming: false, toolCalling: false, structuredOutput: false },
+        run: async () => ({ output: "host", stopReason: "done" as const }),
+      }),
+    });
+    const hostCollideSpec = baseSpec({
+      imports: [{ providers: "./provider-plugin.mjs" }],
+      providers: {
+        custom: { kind: "plugin", plugin: "acme/custom-llm", options: { tag: "x" } },
+      },
+      nodes: [{ id: "a", type: "agent", provider: "custom", with: { prompt: "hi" } }],
+      edges: [
+        { from: "START", to: "a" },
+        { from: "a", to: "END" },
+      ],
+    });
+    await expect(
+      compileGraph(hostCollideSpec, { cwd: fixtureDir, providerPlugins: [hostPlugin] }),
+    ).rejects.toMatchObject({
+      code: "PLUGIN_PROVIDER_COLLISION",
+      message: expect.stringContaining("built-in or host"),
+    });
   });
 
   it("rejects unnamespaced plugin node types with PLUGIN_TYPE_INVALID", async () => {
@@ -498,7 +547,7 @@ describe("namespaced plugins, collision errors, per-compile registry and plugin 
     expect(finalSnap?.values["tags"]).toEqual(["seed", "done:ok", "done:resumed"]);
   });
 
-  it("rejects colliding reducer names with PLUGIN_REDUCER_COLLISION", async () => {
+  it("rejects colliding reducer names with PLUGIN_REDUCER_COLLISION and names the existing source", async () => {
     const spec = baseSpec({
       imports: [{ reducers: "./reducer-1.mjs" }, { reducers: "./reducer-2.mjs" }],
       state: { channels: { tags: { type: "array", reducer: "custom:mergeTags" } } },
@@ -507,7 +556,97 @@ describe("namespaced plugins, collision errors, per-compile registry and plugin 
     });
     await expect(compileGraph(spec, { cwd: fixtureDir })).rejects.toMatchObject({
       code: "PLUGIN_REDUCER_COLLISION",
+      message: expect.stringContaining("./reducer-1.mjs"),
     });
+
+    // Child subgraph colliding with a parent-imported reducer names the parent's import
+    const childCollideSpec = baseSpec({
+      imports: [{ reducers: "./reducer-1.mjs" }],
+      state: { channels: { tags: { type: "array", reducer: "custom:mergeTags" } } },
+      nodes: [
+        {
+          id: "sub",
+          type: "subgraph",
+          uses: "./child-other-reducer.graph.yaml",
+        },
+      ],
+      edges: [
+        { from: "START", to: "sub" },
+        { from: "sub", to: "END" },
+      ],
+    });
+    const childRes = await (await compileGraph(childCollideSpec, { cwd: fixtureDir })).run();
+    expect(childRes.status).toBe("error");
+    expect((childRes.error as Error & { code?: string })?.code).toBe("PLUGIN_REDUCER_COLLISION");
+    expect(childRes.error?.message).toContain("./reducer-1.mjs");
+    expect(childRes.error?.message).not.toContain("built-in or host");
+
+    // Imported reducer colliding with a host-registered reducer says "built-in or host"
+    const hostReg = registry.fork();
+    hostReg.registerReducer("mergeTags", (a, b) => b ?? a);
+    const hostSpec = baseSpec({
+      imports: [{ reducers: "./reducer-1.mjs" }],
+      state: { channels: { tags: { type: "array", reducer: "custom:mergeTags" } } },
+      nodes: [],
+      edges: [{ from: "START", to: "END" }],
+    });
+    await expect(compileGraph(hostSpec, { cwd: fixtureDir, registry: hostReg })).rejects.toMatchObject({
+      code: "PLUGIN_REDUCER_COLLISION",
+      message: expect.stringContaining("built-in or host"),
+    });
+  });
+
+  it("evaluates isUntrustedSafe and requireSafeNodeTypes against per-compile forked registries", async () => {
+    const forked = registry.fork();
+    expect(forked.isUntrustedSafe("agent")).toBe(true);
+    expect(forked.isUntrustedSafe("shell")).toBe(false);
+
+    const safeFactory = {
+      type: "acme/safe-echo",
+      configSchema: z.object({}).passthrough(),
+      capabilities: { hostAccess: false },
+      build() {
+        return {
+          contract: {},
+          capabilities: { hostAccess: false },
+          async run() {
+            return { update: { out: "safe-ok" } };
+          },
+        };
+      },
+    };
+    const unsafeFactory = {
+      type: "acme/unsafe-echo",
+      configSchema: z.object({}).passthrough(),
+      capabilities: {},
+      build() {
+        return {
+          contract: {},
+          capabilities: {},
+          async run() {
+            return { update: { out: "unsafe" } };
+          },
+        };
+      },
+    };
+
+    const safeSpec = baseSpec({ nodes: [{ id: "n", type: "acme/safe-echo" }] });
+    const compiledSafe = await compileGraph(safeSpec, {
+      extraFactories: [safeFactory],
+      nodePolicy: { requireSafeNodeTypes: true },
+    });
+    expect(registry.isUntrustedSafe("acme/safe-echo")).toBe(false);
+    const safeRes = await compiledSafe.run();
+    expect(safeRes.status).toBe("completed");
+    expect(safeRes.state["out"]).toBe("safe-ok");
+
+    const unsafeSpec = baseSpec({ nodes: [{ id: "n", type: "acme/unsafe-echo" }] });
+    await expect(
+      compileGraph(unsafeSpec, {
+        extraFactories: [unsafeFactory],
+        nodePolicy: { requireSafeNodeTypes: true },
+      }),
+    ).rejects.toMatchObject({ code: "NODE_TYPE_BLOCKED" });
   });
 
   it("runs a kind: plugin provider with adapter-validated options scoped to the compile", async () => {

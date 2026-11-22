@@ -2,7 +2,9 @@
 
 Opt-in tool packages extend agent nodes with capabilities that need local I/O (filesystem, shell, etc.). They register **function tools** via `@flowgraph/core`'s `registerTool()` API so any provider (including LangChain) can invoke them.
 
-## 1. Filesystem tools (`@flowgraph/tools-fs`)
+## 1. Filesystem tools (`@flowgraph/tools-fs`, preview)
+
+`@flowgraph/tools-fs` is a separately versioned preview package that registers the top-level `localTools` graph schema extension and provides sandboxed filesystem tools. The FlowGraph CLI registers it by default; programmatic hosts should import `@flowgraph/tools-fs` before loading graphs that declare `localTools`.
 
 Declare in your graph:
 

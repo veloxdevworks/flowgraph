@@ -12,6 +12,8 @@ interface SubgraphHostContext {
   runConfig: Pick<RunConfig, "vars" | "defaults" | "permission">;
   registry?: NodeRegistry;
   providerPlugins?: ProviderPlugin[];
+  providerPluginSources?: Record<string, string>;
+  providerSources?: Record<string, string>;
 }
 
 // A child executes nodes within the root invocation, not another run/interrupt lifecycle.
@@ -60,6 +62,8 @@ export function captureSubgraphHostContext(options: {
   runConfig?: RunConfig;
   registry?: NodeRegistry;
   providerPlugins?: ProviderPlugin[];
+  providerPluginSources?: Record<string, string>;
+  providerSources?: Record<string, string>;
 }): SubgraphHostContext {
   return {
     hooks: (options.hooks ?? [])
@@ -68,6 +72,12 @@ export function captureSubgraphHostContext(options: {
     runConfig: copyHostOverrides(options.runConfig),
     ...(options.registry ? { registry: options.registry } : {}),
     ...(options.providerPlugins?.length ? { providerPlugins: [...options.providerPlugins] } : {}),
+    ...(options.providerPluginSources && Object.keys(options.providerPluginSources).length > 0
+      ? { providerPluginSources: { ...options.providerPluginSources } }
+      : {}),
+    ...(options.providerSources && Object.keys(options.providerSources).length > 0
+      ? { providerSources: { ...options.providerSources } }
+      : {}),
   };
 }
 
@@ -82,6 +92,8 @@ export function subgraphHostOptions(ctx: NodeRunContext): {
   runConfig?: RunConfig;
   registry?: NodeRegistry;
   providerPlugins?: ProviderPlugin[];
+  providerPluginSources?: Record<string, string>;
+  providerSources?: Record<string, string>;
 } {
   const host = (ctx as unknown as Record<symbol, unknown>)[SUBGRAPH_HOST_CONTEXT] as
     SubgraphHostContext | undefined;
@@ -93,6 +105,8 @@ export function subgraphHostOptions(ctx: NodeRunContext): {
           runConfig: copyHostOverrides(host.runConfig),
           ...(host.registry ? { registry: host.registry } : {}),
           ...(host.providerPlugins ? { providerPlugins: host.providerPlugins } : {}),
+          ...(host.providerPluginSources ? { providerPluginSources: { ...host.providerPluginSources } } : {}),
+          ...(host.providerSources ? { providerSources: { ...host.providerSources } } : {}),
         }
       : {}),
   };

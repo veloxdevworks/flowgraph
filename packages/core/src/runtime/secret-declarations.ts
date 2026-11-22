@@ -5,7 +5,7 @@
 
 import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { templateRootRefs } from "../node-policy.js";
-import { getMediaVendor } from "../media/registry.js";
+import { registry } from "../registry.js";
 import { defaultLangChainApiKeyEnv } from "../providers/langchain/factory.js";
 import { undeclaredBaseUrlKeyMessage, undeclaredSecretMessage } from "./secret-scope.js";
 
@@ -80,7 +80,7 @@ export function providerSecretDiagnostics(spec: GraphSpec): Diagnostic[] {
     if (!("baseUrl" in cfg) || cfg.baseUrl === undefined) continue;
     const key = cfg.kind === "langchain"
       ? defaultLangChainApiKeyEnv(cfg.vendor)
-      : cfg.kind === "media" ? getMediaVendor(cfg.vendor)?.defaultApiKeyEnv : undefined;
+      : registry.resolveProviderDefaultSecret(cfg as unknown as Record<string, unknown>);
     if (key && !declared.has(key)) {
       out.push({ severity: "error", code: "SECRET_UNDECLARED", path: `providers.${name}.baseUrl`, message: undeclaredBaseUrlKeyMessage(name, key) });
     }

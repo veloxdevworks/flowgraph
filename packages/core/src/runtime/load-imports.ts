@@ -29,7 +29,9 @@ export interface GraphImportAliases {
 export interface LoadGraphImportsResult extends GraphImportAliases {
   registry: NodeRegistry;
   providers: ProviderAdapter[];
+  providerSources: Map<string, string>;
   providerPlugins: Map<string, ProviderPlugin>;
+  providerPluginSources: Map<string, string>;
 }
 
 function isTypeScriptPath(filePath: string): boolean {
@@ -147,7 +149,7 @@ async function importModuleSpecifier(
   return importResolvedPath(resolved);
 }
 
-function registerReducerExports(mod: Record<string, unknown>, target: NodeRegistry): void {
+function registerReducerExports(mod: Record<string, unknown>, target: NodeRegistry, source?: string): void {
   const def = mod["default"];
   if (def == null) return;
 
@@ -162,7 +164,7 @@ function registerReducerExports(mod: Record<string, unknown>, target: NodeRegist
         typeof (entry as { reducer: unknown }).reducer === "function"
       ) {
         const { name, reducer } = entry as { name: string; reducer: ReducerFn };
-        target.registerReducer(name, reducer);
+        target.registerReducer(name, reducer, source ? { source } : {});
       }
     }
     return;
@@ -171,7 +173,7 @@ function registerReducerExports(mod: Record<string, unknown>, target: NodeRegist
   if (typeof def === "object") {
     for (const [name, fn] of Object.entries(def as Record<string, unknown>)) {
       if (typeof fn === "function") {
-        target.registerReducer(name, fn as ReducerFn);
+        target.registerReducer(name, fn as ReducerFn, source ? { source } : {});
       }
     }
   }
@@ -179,7 +181,7 @@ function registerReducerExports(mod: Record<string, unknown>, target: NodeRegist
 
 async function loadReducerImport(specifier: string, cwd: string, target: NodeRegistry): Promise<void> {
   const mod = await importModuleSpecifier(specifier, cwd);
-  registerReducerExports(mod, target);
+  registerReducerExports(mod, target, specifier);
 }
 
 /**
@@ -248,7 +250,9 @@ export async function loadGraphImports(
   const targetRegistry = opts.registry ?? registry.fork();
   const aliases = readGraphImportAliases(spec);
   const providersByName = new Map<string, ProviderAdapter>();
+  const providerSources = new Map<string, string>();
   const providerPlugins = new Map<string, ProviderPlugin>();
+  const providerPluginSources = new Map<string, string>();
 
   for (const imp of spec.imports ?? []) {
     if ("nodes" in imp) {
@@ -265,22 +269,32 @@ export async function loadGraphImports(
           const existing = providerPlugins.get(entry.name);
           if (existing !== undefined) {
             if (existing === entry) continue;
+            const existingSource = providerPluginSources.get(entry.name);
+            const target = existingSource
+              ? `provider plugin imported from "${existingSource}"`
+              : "built-in or host provider plugin";
             throw Object.assign(
-              new Error(`Provider plugin "${entry.name}" collides with an already-imported provider plugin.`),
+              new Error(`Provider plugin "${entry.name}" collides with an already-registered ${target}.`),
               { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
             );
           }
           providerPlugins.set(entry.name, entry);
+          providerPluginSources.set(entry.name, imp.providers);
         } else {
           const existing = providersByName.get(entry.name);
           if (existing !== undefined) {
             if (existing === entry) continue;
+            const existingSource = providerSources.get(entry.name);
+            const target = existingSource
+              ? `provider imported from "${existingSource}"`
+              : "built-in or host provider";
             throw Object.assign(
-              new Error(`Provider "${entry.name}" collides with an already-imported provider.`),
+              new Error(`Provider "${entry.name}" collides with an already-registered ${target}.`),
               { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
             );
           }
           providersByName.set(entry.name, entry);
+          providerSources.set(entry.name, imp.providers);
         }
       }
     } else if ("reducers" in imp) {
@@ -292,7 +306,9 @@ export async function loadGraphImports(
     ...aliases,
     registry: targetRegistry,
     providers: [...providersByName.values()],
+    providerSources,
     providerPlugins,
+    providerPluginSources,
   };
 }
 

@@ -1,4 +1,4 @@
-import { checkWorkshopOutput, uncoveredAgendaItems } from "@flowgraph/spec";
+import { checkWorkshopOutput, uncoveredAgendaItems } from "@flowgraph/node-workshop/contract";
 import { appendPath, deepMerge, isPlainObject, setPath, unsetPath } from "./draft.js";
 import {
   CONTROLLER_TOOL_NAMES,

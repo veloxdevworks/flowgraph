@@ -157,7 +157,7 @@ providers:
 - `kind: media` is for backends with no LLM side, or to pin separate credentials. Fields: `vendor`, `model`, `baseUrl`, `apiKeyEnv`, `options`. The key is read at call time through the run's secret provider (`env`/`dotenv`).
 - A bare vendor name also works (`provider: xai` on a node) using that vendor's default key env var.
 - A node without `provider:` uses `config.defaults.provider` when that provider can do the modality, otherwise the only provider that can, otherwise fails listing the candidates.
-- **Third-party vendors:** a plugin loaded through `imports[].providers` calls `registerMediaVendor({ vendor, modalities, create })` (or `registerMediaProvider`) from `@flowgraph/core`; `kind: media` entries then name the vendor. A `MediaProvider` implements `start` / `poll` / `fetch` / `cancel` and persists outputs through the supplied `saveOutput`.
+- **Third-party vendors:** a plugin loaded through `imports[].providers` calls `registerMediaVendor({ vendor, modalities, create })` (or `registerMediaProvider`) from `@flowgraph/media` (preview package; registered by default in `@flowgraph/cli`); `kind: media` entries then name the vendor. A `MediaProvider` implements `start` / `poll` / `fetch` / `cancel` and persists outputs through the supplied `saveOutput`.
 **Reference vendors (`@flowgraph/media`)**, loaded automatically by the CLI and server. Written from each vendor's official docs (2026-11-05); **not yet exercised against the live APIs**. Model ids and prices move quickly, so check the vendor docs. Media model precedence is top-level node `model:`, then `with.model`, then the provider's `model`; the node overrides are passed through to the vendor.
 
 | Vendor id | Use via | Serves | Key env (default) | Default model(s) | Notes |

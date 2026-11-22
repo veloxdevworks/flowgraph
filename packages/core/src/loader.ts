@@ -24,7 +24,6 @@ import { withUnresolvedImports } from "./runtime/load-imports.js";
 import { registry, type NodeRegistry } from "./registry.js";
 import { setGraphFile, subgraphAliases } from "./runtime/graph-files.js";
 import "./nodes/index.js";
-import { getMediaVendor } from "./media/registry.js";
 import { offlineProviderValidations, providerConfigDiagnostics } from "./providers/diagnostics.js";
 import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
 import { expandGraphEnv, recordGraphEnvExpansion, unexpandedEnvDiagnostics, type GraphEnvExpansion } from "./runtime/config-env.js";
@@ -50,8 +49,15 @@ function rawNodeTypeDiagnostics(parsed: unknown): Diagnostic[] {
       if (!value || typeof value !== "object") return;
       const rawNode = value as { id?: unknown; type?: unknown; with?: { node?: unknown }; spec?: unknown };
       if (typeof rawNode.type === "string" && !registry.has(rawNode.type)) {
-        // Plugin types are namespaced and loaded later; bare unknown types stay errors.
-        if (!(hasNodesImport && isNamespacedPluginType(rawNode.type))) {
+        if (rawNode.type === "webhook") {
+          diagnostics.push({
+            severity: "error",
+            code: "WEBHOOK_NODE_REMOVED",
+            path: `${base}.type`,
+            message: `Node "${String(rawNode.id)}" uses removed type "webhook". Use type "http" with once: true (and method: POST), or run "flowgraph migrate" to rewrite this graph.`,
+          });
+        } else if (!(hasNodesImport && isNamespacedPluginType(rawNode.type))) {
+          // Plugin types are namespaced and loaded later; bare unknown types stay errors.
           diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_TYPE", path: `${base}.type`, message: `Node "${String(rawNode.id)}" has unregistered type "${rawNode.type}"` });
         }
       }
@@ -205,22 +211,7 @@ export function validateSpec(spec: GraphSpec, opts: ValidateSpecOptions = {}): D
     }
   });
   diagnostics.push(...graphLintDiagnostics(spec, reg));
-  walkNodes(spec, node => {
-    if (!["image", "video", "audio", "model3d"].includes(String(node.type))) return;
-    const name = node.provider ?? spec.config?.defaults?.provider;
-    const cfg = typeof name === "string" ? spec.providers?.[name] : undefined;
-    const vendor = getMediaVendor(cfg && "vendor" in cfg ? cfg.vendor : String(name ?? ""));
-    if (!vendor) return;
-    const w = node.with as Record<string, unknown> ?? {};
-    // Dynamic requests are checked after rendering, before submission.
-    if (JSON.stringify([w.model, w.size, w.params]).includes("{{")) return;
-    try {
-      vendor.create({ name: String(name), ...(cfg?.kind === "media" ? { model: cfg.model, options: cfg.options } : {}) }).validateRequest?.({
-        modality: node.type as import("./media/types.js").MediaModality, model: typeof node.model === "string" ? node.model : typeof w.model === "string" ? w.model : undefined,
-        inputs: [], count: 1, params: w.params as Record<string, unknown> ?? {}, ...(typeof w.size === "string" ? { size: w.size } : {}),
-      });
-    } catch (err) { diagnostics.push({ severity: "error", code: "MEDIA_REQUEST_INVALID", path: `nodes.${node.id}.with`, message: `Media node "${node.id}": ${String(err)}` }); }
-  });
+  diagnostics.push(...reg.runValidators(spec));
 
   diagnostics.push(...providerConfigDiagnostics(spec, offlineProviderValidations(spec)));
   diagnostics.push(...secretReferenceDiagnostics(spec), ...unexpandedEnvDiagnostics(spec));

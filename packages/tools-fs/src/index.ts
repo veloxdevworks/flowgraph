@@ -8,8 +8,19 @@ import { z } from "zod";
 import { registerTool } from "@flowgraph/core";
 import type { NodeRunContext } from "@flowgraph/core";
 import { resolveSandboxPath, SandboxError } from "./sandbox.js";
+import { registerLocalToolsSchema, type FsOperation } from "./schema.js";
 
-export type FsOperation = "read" | "list" | "write" | "edit" | "delete";
+export {
+  FsOperationSchema,
+  LocalToolsFsSchema,
+  LocalToolsSchema,
+  registerLocalToolsSchema,
+  type FsOperation,
+  type LocalTools,
+  type LocalToolsFs,
+} from "./schema.js";
+
+registerLocalToolsSchema();
 
 export const MUTATING_FS_OPERATIONS: readonly FsOperation[] = ["write", "edit", "delete"];
 

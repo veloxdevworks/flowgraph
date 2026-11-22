@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { JobHandle, MediaCallContext, MediaInput, MediaRequest, MediaOutput } from "@flowgraph/core";
+import type { JobHandle, MediaCallContext, MediaInput, MediaRequest, MediaOutput } from "../runtime/types.js";
 import { meshyVendor } from "./meshy.js";
 
 const TASK_ID = "018a210d-8ba4-705c-b111-1f1776f7f578";

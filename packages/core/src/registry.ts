@@ -5,9 +5,10 @@
  */
 
 import { z } from "zod";
-import { isNamespacedPluginType, zodToConfigJsonSchema } from "@flowgraph/spec";
+import { isNamespacedPluginType, zodToConfigJsonSchema, type Diagnostic, type GraphSpec } from "@flowgraph/spec";
 import type { ContextConfigInput } from "./context/types.js";
 import type { NodeRunContext } from "./context.js";
+import type { NodePolicy } from "./node-policy.js";
 
 export interface NodeContract {
   inputs?: Record<string, unknown>;
@@ -33,6 +34,20 @@ export type NodeCapabilities = {
    * to settle. The node must guard work that ignores cancellation before retrying.
    */
   receivesTimeoutSignal?: boolean;
+  /**
+   * Whether this node type can access host resources (processes, local files,
+   * ports, binaries, etc.). Defaults to `true` for safety: untrusted upload
+   * policies allow only node types explicitly marked `hostAccess: false`.
+   *
+   * Setting `hostAccess: false` means the node type is safe for untrusted
+   * graphs only alongside the server's `blockHostExec`, `allowedFunctions`,
+   * `allowedTools`, `blockInboundWebhooks`, and `blockSubgraphFiles` guards
+   * (for example, `workshop` and `hitl` review-mode git diffs rely on
+   * `blockHostExec`, `function` relies on `allowedFunctions`, `agent` relies
+   * on `allowedTools`, `wait` relies on `blockInboundWebhooks`, and `subgraph`
+   * relies on `blockSubgraphFiles`).
+   */
+  hostAccess?: boolean;
 };
 
 export type NodeResult =
@@ -113,15 +128,59 @@ export interface RegisterNodeOptions {
   source?: string;
 }
 
+export interface RegisterReducerOptions {
+  /** Optional import specifier or origin describing where this reducer was registered from. */
+  source?: string;
+}
+
 function registryError(code: string, message: string): Error & { code: string; retryable: false } {
   return Object.assign(new Error(message), { code, retryable: false as const });
 }
+
+export interface RunEndHookContext {
+  spec: GraphSpec;
+  threadId: string;
+  state?: Record<string, unknown> | undefined;
+  policy?: NodePolicy | undefined;
+}
+
+export interface HydrateHookContext {
+  spec: GraphSpec;
+  threadId: string;
+  snapshotValues?: Record<string, unknown> | undefined;
+  nodePolicy?: NodePolicy | undefined;
+}
+
+export interface CompileContextHookInput {
+  spec: GraphSpec;
+  opts: Record<string, unknown>;
+  contextBag: Record<symbol, unknown>;
+}
+
+export interface RunLifecycleHooks {
+  onRunEnd?: (ctx: RunEndHookContext) => Promise<void>;
+  onHydrate?: (ctx: HydrateHookContext) => Promise<void>;
+}
+
+export type GraphValidatorFn = (spec: GraphSpec) => Diagnostic[];
+export type ToolInvokeCheckFn = (nodeSpec: Record<string, unknown>) => string | undefined;
+export type CompileContextHookFn = (input: CompileContextHookInput) => void;
+export type ProviderSecretResolverFn = (cfg: Record<string, unknown>) => string | undefined;
+export type PreflightNodeCheckFn = (node: { id?: string; type?: string; with?: unknown }, path: string, cwd: string) => Promise<Diagnostic[]>;
 
 export class NodeRegistry {
   private readonly parent?: NodeRegistry | undefined;
   private factories = new Map<string, NodeFactory>();
   private factorySources = new Map<string, string>();
   private reducers = new Map<string, ReducerFn>();
+  private reducerSources = new Map<string, string>();
+  private validators = new Map<string, { fn: GraphValidatorFn; compile: boolean }>();
+  private toolInvokeChecks = new Map<string, ToolInvokeCheckFn>();
+  private runLifecycles = new Map<string, RunLifecycleHooks>();
+  private compileContexts = new Map<string, CompileContextHookFn>();
+  private subgraphSymbols = new Set<symbol>();
+  private providerSecretResolvers = new Map<string, ProviderSecretResolverFn>();
+  private preflightChecks = new Map<string, PreflightNodeCheckFn>();
 
   constructor(parent?: NodeRegistry) {
     this.parent = parent;
@@ -169,21 +228,39 @@ export class NodeRegistry {
     return this.factories.has(type) || (this.parent?.has(type) ?? false);
   }
 
+  /**
+   * True only when `type` is registered AND explicitly marked `hostAccess: false`.
+   * Any unregistered type or plugin/package type without `hostAccess: false`
+   * defaults to unsafe for untrusted uploads.
+   */
+  isUntrustedSafe(type: string): boolean {
+    return this.get(type)?.capabilities?.hostAccess === false;
+  }
+
   types(): string[] {
     if (!this.parent) return [...this.factories.keys()];
     return [...new Set([...this.parent.types(), ...this.factories.keys()])];
   }
 
-  registerReducer(name: string, fn: ReducerFn): void {
+  private getReducerSource(name: string): string | undefined {
+    return this.reducerSources.get(name) ?? this.parent?.getReducerSource(name);
+  }
+
+  registerReducer(name: string, fn: ReducerFn, opts: RegisterReducerOptions = {}): void {
     const existing = this.getReducer(name);
     if (existing !== undefined) {
       if (existing === fn) return;
+      const existingSource = this.getReducerSource(name);
+      const target = existingSource
+        ? `reducer imported from "${existingSource}"`
+        : "built-in or host reducer";
       throw registryError(
         "PLUGIN_REDUCER_COLLISION",
-        `Reducer "${name}" is already registered.`,
+        `Reducer "${name}" collides with an already-registered ${target}.`,
       );
     }
     this.reducers.set(name, fn);
+    if (opts.source) this.reducerSources.set(name, opts.source);
   }
 
   getReducer(name: string): ReducerFn | undefined {
@@ -192,6 +269,120 @@ export class NodeRegistry {
 
   hasReducer(name: string): boolean {
     return this.reducers.has(name) || (this.parent?.hasReducer(name) ?? false);
+  }
+
+  private collectValidators(): Map<string, { fn: GraphValidatorFn; compile: boolean }> {
+    const merged = this.parent ? this.parent.collectValidators() : new Map<string, { fn: GraphValidatorFn; compile: boolean }>();
+    for (const [id, entry] of this.validators) merged.set(id, entry);
+    return merged;
+  }
+
+  registerValidator(id: string, fn: GraphValidatorFn, opts: { compile?: boolean } = {}): void {
+    this.validators.set(id, { fn, compile: opts.compile ?? false });
+  }
+
+  runValidators(spec: GraphSpec): Diagnostic[] {
+    const out: Diagnostic[] = [];
+    for (const { fn } of this.collectValidators().values()) out.push(...fn(spec));
+    return out;
+  }
+
+  runCompileValidators(spec: GraphSpec): Diagnostic[] {
+    const out: Diagnostic[] = [];
+    for (const { fn, compile } of this.collectValidators().values()) {
+      if (compile) out.push(...fn(spec));
+    }
+    return out;
+  }
+
+  private collectToolInvokeChecks(): Map<string, ToolInvokeCheckFn> {
+    const merged = this.parent ? this.parent.collectToolInvokeChecks() : new Map<string, ToolInvokeCheckFn>();
+    for (const [id, fn] of this.toolInvokeChecks) merged.set(id, fn);
+    return merged;
+  }
+
+  registerToolInvokeCheck(id: string, fn: ToolInvokeCheckFn): void {
+    this.toolInvokeChecks.set(id, fn);
+  }
+
+  checkToolInvoke(nodeSpec: Record<string, unknown> | undefined): string | undefined {
+    if (!nodeSpec) return undefined;
+    for (const fn of this.collectToolInvokeChecks().values()) {
+      const msg = fn(nodeSpec);
+      if (msg) return msg;
+    }
+    return undefined;
+  }
+
+  private collectRunLifecycles(): Map<string, RunLifecycleHooks> {
+    const merged = this.parent ? this.parent.collectRunLifecycles() : new Map<string, RunLifecycleHooks>();
+    for (const [id, hooks] of this.runLifecycles) merged.set(id, hooks);
+    return merged;
+  }
+
+  registerRunLifecycle(id: string, hooks: RunLifecycleHooks): void {
+    this.runLifecycles.set(id, hooks);
+  }
+
+  async runEndHooks(ctx: RunEndHookContext): Promise<void> {
+    for (const { onRunEnd } of this.collectRunLifecycles().values()) {
+      if (onRunEnd) await onRunEnd(ctx);
+    }
+  }
+
+  async runHydrateHooks(ctx: HydrateHookContext): Promise<void> {
+    for (const { onHydrate } of this.collectRunLifecycles().values()) {
+      if (onHydrate) await onHydrate(ctx);
+    }
+  }
+
+  private collectCompileContexts(): Map<string, CompileContextHookFn> {
+    const merged = this.parent ? this.parent.collectCompileContexts() : new Map<string, CompileContextHookFn>();
+    for (const [id, fn] of this.compileContexts) merged.set(id, fn);
+    return merged;
+  }
+
+  registerCompileContext(id: string, fn: CompileContextHookFn): void {
+    this.compileContexts.set(id, fn);
+  }
+
+  applyCompileContexts(input: CompileContextHookInput): void {
+    for (const fn of this.collectCompileContexts().values()) fn(input);
+  }
+
+  registerSubgraphContextSymbol(sym: symbol): void {
+    this.subgraphSymbols.add(sym);
+  }
+
+  subgraphContextSymbols(): symbol[] {
+    if (!this.parent) return [...this.subgraphSymbols];
+    return [...new Set([...this.parent.subgraphContextSymbols(), ...this.subgraphSymbols])];
+  }
+
+  registerProviderSecretResolver(kind: string, fn: ProviderSecretResolverFn): void {
+    this.providerSecretResolvers.set(kind, fn);
+  }
+
+  resolveProviderDefaultSecret(cfg: Record<string, unknown>): string | undefined {
+    const kind = typeof cfg.kind === "string" ? cfg.kind : undefined;
+    if (!kind) return undefined;
+    const fn = this.providerSecretResolvers.get(kind);
+    if (fn) return fn(cfg);
+    return this.parent?.resolveProviderDefaultSecret(cfg);
+  }
+
+  registerPreflightCheck(nodeType: string, fn: PreflightNodeCheckFn): void {
+    this.preflightChecks.set(nodeType, fn);
+  }
+
+  async runPreflightChecks(
+    node: { id?: string; type?: string; with?: unknown },
+    path: string,
+    cwd: string,
+  ): Promise<Diagnostic[]> {
+    const fn = typeof node.type === "string" ? this.preflightChecks.get(node.type) : undefined;
+    if (fn) return fn(node, path, cwd);
+    return this.parent ? this.parent.runPreflightChecks(node, path, cwd) : [];
   }
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { WorkshopController } from "./controller.js";
 import { unsetPath } from "./draft.js";
-import type { WorkshopContract } from "@flowgraph/spec";
+import type { WorkshopContract } from "@flowgraph/node-workshop/contract";
 
 const contract: WorkshopContract = {
   mode: "workshop",

@@ -14,7 +14,7 @@
 import { realpath, stat } from "node:fs/promises";
 import * as path from "node:path";
 import type { Artifact } from "@flowgraph/spec";
-import { mimeForExtension, roleForMime, toPosix } from "../media/artifacts.js";
+import { mimeForExtension, roleForMime, toPosix } from "../runtime/artifacts.js";
 
 export type HitlSelect = "none" | "one" | "many";
 

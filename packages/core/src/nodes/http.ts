@@ -13,6 +13,7 @@ import { nodePolicyOf } from "../node-policy.js";
 import type { NodeResult } from "../registry.js";
 import { applyOutput } from "./output.js";
 import { maskResponseForEvent, performHttpRequest, redactHeaders, redactUrlSecrets } from "./http-request.js";
+import { observeSensitiveHeaders } from "../runtime/secret-redaction.js";
 import { secretScope } from "../runtime/secret-scope.js";
 
 export { redactHeaders } from "./http-request.js";
@@ -24,12 +25,12 @@ export const httpNode = defineNode<Config>({
   type: "http",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { sideEffecting: true, stopsOnTimeout: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true, hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { sideEffecting: true, stopsOnTimeout: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {
@@ -40,45 +41,61 @@ export const httpNode = defineNode<Config>({
           secret: secretScope(ctx),
         };
 
-        // Render all template strings
-        const url = String(renderDeep(config.url, scope));
-        const method = config.method ?? "GET";
-        const headers = config.headers
-          ? (renderDeep(config.headers, scope) as Record<string, string>)
-          : undefined;
-        const renderedBody =
-          config.body != null ? renderDeep(config.body, scope) : undefined;
-        const query = config.query
-          ? (renderDeep(config.query, scope) as Record<string, unknown>)
-          : undefined;
+        const nodeId = String(nodeSpec["id"] ?? ctx.nodeId);
+        const execute = async () => {
+          // Render all template strings
+          const url = String(renderDeep(config.url, scope));
+          const method = config.method ?? "GET";
+          const headers = config.headers
+            ? (renderDeep(config.headers, scope) as Record<string, string>)
+            : undefined;
+          const renderedBody =
+            config.body != null ? renderDeep(config.body, scope) : undefined;
+          const query = config.query
+            ? (renderDeep(config.query, scope) as Record<string, unknown>)
+            : undefined;
 
-        ctx.logger.debug("http request", { method, url: redactUrlSecrets(url) });
+          ctx.logger.debug("http request", { method, url: redactUrlSecrets(url) });
 
-        const result = await performHttpRequest({
-          method,
-          url,
-          ...(headers ? { headers } : {}),
-          ...(query ? { query } : {}),
-          ...(renderedBody !== undefined ? { body: renderedBody } : {}),
-          ...(config.expect?.status ? { expectStatus: config.expect.status } : {}),
-          signal: ctx.signal ?? null,
-          outbound: nodePolicyOf(ctx)?.outboundHttp,
-        });
+          const result = await performHttpRequest({
+            method,
+            url,
+            ...(headers ? { headers } : {}),
+            ...(query ? { query } : {}),
+            ...(renderedBody !== undefined ? { body: renderedBody } : {}),
+            ...(config.expect?.status ? { expectStatus: config.expect.status } : {}),
+            signal: ctx.signal ?? null,
+            outbound: nodePolicyOf(ctx)?.outboundHttp,
+          });
 
-        ctx.emit("node.output", {
-          request: {
-            method: result.method,
-            url: redactUrlSecrets(result.url),
-            headers: redactHeaders(result.requestHeaders),
-            ...(result.requestBody !== undefined ? { body: result.requestBody } : {}),
-          },
-          response: { status: result.status, ...maskResponseForEvent(result) },
-        });
+          if (config.once) {
+            observeSensitiveHeaders(result.headers);
+            for (const cookie of result.setCookies) {
+              observeSensitiveHeaders({ "set-cookie": cookie });
+            }
+          }
 
-        const out = { status: result.status, body: result.body, headers: result.headers };
+          ctx.emit("node.output", {
+            request: {
+              method: result.method,
+              url: redactUrlSecrets(result.url),
+              headers: redactHeaders(result.requestHeaders),
+              ...(result.requestBody !== undefined ? { body: result.requestBody } : {}),
+            },
+            response: { status: result.status, ...maskResponseForEvent(result) },
+          });
+
+          return {
+            status: result.status,
+            body: result.body,
+            headers: config.once ? redactHeaders(result.headers) : result.headers,
+          };
+        };
+
+        const out = config.once ? await ctx.once(`http-once:${nodeId}`, execute) : await execute();
         return {
           update: applyOutput(config.output, out, {
-            nodeId: String(nodeSpec["id"] ?? ctx.nodeId),
+            nodeId,
             scope,
           }),
         };

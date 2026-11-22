@@ -155,7 +155,7 @@ flowgraph migrate ./old.graph.yaml          # dry-run
 flowgraph migrate ./old.graph.yaml --write  # apply in place
 ```
 
-Upgrades a graph or skill spec toward `apiVersion: flowgraph/v1`. Prints migration notes; use `--write` to persist changes.
+Upgrades a graph or skill spec toward `apiVersion: flowgraph/v1`, canonicalizes `kind`, and rewrites legacy `type: webhook` nodes to `type: http` with `once: true` (and `method: POST` if absent). Prints migration notes; use `--write` to persist changes.
 
 Pre-v1 alias rewrites:
 

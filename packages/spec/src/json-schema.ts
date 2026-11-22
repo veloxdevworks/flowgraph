@@ -1,6 +1,13 @@
 import type { ZodTypeAny } from "zod";
 import { ignoreOverride, zodToJsonSchema } from "zod-to-json-schema";
-import { GraphSpecSchema, MapBodyNodeSchema, NodeSpecSchema, isRelocatedFieldDef } from "./schema.js";
+import {
+  CoreProviderConfigSchema,
+  GraphSpecObjectSchema,
+  MapBodyNodeSchema,
+  NodeSpecSchema,
+  ProviderConfigSchema,
+  isRelocatedFieldDef,
+} from "./schema.js";
 
 /** Where the v1 Graph JSON Schema is published. A breaking schema change gets a new path. */
 export const GRAPH_JSON_SCHEMA_ID = "https://veloxdevworks.com/flowgraph/schema/v1.json";
@@ -22,12 +29,18 @@ const RELOCATED = "x-flowgraph-relocated";
  */
 export function generateJsonSchema(): Record<string, unknown> {
   const inlineSpec = (NodeSpecSchema.shape.spec as unknown as { _def: { innerType: ZodTypeAny } })._def.innerType;
-  const schema = zodToJsonSchema(GraphSpecSchema, {
+  const strictGraph = GraphSpecObjectSchema.strict();
+  const coreProviderJson = zodToJsonSchema(CoreProviderConfigSchema, { $refStrategy: "none", target: "jsonSchema7" });
+  const schema = zodToJsonSchema(strictGraph, {
     name: "GraphSpec",
     $refStrategy: "none",
     definitions: { NodeSpec: NodeSpecSchema, MapBodyNode: MapBodyNodeSchema },
     override: (def, refs) => {
       if (isRelocatedFieldDef(def)) return { [RELOCATED]: true };
+      if (def === ProviderConfigSchema._def) {
+        const { $schema: _s, ...providerDef } = coreProviderJson as Record<string, unknown>;
+        return providerDef;
+      }
       if (def === inlineSpec._def) return { $ref: GRAPH_REF };
       const at = refs.currentPath.join("/");
       if (def === NodeSpecSchema._def && at !== NODE_REF) return { $ref: NODE_REF };

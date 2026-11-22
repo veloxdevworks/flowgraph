@@ -1,13 +1,8 @@
-import { afterEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { GraphSpecSchema, diagnosticsFromZodIssues } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { createScriptedProvider } from "./providers/mock.js";
 import { graphEdges } from "./runtime/validate-graph.js";
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-const dirs:string[]=[];
-afterEach(async()=>{for(const dir of dirs.splice(0))await rm(dir,{recursive:true,force:true});});
 const graph=(node:unknown)=>GraphSpecSchema.parse({apiVersion:"flowgraph/v1",kind:"Graph",metadata:{name:"diagnostics-round2"},nodes:[node],edges:[{from:"START",to:"work"},{from:"work",to:"END"}]});
 it("PLAT-368: typed errors retain their code and unprefixed text in node/run events",async()=>{
   const provider=createScriptedProvider("broken",()=>{throw Object.assign(new Error("Error: Error: useful reason"),{code:"AGENT_OUTPUT_INVALID",retryable:false});});
@@ -27,13 +22,6 @@ it("PLAT-383/384: script failures name their node and missing module export",asy
   expect(result.error?.message).toContain('script node "work"');
   expect(result.error?.message).toContain("export default");
   expect(result.error?.message).not.toMatch(/\n\s+at /);
-});
-it("PLAT-383: media token usage enters run totals and reused results do not double charge",async()=>{
-  const cwd=await mkdtemp(join(tmpdir(),"fg-image-usage-"));dirs.push(cwd);
-  const spec=graph({id:"work",type:"image",provider:"image-usage",with:{prompt:"draw"}});
-  const g=await compileGraph(spec,{cwd,mediaProviders:[{name:"image-usage",vendor:"test",modalities:["image"],start:async(_req,ctx)=>({id:"done",done:[await ctx.saveOutput({bytes:Uint8Array.from([137,80,78,71,13,10,26,10]),mimeType:"image/png"})],usage:{inputTokens:50,outputTokens:100,totalTokens:150},costUSD:0.1})}]});
-  expect(await g.run({threadId:"tokens"})).toMatchObject({status:"completed",usage:{inputTokens:50,outputTokens:100,totalTokens:150,costUSD:0.1}});
-  expect(await g.run({threadId:"tokens"})).toMatchObject({status:"completed",usage:{inputTokens:50,outputTokens:100,totalTokens:150,costUSD:0.1,calls:1}});
 });
 it("PLAT-384: route topology uses declared outcome names",()=>{
   const spec=graph({id:"work",type:"hitl",with:{mode:"approve",message:"go?",routes:{approved:"END",rejected:"END"}}});

@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { resolve, dirname } from "node:path";
-import { acquireThreadRun, createFileJournal, listMediaJournals, loadGraph, resolveGraphWorkspace, resolveMediaSubmission, UsageLedger, type GraphSpec } from "@flowgraph/core";
+import { acquireThreadRun, loadGraph, resolveGraphWorkspace, UsageLedger, type GraphSpec } from "@flowgraph/core";
+import { createFileJournal, listMediaJournals, resolveMediaSubmission } from "@flowgraph/media";
 import { openThreadDatabase, type ThreadDatabaseOptions } from "./thread-command.js";
 interface Options extends ThreadDatabaseOptions {
   thread:string; node?:string; fingerprint?:string; workspace?:string;

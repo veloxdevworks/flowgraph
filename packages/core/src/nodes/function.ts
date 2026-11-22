@@ -32,12 +32,12 @@ export const functionNode = defineNode<Config>({
   type: "function",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: {},
+  capabilities: { hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: {},
+      capabilities: { hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         assertFunctionAllowed(nodePolicyOf(ctx), config.fn, `function node "${ctx.nodeId}"`);

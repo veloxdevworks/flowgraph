@@ -1,9 +1,9 @@
 import {
   waitForWebhookResume,
-  terminateThreadServices,
   type RunResult,
   type StateSnapshot,
 } from "@flowgraph/core";
+import { terminateThreadServices } from "@flowgraph/node-service";
 
 /** The engine may finish a timed wait before the CLI begins awaiting it. */
 export function continuationMailbox() {
