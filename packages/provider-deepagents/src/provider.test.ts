@@ -23,7 +23,7 @@ describe("deepagents hub", () => {
           id: "implement",
           type: "agent",
           provider: "deepagents",
-          with: { prompt: "go", hub: "deepagents", output: { to: "answer" } },
+          with: { prompt: "go", output: { to: "answer" } },
         },
       ],
       edges: [

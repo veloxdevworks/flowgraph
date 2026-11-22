@@ -294,20 +294,12 @@ describe("runtime.memory on sqlite (graph integration)", () => {
 
   it("legacy ctx.store is durable and confined to its graph", async () => {
     const p = tmpDb();
-    const noMem = { store: { backend: "sqlite" } };
-    await runOn(p, fnGraph("legacy-a", "legacyPut", noMem));
-    const other = await runOn(p, fnGraph("legacy-b", "legacyGet", noMem));
+    const withMem = { memory: {} };
+    await runOn(p, fnGraph("legacy-a", "legacyPut", withMem));
+    const other = await runOn(p, fnGraph("legacy-b", "legacyGet", withMem));
     expect(other.state["out"]).toEqual({ item: null, all: 0, namespaces: [] });
-    const same = await runOn(p, fnGraph("legacy-a", "legacyGet", noMem));
+    const same = await runOn(p, fnGraph("legacy-a", "legacyGet", withMem));
     expect(same.state["out"]).toEqual({ item: { from: "legacy-a" }, all: 1, namespaces: [["facts"]] });
-  });
-
-  it("runtime.store.backend: sqlite is an alias for runtime.memory.backend: checkpoint", async () => {
-    const p = tmpDb();
-    const spec = fnGraph("alias", "memBump", { store: { backend: "sqlite" } });
-    await runOn(p, spec);
-    const r = await runOn(p, spec);
-    expect(r.state["out"]).toMatchObject({ graph: { n: 2 } });
   });
 
   it("binds the subject from input; threads on the same subject share it", async () => {

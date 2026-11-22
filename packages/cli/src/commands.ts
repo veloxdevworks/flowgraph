@@ -275,7 +275,7 @@ program
     const imported = await loadGraphImports(spec, { cwd: graphDir });
 
     const lintDiags = [
-      ...validateSpec(spec),
+      ...validateSpec(spec, { registry: imported.registry }),
       ...memoryHostDiagnostics(spec, { memoryBackends: CLI_MEMORY_BACKENDS, hostName: "flowgraph CLI" }),
       ...hostSupportDiagnostics(spec, { hostName: "flowgraph CLI" }),
     ];

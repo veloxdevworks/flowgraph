@@ -50,6 +50,17 @@ export async function buildServerProviders(
         if (opts.untrusted) assertUntrustedProvider(name, cfg);
         break;
       }
+      case "plugin": {
+        if (opts.untrusted) {
+          throw new ServerRequestError(
+            403,
+            "PROVIDER_PLUGIN_BLOCKED",
+            `Provider "${name}": kind: plugin is not allowed for untrusted graph uploads.`,
+          );
+        }
+        // Resolved and options-validated per compile by compileGraph against server-registered plugins.
+        break;
+      }
       case "cli":
       case "claude":
       case "cursor":

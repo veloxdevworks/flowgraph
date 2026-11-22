@@ -133,6 +133,9 @@ export async function buildProviders(
         // Media (image/video/3D) providers are built by compileGraph from the
         // same providers: block; there is no agent adapter to create here.
         continue;
+      case "plugin":
+        // Plugin providers are resolved and options-validated per compile by compileGraph.
+        continue;
       default:
         throw new Error(
           `Provider "${name}": unsupported kind "${(cfg as { kind?: string }).kind}".`,
@@ -155,7 +158,6 @@ export async function buildProviders(
   }
 
   const needsDeepHub =
-    spec.nodes.some((n) => (n.with as { hub?: string } | undefined)?.hub === "deepagents") ||
     Object.values(spec.providers ?? {}).some((p) => p.kind === "deepagents");
   if (needsDeepHub && !built.has("deepagents") && !providers.some((p) => p.name === "deepagents")) {
     const createDeep = await loadDeepAgentsFactory();
