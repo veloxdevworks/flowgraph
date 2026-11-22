@@ -3,6 +3,10 @@
  * not schedule triggers; these only reject values a host could not run.
  */
 
+import { TIME_ZONE_NAMES } from "./time-zones.js";
+
+export { TIME_ZONE_NAMES } from "./time-zones.js";
+
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 const DAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 
@@ -79,49 +83,50 @@ export function cronScheduleProblem(schedule: string): string | undefined {
 }
 
 /**
- * IANA names `Intl.supportedValuesOf("timeZone")` often leaves out, spelled
- * in their own case. `GMT` is accepted on its own, the same zone as `Etc/GMT`.
+ * Abbreviations a cron timezone cannot use. Some engines accept them, and
+ * tzdata links CET, EET, EST, HST, MET, MST, and WET, but they are not
+ * Area/Location names. `UTC` and `GMT` are not in this list.
  */
-const TIME_ZONE_LINKS = [
-  "UTC",
-  "GMT",
-  "Etc/UTC",
-  "Etc/GMT",
-  "Etc/GMT0",
-  "Etc/GMT+0",
-  "Etc/GMT-0",
-  "Asia/Kolkata",
-  "Europe/Kyiv",
-  "US/Mountain",
-  "America/Nuuk",
-  "Asia/Ho_Chi_Minh",
-  "America/Argentina/Buenos_Aires",
-  ...Array.from({ length: 14 }, (_, index) => [`Etc/GMT+${index + 1}`, `Etc/GMT-${index + 1}`]).flat(),
-];
+export const REJECTED_TIME_ZONE_ABBREVIATIONS = [
+  "ADT",
+  "AEDT",
+  "AEST",
+  "AKDT",
+  "AKST",
+  "AST",
+  "BST",
+  "CDT",
+  "CEST",
+  "CET",
+  "CST",
+  "EDT",
+  "EET",
+  "EEST",
+  "EST",
+  "HST",
+  "IST",
+  "JST",
+  "KST",
+  "MDT",
+  "MET",
+  "MST",
+  "PDT",
+  "PST",
+  "WEST",
+  "WET",
+] as const;
 
-let timeZoneNames: ReadonlySet<string> | undefined;
-
-function knownTimeZoneNames(): ReadonlySet<string> {
-  if (timeZoneNames) return timeZoneNames;
-  const names = new Set<string>(TIME_ZONE_LINKS);
-  try {
-    for (const name of Intl.supportedValuesOf("timeZone")) names.add(name);
-  } catch {
-    // A runtime without this list still accepts the link names above.
-  }
-  timeZoneNames = names;
-  return names;
-}
+const REJECTED_TIME_ZONES = new Set<string>(REJECTED_TIME_ZONE_ABBREVIATIONS);
+const KNOWN_TIME_ZONES = new Set<string>(TIME_ZONE_NAMES);
 
 /**
- * True when `timeZone` is an exact IANA name this runtime knows, such as
- * "America/Denver", "Asia/Kolkata", "Etc/GMT+5", "GMT" or "UTC". The check is
- * the name itself against `Intl.supportedValuesOf("timeZone")` plus the link
- * names above, so a different letter case ("Asia/KOLKATA", "Etc/Utc") is
- * rejected. Abbreviations ("EST") and offsets ("+05:00") are rejected.
+ * True when `timeZone` is a tzdata Zone or Link name in its own case and
+ * `Intl.DateTimeFormat` accepts it. `UTC` and `GMT` are in that set. A
+ * different letter case ("Asia/KOLKATA", "Etc/Utc"), an abbreviation
+ * ("EST", "CET", "MST"), and an offset ("+05:00") are rejected.
  */
 export function isKnownTimeZone(timeZone: string): boolean {
-  if (!knownTimeZoneNames().has(timeZone)) return false;
+  if (REJECTED_TIME_ZONES.has(timeZone) || !KNOWN_TIME_ZONES.has(timeZone)) return false;
   try {
     new Intl.DateTimeFormat("en-US", { timeZone });
     return true;

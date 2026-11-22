@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { loadGraph, validateSpec } from "./loader.js";
-import { cronScheduleProblem, isKnownTimeZone } from "./runtime/cron-schedule.js";
+import { REJECTED_TIME_ZONE_ABBREVIATIONS, TIME_ZONE_NAMES, cronScheduleProblem, isKnownTimeZone } from "./runtime/cron-schedule.js";
 import { graphShapeDiagnostics, MAX_GRAPH_NESTING } from "./runtime/validate-graph.js";
 
 const head = { apiVersion: "flowgraph/v1", kind: "Graph" } as const;
@@ -300,17 +300,23 @@ describe("cronScheduleProblem", () => {
 });
 
 describe("isKnownTimeZone", () => {
-  it("accepts IANA names, including ones ICU lists under an older name, and UTC", () => {
-    const zones = ["America/Denver", "Europe/London", "Asia/Tokyo", "UTC", "GMT", "Etc/GMT", "Etc/UTC", "Asia/Kolkata", "Europe/Kyiv", "America/Nuuk", "Asia/Ho_Chi_Minh", "Etc/GMT+5", "US/Mountain", "America/Argentina/Buenos_Aires", "America/Port-au-Prince"];
-    for (const zone of zones) expect(isKnownTimeZone(zone), zone).toBe(true);
+  it("accepts every tzdata Zone and Link name, including UTC and GMT", () => {
+    expect(TIME_ZONE_NAMES).toEqual(expect.arrayContaining(["UTC", "GMT", "Asia/Kathmandu", "Asia/Yangon", "Atlantic/Faroe", "America/Indiana/Indianapolis", "America/Kentucky/Louisville", "America/Argentina/Cordoba", "US/Eastern", "US/Pacific", "Canada/Eastern", "Australia/NSW", "Etc/Greenwich"]));
+    for (const zone of TIME_ZONE_NAMES) expect(isKnownTimeZone(zone), zone).toBe(true);
   });
 
-  it("rejects abbreviations, offsets, other spellings and unknown names", () => {
-    for (const zone of ["EST", "+05:00", "america/denver", "AMERICA/DENVER", "America/DENVER", "utc", " UTC", "", "Mars/Olympus", "Asia/KOLKATA", "US/MOUNTAIN", "Etc/Utc", "Europe/KYIV"]) {
+  it("rejects abbreviations and a different letter case", () => {
+    for (const zone of REJECTED_TIME_ZONE_ABBREVIATIONS) {
+      expect(TIME_ZONE_NAMES, zone).not.toContain(zone);
+      expect(isKnownTimeZone(zone), zone).toBe(false);
+    }
+    for (const zone of ["Asia/KOLKATA", "US/MOUNTAIN", "Etc/Utc", "Europe/KYIV", "Asia/KATHMANDU", "america/denver", "AMERICA/DENVER", "America/DENVER", "utc", "gmt", " UTC", "", "+05:00", "Mars/Olympus"]) {
       expect(isKnownTimeZone(zone), zone).toBe(false);
     }
   });
 });
+
+
 
 describe("nesting depth", () => {
   function nestedTo(levels: number): GraphSpec {
