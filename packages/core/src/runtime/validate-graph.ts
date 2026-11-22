@@ -1822,6 +1822,7 @@ function graphStructureChecksHook(value: unknown, issuePath: ReadonlyArray<Prope
 /** Type registration and `with` shape for one node, then the graphs nested in it. */
 function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean): void {
   const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
+  if (lints) for (const d of secretScopeDiagnostics(node, path, label)) push(d);
   const factory = registry.get(node.type);
   if (!factory) {
     push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
@@ -1860,6 +1861,32 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
   }
 }
 
+const SECRET_SCOPE_ROOT: ReadonlySet<string> = new Set(["secret"]);
+
+/**
+ * A node's `input` and its `when` guard render without `secret` in scope (a map body's too), so
+ * `{{ secret.X }}` there is null or false at run time. Secrets are read in `with`, where the node
+ * that uses them is the one holding the value.
+ */
+function secretScopeDiagnostics(node: NodeSpec, path: string, label: string): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  const found: Array<{ at: string; text: string }> = [];
+  withTemplates((node as { input?: unknown }).input, "input", found);
+  const when = (node as { when?: unknown }).when;
+  if (typeof when === "string") found.push({ at: "when", text: when.includes("{{") ? when : `{{ ${when} }}` });
+  for (const { at, text } of found) {
+    for (const ref of new Set(templateRootRefs(text, SECRET_SCOPE_ROOT))) {
+      out.push({
+        severity: "error",
+        code: "SECRET_OUT_OF_SCOPE",
+        path: `${path}.${at}`,
+        message: `${label} reads "${ref}" in ${at.replace(/[.[].*$/, "")}, which has no secret scope and would render empty. Read the secret in the node's with instead.`,
+      });
+    }
+  }
+  return out;
+}
+
 function inputDefaultProblem(field: NonNullable<GraphSpec["inputs"]>[number]): string | undefined {
   if (field.default === undefined) return undefined;
   const problem = inputValueProblem(field, field.default);
@@ -1892,7 +1919,7 @@ export function mapItemBindingDiagnostics(spec: GraphSpec): Diagnostic[] {
         diagnostics.push({
           severity: "error",
           code: "MAP_ITEM_REF_REMOVED",
-          message: `Map "${node.id}" reads "${ref}" in ${at}, but the item is bound as {{ ${as} }} directly. Write ${ref.replace(/^item(\.|\[")${as}("\])?/, as)}.`,
+          message: `Map "${node.id}" reads "${ref}" in ${at}, but the item is bound as {{ ${as} }} directly. Write ${as}${ref.slice(ref.startsWith(`item.${as}`) ? `item.${as}`.length : `item[${JSON.stringify(as)}]`.length)}.`,
           path: `nodes.${node.id}.with.node.${at}`,
         });
       }

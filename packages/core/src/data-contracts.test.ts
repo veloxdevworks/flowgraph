@@ -5,6 +5,7 @@ import { registerFunction } from "./nodes/function.js";
 import { validateSpec } from "./loader.js";
 import { InputValidationError, decodeCliInput, resolveGraphInput } from "./inputs.js";
 import { ChannelWriteError } from "./runtime/state-annotation.js";
+import type { Hook } from "./hooks/types.js";
 
 beforeAll(() => {
   registerFunction("contractValue", (input) => (input as { value?: unknown }).value);
@@ -247,5 +248,95 @@ describe("node input", () => {
       ],
     });
     expect(errorCodes(spec)).toContain("NODE_CONFIG_ERROR");
+  });
+});
+
+describe("node input through a node:before hook", () => {
+  const echoGraph = (input: unknown, when?: string) =>
+    graph({
+      state: { channels: { out: { type: "any" } } },
+      nodes: [
+        { id: "n", type: "function", input, ...(when ? { when } : {}), with: { fn: "contractEcho", output: { to: "out" } } },
+      ],
+      edges: [
+        { from: "START", to: "n" },
+        { from: "n", to: "END" },
+      ],
+    });
+
+  it.each([0, false, ""])("passes input %j to the node unchanged with the hook registered", async (value) => {
+    const seen: unknown[] = [];
+    const hook: Hook = {
+      phase: "node:before",
+      handler: ({ payload }) => {
+        seen.push(payload.input);
+        return undefined;
+      },
+    };
+    const withHook = await (await compileGraph(echoGraph(value), { hooks: [hook] })).run({ input: {} });
+    const without = await (await compileGraph(echoGraph(value), {})).run({ input: {} });
+    expect(withHook.status).toBe("completed");
+    expect(withHook.state["out"]).toBe(value);
+    expect(without.state["out"]).toBe(value);
+    expect(seen).toEqual([value]);
+  });
+
+  it("renders a templated scalar input for the hook and the node alike", async () => {
+    const seen: unknown[] = [];
+    const hook: Hook = {
+      phase: "node:before",
+      handler: ({ payload }) => {
+        seen.push(payload.input);
+        return undefined;
+      },
+    };
+    const spec = graph({
+      state: { channels: { count: { type: "number" }, out: { type: "any" } } },
+      nodes: [{ id: "n", type: "function", input: "{{ state.count }}", with: { fn: "contractEcho", output: { to: "out" } } }],
+      edges: [
+        { from: "START", to: "n" },
+        { from: "n", to: "END" },
+      ],
+    });
+    const r = await (await compileGraph(spec, { hooks: [hook] })).run({ input: { count: 0 } });
+    expect(r.state["out"]).toBe(0);
+    expect(seen).toEqual([0]);
+  });
+
+  it("lets a hook replace the input with a falsy value", async () => {
+    const hook: Hook = { phase: "node:before", handler: () => ({ kind: "mutate", payload: { input: 0 } }) };
+    const r = await (await compileGraph(echoGraph({ a: 1 }), { hooks: [hook] })).run({ input: {} });
+    expect(r.state["out"]).toBe(0);
+  });
+
+  it("gives a when guard the falsy input as it is", async () => {
+    const r = await (await compileGraph(echoGraph(0, "{{ input == 0 }}"), {})).run({ input: {} });
+    expect(r.state["out"]).toBe(0);
+  });
+});
+
+describe("input replaced by a run:before hook", () => {
+  const spec = graph({
+    inputs: [{ key: "name", type: "string" }],
+    nodes: [{ id: "n", type: "function", input: { value: 1 }, with: { fn: "contractValue" } }],
+    edges: [
+      { from: "START", to: "n" },
+      { from: "n", to: "END" },
+    ],
+  });
+
+  it("rejects an undeclared key like any other run input", async () => {
+    const hook: Hook = { phase: "run:before", handler: () => ({ kind: "mutate", payload: { input: { name: "a", surprise: 1 } } }) };
+    const r = await (await compileGraph(spec, { hooks: [hook] })).run({ input: { name: "a" } });
+    expect(r.status).toBe("error");
+    expect(r.error).toMatchObject({ code: "INPUT_INVALID" });
+    expect(r.error?.message).toContain('unknown input "surprise"');
+  });
+
+  it("accepts a replacement made of declared keys", async () => {
+    const hook: Hook = { phase: "run:before", handler: () => ({ kind: "mutate", payload: { input: { name: "b" } } }) };
+    const r = await (await compileGraph(spec, { hooks: [hook] })).run({ input: { name: "a" } });
+    expect(r.status).toBe("completed");
+    expect(r.state["name"]).toBe("b");
   });
 });

@@ -70,7 +70,7 @@ describe("input contracts", () => {
     expect(messageOf(InputFieldSchema.safeParse({ key: "n", label: "Name" }))).toContain("ui.label");
   });
 
-  it("no longer has a text type", () => {
+  it("points text inputs at string with a textarea widget", () => {
     expect(messageOf(InputFieldSchema.safeParse({ key: "n", type: "text" }))).toContain("type: string");
   });
 

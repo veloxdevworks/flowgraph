@@ -217,4 +217,28 @@ describe("output declarations and placed input", () => {
     expect(codes(placed(7))).toContain("PLACEMENT_INPUT_NOT_OBJECT");
     expect(codes(placed({ a: "b" }))).not.toContain("PLACEMENT_INPUT_NOT_OBJECT");
   });
+
+  it("reports a secret read in a node input or a when guard, which have no secret scope", () => {
+    const withSecret = (node: Record<string, unknown>) =>
+      graph({
+        secrets: ["API_TOKEN"],
+        nodes: [{ id: "n", type: "function", with: { fn: "compositionEcho" }, ...node }],
+        edges: line("n"),
+      });
+    const scoped = (spec: GraphSpec) => validateSpec(spec).filter((d) => d.code === "SECRET_OUT_OF_SCOPE").map((d) => d.path);
+    expect(scoped(withSecret({ input: { token: "{{ secret.API_TOKEN }}" } }))).toEqual(["nodes.n.input.token"]);
+    expect(scoped(withSecret({ input: ["a", { deep: "x {{ secret.API_TOKEN }}" }] }))).toEqual(["nodes.n.input[1].deep"]);
+    expect(scoped(withSecret({ when: "secret.API_TOKEN == 'x'" }))).toEqual(["nodes.n.when"]);
+    expect(scoped(withSecret({ input: { token: "{{ state.token }}" }, when: "{{ state.on }}" }))).toEqual([]);
+  });
+
+  it("reports a secret read in a map body's input or inner when", () => {
+    const body = (node: Record<string, unknown>) =>
+      mapGraph({ node: { type: "function", with: { fn: "compositionEcho" }, ...node } }, {});
+    const scoped = (spec: GraphSpec) => validateSpec(spec).filter((d) => d.code === "SECRET_OUT_OF_SCOPE").map((d) => d.path);
+    const declared = (spec: GraphSpec) => ({ ...spec, secrets: ["API_TOKEN"] }) as GraphSpec;
+    expect(scoped(declared(body({ when: "{{ secret.API_TOKEN }}" })))).toEqual(["nodes.fan.with.node.when"]);
+    expect(scoped(declared(body({ input: { token: "{{ secret.API_TOKEN }}" } })))).toEqual(["nodes.fan.with.node.input.token"]);
+    expect(scoped(declared(body({ when: "{{ item }}" })))).toEqual([]);
+  });
 });
