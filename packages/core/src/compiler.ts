@@ -60,11 +60,9 @@ import {
 import { OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
 import {
   collectNodeWriteChannels,
-  demoToolExposureDiagnostics,
   ensureDeclaredOutputChannels,
   graphShapeDiagnostics,
   graphStructureDiagnostics,
-  provesObjective,
 } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { sharedHistoryChannels } from "./context/shared.js";
@@ -86,13 +84,9 @@ import {
   getWebhookRoute,
   type WebhookServerConfig,
 } from "./runtime/webhook-server.js";
-import { terminateThreadServices, startService, statusService, type ServiceStartSpec } from "./runtime/service-manager.js";
-import { cleanupWorktrees } from "./nodes/worktree.js";
 import { registerProvider, providerConfigDiagnostics, type ProviderAdapter } from "./providers/index.js";
 import { hostSupportDiagnostics } from "./runtime/host-support.js";
 import { GRAPH_PROVIDERS, type GraphProviders } from "./providers/registry.js";
-import { GRAPH_MEDIA_PROVIDERS, deriveMediaProviders, type GraphMediaProviders } from "./media/registry.js";
-import type { MediaProvider } from "./media/types.js";
 import { ReplayStore, RUN_SCOPE_KEY, replayNodeKey, replayStoreFromInterrupts, runScopeOf, runSignalOf, type RunScope } from "./providers/replay-cache.js";
 import { collectMapResults, mapSyntheticIds, runMapItem, type MapTask } from "./nodes/map.js";
 import type { ToolWiring } from "./providers/tools.js";
@@ -118,14 +112,12 @@ import {
   NODE_POLICY,
   assertGraphRuntimeAllowed,
   assertGraphToolsAllowed,
-  assertHostExecAllowed,
   assertHostProbeAllowed,
   assertNoReservedChannels,
   assertImportsAllowed,
   isReservedChannel,
   withoutReservedKeys,
   assertNoReservedInput,
-  hostExecAllowed,
   assertNodeSpecAllowed,
   assertNodeTypeAllowed,
   type NodePolicy,
@@ -199,10 +191,13 @@ export interface CompileOptions {
   extraFactories?: NodeFactory[];
   providers?: ProviderAdapter[];
   /**
-   * Media providers (image/video/model3d) this graph may use, in addition to
-   * those derived from its `providers:` block.
+   * Optional media providers passed through to `@flowgraph/media` when registered.
    */
-  mediaProviders?: MediaProvider[];
+  mediaProviders?: unknown[];
+  /**
+   * Symbol-keyed extension contexts copied onto the run context (used by subgraphs and plugins).
+   */
+  extraContext?: Record<symbol, unknown>;
   interruptBefore?: string[];
   interruptAfter?: string[];
   /**
@@ -1547,9 +1542,9 @@ async function assembleCompiledLangGraph(
   // subgraphs; lints such as inputs, triggers and hitl routes stay validate-time at every level.
   // After imports and extra factories, so plugin types resolve.
   throwIfInvalid(graphStructureDiagnostics(spec));
+  const pluginCompileError = registry.runCompileValidators(spec).find((d) => d.severity === "error");
+  if (pluginCompileError) throw new Error(`${pluginCompileError.path ?? "graph"}: ${pluginCompileError.message}`);
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
-  const exposed = demoToolExposureDiagnostics(spec)[0];
-  if (exposed) throw new Error(`${exposed.path}: ${exposed.message}`);
   const mcpHub = opts.nodePolicy?.blockMcp ? undefined : opts.mcp;
   const toolWiring: ToolWiring = { mcp: mcpHub };
   const compiledNodes = new Map<string, ReturnType<NodeFactory["build"]>>();
@@ -1595,15 +1590,16 @@ async function assembleCompiledLangGraph(
     };
     (baseCtx as Record<symbol, unknown>)[GRAPH_PROVIDERS] = graphProviders;
   }
-  {
-    // Media providers: explicit ones first, then those implied by `providers:`
-    // (a langchain xai/openai entry doubles as an image/video provider).
-    const media = [...(opts.mediaProviders ?? []), ...deriveMediaProviders(spec.providers)];
-    if (media.length) {
-      const graphMedia: GraphMediaProviders = { byName: new Map(media.map((p) => [p.name, p])) };
-      (baseCtx as Record<symbol, unknown>)[GRAPH_MEDIA_PROVIDERS] = graphMedia;
+  if (opts.extraContext) {
+    for (const sym of Object.getOwnPropertySymbols(opts.extraContext)) {
+      (baseCtx as Record<symbol, unknown>)[sym] = opts.extraContext[sym];
     }
   }
+  registry.applyCompileContexts({
+    spec,
+    opts: opts as Record<string, unknown>,
+    contextBag: baseCtx as Record<symbol, unknown>,
+  });
 
   const providerDiags = providerConfigDiagnostics(spec, opts.providers ?? []);
   const providerErrors = providerDiags.filter((d) => d.severity === "error");
@@ -1910,9 +1906,8 @@ async function assembleCompiledLangGraph(
       throw Object.assign(new Error(`node-as-tool: map node "${id}" cannot be called as a tool; put it in a subgraph and call that instead.`), { code: "NODE_TOOL_UNSUPPORTED", retryable: false });
     }
     // Reached only by a tool list the compiler can't see, such as a reusable agent definition.
-    if (provesObjective(spec.nodes.find((n) => n.id === id))) {
-      throw new Error(`node-as-tool: demo node "${id}" has an objective or steps, so it cannot be called as a tool.`);
-    }
+    const toolInvokeRefusal = registry.checkToolInvoke(spec.nodes.find((n) => n.id === id) as Record<string, unknown> | undefined);
+    if (toolInvokeRefusal) throw new Error(toolInvokeRefusal);
     const target = compiledNodes.get(id);
     if (!target) throw new Error(`node-as-tool: no node "${id}" in this graph.`);
     // Model-chosen arguments become the node's input (and a subgraph's input state).
@@ -2732,7 +2727,7 @@ function stripReserved(state: Record<string, unknown>): Record<string, unknown> 
   return out;
 }
 
-/** Tear down non-keepAlive services (and optional worktrees) when a run reaches completed/error. */
+/** Run registered run-end lifecycle hooks (e.g. service termination, worktree cleanup). */
 /** @internal Exported for tests. */
 export async function maybeTerminateServices(
   spec: GraphSpec,
@@ -2740,19 +2735,7 @@ export async function maybeTerminateServices(
   state?: Record<string, unknown>,
   policy?: NodePolicy,
 ): Promise<void> {
-  const terminate = spec.runtime?.services?.terminateOnEnd ?? true;
-  if (terminate) {
-    try {
-      await terminateThreadServices(threadId);
-    } catch {
-      /* best-effort cleanup — do not fail the run result */
-    }
-  }
-  // `git worktree remove` on paths from state only where worktree nodes could have made them.
-  if (spec.runtime?.worktrees?.cleanupOnEnd && hostExecAllowed(policy, "worktree")) {
-    const entries = (state?.[WORKTREES_CHANNEL] as Array<{ path?: unknown; repo?: unknown }>) ?? [];
-    await cleanupWorktrees(entries);
-  }
+  await registry.runEndHooks({ spec, threadId, state, policy });
 }
 
 function buildNodeCtx(
@@ -3057,27 +3040,12 @@ export async function hydrateDurableRuntime(
     });
   }
 
-  if (graphSpec.runtime?.services?.rehydrateOnResume) {
-    const intents = snap.values?.[SERVICES_CHANNEL];
-    if (intents && typeof intents === "object") {
-      for (const [name, raw] of Object.entries(intents as Record<string, unknown>)) {
-        if (!raw || typeof raw !== "object") continue;
-        const current = statusService(threadId, name);
-        if (current.status === "running") continue;
-        const spec = raw as ServiceStartSpec;
-        try {
-          // Saved state is not proof the graph may start programs: refuse
-          // under a policy that blocks service nodes or host programs.
-          assertNodeTypeAllowed(opts.nodePolicy, "service", `rehydrating service "${name}"`);
-          assertHostExecAllowed(opts.nodePolicy, `service "${name}"`, `rehydrating service "${name}"`);
-          await startService(threadId, { ...spec, name });
-        } catch (err) {
-          (raw as Record<string, unknown>)["needsRestart"] = true;
-          (raw as Record<string, unknown>)["rehydrateError"] = err instanceof Error ? err.message : String(err);
-        }
-      }
-    }
-  }
+  await registry.runHydrateHooks({
+    spec: graphSpec,
+    threadId,
+    snapshotValues: snap.values,
+    nodePolicy: opts.nodePolicy,
+  });
 }
 
 function addCheckpointedMap(

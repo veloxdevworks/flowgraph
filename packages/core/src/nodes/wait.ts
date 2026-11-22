@@ -32,12 +32,12 @@ export const waitNode = defineNode<Config>({
   type: "wait",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {

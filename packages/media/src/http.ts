@@ -4,7 +4,7 @@
  * `ctx.secrets` at call time so the run's secret provider and redaction apply.
  */
 
-import type { MediaCallContext } from "@flowgraph/core";
+import type { MediaCallContext } from "./runtime/types.js";
 
 /** A vendor returned a non-2xx response. `message` never contains credentials. */
 export class VendorHttpError extends Error {

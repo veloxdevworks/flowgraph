@@ -155,7 +155,7 @@ flowgraph migrate ./old.graph.yaml          # dry-run
 flowgraph migrate ./old.graph.yaml --write  # apply in place
 ```
 
-Upgrades a graph spec toward `apiVersion: flowgraph/v1`. Prints migration notes; use `--write` to persist changes.
+Upgrades a graph spec toward `apiVersion: flowgraph/v1`, canonicalizes `kind`, and rewrites legacy `type: webhook` nodes to `type: http` with `once: true` (and `method: POST` if absent). Prints migration notes; use `--write` to persist changes.
 
 The data-contract migration rewrites the fields that were removed, on the YAML document so comments and layout survive:
 

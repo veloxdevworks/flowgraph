@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { compileGraph } from "./compiler.js";
+import { registry } from "./registry.js";
 import type { GraphSpec } from "@flowgraph/spec";
 import type { FlowgraphEvent } from "./events.js";
 
-describe("webhook node (emit)", () => {
+describe("http node (once: true)", () => {
   const originalFetch = global.fetch;
 
   beforeEach(() => {
@@ -20,19 +21,44 @@ describe("webhook node (emit)", () => {
     global.fetch = originalFetch;
   });
 
+  it("does not register legacy webhook node in core and emits a coded migration diagnostic", async () => {
+    expect(registry.has("webhook")).toBe(false);
+    const { validateSpec } = await import("./loader.js");
+    const legacy = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "legacy-wh" },
+      nodes: [{ id: "notify", type: "webhook", with: { url: "https://example.com/hook" } }],
+      edges: [
+        { from: "START", to: "notify" },
+        { from: "notify", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const diags = validateSpec(legacy);
+    expect(diags).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "WEBHOOK_NODE_REMOVED",
+        path: "nodes.notify.type",
+        message: expect.stringContaining("flowgraph migrate"),
+      }),
+    );
+  });
+
   it("calls fetch once and does not re-fire on replay after interrupt/resume", async () => {
     const spec = {
       apiVersion: "flowgraph/v1",
       kind: "Graph",
-      metadata: { name: "webhook-emit" },
+      metadata: { name: "http-once-emit" },
       state: { channels: { notifyResult: { type: "object" } } },
       nodes: [
         {
           id: "notify",
-          type: "webhook",
+          type: "http",
           with: {
             url: "https://example.com/hook",
             method: "POST",
+            once: true,
             body: { event: "started" },
             output: { to: "notifyResult" },
           },
@@ -67,7 +93,7 @@ describe("webhook node (emit)", () => {
   });
 });
 
-describe("webhook node secrets", () => {
+describe("http node (once: true) secrets", () => {
   const originalFetch = global.fetch;
   afterEach(() => {
     global.fetch = originalFetch;
@@ -94,9 +120,11 @@ describe("webhook node secrets", () => {
       nodes: [
         {
           id: "notify",
-          type: "webhook",
+          type: "http",
           with: {
             url: "https://example.com/hook",
+            method: "POST",
+            once: true,
             headers: { Authorization: "Bearer {{ secret.FG_WEBHOOK_TOKEN }}", "X-Api-Key": "{{ state.apiKey }}" },
             body: { event: "started" },
             output: { to: "notifyResult" },
@@ -121,7 +149,7 @@ describe("webhook node secrets", () => {
   });
 });
 
-describe("webhook node response headers", () => {
+describe("http node (once: true) response headers", () => {
   const originalFetch = global.fetch;
   afterEach(() => {
     global.fetch = originalFetch;
@@ -136,9 +164,11 @@ describe("webhook node response headers", () => {
       nodes: [
         {
           id: "notify",
-          type: "webhook",
+          type: "http",
           with: {
             url: "https://example.com/hook",
+            method: "POST",
+            once: true,
             headers: { "X-Service-Token": "{{ state.token }}" },
             body: { event: "started" },
             output: { to: "notifyResult" },

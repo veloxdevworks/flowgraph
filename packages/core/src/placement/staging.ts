@@ -12,7 +12,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, realpath, rename, rm, stat } from "node:fs/promises";
 import * as path from "node:path";
-import { artifactDir } from "../media/artifacts.js";
+import { artifactDir } from "../runtime/artifacts.js";
 import {
   findArtifacts,
   isSha256,

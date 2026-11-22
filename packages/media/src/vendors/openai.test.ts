@@ -11,9 +11,10 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { Artifact } from "@flowgraph/spec";
-import type { MediaCallContext, MediaInput, MediaOutput, MediaProvider, MediaRequest } from "@flowgraph/core";
+import type { MediaCallContext, MediaInput, MediaOutput, MediaProvider, MediaRequest } from "../runtime/types.js";
 import { VendorHttpError } from "../http.js";
-import {registerMediaVendor,validateSpec} from "@flowgraph/core";
+import { validateSpec } from "@flowgraph/core";
+import { registerMediaVendor } from "../index.js";
 import {GraphSpecSchema} from "@flowgraph/spec";
 import { openaiVendor } from "./openai.js";
 

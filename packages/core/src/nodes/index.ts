@@ -1,14 +1,11 @@
 /**
- * Register all built-in node types with the global registry.
+ * Register all built-in core node types with the global registry.
  */
 import { registry } from "../registry.js";
 import { routerNode } from "./router.js";
 import { httpNode } from "./http.js";
-import { demoNode } from "./demo.js";
 import { functionNode } from "./function.js";
 import { shellNode } from "./shell.js";
-import { serviceNode } from "./service.js";
-import { portNode } from "./port.js";
 import { scriptNode } from "./script.js";
 import { failNode } from "./fail.js";
 import { waitNode } from "./wait.js";
@@ -18,24 +15,15 @@ import { subgraphNode } from "./subgraph.js";
 import { mapNode } from "./map.js";
 import { mcpNode } from "./mcp.js";
 import { hitlNode } from "./hitl.js";
-import { workshopNode } from "./workshop.js";
-import { worktreeNode } from "./worktree.js";
-import { webhookNode } from "./webhook.js";
 import { memoryNode } from "./memory.js";
-import { imageNode, videoNode, model3dNode, audioNode } from "./media.js";
 import "../providers/ask-human.js";
-import "../providers/list-services.js";
-import "../providers/service-tools.js";
 
 // Register built-ins (idempotent — guard against double-import)
 const BUILT_INS = [
   routerNode,
   httpNode,
-  demoNode,
   functionNode,
   shellNode,
-  serviceNode,
-  portNode,
   scriptNode,
   failNode,
   waitNode,
@@ -45,14 +33,7 @@ const BUILT_INS = [
   mapNode,
   mcpNode,
   hitlNode,
-  workshopNode,
-  worktreeNode,
-  webhookNode,
   memoryNode,
-  imageNode,
-  videoNode,
-  model3dNode,
-  audioNode,
 ];
 for (const node of BUILT_INS) {
   if (!registry.has(node.type)) registry.register(node);
@@ -69,11 +50,8 @@ export const intelligentNode = agentNode;
 export {
   routerNode,
   httpNode,
-  demoNode,
   functionNode,
   shellNode,
-  serviceNode,
-  portNode,
   scriptNode,
   failNode,
   waitNode,
@@ -83,8 +61,5 @@ export {
   mapNode,
   mcpNode,
   hitlNode,
-  workshopNode,
-  worktreeNode,
-  webhookNode,
   memoryNode,
 };

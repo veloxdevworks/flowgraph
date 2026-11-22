@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { InterruptInfo } from "@flowgraph/core";
-import { checkWorkshopOutput } from "@flowgraph/spec";
+import { checkWorkshopOutput } from "@flowgraph/node-workshop/contract";
 import type { FacilitatorModel } from "@flowgraph/workshop-session";
 import {
   resolveWorkshopModel,

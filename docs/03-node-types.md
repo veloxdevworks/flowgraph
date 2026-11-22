@@ -262,7 +262,7 @@ Model-based routing:
 
 ---
 
-## 4. `http` / `webhook` / `mcp` — network & integration I/O
+## 4. `http` / `mcp` — network & integration I/O
 
 Deterministic network and integration nodes.
 
@@ -314,23 +314,24 @@ See `examples/mcp/` for a runnable walkthrough.
       map: { prs: "{{ result.body }}" }   # parse JSON by default; result.body/status/headers
 ```
 
-The `node.output` event and the debug log show the request URL with credentials and sensitive query parameters masked. In the event, request headers that are sensitive or listed in `runtime.secrets.redact.headers` show as `[REDACTED]`, and so do response headers that are sensitive, listed there, or auth/token-like by name (`Set-Cookie`, `X-Auth-Token`, `X-Session-Id`, …). The event's response body also masks those headers' values and each `Set-Cookie`'s `name=value` and credential-like bare value (the same cookie rule as `webhook`). This masking applies to the event only: `result.headers`, the response body and the node's output keep the real values, so a later node can forward a session cookie, for example `Cookie: "{{ split(state.login.headers['set-cookie'], ';')[0] }}"`.
+The `node.output` event and the debug log show the request URL with credentials and sensitive query parameters masked. In the event, request headers that are sensitive or listed in `runtime.secrets.redact.headers` show as `[REDACTED]`, and so do response headers that are sensitive, listed there, or auth/token-like by name (`Set-Cookie`, `X-Auth-Token`, `X-Session-Id`, …). The event's response body also masks those headers' values and each `Set-Cookie`'s `name=value` and credential-like bare value (described below). This masking applies to the event only: `result.headers`, the response body and the node's output keep the real values, so a later node can forward a session cookie, for example `Cookie: "{{ split(state.login.headers['set-cookie'], ';')[0] }}"`.
 
-`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.timeout` on `http`, `webhook`, `shell`, `script`, and media is rejected, with an error that names the node `timeout`. `http`, `webhook`, `shell`, `script`, `skill`, `mcp`, and `service` stop when that timeout aborts. An `mcp` node passes that abort signal into `callTool` / `readResource`, and the hub cancels the client request so a retry does not overlap it. Media uses the node `timeout` or `runtime.timeoutDefault` as the job deadline (otherwise the per-type default), keeps the vendor job on a node timeout so a retry can re-attach, and still cancels it when the run itself is cancelled. `demo` keeps its own capture timing. Shell and script with neither a node `timeout` nor `runtime.timeoutDefault` are unbounded.
+`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.timeout` on `http`, `shell`, `script`, and media is rejected, with an error that names the node `timeout`. `http`, `shell`, `script`, `skill`, `mcp`, and `service` stop when that timeout aborts. An `mcp` node passes that abort signal into `callTool` / `readResource`, and the hub cancels the client request so a retry does not overlap it. Media uses the node `timeout` or `runtime.timeoutDefault` as the job deadline (otherwise the per-type default), keeps the vendor job on a node timeout so a retry can re-attach, and still cancels it when the run itself is cancelled. `demo` keeps its own capture timing. Shell and script with neither a node `timeout` nor `runtime.timeoutDefault` are unbounded.
 
-### `webhook` — outbound HTTP notification
+### Outbound notifications (`http` with `once: true`)
 
 ```yaml
 - id: notify-slack
-  type: webhook
+  type: http
   with:
     url: "https://hooks.example.com/notify"
     method: POST
+    once: true
     body: { event: "started", runId: "{{ run.runId }}" }
     output: { to: notifyResult }
 ```
 
-Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). A `{{ secret.X }}` in a webhook needs `X` in the graph's top-level `secrets:`, as in `http`. Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. Sensitive response headers such as `Set-Cookie` show as `[REDACTED]` in `result.headers`, and their values are redacted elsewhere too. For each `Set-Cookie`, the cookie's `name=value` is redacted as well. Its bare value is redacted on its own only when it is at least 16 characters, or at least 8 under a credential-like cookie name. A name is credential-like when one of its words, split on `-`, `_`, `.` and case changes, is `sess`, `session`, `sid`, `token`, `auth`, `jwt`, `secret`, `key`, `csrf`, `xsrf`, `login`, `remember` or `refresh`, or one of the compounds `sessionid`, `sessid`, `phpsessid`, `jsessionid`, `csrftoken` and `apikey`: `session_id`, `auth-token`, `XSRF-TOKEN`, `refreshToken`, `PHPSESSID` and `csrftoken` qualify, `monkey` and `Access-Mode` do not. A body that echoes only a session token is masked, while values such as `default` from `theme=default` or `true` from `consent=true` stay readable elsewhere in the run. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well; a listed header shows as `[REDACTED]` in `result.headers`, the same as a built-in one. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
+Setting `once: true` on an `http` node makes the outbound request idempotent across checkpoint replay via `ctx.once`. A `{{ secret.X }}` in an `http` node needs `X` in the graph's top-level `secrets:`. When `once: true` is set, sensitive response headers such as `Set-Cookie` show as `[REDACTED]` in `result.headers`, and their values are redacted elsewhere too. For each `Set-Cookie`, the cookie's `name=value` is redacted as well. Its bare value is redacted on its own only when it is at least 16 characters, or at least 8 under a credential-like cookie name. A name is credential-like when one of its words, split on `-`, `_`, `.` and case changes, is `sess`, `session`, `sid`, `token`, `auth`, `jwt`, `secret`, `key`, `csrf`, `xsrf`, `login`, `remember` or `refresh`, or one of the compounds `sessionid`, `sessid`, `phpsessid`, `jsessionid`, `csrftoken` and `apikey`: `session_id`, `auth-token`, `XSRF-TOKEN`, `refreshToken`, `PHPSESSID` and `csrftoken` qualify, `monkey` and `Access-Mode` do not. A body that echoes only a session token is masked, while values such as `default` from `theme=default` or `true` from `consent=true` stay readable elsewhere in the run. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well; a listed header shows as `[REDACTED]` in `result.headers`, the same as a built-in one. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
@@ -1450,33 +1451,35 @@ OpenAI image dimensions are checked offline and again after rendering, before in
 
 ---
 
-## 9. Built-in node summary
+## 9. Node type summary
+
+Core built-in node types live in `@flowgraph/core`. Product node packages are separately versioned **preview** packages registered by default in `@flowgraph/cli` (import them directly for programmatic runs).
 
 | `type` | Purpose | Capabilities | Package |
 |---|---|---|---|
-| `agent` | Agent loop w/ tools (hub & spoke) | streaming, interruptible, side-effecting | core (+ provider pkg) |
-| `skill` | Run a declared skill | varies by skill | core (+ `@flowgraph/skills`) |
-| `router` | Choose next node(s) | routing | core |
-| `http` | Outbound HTTP | side-effecting | core |
-| `demo` | Best-effort artifact capture (HTTP / screenshot / video / simulator / file) | side-effecting | core (+ optional `playwright`; simulators need Xcode/adb) |
-| `mcp` | MCP tool/resource call | side-effecting | core (+ `@flowgraph/mcp` at runtime) |
-| `webhook` | Outbound HTTP notify | side-effecting | core |
-| `shell` | Run a local program, or a shell command line with `shell: true` | side-effecting | core |
-| `service` | Start/stop long-running background processes | side-effecting | core |
-| `port` | Allocate free TCP port(s) at run time | — | core |
-| `script` | Sandboxed inline Node.js (ESM) | side-effecting | core |
-| `function` | Registered TS function (legacy) | varies | core |
-| `fail` | End the run as failed with a rendered reason (`FLOW_FAILED`) | terminal | core |
-| `subgraph` | Nested / embed a child graph | composite | core |
-| `map` | Fan-out over a collection | composite, parallel | core |
-| `hitl` | Human approve / question / choice gate | interruptible | core |
-| `wait` | Delay / condition / signal / inbound webhook gate | interruptible | core |
-| `workshop` | Facilitated agenda session (human answers per item) | interruptible | core |
-| `worktree` | Add / remove / list isolated git worktrees | side-effecting | core |
-| `image` | Generate / edit images | side-effecting | core (+ a media provider) |
-| `video` | Generate video clips | side-effecting | core (+ a media provider) |
-| `model3d` | Generate 3D assets (GLB, FBX, …) | side-effecting | core (+ a media provider) |
-| `audio` | Generate speech, sound effects, music | side-effecting | core (+ a media provider) |
+| `agent` | Agent loop w/ tools (hub & spoke) | streaming, interruptible, side-effecting | `@flowgraph/core` (+ provider pkg) |
+| `skill` | Run a declared skill | varies by skill | `@flowgraph/core` (+ `@flowgraph/skills`) |
+| `router` | Choose next node(s) | routing | `@flowgraph/core` |
+| `http` | Outbound HTTP (and idempotent notifications with `once: true`) | side-effecting | `@flowgraph/core` |
+| `mcp` | MCP tool/resource call | side-effecting | `@flowgraph/core` (+ `@flowgraph/mcp` at runtime) |
+| `shell` | Run a local program, or a shell command line with `shell: true` | side-effecting | `@flowgraph/core` |
+| `script` | Sandboxed inline Node.js (ESM) | side-effecting | `@flowgraph/core` |
+| `function` | Registered TS function | varies | `@flowgraph/core` |
+| `fail` | End the run as failed with a rendered reason (`FLOW_FAILED`) | terminal | `@flowgraph/core` |
+| `subgraph` | Nested / embed a child graph | composite | `@flowgraph/core` |
+| `map` | Fan-out over a collection | composite, parallel | `@flowgraph/core` |
+| `hitl` | Human approve / question / choice gate | interruptible | `@flowgraph/core` |
+| `wait` | Delay / condition / signal / inbound webhook gate | interruptible | `@flowgraph/core` |
+| `memory` | Persistent thread/org memory | side-effecting | `@flowgraph/core` |
+| `demo` | Best-effort artifact capture (HTTP / screenshot / video / simulator / file) | side-effecting | `@flowgraph/node-demo` (preview; optional `playwright`) |
+| `service` | Start/stop long-running background processes | side-effecting | `@flowgraph/node-service` (preview) |
+| `port` | Allocate free TCP port(s) at run time | — | `@flowgraph/node-port` (preview) |
+| `workshop` | Facilitated agenda session (human answers per item) | interruptible | `@flowgraph/node-workshop` (preview) |
+| `worktree` | Add / remove / list isolated git worktrees | side-effecting | `@flowgraph/node-worktree` (preview) |
+| `image` | Generate / edit images | side-effecting | `@flowgraph/media` (preview) |
+| `video` | Generate video clips | side-effecting | `@flowgraph/media` (preview) |
+| `model3d` | Generate 3D assets (GLB, FBX, …) | side-effecting | `@flowgraph/media` (preview) |
+| `audio` | Generate speech, sound effects, music | side-effecting | `@flowgraph/media` (preview) |
 
 ---
 

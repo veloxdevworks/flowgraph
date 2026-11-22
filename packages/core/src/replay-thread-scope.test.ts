@@ -10,13 +10,27 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { MemorySaver } from "@langchain/langgraph";
 import { AIMessage } from "@langchain/core/messages";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
-import { createLangChainProvider } from "./index.js";
+import { createLangChainProvider, getTool, registerTool } from "./index.js";
 import type { NodePolicy } from "./node-policy.js";
-import { resetServiceManager } from "./runtime/service-manager.js";
 import "./nodes/index.js";
+
+beforeAll(() => {
+  if (!getTool("start_service")) {
+    registerTool({
+      name: "start_service",
+      description: "test stub",
+      handler: (args) => {
+        const a = args as { args?: string[] };
+        const m = a.args?.find((s) => s.includes("id > "))?.split("id > ")[1];
+        if (m) fs.writeFileSync(m, "ran");
+        return { started: true };
+      },
+    });
+  }
+});
 
 const POLICY: NodePolicy = {
   blockedTypes: ["shell", "script", "service", "worktree", "skill", "demo", "mcp"],
@@ -67,8 +81,7 @@ function forgedStart(victimThread: string, marker: string): Record<string, unkno
 }
 
 const markers: string[] = [];
-afterEach(async () => {
-  await resetServiceManager();
+afterEach(() => {
   for (const m of markers.splice(0)) fs.rmSync(m, { force: true });
 });
 

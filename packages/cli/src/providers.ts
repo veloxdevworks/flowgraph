@@ -88,6 +88,11 @@ export async function buildProviders(
   const built = new Set<string>();
 
   for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
+    if ((cfg as { kind?: string }).kind === "media") {
+      // Media (image/video/3D/audio) providers are built by compileGraph from the
+      // same providers: block; there is no agent adapter to create here.
+      continue;
+    }
     switch (cfg.kind) {
       case "cli": {
         const vendor = cfg.vendor as CliVendor;
@@ -129,10 +134,6 @@ export async function buildProviders(
         providers.push(await createDeep(name, cfg, { cwd, spec }));
         break;
       }
-      case "media":
-        // Media (image/video/3D) providers are built by compileGraph from the
-        // same providers: block; there is no agent adapter to create here.
-        continue;
       default:
         throw new Error(
           `Provider "${name}": unsupported kind "${(cfg as { kind?: string }).kind}".`,

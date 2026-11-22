@@ -23,12 +23,12 @@ export const mapNode = defineNode<Config>({
   type: "map",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, hostAccess: false },
 
   build(): CompiledNode {
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, hostAccess: false },
       async run(): Promise<NodeResult> {
         throw new Error("map node was not expanded at compile time (internal error).");
       },

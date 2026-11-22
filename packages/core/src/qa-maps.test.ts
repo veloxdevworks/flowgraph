@@ -1,11 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
-import type { MediaProvider } from "./media/types.js";
 import type { FlowgraphEvent } from "./events.js";
 
 const dirs: string[] = [];
@@ -382,61 +379,6 @@ describe("PLAT-313 / PLAT-351: item identities", () => {
       (pauses.find((event) => event.type === "run.paused")?.data as { next: string[] }).next,
     ).toEqual(["fan"]);
   });
-  it("uses separate media journals and artifact paths for two mapped nodes", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "fg-qa-map-media-"));
-    dirs.push(dir);
-    let starts = 0;
-    const events: FlowgraphEvent[] = [];
-    const provider: MediaProvider = {
-      name: "qa-media",
-      vendor: "qa",
-      modalities: ["image"],
-      async start(_req, ctx) {
-        const id = String(++starts);
-        const artifact = await ctx.saveOutput({
-          bytes: new Uint8Array([1, 2, 3]),
-          mimeType: "image/png",
-        });
-        return { id, done: [artifact] };
-      },
-    };
-    const mediaMap = (id: string) => ({
-      id,
-      type: "map",
-      with: {
-        over: "{{ ['same'] }}",
-        node: { type: "image", with: { provider: "qa-media", prompt: "same" } },
-        collect: { to: "results" },
-      },
-    });
-    const spec = graph(
-      [mediaMap("views-a"), mediaMap("views-b")],
-      [
-        { from: "START", to: "views-a" },
-        { from: "views-a", to: "views-b" },
-        { from: "views-b", to: "END" },
-      ],
-    );
-    const result = await (
-      await compileGraph(spec, {
-        cwd: dir,
-        mediaProviders: [provider],
-        sinks: [
-          (e) => {
-            events.push(e);
-          },
-        ],
-      })
-    ).run({ threadId: "qa-media-map" });
-    expect(result.status).toBe("completed");
-    expect(starts).toBe(2);
-    const jobs = events
-      .filter((e) => e.type === "custom.media.job")
-      .map((e) => e.data as { nodeId: string });
-    expect(new Set(jobs.map((e) => e.nodeId))).toEqual(new Set(["views-a[0]", "views-b[0]"]));
-    expect(JSON.stringify(result.state)).not.toContain("/undefined/");
-  });
-
   it("reports author node names for a pending map rather than compiler IDs", async () => {
     const spec = graph(
       [

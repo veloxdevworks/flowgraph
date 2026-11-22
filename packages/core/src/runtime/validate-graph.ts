@@ -915,41 +915,6 @@ export function hitlRouterMergeDiagnostics(spec: GraphSpec): Diagnostic[] {
   }));
 }
 
-/**
- * A `demo` node that proves something can't be an agent tool (ADR-0019 §9): a tool call writes
- * no `state.outputs`, and an agent choosing its own assertions would make `passed` meaningless.
- */
-export function provesObjective(node: { type?: unknown; with?: unknown } | undefined): boolean {
-  if (node?.type !== "demo") return false;
-  const w = (node.with ?? {}) as Record<string, unknown>;
-  return w["objective"] != null || w["steps"] != null;
-}
-
-export function demoToolExposureDiagnostics(spec: GraphSpec): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-  const check = (node: NodeSpec, path: string): void => {
-    const w = (node.with ?? {}) as { tools?: unknown; node?: NodeSpec };
-    if (Array.isArray(w.tools)) {
-      for (const tool of w.tools as Array<{ node?: unknown }>) {
-        const target = (Array.isArray(spec.nodes) ? spec.nodes : []).find((n) => n != null && n.id === tool?.node);
-        if (!provesObjective(target)) continue;
-        diagnostics.push({
-          severity: "error",
-          code: "DEMO_OBJECTIVE_AS_TOOL",
-          message: `Node "${node.id ?? "map item"}" exposes demo node "${target!.id}" as a tool, but a demo node with an objective or steps can't be an agent tool`,
-          path: `${path}.with.tools`,
-        });
-      }
-    }
-    if (w.node) check(w.node, `${path}.with.node`);
-  };
-  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
-    if (!isRecord(node)) continue;
-    check(node as NodeSpec, `nodes.${String(node.id)}`);
-  }
-  return diagnostics;
-}
-
 // ---------------------------------------------------------------------------
 // Placement (`runsOn`) — ADR-0020
 // ---------------------------------------------------------------------------
@@ -1825,7 +1790,16 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
   if (lints) for (const d of secretScopeDiagnostics(node, path, label)) push(d);
   const factory = registry.get(node.type);
   if (!factory) {
-    push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
+    if (node.type === "webhook") {
+      push({
+        severity: "error",
+        code: "WEBHOOK_NODE_REMOVED",
+        message: `${label} uses removed type "webhook". Use type "http" with once: true (and method: POST), or run "flowgraph migrate" to rewrite this graph.`,
+        path: `${path}.type`,
+      });
+    } else {
+      push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
+    }
   } else {
     const configResult = factory.configSchema.safeParse(node.with ?? {});
     if (!configResult.success) {
@@ -2012,7 +1986,6 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...hitlRouterMergeDiagnostics(spec),
     ...topologyDiagnostics(spec),
     ...staticGraphDiagnostics(spec),
-    ...demoToolExposureDiagnostics(spec),
     ...channelReducerDiagnostics(spec),
     ...undeclaredOutputChannelDiagnostics(spec),
     ...nodeChannelNameCollisionDiagnostics(spec),

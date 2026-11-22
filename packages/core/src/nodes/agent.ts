@@ -47,7 +47,7 @@ export const agentNode = defineNode<Config>({
   type: "agent",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { streaming: true, interruptible: true, sideEffecting: true, receivesTimeoutSignal: true },
+  capabilities: { streaming: true, interruptible: true, sideEffecting: true, receivesTimeoutSignal: true, hostAccess: false },
 
   build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const nodeProvider = nodeSpec["provider"] as string | undefined;
@@ -60,7 +60,7 @@ export const agentNode = defineNode<Config>({
 
     return {
       contract: {},
-      capabilities: { streaming: true, interruptible: true, sideEffecting: true, receivesTimeoutSignal: true },
+      capabilities: { streaming: true, interruptible: true, sideEffecting: true, receivesTimeoutSignal: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const providerName =
