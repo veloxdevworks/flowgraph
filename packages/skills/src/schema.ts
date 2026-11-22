@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ContractSchemaSchema, DurationSchema, contractSchemaProblem, type PropertyDef } from "@flowgraph/spec";
+import { ContractSchemaSchema, DurationSchema, contractSchemaProblem, strictObject, type PropertyDef } from "@flowgraph/spec";
 
 // ---------------------------------------------------------------------------
 // Skill front-matter schema
@@ -58,7 +58,7 @@ export function skillInputValueSchema(decl: SkillInputDecl): Record<string, unkn
 /** A named skill output: a JSON Schema (draft-07) describing its value. */
 export const SkillOutputSchema = ContractSchemaSchema;
 
-export const EnvVarDeclSchema = z.object({
+export const EnvVarDeclSchema = strictObject({
   name: z.string(),
   description: z.string().optional(),
   secret: z.boolean().optional().default(false),
@@ -69,7 +69,7 @@ export const EnvVarDeclSchema = z.object({
 /** A single executable name. Paths and shell syntax are rejected. */
 export const BIN_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
 
-export const BinDeclSchema = z.object({
+export const BinDeclSchema = strictObject({
   name: z
     .string()
     .regex(
@@ -79,13 +79,13 @@ export const BinDeclSchema = z.object({
   optional: z.boolean().optional().default(false),
 });
 
-export const EnvDeclSchema = z.object({
+export const EnvDeclSchema = strictObject({
   vars: z.array(EnvVarDeclSchema).optional(),
   bin: z.array(BinDeclSchema).optional(),
   node: z.string().optional(),
 });
 
-export const SkillFrontMatterSchema = z.object({
+export const SkillFrontMatterSchema = strictObject({
   apiVersion: z.literal("flowgraph/v1").optional(),
   kind: z.literal("Skill").optional(),
   name: z.string(),

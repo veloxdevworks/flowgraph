@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { OutputMappingSchema } from "@flowgraph/spec";
+import { strictWith } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import {
   applyOutput,
@@ -17,11 +17,11 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-export const WorktreeWithSchema = z.object({
+export const WorktreeWithSchema = strictWith({
   action: z.union([z.literal("add"), z.literal("remove"), z.literal("status")]).default("add"),
   /** Branch to create/checkout (templates ok). Required for action: add. */
   branch: z.string().optional(),
-  /** Worktree directory (absolute or workspace-relative; templates ok). */
+  /** Worktree directory (absolute or workspace-relative; templates ok). Required for add and remove. */
   path: z.string().optional(),
   /** Git repo root. Defaults to runtime.workspace. */
   repo: z.string().optional(),
@@ -30,7 +30,29 @@ export const WorktreeWithSchema = z.object({
    * (`git worktree add -B`). Default false: fail instead of moving the branch.
    */
   reset: z.boolean().optional(),
-  output: OutputMappingSchema.optional(),
+}).superRefine((value, ctx) => {
+  const need = (field: "branch" | "path") => {
+    if (!value[field]?.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `worktree action: ${value.action} needs ${field}` });
+    }
+  };
+  const refuse = (field: "branch" | "path" | "reset", why: string) => {
+    if (value[field] !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `worktree action: ${value.action} does not use ${field}; ${why}` });
+    }
+  };
+  if (value.action === "add") {
+    need("branch");
+    need("path");
+  } else if (value.action === "remove") {
+    need("path");
+    refuse("branch", "it removes the worktree at path");
+    refuse("reset", "reset applies to action: add");
+  } else {
+    refuse("branch", "it lists the repo's worktrees");
+    refuse("path", "it lists the repo's worktrees");
+    refuse("reset", "reset applies to action: add");
+  }
 });
 
 export type WorktreeWith = z.infer<typeof WorktreeWithSchema>;
