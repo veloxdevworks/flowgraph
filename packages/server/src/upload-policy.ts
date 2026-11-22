@@ -385,13 +385,13 @@ function checkGraphLevel(
   }
 }
 
-/** Reject absolute paths and `..` path traversal in media node input references. */
+/** Reject absolute, home-relative (`~`), and `..` path traversal references in media node inputs. */
 function isUnsafeHostPath(raw: string): boolean {
   const s = raw.trim();
   if (!s || s.includes("{{")) return false;
   if (/^https?:\/\//i.test(s) || /^data:/i.test(s)) return false;
   if (/^file:\/\//i.test(s)) return true;
-  if (s.startsWith("/") || s.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(s)) return true;
+  if (s.startsWith("/") || s.startsWith("\\") || s.startsWith("~") || /^[A-Za-z]:[\\/]/.test(s)) return true;
   return /(?:^|[\\/])\.\.(?:[\\/]|$)/.test(s);
 }
 
@@ -414,6 +414,12 @@ function checkMediaInputPaths(
     const o = value as Record<string, unknown>;
     if (typeof o.path === "string" && isUnsafeHostPath(o.path)) {
       add("UPLOAD_HOST_PATH_BLOCKED", `${at}.path`, `media input path "${o.path}" escapes the run workspace`);
+    }
+    if (o.artifact !== undefined) {
+      checkMediaInputPaths(o.artifact, `${at}.artifact`, add);
+    }
+    if (o.artifacts !== undefined) {
+      checkMediaInputPaths(o.artifacts, `${at}.artifacts`, add);
     }
   }
 }

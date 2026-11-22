@@ -22,6 +22,8 @@ export interface NodePolicy {
    * Allowlist mode: allow only registered node types explicitly marked
    * `capabilities.hostAccess === false`. Any other type (including newly
    * registered plugins or packages) is refused with NODE_TYPE_BLOCKED.
+   * Also implies `blockHostExec` so node features such as workshop or hitl
+   * review git diffs cannot execute host programs.
    */
   requireSafeNodeTypes?: boolean | undefined;
   /** Refuse subgraph `uses` references, which load graph files from the host's disk. Inline `spec` is allowed. */
@@ -181,7 +183,7 @@ export function assertFunctionAllowed(policy: NodePolicy | undefined, name: stri
 
 /** Throws HOST_EXEC_BLOCKED when the policy refuses running a host program for `what`. */
 export function assertHostExecAllowed(policy: NodePolicy | undefined, what: string, where: string): void {
-  if (!policy?.blockHostExec) return;
+  if (!policy?.blockHostExec && !policy?.requireSafeNodeTypes) return;
   throw new NodePolicyError("HOST_EXEC_BLOCKED", `${where}: ${what} runs a program on the host, which is not allowed here${suffix(policy)}`);
 }
 
@@ -723,7 +725,7 @@ export function assertNoReservedChannels(policy: NodePolicy | undefined, channel
  */
 export function hostExecAllowed(policy: NodePolicy | undefined, nodeType?: string): boolean {
   if (!policy) return true;
-  if (policy.blockHostExec) return false;
+  if (policy.blockHostExec || policy.requireSafeNodeTypes) return false;
   return !(nodeType && policy.blockedTypes?.includes(nodeType));
 }
 

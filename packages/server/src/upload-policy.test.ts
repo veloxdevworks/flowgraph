@@ -180,19 +180,31 @@ runtime:
     expect(codesOf(img(`"nested/../../secret.png"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
     expect(codesOf(img(`["ok.png", "../escape.png"]`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input[1]"]);
     expect(codesOf(img(`"file:///etc/passwd"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
+    expect(codesOf(img(`"~/secret.png"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
+    expect(codesOf(img(`"~root/secret.png"`))).toEqual(["UPLOAD_HOST_PATH_BLOCKED nodes.a.with.input"]);
 
     // Safe relative paths, public URLs, and templates stay allowed at upload time.
     expect(codesOf(img(`"assets/ref.png"`))).toEqual([]);
     expect(codesOf(img(`"https://example.com/ref.png"`))).toEqual([]);
     expect(codesOf(img(`"{{ state.out }}"`))).toEqual([]);
 
-    // Also check raw spec with `inputs` field directly.
+    // Also check raw spec with `inputs` field and `{ artifact }` / `{ artifacts }` wrappers.
     const parsed = parseGraphYaml(graph(`  - { id: a, type: image, with: { prompt: "draw" } }`), { expandEnv: false });
     const node = parsed.spec!.nodes[0] as unknown as { with: Record<string, unknown> };
-    node.with.inputs = ["/etc/shadow", "../escape.png"];
+    node.with.inputs = [
+      "/etc/shadow",
+      "../escape.png",
+      "~/keys.png",
+      { artifact: { kind: "artifact", path: "/etc/passwd" } },
+      { artifacts: [{ kind: "artifact", path: "../secret.png" }, { kind: "artifact", path: "~/home.png" }] },
+    ];
     expect(checkUntrustedUpload("", parsed.spec!).map((v) => `${v.code} ${v.path}`)).toEqual([
       "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[0]",
       "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[1]",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[2]",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[3].artifact.path",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[4].artifacts[0].path",
+      "UPLOAD_HOST_PATH_BLOCKED nodes.a.with.inputs[4].artifacts[1].path",
     ]);
   });
 });

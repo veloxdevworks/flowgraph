@@ -10,9 +10,16 @@ import {
   mockProvider,
 } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
-// Registers the media vendors (xai, openai, tripo, meshy, elevenlabs) so `image`/`video`/`model3d`/`audio`
-// nodes can resolve providers declared in the graph.
+// Registers the media vendors and moved product node packages so trusted runs
+// can use media, workshop, demo, service, port, worktree, and localTools;
+// untrusted uploads remain restricted by the default-deny upload policy.
 import "@flowgraph/media";
+import "@flowgraph/node-demo";
+import "@flowgraph/node-port";
+import "@flowgraph/node-service";
+import "@flowgraph/node-workshop";
+import "@flowgraph/node-worktree";
+import "@flowgraph/tools-fs";
 import { ServerRequestError } from "./errors.js";
 
 /** Refuse providers an untrusted author may not configure (checked again when the graph runs). */

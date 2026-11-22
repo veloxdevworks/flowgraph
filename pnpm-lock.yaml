@@ -824,9 +824,27 @@ importers:
       '@flowgraph/media':
         specifier: workspace:*
         version: link:../media
+      '@flowgraph/node-demo':
+        specifier: workspace:*
+        version: link:../node-demo
+      '@flowgraph/node-port':
+        specifier: workspace:*
+        version: link:../node-port
+      '@flowgraph/node-service':
+        specifier: workspace:*
+        version: link:../node-service
+      '@flowgraph/node-workshop':
+        specifier: workspace:*
+        version: link:../node-workshop
+      '@flowgraph/node-worktree':
+        specifier: workspace:*
+        version: link:../node-worktree
       '@flowgraph/spec':
         specifier: workspace:*
         version: link:../spec
+      '@flowgraph/tools-fs':
+        specifier: workspace:*
+        version: link:../tools-fs
       '@flowgraph/workshop-session':
         specifier: workspace:*
         version: link:../workshop-session
@@ -843,24 +861,6 @@ importers:
       '@flowgraph/checkpoint-sqlite':
         specifier: workspace:*
         version: link:../checkpoint-sqlite
-      '@flowgraph/node-demo':
-        specifier: workspace:*
-        version: link:../node-demo
-      '@flowgraph/node-port':
-        specifier: workspace:*
-        version: link:../node-port
-      '@flowgraph/node-service':
-        specifier: workspace:*
-        version: link:../node-service
-      '@flowgraph/node-workshop':
-        specifier: workspace:*
-        version: link:../node-workshop
-      '@flowgraph/node-worktree':
-        specifier: workspace:*
-        version: link:../node-worktree
-      '@flowgraph/tools-fs':
-        specifier: workspace:*
-        version: link:../tools-fs
       '@types/node':
         specifier: ^26.0.1
         version: 26.1.0

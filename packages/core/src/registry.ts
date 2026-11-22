@@ -37,6 +37,14 @@ export type NodeCapabilities = {
    * Whether this node type can access host resources (processes, local files,
    * ports, binaries, etc.). Defaults to `true` for safety: untrusted upload
    * policies allow only node types explicitly marked `hostAccess: false`.
+   *
+   * Setting `hostAccess: false` means the node type is safe for untrusted
+   * graphs only alongside the server's `blockHostExec`, `allowedFunctions`,
+   * `allowedTools`, `blockInboundWebhooks`, and `blockSubgraphFiles` guards
+   * (for example, `workshop` and `hitl` review-mode git diffs rely on
+   * `blockHostExec`, `function` relies on `allowedFunctions`, `agent` relies
+   * on `allowedTools`, `wait` relies on `blockInboundWebhooks`, and `subgraph`
+   * relies on `blockSubgraphFiles`).
    */
   hostAccess?: boolean;
 };

@@ -139,6 +139,13 @@ describe("node policy: agent tools, functions and host programs", () => {
     expect(JSON.stringify(r.interrupts)).not.toMatch(/diffStat|patch/);
   });
 
+  it("implies blockHostExec when requireSafeNodeTypes is set", async () => {
+    const safeOnly = { requireSafeNodeTypes: true };
+    const review = { id: "r", type: "hitl", with: { mode: "review", message: "look", diff: { cwd: "/" }, output: { to: "out" } } };
+    await expect(codeOf(compileGraph(graph([review]), { checkpointer: "memory", nodePolicy: safeOnly }))).resolves.toBe("HOST_EXEC_BLOCKED");
+    expect(await codeOf(() => assertNodeSpecAllowed(safeOnly, review, "inner"))).toBe("HOST_EXEC_BLOCKED");
+  });
+
   it("lists the registered tools an agent tool list refers to", () => {
     expect(registeredToolNamesOf([{ function: "a" }, { builtin: ["Read", "WebSearch"] }, { skill: "s" }, { node: "n" }])).toEqual(["a", "fs_read"]);
   });
