@@ -126,6 +126,8 @@ export default async function handler(
 
 For `kindOf: command`, the runtime spawns `command[0]` with `command.slice(1)` (no OS shell), writes the JSON-serialized input object to the child's **stdin** (closing stdin after writing), and also sets the `FLOWGRAPH_INPUT` environment variable to the same JSON string. Standard output is parsed as JSON when valid (or returned as trimmed text otherwise), then validated against `outputs` if declared.
 
+On Unix, the command runs in its own process group (`detached: true`), so a terminal `Ctrl-C` (`SIGINT`) does not reach it directly. When a run is cancelled or the skill times out, Flowgraph stops the process group (`SIGTERM`, then `SIGKILL` after the stop grace period) so child and grandchild processes exit cleanly.
+
 ## 4. Contracts & validation
 
 Each entry under `inputs` / `outputs` is a JSON Schema (draft-07) — the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as node `schema:` blocks. They are checked at three points:

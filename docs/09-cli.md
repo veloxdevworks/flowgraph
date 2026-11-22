@@ -171,9 +171,10 @@ Data-contract rewrites (applied on the YAML document so comments and layout surv
 - input `label` → `ui.label`, and input `type: text` → `type: string` with `ui: { widget: textarea }`;
 - top-level `input:` seed values → `default` on the matching `inputs` entries;
 - `function` / `script` / `shell` `with.input` → the node's `input:`;
+- `agent` / `router` `with.provider` / `with.model` → node-level `provider:` / `model:`;
 - map `{{ item.<as> }}` → `{{ <as> }}`, including inside the map body.
 
-Anything that needs a decision is left as it is and printed as a manual item: a node that has both `input` and `with.input`, a subgraph that sets both `stateMap.out` and `output`, and a map `with.output`.
+Anything that needs a decision is left as it is and printed as a manual item: a node that has both `input` and `with.input`, an `agent` / `router` that sets both node-level and `with.` `provider` or `model` to different values, a subgraph that sets both `stateMap.out` and `output`, and a map `with.output`.
 
 ## 7. Exit codes
 

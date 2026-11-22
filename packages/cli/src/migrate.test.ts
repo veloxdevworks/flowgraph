@@ -146,4 +146,131 @@ runtime:
     expect(second.changed).toBe(false);
     expect(second.output).toBe(first.output);
   });
+
+  it("moves agent and router with.provider and with.model to node level and is idempotent", () => {
+    const legacy = `apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: provider-move
+nodes:
+  - id: ask
+    type: intelligent
+    with:
+      provider: anthropic
+      model: claude-sonnet-4-6
+      prompt: hello
+  - id: route
+    type: router
+    with:
+      mode: model
+      provider: openai
+      model: gpt-4o
+      input: "{{ state.text }}"
+      routes:
+        - name: a
+          to: ask
+  - id: dup
+    type: agent
+    provider: mock
+    model: m1
+    with:
+      provider: mock
+      model: m1
+      prompt: same
+  - id: fan
+    type: map
+    with:
+      over: "{{ state.items }}"
+      node:
+        type: agent
+        with:
+          provider: mock
+          model: fast
+          prompt: "{{ item }}"
+edges:
+  - { from: START, to: route }
+  - { from: ask, to: dup }
+  - { from: dup, to: fan }
+  - { from: fan, to: END }
+`;
+
+    const first = migrateSpec(legacy);
+    expect(first.changed).toBe(true);
+    expect(first.manual).toEqual([]);
+    expect(first.notes).toEqual(
+      expect.arrayContaining([
+        "nodes.ask: with.provider → provider",
+        "nodes.ask: with.model → model",
+        "nodes.route: with.provider → provider",
+        "nodes.route: with.model → model",
+        "nodes.dup: removed duplicate with.provider (matches provider)",
+        "nodes.dup: removed duplicate with.model (matches model)",
+        "nodes.fan.with.node: with.provider → provider",
+        "nodes.fan.with.node: with.model → model",
+      ]),
+    );
+
+    const parsedDoc = parseYaml(first.output) as {
+      nodes: Array<{ id: string; provider?: string; model?: string; with?: Record<string, unknown> }>;
+    };
+    expect(parsedDoc.nodes[0]).toMatchObject({ id: "ask", provider: "anthropic", model: "claude-sonnet-4-6" });
+    expect(parsedDoc.nodes[0]?.with).not.toHaveProperty("provider");
+    expect(parsedDoc.nodes[0]?.with).not.toHaveProperty("model");
+    expect(parsedDoc.nodes[1]).toMatchObject({ id: "route", provider: "openai", model: "gpt-4o" });
+    expect(parsedDoc.nodes[1]?.with).not.toHaveProperty("provider");
+    expect(parsedDoc.nodes[1]?.with).not.toHaveProperty("model");
+    expect(parsedDoc.nodes[2]).toMatchObject({ id: "dup", provider: "mock", model: "m1" });
+    expect(parsedDoc.nodes[2]?.with).not.toHaveProperty("provider");
+    expect(parsedDoc.nodes[2]?.with).not.toHaveProperty("model");
+
+    const parsed = GraphSpecSchema.safeParse(parsedDoc);
+    expect(parsed.success, JSON.stringify(parsed.success ? null : parsed.error.issues)).toBe(true);
+
+    const second = migrateSpec(first.output);
+    expect(second.changed).toBe(false);
+    expect(second.manual).toEqual([]);
+    expect(second.output).toBe(first.output);
+  });
+
+  it("reports a manual item when node-level and with provider or model differ", () => {
+    const conflicting = `apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: provider-conflict
+nodes:
+  - id: ask
+    type: agent
+    provider: anthropic
+    model: claude-sonnet-4-6
+    with:
+      provider: openai
+      model: gpt-4o
+      prompt: hello
+  - id: route
+    type: router
+    provider: mock
+    with:
+      mode: model
+      provider: openai
+      routes:
+        - name: a
+          to: ask
+edges:
+  - { from: START, to: route }
+  - { from: ask, to: END }
+`;
+
+    const first = migrateSpec(conflicting);
+    expect(first.changed).toBe(false);
+    expect(first.output).toBe(conflicting);
+    expect(first.manual).toEqual([
+      "nodes.ask: has both provider and with.provider with different values; keep one",
+      "nodes.ask: has both model and with.model with different values; keep one",
+      "nodes.route: has both provider and with.provider with different values; keep one",
+    ]);
+
+    const second = migrateSpec(first.output);
+    expect(second.changed).toBe(false);
+    expect(second.manual).toEqual(first.manual);
+  });
 });
