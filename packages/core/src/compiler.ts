@@ -70,7 +70,7 @@ import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { sharedHistoryChannels } from "./context/shared.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { graphFile } from "./runtime/graph-files.js";
-import { barrierEdgeDiagnostics, nodeRouteTargets, nodeToolTargets, topologyDiagnostics } from "./runtime/validate-graph.js";
+import { barrierEdgeDiagnostics, nodeRouteTargets, nodeToolTargets, nodesById, topologyDiagnostics } from "./runtime/validate-graph.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
 
 /**
@@ -1615,6 +1615,7 @@ async function assembleCompiledLangGraph(
   const defaultTimeout = spec.runtime?.timeoutDefault;
 
   const mapJoinById = new Map<string, string>();
+  const routeNodes = nodesById(spec);
 
   for (const nodeSpec of spec.nodes) {
     assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
@@ -1724,7 +1725,7 @@ async function assembleCompiledLangGraph(
     // Routers (and any routing-capable node) declare Command.goto destinations via
     // `ends` so LangGraph accepts goto without requiring a duplicate branch edge.
     const recovery = recoveryTargets(spec, nodeSpec, opts.hooks);
-    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id), ...nodeToolTargets(spec, nodeSpec.id), ...recovery].map(target => target === "END" ? END : target))];
+    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id, routeNodes), ...nodeToolTargets(spec, nodeSpec.id), ...recovery].map(target => target === "END" ? END : target))];
     const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
 
     const executeNode = async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {

@@ -34,23 +34,13 @@ function isJoinBarrier(from: string | readonly string[]): from is readonly strin
   return Array.isArray(from) && from.length > 1;
 }
 
-type NodeIndex = { nodes: GraphSpec["nodes"]; length: number; byId: Map<string, NodeSpec> };
-
-const nodeIndexCache = new WeakMap<GraphSpec, NodeIndex>();
-
-/** Nodes keyed by id. Built once for a spec and reused until its node list changes. */
-function nodesById(spec: GraphSpec): Map<string, NodeSpec> {
-  const nodes = spec.nodes;
-  const length = Array.isArray(nodes) ? nodes.length : 0;
-  const cached = nodeIndexCache.get(spec);
-  if (cached && cached.nodes === nodes && cached.length === length) return cached.byId;
+/** First node for each id. A later duplicate keeps the earlier node, as `find` did. */
+export function nodesById(spec: GraphSpec): Map<string, NodeSpec> {
   const byId = new Map<string, NodeSpec>();
-  if (Array.isArray(nodes)) {
-    for (const node of nodes) {
-      if (node != null && !byId.has(node.id)) byId.set(node.id, node);
-    }
+  if (!Array.isArray(spec.nodes)) return byId;
+  for (const node of spec.nodes) {
+    if (node != null && !byId.has(node.id)) byId.set(node.id, node);
   }
-  nodeIndexCache.set(spec, { nodes, length, byId });
   return byId;
 }
 
@@ -73,8 +63,8 @@ function routeTargetsOf(node: NodeSpec | undefined): string[] {
 }
 
 /** Targets declared by a node's own `with.routes` (router or hitl); edges don't have to repeat them. */
-export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
-  return routeTargetsOf(nodesById(spec).get(id));
+export function declaredRouteTargets(spec: GraphSpec, id: string, byId?: Map<string, NodeSpec>): string[] {
+  return routeTargetsOf((byId ?? nodesById(spec)).get(id));
 }
 
 function outgoingTargets(spec: GraphSpec, from: string, byId: Map<string, NodeSpec>): string[] {
@@ -117,16 +107,17 @@ function routeTargetsFor(spec: GraphSpec, id: string, byId: Map<string, NodeSpec
   return [...new Set(targets)];
 }
 
-export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
-  return routeTargetsFor(spec, id, nodesById(spec));
+export function nodeRouteTargets(spec: GraphSpec, id: string, byId?: Map<string, NodeSpec>): string[] {
+  return routeTargetsFor(spec, id, byId ?? nodesById(spec));
 }
 
 /** Public topology includes routes that do not require duplicate static edges. */
 export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; label?: string }> {
+  const byId = nodesById(spec);
   const edges: Array<{ from: string; to: string; label?: string }> = [];
   for (const edge of spec.edges) {
     const sources = edgeFromIds(edge.from);
-    if (!Array.isArray(edge.from) && declaredRouteTargets(spec, edge.from).length) continue;
+    if (!Array.isArray(edge.from) && declaredRouteTargets(spec, edge.from, byId).length) continue;
     const barrier = isJoinBarrier(edge.from);
     if ("to" in edge) {
       for (const from of sources) for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) edges.push({ from, to, ...(barrier ? { label: "barrier" } : {}) });
@@ -145,17 +136,18 @@ export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; l
       const routes = node.type === "hitl" ? normalizeHitlRoutes(node.with?.routes) : undefined;
       for (const [label, route] of Object.entries(routes ?? {})) if (typeof route?.to === "string") { edges.push({ from: node.id, to: route.to, label }); labelled.add(route.to); }
     }
-    for (const to of nodeRouteTargets(spec, node.id)) if (!labelled.has(to)) edges.push({ from: node.id, to, label: "route" });
+    for (const to of nodeRouteTargets(spec, node.id, byId)) if (!labelled.has(to)) edges.push({ from: node.id, to, label: "route" });
   }
   return [...new Map(edges.map((edge) => [`${edge.from}:${edge.to}:${edge.label ?? ""}`, edge])).values()];
 }
 
 export function topologyDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const byId = nodesById(spec);
   const nodes = recordNodes(spec.nodes);
   const ids = new Set(["START", "END", ...nodes.map((n) => n.id)]);
-  const diagnostics = reachabilityDiagnostics(spec);
+  const diagnostics = reachabilityDiagnostics(spec, byId);
   for (const node of nodes) {
-    for (const target of [...nodeRouteTargets(spec, node.id), ...nodeToolTargets(spec, node.id)]) {
+    for (const target of [...nodeRouteTargets(spec, node.id, byId), ...nodeToolTargets(spec, node.id)]) {
       if (!ids.has(target)) diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Node "${node.id}" references unknown target "${target}"`, path: `nodes.${node.id}` });
     }
   }
@@ -182,8 +174,7 @@ function incomingSources(spec: GraphSpec, to: string, byId: Map<string, NodeSpec
 }
 
 /** Nodes reachable from START by following edges (excluding END). */
-export function nodesReachableFromStart(spec: GraphSpec): Set<string> {
-  const byId = nodesById(spec);
+export function nodesReachableFromStart(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
   const reachable = new Set<string>();
   const queue = outgoingTargets(spec, "START", byId).filter((t) => t !== "END");
 
@@ -199,8 +190,7 @@ export function nodesReachableFromStart(spec: GraphSpec): Set<string> {
 }
 
 /** Nodes that can eventually reach END. */
-export function nodesThatReachEnd(spec: GraphSpec): Set<string> {
-  const byId = nodesById(spec);
+export function nodesThatReachEnd(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
   const canReach = new Set<string>();
   const queue: string[] = [];
 
@@ -221,10 +211,10 @@ export function nodesThatReachEnd(spec: GraphSpec): Set<string> {
   return canReach;
 }
 
-export function reachabilityDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec)): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
-  const fromStart = nodesReachableFromStart(spec);
-  const toEnd = nodesThatReachEnd(spec);
+  const fromStart = nodesReachableFromStart(spec, byId);
+  const toEnd = nodesThatReachEnd(spec, byId);
   const nodes = recordNodes(spec.nodes);
   const tools = new Set(nodes.flatMap((node) => nodeToolTargets(spec, node.id)));
 
@@ -520,9 +510,10 @@ export function nodeChannelNameCollisionDiagnostics(spec: GraphSpec): Diagnostic
 
 export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
+  const byId = nodesById(spec);
   const routerIds = new Set(
     spec.nodes
-      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id).length > 0))
+      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id, byId).length > 0))
       .map((n) => n.id),
   );
 
@@ -1109,9 +1100,10 @@ export function placementAdjacentHopDiagnostics(spec: GraphSpec): Diagnostic[] {
  * Matches `declaresRoutes` in the compiler.
  */
 function routeDeclaringIds(spec: GraphSpec): Set<string> {
+  const byId = nodesById(spec);
   return new Set(
     recordNodes(spec.nodes)
-      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id).length > 0))
+      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id, byId).length > 0))
       .map((n) => n.id),
   );
 }
@@ -1682,8 +1674,9 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
     for (const target of edgeTargets(edge)) allTargets.add(target);
   }
   // A router's or routing hitl's own `with.routes` also lead somewhere.
+  const byId = nodesById(spec);
   for (const node of nodes) {
-    const routeTargets = declaredRouteTargets(spec, node.id);
+    const routeTargets = declaredRouteTargets(spec, node.id, byId);
     for (const t of routeTargets) allTargets.add(t);
     if (routeTargets.includes("START")) {
       push({ severity: "error", code: "ROUTE_TO_START", path: `nodes.${node.id}.with.routes`, message: `${node.type === "hitl" ? "Hitl" : "Router"} "${node.id}" has a route to "START". Route to the first node instead.` });
