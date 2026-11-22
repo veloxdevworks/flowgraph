@@ -8,7 +8,7 @@ This doc covers what happens when a compiled graph runs: compilation handoff, ch
 
 ```ts
 const result = await runGraph(compiled, {
-  input: { issue },             // initial state (graph `input:` merged under it, validated against `inputs:`)
+  input: { issue },             // initial state, validated against `inputs:` (defaults applied, unknown keys rejected)
   threadId: "issue-123",        // checkpoint/resume key; omitted = a new thread for this run only
   config: { /* per-run overrides */ },
   signal,                       // AbortSignal → run.aborted

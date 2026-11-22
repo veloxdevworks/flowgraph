@@ -210,7 +210,7 @@ describe("subgraph agents and forged replay entries", () => {
           type: "map",
           with: {
             over: "{{ state.items }}",
-            node: { type: "agent", provider: "llm", with: { prompt: "{{ item.item }}", permission: "ask", tools: [{ function: "list_services" }] } },
+            node: { type: "agent", provider: "llm", with: { prompt: "{{ item }}", permission: "ask", tools: [{ function: "list_services" }] } },
             collect: { to: "got" },
           },
         },
@@ -344,7 +344,7 @@ describe("__ keys never enter graph state", () => {
   it("map results never land on a __ channel in a trusted graph", async () => {
     const checkpointer = new MemorySaver();
     const compiled = await compileGraph(
-      mapSpec({ type: "function", with: { fn: "echoItem", input: { v: "{{ item.it }}" } } }, { to: "got", map: { __worktrees: "{{ result }}" } }),
+      mapSpec({ type: "function", with: { fn: "echoItem" }, input: { v: "{{ it }}" } }, { to: "got", map: { __worktrees: "{{ result }}" } }),
       { checkpointer },
     );
     const threadId = `map-${randomUUID()}`;
@@ -357,7 +357,7 @@ describe("__ keys never enter graph state", () => {
   });
 
   it("a map inner node's input loses __ keys, and is refused under a policy", async () => {
-    const inner = { type: "function", input: { v: "{{ item.it }}", __agentReplay: "planted" }, with: { fn: "nodeInput" } };
+    const inner = { type: "function", input: { v: "{{ it }}", __agentReplay: "planted" }, with: { fn: "nodeInput" } };
     const compiled = await compileGraph(mapSpec(inner, { to: "got" }));
     const res = await compiled.run({ input: { items: ["a"] } });
     expect(res.status).toBe("completed");

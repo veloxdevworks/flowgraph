@@ -86,8 +86,8 @@ it.each(["shell", "script", "http"])(
       node = {
         type,
         with: {
-          code: "export default async function(input) { return {echo:input.value}; }",
-          input: { value: "{{ secret.FGQA_R2_KEY }}" },
+          code: "export default async function() { return {echo:process.env.FGQA_VALUE}; }",
+          env: { FGQA_VALUE: "{{ secret.FGQA_R2_KEY }}" },
         },
       };
     const saver = new MemorySaver();
@@ -170,8 +170,8 @@ it("short secret values do not rewrite unrelated business text", async () => {
     spec({
       type: "script",
       with: {
-        code: "export default async input => ({value:input.secret,msg:'configuration done on 10 items'});",
-        input: { secret: "{{ secret.FGQA_R2_SHORT }}" },
+        code: "export default async () => ({value:process.env.FGQA_SECRET,msg:'configuration done on 10 items'});",
+        env: { FGQA_SECRET: "{{ secret.FGQA_R2_SHORT }}" },
       },
     }),
     { cwd: await dir() },

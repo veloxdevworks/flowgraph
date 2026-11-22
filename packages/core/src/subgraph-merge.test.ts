@@ -82,7 +82,6 @@ function childLogSpec(): GraphSpec {
         type: "function",
         with: {
           fn: "subgraphMergeStamp",
-          input: { log: "{{ state.log }}", item: "child" },
           output: {
             map: {
               log: "{{ result.log }}",
@@ -90,7 +89,7 @@ function childLogSpec(): GraphSpec {
               childOnly: "{{ result.childOnly }}",
             },
           },
-        },
+        }, input: { log: "{{ state.log }}", item: "child" },
       },
     ],
     edges: [
@@ -285,20 +284,19 @@ describe("subgraph merge-back", () => {
             type: "function",
             with: {
               fn: "subgraphMergeEcho",
-              input: {
-                tags: "{{ state.tags }}",
-                tag,
-                base,
-                extraKey,
-                extraVal,
-              },
               output: {
                 map: {
                   tags: "{{ result.tags }}",
                   bag: "{{ result.bag }}",
                 },
               },
-            },
+            }, input: {
+                tags: "{{ state.tags }}",
+                tag,
+                base,
+                extraKey,
+                extraVal,
+              },
           },
         ],
         edges: [
@@ -370,9 +368,8 @@ describe("subgraph merge-back", () => {
                     type: "function",
                     with: {
                       fn: "subgraphMergeSquare",
-                      input: { n: "{{ state.n }}" },
                       output: { map: { squared: "{{ result.squared }}" } },
-                    },
+                    }, input: { n: "{{ state.n }}" },
                   },
                 ],
                 edges: [
@@ -381,7 +378,7 @@ describe("subgraph merge-back", () => {
                 ],
                 runtime: { checkpoint: { enabled: false } },
               },
-              with: { stateMap: { in: { n: "{{ item.n }}" } } },
+              with: { stateMap: { in: { n: "{{ n }}" } } },
             },
             collect: { to: "squares" },
           },
@@ -417,9 +414,8 @@ describe("subgraph merge-back", () => {
           type: "function",
           with: {
             fn: "subgraphMergeStamp",
-            input: { log: "{{ state.log }}", item: "before" },
             output: { map: { log: "{{ result.log }}" } },
-          },
+          }, input: { log: "{{ state.log }}", item: "before" },
         },
         {
           id: "gate",
@@ -431,9 +427,8 @@ describe("subgraph merge-back", () => {
           type: "function",
           with: {
             fn: "subgraphMergeStamp",
-            input: { log: "{{ state.log }}", item: "after" },
             output: { map: { log: "{{ result.log }}" } },
-          },
+          }, input: { log: "{{ state.log }}", item: "after" },
         },
       ],
       edges: [
@@ -501,9 +496,8 @@ describe("subgraph merge regressions", () => {
           type: "function",
           with: {
             fn: "subgraphMergeKeepDraft",
-            input: { draft: "{{ state.draft }}" },
             output: { map: { draft: "{{ result.draft }}" } },
-          },
+          }, input: { draft: "{{ state.draft }}" },
         },
       ],
       edges: [
@@ -560,9 +554,8 @@ describe("subgraph merge regressions", () => {
           type: "function",
           with: {
             fn: "subgraphMergeEditMessages",
-            input: { messages: "{{ state.messages }}" },
             output: { map: { messages: "{{ result.messages }}" } },
-          },
+          }, input: { messages: "{{ state.messages }}" },
         },
       ],
       edges: [
@@ -654,9 +647,8 @@ describe("subgraph message channel types", () => {
           type: "function",
           with: {
             fn: "subgraphMergeReply",
-            input: { id: "m9" },
             output: { map: { messages: "{{ result.messages }}" } },
-          },
+          }, input: { id: "m9" },
         },
       ],
       edges: [

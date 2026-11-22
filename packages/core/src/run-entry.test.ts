@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
-import { resolveGraphInput } from "./inputs.js";
+import { decodeCliInput, resolveGraphInput } from "./inputs.js";
 import { createScriptedProvider } from "./providers/index.js";
 import type { FlowgraphEvent } from "./events.js";
 
@@ -36,7 +36,7 @@ registerFunction("runEntryEcho", (input) => input);
 registerFunction("runEntryLog", (input) => [(input as { tag: string }).tag]);
 
 describe("each start without a thread id is its own run", () => {
-  const logGraph = () => graph([{ id: "a", type: "function", with: { fn: "runEntryLog", input: { tag: "{{ state.tag }}" }, output: { to: "log" } } }], {
+  const logGraph = () => graph([{ id: "a", type: "function", with: { fn: "runEntryLog", output: { to: "log" } }, input: { tag: "{{ state.tag }}" } }], {
     state: { channels: { tag: { type: "string" }, log: { type: "array", reducer: "append", default: [] } } },
   });
 
@@ -152,14 +152,14 @@ describe("each start without a thread id is its own run", () => {
 });
 
 describe("compiled.run() resolves graph inputs like the CLI and server", () => {
-  const inputsGraph = () => graph([{ id: "a", type: "function", with: { fn: "runEntryEcho", input: { all: "{{ state }}" }, output: { to: "got" } } }], {
+  const inputsGraph = () => graph([{ id: "a", type: "function", with: { fn: "runEntryEcho", output: { to: "got" } }, input: { all: "{{ state }}" } }], {
     state: { channels: { got: { type: "object" }, name: { type: "string" }, greeting: { type: "string" }, count: { type: "number" }, seed: { type: "string" } } },
     inputs: [
       { key: "name", required: true },
       { key: "greeting", default: "hey" },
       { key: "count", type: "number" },
+      { key: "seed", default: "from-graph" },
     ],
-    input: { seed: "from-graph" },
   });
 
   it("rejects a missing required input with INPUT_INVALID before anything runs", async () => {
@@ -171,9 +171,9 @@ describe("compiled.run() resolves graph inputs like the CLI and server", () => {
     expect(events.filter((e) => e.type === "run.start")).toHaveLength(0);
   });
 
-  it("applies defaults, coerces values and seeds the graph's input", async () => {
+  it("applies defaults and seeds declared inputs as they are", async () => {
     const compiled = await compileGraph(inputsGraph(), { workspace: workspace() });
-    const r = await compiled.run({ input: { name: "Ada", count: "3" } });
+    const r = await compiled.run({ input: { name: "Ada", count: 3 } });
     expect(r.status).toBe("completed");
     expect(r.state.got).toMatchObject({ all: { name: "Ada", greeting: "hey", count: 3, seed: "from-graph" } });
   });
@@ -209,10 +209,25 @@ describe("a node's input is the payload its handler receives", () => {
     expect(r.state.got).toEqual({ x: "hello", who: { k: 1 } });
   });
 
-  it("lets with.input replace the node input and read it", async () => {
-    const spec = graph([{ id: "a", type: "function", input: { x: "hello" }, with: { fn: "runEntryEcho", input: { y: "{{ input.x }}!" }, output: { to: "got" } } }]);
-    const r = await (await compileGraph(spec, { workspace: workspace() })).run();
-    expect(r.state.got).toEqual({ y: "hello!" });
+  it("refuses with.input: the node's own input is the only path", async () => {
+    const spec = graph([{ id: "a", type: "function", with: { fn: "runEntryEcho", input: { y: "x" }, output: { to: "got" } } }]);
+    await expect(compileGraph(spec, { workspace: workspace() })).rejects.toThrow(/with\.input was removed/);
+  });
+
+  it("passes any value as the node input, rendering templates at every depth", async () => {
+    for (const [input, expected] of [
+      [["{{ state.n }}", { deep: ["{{ state.n }}"] }], [7, { deep: [7] }]],
+      ["{{ state.n }}", 7],
+      [3, 3],
+      [false, false],
+    ] as Array<[unknown, unknown]>) {
+      const spec = graph([{ id: "a", type: "function", input, with: { fn: "runEntryEcho", output: { to: "got" } } }], {
+        state: { channels: { n: { type: "number" }, got: { type: "any" } } },
+      });
+      const r = await (await compileGraph(spec, { workspace: workspace() })).run({ input: { n: 7 } });
+      expect(r.status, JSON.stringify(input)).toBe("completed");
+      expect(r.state.got).toEqual(expected);
+    }
   });
 
   it("passes node-level input to a shell command as FLOWGRAPH_INPUT", async () => {
@@ -275,27 +290,37 @@ describe("a generated thread keeps its run id after a pause", () => {
 });
 
 describe("graph inputs are resolved once", () => {
-  const jsonGraph = () => graph([{ id: "a", type: "function", with: { fn: "runEntryEcho", input: { cfg: "{{ state.cfg }}" }, output: { to: "got" } } }], {
+  const jsonGraph = () => graph([{ id: "a", type: "function", with: { fn: "runEntryEcho", output: { to: "got" } }, input: { cfg: "{{ state.cfg }}" } }], {
     state: { channels: { got: { type: "object" }, cfg: { type: "any" } } },
     inputs: [{ key: "cfg", type: "json" }],
+  });
+
+  it.each([42, true, { a: 1 }, "42", null])("passes the json input %j through as it is, resolved or not", async (value) => {
+    const compiled = await compileGraph(jsonGraph(), { workspace: workspace() });
+    const direct = await compiled.run({ input: { cfg: value } });
+    expect(direct.status).toBe("completed");
+    expect(direct.state.cfg).toEqual(value);
+    const resolved = resolveGraphInput(compiled.spec, { cfg: value });
+    expect(resolved).toEqual({ cfg: value });
+    expect(resolveGraphInput(compiled.spec, resolved)).toEqual(resolved);
+    const preResolved = await compiled.run({ input: resolved });
+    expect(preResolved.state.cfg).toEqual(value);
   });
 
   it.each([
     ["42", 42],
     ["true", true],
     ['{"a":1}', { a: 1 }],
-  ])("accepts a json input %s whether or not the caller resolved it first", async (raw, value) => {
+  ])("decodes CLI text %s once, by the declared type", async (text, value) => {
     const compiled = await compileGraph(jsonGraph(), { workspace: workspace() });
-    const direct = await compiled.run({ input: { cfg: raw } });
-    expect(direct.status).toBe("completed");
-    expect(direct.state.cfg).toEqual(value);
-    const preResolved = await compiled.run({ input: resolveGraphInput(compiled.spec, { cfg: raw }) });
-    expect(preResolved.status).toBe("completed");
-    expect(preResolved.state.cfg).toEqual(value);
+    const decoded = decodeCliInput(compiled.spec, { cfg: text });
+    expect(decoded).toEqual({ cfg: value });
+    const r = await compiled.run({ input: decoded });
+    expect(r.state.cfg).toEqual(value);
   });
 
-  it("still rejects JSON text that does not parse", async () => {
+  it("rejects CLI text that is not JSON for a json input", async () => {
     const compiled = await compileGraph(jsonGraph(), { workspace: workspace() });
-    await expect(compiled.run({ input: { cfg: "{nope" } })).rejects.toMatchObject({ code: "INPUT_INVALID" });
+    expect(() => decodeCliInput(compiled.spec, { cfg: "{nope" })).toThrowError(expect.objectContaining({ code: "INPUT_INVALID" }));
   });
 });

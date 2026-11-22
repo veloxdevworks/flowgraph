@@ -14,8 +14,8 @@ nodes:
     type: function
     with:
       fn: square
-      input: { n: "{{ state.n }}" }
       output: { to: squared }
+    input: { n: "{{ state.n }}" }
 
 edges:
   - { from: START, to: sq }

@@ -57,8 +57,8 @@ state:
     mid: { type: object }
     out: { type: object }
 nodes:
-  - { id: a, type: function, with: { fn: pdAdd, input: { n: "{{ state.seed }}" }, output: { to: mid } } }
-  - { id: b, type: function, with: { fn: pdAdd, input: { n: "10" }, output: { to: out } } }
+  - { id: a, type: function, input: { n: "{{ state.seed }}" }, with: { fn: pdAdd, output: { to: mid } } }
+  - { id: b, type: function, input: { n: "10" }, with: { fn: pdAdd, output: { to: out } } }
 edges: [ { from: START, to: a }, { from: a, to: b }, { from: b, to: END } ]
 `);
 

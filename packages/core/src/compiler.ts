@@ -17,7 +17,7 @@ import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
 import { evalGuard, guardExpression, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
-import { resolveGraphInput } from "./inputs.js";
+import { InputValidationError, resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
 import { SecretRedaction, SECRET_REDACTION, observeSecret, redactSecrets, withSecretRedaction } from "./runtime/secret-redaction.js";
 import { expandedConfigEnvValues, unexpandedEnvDiagnostics } from "./runtime/config-env.js";
@@ -830,14 +830,19 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
           run: runMeta,
           payload: { input: current as Record<string, unknown> },
         });
-        if (r.payload.input) current = r.payload.input;
+        if (r.payload.input) current = r.payload.input as Record<string, unknown>;
         // A run:before hook's replacement input is run input too.
         assertNoReservedInput(current, `graph "${graphSpec.metadata.name}" run (after run:before hooks)`);
       }
 
       if (mode === "start" && current && !(current instanceof Command)) {
         const unknown = Object.keys(current).filter(key => !declaredInputKeys.has(key));
-        if (unknown.length) (baseCtx as RunContext).logger.warn(`INPUT_UNKNOWN_KEY: undeclared input key(s) ${unknown.map(key=>JSON.stringify(key)).join(", ")} will not be persisted. Declare them in inputs or state.channels.`, {code:"INPUT_UNKNOWN_KEY",keys:unknown});
+        if (unknown.length) {
+          throw new InputValidationError(
+            unknown.map((key) => `unknown input ${JSON.stringify(key)}: declare it in inputs or state.channels`),
+            Object.fromEntries(unknown.map((key) => [key, "unknown input"])),
+          );
+        }
       }
       if (checkpointer && (mode === "start" || binding.needsBinding)) {
         const update = { [WORKSPACE_CHANNEL]: binding.root, [WORKSPACE_NODES_CHANNEL]: declarations };
@@ -1688,7 +1693,7 @@ async function assembleCompiledLangGraph(
     const receivesTimeoutSignal = stopsOnTimeout || compiled.capabilities?.receivesTimeoutSignal === true;
     const runOnce = (
       state: Record<string, unknown>,
-      inputOverride?: Record<string, unknown>,
+      inputOverride?: unknown,
       lgConfig?: LangGraphRunnableConfig,
       attemptBase = 0,
     ): Promise<NodeRun> =>
@@ -1738,8 +1743,8 @@ async function assembleCompiledLangGraph(
         lgInterrupt({ reason: "paused", __flowgraphPause: true, ...(data !== undefined ? { data } : {}) });
       }
 
-      const renderedInput = nsRecord["input"]
-        ? (renderDeep(nsRecord["input"] as Record<string, string>, { state, config: baseCtx.config, run: runMeta }) as Record<string, unknown>)
+      const renderedInput = nsRecord["input"] !== undefined
+        ? renderDeep(nsRecord["input"], { state, config: baseCtx.config, run: runMeta })
         : {};
       // `when` guard — same scope and brace rule as branch edges and router rules
       if (nodeSpec.when) {
@@ -1751,12 +1756,9 @@ async function assembleCompiledLangGraph(
       }
 
       // node:before — mutate input / veto / route / interrupt
-      let inputOverride: Record<string, unknown> | undefined;
+      let inputOverride: unknown;
       if (hooks.has("node:before")) {
-        const rendered = nsRecord["input"]
-          ? (renderDeep(nsRecord["input"] as Record<string, string>, { state, config: baseCtx.config, run: runMeta }) as Record<string, unknown>)
-          : {};
-        const r = await hooks.run("node:before", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, input: rendered } });
+        const r = await hooks.run("node:before", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, input: renderedInput } });
         const c = r.control;
         if (c?.kind === "veto") {
           events.emit("node.skipped", { nodeId: nodeSpec.id, reason: c.reason }, scope);
@@ -1770,7 +1772,7 @@ async function assembleCompiledLangGraph(
             : c.payload;
           lgInterrupt({ reason: c.reason, data: withReplayData(data, runScopeOf(lgConfig), nodeSpec.id) });
         }
-        inputOverride = r.payload.input as Record<string, unknown> | undefined;
+        inputOverride = r.payload.input;
       }
 
       // A placed node's events say where it ran (ADR-0020): the planned child before it starts,
@@ -2760,7 +2762,7 @@ function buildNodeCtx(
   events: EventBus,
   workspace: string,
   attempt: number,
-  inputOverride?: Record<string, unknown>,
+  inputOverride?: unknown,
   lgConfig?: LangGraphRunnableConfig,
   usePinnedWorkspace = true,
   timeout?: string,
@@ -2773,10 +2775,8 @@ function buildNodeCtx(
   // Rendered `input` and node:before replacements alike lose `__` keys.
   const _input = withoutReservedKeys(
     inputOverride
-      ?? (nodeSpec["input"]
-        ? (renderDeep(nodeSpec["input"] as Record<string, string>, scope) as Record<string, unknown>)
-        : {}),
-  );
+      ?? (nodeSpec["input"] !== undefined ? renderDeep(nodeSpec["input"], scope) : {}),
+  ) as Record<string, unknown>;
 
   const nodeId = String(nodeSpec["id"]);
   const nodeType = String(nodeSpec["type"]);

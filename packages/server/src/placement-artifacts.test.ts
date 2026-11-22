@@ -89,7 +89,7 @@ nodes:
           input: { type: object }
           made: { type: object }
       nodes:
-        - { id: up, type: function, with: { fn: paUpper, input: { doc: "{{ state.input }}" }, output: { to: made } } }
+        - { id: up, type: function, input: { doc: "{{ state.input }}" }, with: { fn: paUpper, output: { to: made } } }
       edges: [ { from: START, to: up }, { from: up, to: END } ]
     with:
       stateMap:
@@ -111,7 +111,7 @@ nodes:
     type: function
     runsOn: [app:test]
     input: { doc: "{{ state.doc }}" }
-    with: { fn: paUpper, input: { doc: "{{ input.doc }}" }, output: { to: made } }
+    with: { fn: paUpper, output: { to: made } }
 edges: [ { from: START, to: up }, { from: up, to: END } ]
 `);
 

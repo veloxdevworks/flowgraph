@@ -17,8 +17,8 @@ imports: [ ... ]            # optional — reusable subgraphs/skills/node packag
 config: { ... }             # optional — graph-level config/defaults
 secrets: [ ... ]            # optional — host environment variables the graph may read
 state: { ... }              # optional — channel (state) definitions
-inputs: [ ... ]             # optional — typed run parameters (collected before start)
-input: { ... }              # optional — default seed values for a run
+inputs: [ ... ]             # optional — typed run parameters with defaults (collected before start)
+outputs: [ ... ]            # optional — values a subgraph file returns to its caller
 nodes: [ ... ]              # required — the node list
 edges: [ ... ]              # required — static + conditional edges
 runtime: { ... }            # optional — checkpoint/retry/hook defaults
@@ -91,44 +91,64 @@ Hosts typically guard against a graph triggering itself via `flow-complete` / `f
 
 Declare typed parameters that must be supplied **before** a run starts. These are distinct from mid-run `hitl` interrupts: they do not create a checkpoint, do not pause a thread, and work for headless/CLI/webhook triggers.
 
+`inputs` is the one input contract. It holds each parameter's type, default and requirement. Presentation hints for forms live apart, under `ui`.
+
 ```yaml
 inputs:
   - key: prospectName
-    label: Prospect Name
-    type: string          # string | text | number | boolean | select | json
+    type: string          # string | number | boolean | select | json
     required: true
+    ui: { label: Prospect Name }
   - key: prospectDescription
-    label: Description
-    type: text
-    description: "What the prospect does / why they matter"
-  - key: jiraTicketId
-    label: Jira Ticket ID
     type: string
-    required: true
+    description: "What the prospect does / why they matter"
+    ui: { label: Description, widget: textarea }
   - key: priority
     type: select
     options: [low, medium, high]
     default: medium
+  - key: filters
+    type: json
+    schema: { type: object, properties: { limit: { type: integer } } }
+    default: { limit: 10 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `key` | Written into the initial run input / state under this name. Required, and unique among the graph's `inputs`. |
-| `label` | Human-readable name for forms and CLI errors. |
-| `type` | `string` (single-line), `text` (multi-line), `number`, `boolean`, `select`, or `json` (any JSON value). Default: `string`. |
-| `required` | When `true`, the run fails fast if the value is missing and no `default` is set. |
-| `default` | Applied when the caller omits the key. Must have the field's type: a string for `string`/`text`, a number, `true`/`false`, one of `options` for `select`, and for `json` any YAML value, or a string that is JSON text. |
+| `key` | Written into the initial run state under this name. Required, and unique among the graph's `inputs`. A declared key is also a state channel, so it does not need a second declaration in `state.channels`. |
+| `type` | `string`, `number`, `boolean`, `select`, or `json` (any JSON value). Default: `string`. |
+| `required` | When `true`, the run fails fast if the value is missing and no `default` is set. An empty string counts as missing for a required `string`. |
+| `default` | Applied when the caller leaves the key out. Must have the field's type: a string, a number, `true`/`false`, one of `options` for `select`, and any YAML value for `json`. Every run gets its own copy. |
 | `options` | Required for `type: select` — allowed string values. |
-| `description` | Optional help text for UIs. |
+| `schema` | `type: json` only — a draft-07 JSON Schema the value must match. |
+| `description` | Help text for forms and CLI errors. |
+| `ui` | Presentation hints only: `label`, `placeholder`, `help` and `widget` (`text`, `textarea`, `password`, `select`, `radio`, `checkbox`). Hints never change which values are valid. |
 
-`flowgraph validate` checks the declarations themselves (`compileGraph` does not): a repeated `key` is `DUPLICATE_INPUT_KEY`, a `select` without `options` is `INPUT_OPTIONS_MISSING`, and a `default` of the wrong type is `INPUT_DEFAULT_TYPE`. The run-time coercion below still applies to the values a caller passes.
+`flowgraph validate` checks the declarations themselves (`compileGraph` does not): a repeated `key` is `DUPLICATE_INPUT_KEY`, a `select` without `options` is `INPUT_OPTIONS_MISSING`, and a `default` that does not match the field's type or `schema` is `INPUT_DEFAULT_TYPE`.
 
 **Runtime behavior:**
 
-- CLI: `flowgraph run … --input prospectName=Acme --input jiraTicketId=PROJ-1`. Missing required keys exit `1` with a list of issues (no interactive prompt).
-- Programmatic / desktop: values are passed as `run({ input: { … } })` and validated against `inputs` inside `compiled.run()`, `compiled.stream()` and `compiled.prepare({ mode: "start" })`. A missing required key or a value of the wrong type rejects with `InputValidationError` (code `INPUT_INVALID`) before anything runs.
-- Every entry point resolves input the same way (`resolveGraphInput(spec, provided)`): the graph's `input:` seed values, overlaid by the caller's values, then `inputs` defaults, coercion and required checks. The CLI and the server use the same function.
-- Graphs without an `inputs` array keep the previous free-form `input:` / `--input` behavior (no validation); the graph's `input:` values are still merged under the caller's.
+- A value is checked as it is given. Nothing is coerced, so a string `"5"` is not a number input, and checking a value twice gives the same answer. `null` is a value that is checked like any other; only an omitted key (or `undefined`) is missing.
+- A key the graph does not declare, as an input or a state channel, is rejected with `INPUT_INVALID` (`unknown input "x"`). It is no longer dropped with a warning.
+- CLI: `flowgraph run … --input prospectName=Acme --input filters='{"limit":5}'`. The text after `=` is decoded once, by the declared type: `number` and `boolean` are parsed, `json` is JSON text, and `string` and `select` are kept as written. `key=@file.json` supplies a JSON file's value as it is. Missing required keys exit `1` with a list of issues (no interactive prompt).
+- Programmatic / desktop / server: values are passed as `run({ input: { … } })` and are already typed, so they pass through unchanged. They are validated against `inputs` inside `compiled.run()`, `compiled.stream()` and `compiled.prepare({ mode: "start" })`. A missing required key, a wrong-type value or an unknown key rejects with `InputValidationError` (code `INPUT_INVALID`) before anything runs.
+- Every entry point resolves input the same way (`resolveGraphInput(spec, provided)`): the caller's values, then `inputs` defaults, then type and required checks. The CLI and the server use the same function.
+- Graphs without an `inputs` array accept only keys that are declared in `state.channels`.
+
+## 2c. `outputs` (what a subgraph file returns)
+
+A graph that is called as a subgraph declares what it returns, the same way it declares what it takes in.
+
+```yaml
+outputs:
+  - key: summary                 # a channel of this graph
+    schema: { type: string, minLength: 1 }
+  - key: tags
+    type: array
+    required: false              # default true: the channel must hold a value (not null)
+```
+
+The declared `inputs` and `outputs` are the call interface: a parent can pass only the declared `inputs` (or channels the child declares), and read only the declared `outputs`. They are checked at the call boundary, see [05](./05-state-and-data.md#subgraph-call-boundary). A top-level run does not check `outputs`.
 
 Do **not** use a leading `hitl` node for call parameters — reserve HITL for mid-run approvals and clarifying questions that depend on something computed during execution.
 
@@ -176,7 +196,14 @@ state:
       reducer: append             # how concurrent/iterative writes merge
     messages:
       type: messages              # special channel using LangGraph's message reducer
+    findingList:
+      type: array
+      schema:                     # optional draft-07 contract, checked on every write
+        type: array
+        items: { type: object, required: [title], properties: { title: { type: string } } }
 ```
+
+`type` is shorthand for a schema with just that type. `schema` adds a draft-07 JSON Schema that every write to the channel must satisfy; a write that does not throws `ChannelWriteError` (code `CHANNEL_WRITE_INVALID`). The channel `items` and `properties` fields were removed in favour of `schema`; `flowgraph migrate` rewrites them. See [05 — Channel contracts](./05-state-and-data.md#channel-contracts).
 
 If `state` is omitted, a default single `messages` channel is assumed (chat-style graph).
 
@@ -395,9 +422,9 @@ nodes:
 | `{ to: X }` and/or `{ map: {…} }` | Apply those projections **and** still write `state.outputs.<nodeId>` |
 | `{ to: X }` and/or `{ map: {…} }` with `raw: false` | Apply only those projections; `state.outputs.<nodeId>` is not written |
 
-- `input:` builds an `input` object available to the node's `with` expressions as `{{ input.* }}`. It is also the payload the node executes with: a skill gets it as its declared inputs, a `function` handler and a `script` get it as their argument, and a `shell` command gets it as `FLOWGRAPH_INPUT` and stdin. For `function`, `script` and `shell`, an explicit `with.input` replaces it (and can read it through `{{ input.* }}`).
+- `input:` is the node's one input path. It accepts any value (an object, a string, a list, a number or `null`), and every `{{ … }}` template inside it is rendered, at any depth. The rendered value is available to the node's `with` expressions as `{{ input }}` (`{{ input.name }}` when it is an object), and it is the payload the node executes with: a skill gets it as its declared inputs, a `function` handler and a `script` get it as their argument, and a `shell` command gets it as `FLOWGRAPH_INPUT` and stdin. `input` and `when` render without `secret` in scope; `flowgraph validate` reports `{{ secret.X }}` there as `SECRET_OUT_OF_SCOPE`, so read secrets in `with`. `with.input` was removed from `function`, `script` and `shell`; `flowgraph migrate` moves it to `input:`. When a node is exposed as a tool, the model's arguments are its input and the node's own `input:` is not used.
 - `to` / `map` are optional overrides for shared/typed/reducer-backed channels (e.g. parallel fan-in into one `append` channel) or field projection.
-- **Exception — `subgraph`:** when `output` and `stateMap.out` are both omitted, channels that **share a name** merge back and the parent's reducer combines only the child's new values. Use `output: none` to write nothing, `output.to` / `output.map` for a normal node projection, or `stateMap.out` (`parentChannel: childChannel`) for an explicit mapping. See [05 — Subgraph merge-back](./05-state-and-data.md#subgraph-merge-back).
+- **Exception — `subgraph`:** when `output` and `stateMap.out` are both omitted, channels that **share a name** merge back and the parent's reducer combines only the child's new values. Use `output: none` to write nothing, `output.to` / `output.map` for a normal node projection, or `stateMap.out` (`parentChannel: childChannel`) for an explicit mapping. `stateMap.out` and `output` are alternatives: a node that sets both is rejected. See [05 — Subgraph merge-back](./05-state-and-data.md#subgraph-merge-back).
 - `raw: false` keeps large or sensitive results out of state and checkpoints while still passing on the fields you project. It needs `to` or `map`; to write nothing, use `output: none`. Anything that reads `state.outputs.<nodeId>` (for example a gate's `round`) then sees no previous value.
 - `none` cannot be combined with `to` / `map`, and a `none` key inside an output object is not supported, whatever its value (for example `{ none: true }`); write `output: none`.
 - Prefer not to declare your own `outputs` channel. If you do, its declared reducer is used as written (for example `mergeDeep` to deep-merge successive results).

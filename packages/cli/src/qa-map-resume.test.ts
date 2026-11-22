@@ -48,7 +48,7 @@ describe("checkpointed maps across CLI processes", () => {
               concurrency: 1,
               node: {
                 type: "function",
-                with: { fn: "qaDurableMap", input: { n: "{{ item.n }}" } },
+                with: { fn: "qaDurableMap" }, input: { n: "{{ n }}" },
               },
               collect: { to: "results" },
             },

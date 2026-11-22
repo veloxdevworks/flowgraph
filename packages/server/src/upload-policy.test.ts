@@ -250,6 +250,7 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
       apiVersion: flowgraph/v1
       kind: Graph
       metadata: { name: child }
+      state: { channels: { x: { type: any } } }
       nodes:
         - { id: w, type: wait, with: { deadline: "1ms" } }
       edges:
@@ -262,7 +263,7 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
     type: map
     with:
       over: "{{ state.out }}"
-      node: { type: hitl, input: { __services: "{{ item.item }}" }, with: { mode: approve, message: "ok?" } }`;
+      node: { type: hitl, input: { __services: "{{ item }}" }, with: { mode: approve, message: "ok?" } }`;
     expect(codesOf(graph(mapInner))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.map.?.input.__services"]);
     const nested = `  - id: a
     type: subgraph
@@ -294,7 +295,9 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
     expect(codesOf(graph(`  - { id: a, type: hitl, with: { mode: approve, message: "ok?", output: { to: __future } } }`).replace("out: { type: string }", "__future: { type: string }"))).toContain(
       "UPLOAD_RESERVED_CHANNEL_BLOCKED nodes.a.with.output",
     );
-    expect(codesOf(graph(hitl, "input:\n  __future: 1\n"))).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED input.__future"]);
+    const handed = parseGraphYaml(graph(hitl), { expandEnv: false }).spec!;
+    (handed as unknown as { input: Record<string, unknown> }).input = { __future: 1 };
+    expect(checkUntrustedUpload("", handed).map((v) => `${v.code} ${v.path}`)).toEqual(["UPLOAD_RESERVED_CHANNEL_BLOCKED input.__future"]);
     expect(codesOf(graph(hitl, "inputs:\n  - { key: topic, type: string }\n  - { key: __services, type: json }\n"))).toEqual([
       "UPLOAD_RESERVED_CHANNEL_BLOCKED inputs[1].key",
     ]);

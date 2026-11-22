@@ -69,7 +69,7 @@ describe("PLAT-388 / PLAT-396 / PLAT-397 map controls", () => {
       if (row < 3) await held;
       return row;
     });
-    const g = await compileGraph(graph({ type: "function", with: { fn: "round3PauseMap", input: { row: "{{ item.row }}" } } }, {}, 3), { cwd: await workspace() });
+    const g = await compileGraph(graph({ type: "function", with: { fn: "round3PauseMap" }, input: { row: "{{ row }}" } }, {}, 3), { cwd: await workspace() });
     const pause = new AbortController();
     const running = g.run({ threadId: "paused-map", input: { items: Array.from({ length: 12 }, (_, i) => i), results: ["seed"] }, pauseSignal: pause.signal });
     await ready;
@@ -93,7 +93,7 @@ describe("PLAT-388 / PLAT-396 / PLAT-397 map controls", () => {
       return row;
     });
     const cwd = await workspace();
-    const g = await compileGraph(graph({ type: "function", on: { error: "continue" }, with: { fn: "round3SwallowMap", input: { row: "{{ item.row }}" } } }, {}, 2), { cwd });
+    const g = await compileGraph(graph({ type: "function", on: { error: "continue" }, with: { fn: "round3SwallowMap" }, input: { row: "{{ row }}" } }, {}, 2), { cwd });
     const result = await g.run({ threadId: "swallowed-map", input: { items: [1, -2, 3, -4] } });
     expect(result.status).toBe("completed");
     expect(result.state.results).toEqual([1, 3]);

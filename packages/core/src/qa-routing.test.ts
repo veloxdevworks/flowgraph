@@ -26,7 +26,7 @@ const fail = (policy?: string) => ({
 const mark = (id: string) => ({
   id,
   type: "function",
-  with: { fn: "qaPolicyMark", input: { id }, output: { to: "seen" } },
+  with: { fn: "qaPolicyMark", output: { to: "seen" } }, input: { id },
 });
 function register() {
   registerFunction("qaPolicyFail", () => {
@@ -111,7 +111,7 @@ describe("PLAT-300/301: recovery policies", () => {
             with: {
               over: "{{ [1, 2] }}",
               as: "n",
-              node: { type: "function", with: { fn: "qaMapPolicy", input: { n: "{{ item.n }}" } } },
+              node: { type: "function", with: { fn: "qaMapPolicy" }, input: { n: "{{ n }}" } },
               collect: { to: "seen" },
             },
           },
@@ -188,7 +188,7 @@ describe("PLAT-320: recursion policy", () => {
         {
           id: "tick",
           type: "function",
-          with: { fn: "qaPolicyInc", input: { n: "{{ state.n }}" }, output: { to: "n" } },
+          with: { fn: "qaPolicyInc", output: { to: "n" } }, input: { n: "{{ state.n }}" },
         },
         {
           id: "route",

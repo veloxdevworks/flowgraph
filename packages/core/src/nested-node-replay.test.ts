@@ -143,7 +143,7 @@ describe("interrupts below a node called as an agent tool", () => {
   it("a map inside a subgraph tool", async () => {
     const outer = scripted("outer", turns([rec("PRE"), call("t", { items: ["x"] })]));
     const inner = scripted("inner", echo);
-    const child = graphOf("child", [map("m", ask("w", "inner", "which={{ item.item }}"))]);
+    const child = graphOf("child", [map("m", ask("w", "inner", "which={{ item }}"))]);
     const spec = graphOf("map-in-tool", [agent("o", "outer", [{ function: "fg_nested_record" }, { node: "t" }])], [sub("t", child)]);
     const r = await approveAll(spec, [outer.provider, inner.provider]);
     expect(r.status).toBe("completed");
@@ -155,7 +155,7 @@ describe("interrupts below a node called as an agent tool", () => {
   it("two map items inside a subgraph tool each ask", async () => {
     const outer = scripted("outer", turns([rec("PRE"), call("t", { items: ["x", "y"] })]));
     const inner = scripted("inner", echo);
-    const child = graphOf("child", [map("m", ask("w", "inner", "which={{ item.item }}"))]);
+    const child = graphOf("child", [map("m", ask("w", "inner", "which={{ item }}"))]);
     const spec = graphOf("map2-in-tool", [agent("o", "outer", [{ function: "fg_nested_record" }, { node: "t" }])], [sub("t", child)]);
     const r = await approveAll(spec, [outer.provider, inner.provider]);
     expect(r.status).toBe("completed");
@@ -364,11 +364,11 @@ describe("a replayed tool result is only reused for the same call", () => {
 describe("map items at the top level", () => {
   it("each item resumes with its own model turns, also when two maps run in the same step", async () => {
     const inner = scripted("inner", echo);
-    const spec = graphOf("maps-in-parallel", [map("m1", ask("w", "inner", "which=a{{ item.item }}"))]) as unknown as {
+    const spec = graphOf("maps-in-parallel", [map("m1", ask("w", "inner", "which=a{{ item }}"))]) as unknown as {
       nodes: Node[];
       edges: Array<{ from: string; to: string }>;
     };
-    spec.nodes.push(map("m2", ask("w", "inner", "which=b{{ item.item }}")));
+    spec.nodes.push(map("m2", ask("w", "inner", "which=b{{ item }}")));
     spec.edges.push({ from: "START", to: "m2" }, { from: "m2", to: "END" });
     const r = await approveAll(spec as unknown as GraphSpec, [inner.provider], { items: ["x", "y", "z"] });
     expect(r.status).toBe("completed");

@@ -82,7 +82,7 @@ state:
     doc: { type: object }
     ${channels}
 nodes:
-  - { id: n, type: function, with: { fn: ${fn}, input: ${input}, output: { to: made } } }
+  - { id: n, type: function, input: ${input}, with: { fn: ${fn}, output: { to: made } } }
 edges: [ { from: START, to: n }, { from: n, to: END } ]
 `;
 

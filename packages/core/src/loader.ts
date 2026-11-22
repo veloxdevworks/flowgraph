@@ -16,6 +16,7 @@ import {
   graphHasPlacement,
   placementNestedMessage,
   subgraphOutputSites,
+  subgraphInputDiagnostics,
   unknownSubgraphOutputDiagnostics,
 } from "./runtime/validate-graph.js";
 import { walkNodes } from "./discover-skills.js";
@@ -148,6 +149,7 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
     diagnostics.push(...inFile(child.diagnostics, childPath));
     if (!child.spec) { fatal = true; continue; }
     if (site.out) diagnostics.push(...unknownSubgraphOutputDiagnostics(site, child.spec));
+    diagnostics.push(...subgraphInputDiagnostics(site, child.spec));
     if (graphHasPlacement(child.spec) || filePlacement.has(child.spec)) {
       filePlacement.add(spec);
       diagnostics.push(site.placed

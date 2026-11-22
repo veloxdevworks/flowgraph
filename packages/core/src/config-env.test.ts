@@ -153,9 +153,8 @@ describe("${VAR} expansion in config and runtime", () => {
             type: "script",
             with: {
               code: "export default async input => input;",
-              input: { token: "{{ config.vars.token }}", label: "{{ config.vars.label }}" },
               output: { to: "out" },
-            },
+            }, input: { token: "{{ config.vars.token }}", label: "{{ config.vars.label }}" },
           },
         ],
       ),
@@ -190,7 +189,7 @@ describe("${VAR} expansion in config and runtime", () => {
           config: { vars: { mode: "${FGQA_CFG_MODE}", flag: "${FGQA_CFG_TRUE}" } },
           state: { channels: { out: { type: "object" } } },
         },
-        [{ id: "echo", type: "script", with: { code: "export default async input => input;", input: text, output: { to: "out" } } }],
+        [{ id: "echo", type: "script", with: { code: "export default async input => input;", output: { to: "out" } }, input: text }],
       ),
     });
     const r = await loadGraph(join(d, "g.yaml"));
@@ -213,7 +212,7 @@ describe("${VAR} expansion in config and runtime", () => {
         config: { vars: { token: "${FGQA_CFG_CHILD_TOKEN}" } },
         state: { channels: { out: { type: "object" } } },
       },
-      [{ id: "echo", type: "script", with: { code: "export default async input => input;", input: { token: "{{ config.vars.token }}" }, output: { to: "out" } } }],
+      [{ id: "echo", type: "script", with: { code: "export default async input => input;", output: { to: "out" } }, input: { token: "{{ config.vars.token }}" } }],
     );
     const d = await write({
       "g.yaml": graph({ state: { channels: { out: { type: "object" } } } }, [

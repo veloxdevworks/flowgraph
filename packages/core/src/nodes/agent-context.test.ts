@@ -80,7 +80,7 @@ beforeAll(() => {
 function toolGraph(name: string, provider: string, context: Record<string, unknown> | undefined, extra: Record<string, unknown> = {}): GraphSpec {
   return {
     metadata: { name },
-    state: { channels: { answer: { type: "object" } } },
+    state: { channels: { answer: { type: "any" } } },
     nodes: [
       {
         id: "investigate",
@@ -424,7 +424,7 @@ describe("agent with.context inside map and subgraphs", () => {
           with: {
             over: "{{ state.docs }}",
             as: "doc",
-            node: { type: "agent", provider: "ctx-map", with: { prompt: "{{ item.doc }}", context: { history: "chat", maxTokens: 4000 } } },
+            node: { type: "agent", provider: "ctx-map", with: { prompt: "{{ doc }}", context: { history: "chat", maxTokens: 4000 } } },
             collect: { to: "out" },
           },
         },
@@ -609,7 +609,7 @@ describe("agent with.context known issues", () => {
   function issuesGraph(name: string, provider: string, context: Record<string, unknown> | undefined): GraphSpec {
     return {
       metadata: { name },
-      state: { channels: { out: { type: "object" }, answer: { type: "object" } } },
+      state: { channels: { out: { type: "object" }, answer: { type: "any" } } },
       nodes: [
         { id: "raise", type: "function", with: { fn: "ctxRaiseMany", output: { to: "out" } } },
         {

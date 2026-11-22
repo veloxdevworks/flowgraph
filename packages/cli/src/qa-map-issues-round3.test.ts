@@ -14,7 +14,7 @@ it("PLAT-396: --fail-on-issues fails for swallowed map items while retaining suc
         over: "{{ state.rows }}", as: "row", concurrency: 2,
         node: { type: "shell", on: { error: "continue" }, with: {
           command: process.execPath,
-          args: ["-e", "const row = process.argv[1]; if (row.startsWith('BAD:')) throw new Error('invalid pantry row'); process.stdout.write(row);", "{{ item.row }}"],
+          args: ["-e", "const row = process.argv[1]; if (row.startsWith('BAD:')) throw new Error('invalid pantry row'); process.stdout.write(row);", "{{ row }}"],
         } }, collect: { map: { cleaned: "{{ result.stdout }}" } },
       } }],
       edges: [{ from: "START", to: "cleanup" }, { from: "cleanup", to: "END" }],

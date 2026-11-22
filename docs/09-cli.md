@@ -63,7 +63,7 @@ flowgraph run ./triage.graph.yaml \
 
 | Flag | Description |
 |------|-------------|
-| `--input <key=val>` | Initial channel values. `@file.json` loads JSON; bare strings are parsed as JSON when valid. When the graph declares an `inputs:` schema, values are coerced/validated against it (defaults applied; missing required keys fail fast). |
+| `--input <key=val>` | Initial channel values. The text after `=` is decoded once, by the type the graph declares for the key: a `number` or `boolean` input is parsed, a `json` input is JSON text, a `string` or `select` input is kept exactly as written. A key that is a state channel (not an input) is decoded by the channel's `type`; `any` takes JSON when the text is valid JSON and the text itself otherwise. `key=@file.json` supplies the file's JSON value as it is. The decoded values are then checked against `inputs:` (defaults applied; missing required keys, wrong types and undeclared keys fail fast). |
 | `--thread <id>` | Checkpoint/resume key (required for durable HITL flows). |
 | `--stream` | Pretty-print live events to the terminal. |
 | `--json` | Emit events as JSONL on stdout (machine-readable). |
@@ -75,7 +75,7 @@ flowgraph run ./triage.graph.yaml \
 **Behavior (shipped):**
 
 - Loads, validates, and compiles the graph; exits `2` on load/validation errors.
-- If the graph declares `inputs:`, resolves defaults and validates `--input` (and any `input:` seed defaults) **before** the run starts. Missing required keys or type mismatches exit `1` with an aggregated error listing every issue — never an interactive prompt.
+- If the graph declares `inputs:`, resolves defaults and validates `--input` **before** the run starts. Missing required keys, type mismatches or keys the graph does not declare exit `1` with an aggregated error listing every issue — never an interactive prompt.
 - Checkpoint backend comes from `runtime.checkpoint` in the YAML (not a CLI flag).
 - Budget limits come from `runtime.budget` in the YAML (not `--max-usd`).
 - Skill preflight runs when a **skill node executes**, not upfront at run start.
@@ -156,6 +156,16 @@ flowgraph migrate ./old.graph.yaml --write  # apply in place
 ```
 
 Upgrades a graph spec toward `apiVersion: flowgraph/v1`. Prints migration notes; use `--write` to persist changes.
+
+The data-contract migration rewrites the fields that were removed, on the YAML document so comments and layout survive:
+
+- channel `items` / `properties` → `schema`;
+- input `label` → `ui.label`, and input `type: text` → `type: string` with `ui: { widget: textarea }`;
+- top-level `input:` seed values → `default` on the matching `inputs` entries;
+- `function` / `script` / `shell` `with.input` → the node's `input:`;
+- map `{{ item.<as> }}` → `{{ <as> }}`, including inside the map body.
+
+Anything that needs a decision is left as it is and printed as a manual item: a node that has both `input` and `with.input`, a subgraph that sets both `stateMap.out` and `output`, and a map `with.output`.
 
 ## 7. Exit codes
 

@@ -466,7 +466,7 @@ describe.skipIf(!DB)("runtime.memory on postgres (graph integration)", () => {
       apiVersion: "flowgraph/v1",
       kind: "Graph",
       metadata: { name },
-      state: { channels: { out: { type: "object" } } },
+      state: { channels: { out: { type: "object" }, ticket: { type: "any" } } },
       nodes: [{ id: "n", type: "function", with: { fn, output: { to: "out" } } }],
       edges: [
         { from: "START", to: "n" },

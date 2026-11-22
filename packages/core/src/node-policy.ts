@@ -630,11 +630,14 @@ export function reservedStateMapRefs(node: { with?: unknown }): string[] {
  * result goes through this, for trusted graphs too: `__` names are the
  * engine's, and nothing outside the engine may put a value there.
  */
-export function withoutReservedKeys<T extends Record<string, unknown>>(value: T): T {
+export function withoutReservedKeys<T>(value: T): T {
+  // A node's input can be any value; only an object has keys to drop.
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
   let out: Record<string, unknown> | undefined;
-  for (const k of Object.keys(value)) {
+  for (const k of Object.keys(record)) {
     if (!isReservedChannel(k)) continue;
-    out ??= { ...value };
+    out ??= { ...record };
     delete out[k];
   }
   return (out ?? value) as T;
@@ -648,7 +651,8 @@ export function withoutReservedKeys<T extends Record<string, unknown>>(value: T)
  */
 export function reservedInputRefs(node: { input?: unknown }): string[] {
   const input = node.input;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  if (Array.isArray(input) || typeof input === "string") return refersToReserved(input) ? ["input"] : [];
+  if (!input || typeof input !== "object") return [];
   const out: string[] = [];
   for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
     if (isReservedChannel(key.trim()) || refersToReserved(value)) out.push(`input.${key}`);

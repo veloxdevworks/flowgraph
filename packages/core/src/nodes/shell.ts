@@ -44,6 +44,13 @@ export function normalizeShellText(text: string): string {
     .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'");
 }
 
+/** A node's input is "set" unless it is absent, null or an empty object. */
+function hasInput(input: unknown): boolean {
+  if (input === undefined || input === null) return false;
+  if (typeof input === "object" && !Array.isArray(input)) return Object.keys(input).length > 0;
+  return true;
+}
+
 export const shellNode = defineNode<Config>({
   type: "shell",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -87,11 +94,9 @@ export const shellNode = defineNode<Config>({
               Object.entries(renderedEnvRaw).map(([k, v]) => [k, String(v)]),
             )
           : undefined;
-        // `with.input` wins; otherwise the node's `input` (or tool arguments) is passed.
-        // Nothing is sent when neither is set, so FLOWGRAPH_INPUT stays unset.
-        const input = config.input
-          ? (renderDeep(config.input, scope) as Record<string, unknown>)
-          : Object.keys(scope.input).length > 0 ? scope.input : undefined;
+        // The node's `input` (or tool arguments) is passed. Nothing is sent when it is empty,
+        // so FLOWGRAPH_INPUT stays unset.
+        const input = hasInput(scope.input) ? scope.input : undefined;
 
         const allowedExit = config.expect?.exitCode ?? [0];
 

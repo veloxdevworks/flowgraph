@@ -29,25 +29,25 @@ nodes:
     type: function
     with:
       fn: draftNotes
-      input: { version: "{{ state.version }}" }
       output: { to: draft }
+    input: { version: "{{ state.version }}" }
 
   - id: approve
     type: function
     with:
       fn: requestApproval
-      input: { draft: "{{ state.draft }}" }
       output:
         map:
           approved: "{{ result.approved }}"
           notes: "{{ result.notes }}"
+    input: { draft: "{{ state.draft }}" }
 
   - id: publish-notes
     type: function
     with:
       fn: publishNotes
-      input: { notes: "{{ state.notes }}", version: "{{ state.version }}" }
       output: { to: published }
+    input: { notes: "{{ state.notes }}", version: "{{ state.version }}" }
 
 edges:
   - from: START

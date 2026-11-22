@@ -20,7 +20,7 @@ const childSpec: GraphSpec = {
   apiVersion: "flowgraph/v1",
   kind: "Graph",
   metadata: { name: "child-hitl" },
-  state: { channels: { gateResult: { type: "object" } } },
+  state: { channels: { topic: { type: "string" }, gateResult: { type: "object" } } },
   nodes: [
     {
       id: "human-gate",
@@ -113,9 +113,8 @@ describe("nested subgraph events", () => {
           type: "function",
           with: {
             fn: "echoBang",
-            input: { value: "{{ state.value }}" },
             output: { to: "out" },
-          },
+          }, input: { value: "{{ state.value }}" },
         },
       ],
       edges: [
