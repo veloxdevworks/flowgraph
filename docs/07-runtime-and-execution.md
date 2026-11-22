@@ -70,7 +70,7 @@ A graph's retention overrides the host default field by field. Host options: `cr
 
 `node scripts/checkpoint-growth-bench.mjs --runs 2000` runs the same small graph with and without retention and prints file size, row counts, and byte totals. Set `FLOWGRAPH_TEST_POSTGRES_URL` to include Postgres.
 
-The adapter interface wraps LangGraph's `BaseCheckpointSaver` (`put`, `putWrites`, `getTuple`, `list`) so any LangGraph checkpointer is usable, and ours add lifecycle events (`checkpoint.write/load`) and the `checkpoint:beforeWrite` hook (for redaction/transform).
+The adapter interface wraps LangGraph's `BaseCheckpointSaver` (`put`, `putWrites`, `getTuple`, `list`) so any LangGraph checkpointer is usable, and ours add lifecycle events (`checkpoint.write/load`). Redaction of a state delta uses `state:beforeUpdate`.
 
 
 SQLite stores serialized checkpoint bodies, pending writes and external channel blobs larger than 4 KiB as shared content-addressed chunks. Incremental append/prepend histories reuse unchanged chunks and branch nodes across versions instead of copying the growing state each time. This physical deduplication also applies with `retention: false` or `dedupeChannels: false`; full history and pending writes remain readable. Metadata stays queryable JSON. `sqliteCheckpointStats` reports shared payload storage separately as `chunks` / `chunkBytes`.
@@ -298,9 +298,9 @@ in-process objects to another machine.
 
 `runGraph({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written (so the run is resumable), and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this.
 
-A node `timeout` is not a cancel. The attempt fails with `Node timed out`, and the run fails unless a retry succeeds or `on.error` handles it, but for most node types the timed-out work keeps running in the background, and `ctx.signal` stays the run's own, so aborting it always means the run was cancelled. That keeps a timed-out `image` or `video` job alive for a retry to re-attach to, and a `service` able to finish a graceful stop.
+A node `timeout` fails the attempt with `Node timed out`. The run fails unless a retry succeeds or `on.error` handles it. `http`, `webhook`, `shell`, `script`, `skill`, `mcp`, `service`, and `demo` receive that attempt's abort signal and stop. `image`, `video`, `audio`, and `model3d` receive it too, but a timeout leaves the vendor job running so a retry can re-attach; cancelling the run still cancels the job. There is no hidden 30s limit on `shell` or `script`, and those nodes do not take `with.timeout`.
 
-A node type that can stop cleanly declares `capabilities.stopsOnTimeout`; today that is only `demo`. Its `ctx.signal` is per attempt and also aborts on timeout, with the timeout error as `signal.reason` (`isTimeoutError(reason)` tells it from a cancelled run). The engine waits up to 20 seconds for the attempt to stop before it retries or reports the failure, so the two don't overlap. Nothing retries once the run itself is cancelled.
+A node type that stops cleanly declares `capabilities.stopsOnTimeout`. Its `ctx.signal` is per attempt and also aborts on timeout, with the timeout error as `signal.reason` (`isTimeoutError(reason)` tells it from a cancelled run). The engine waits up to 20 seconds for the attempt to stop before it retries or reports the failure, so the two don't overlap. Media declares `receivesTimeoutSignal` instead, so a vendor call that ignores the signal does not hold the run. Nothing retries once the run itself is cancelled.
 
 ## 6a. Node placement
 
@@ -387,7 +387,7 @@ runGraph()
 
 ## 10. Failure semantics
 
-After retries and `node:error` hooks, `on.error: fail` (the default) fails the run. `continue` and `ignore` record an issue, produce no node result, and follow normal successors while siblings finish. `route:<nodeId>` selects only the recovery path. A hook route is also exclusive. For maps, failed items have no collected value; admitted siblings finish before the map's recovery route runs. Inner item policies override the map's policy.
+After retries and `node:error` hooks, `on.error: fail` (the default) fails the run. `continue` records an issue, produces no node result, and follows normal successors while siblings finish. `route:<nodeId>` selects only the recovery path. A hook `continue` on `node:error` does the same as `on.error: continue`. A hook `fail` fails the node even when `on.error` is `continue`. A hook route is also exclusive. For maps, failed items have no collected value; admitted siblings finish before the map's recovery route runs. Inner item policies override the map's policy.
 
 `runtime.recursionLimit` bounds supersteps per invocation, including parallel bookkeeping. Its default is 1,000; choose a smaller positive value for a tighter guard. Resume/continue starts a new invocation and a new counter; this is not a lifetime thread budget. Limit errors use code `RECURSION_LIMIT` and name the graph, pending nodes, and the YAML setting. `retry.retryOn` matches exact error `code`/`status`/`statusCode` values or complete message tokens (`code 7` does not match `code 75`).
 

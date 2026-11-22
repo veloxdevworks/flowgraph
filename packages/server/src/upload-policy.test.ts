@@ -75,6 +75,13 @@ describe("checkUntrustedUpload", () => {
     expect(codes).toContain("UPLOAD_SECRET_REFERENCE_BLOCKED nodes[0].with.headers.x");
   });
 
+  it("blocks env placeholders written with a YAML escape", () => {
+    const yaml = graph(`  - { id: a, type: hitl, with: { mode: approve, message: "key=\\u0024{HOME}" } }`);
+    expect(yaml).not.toContain("${HOME}");
+    expect(parseGraphYaml(yaml, { expandEnv: false }).spec?.nodes[0]?.with).toMatchObject({ message: "key=${HOME}" });
+    expect(codesOf(yaml)).toEqual(["UPLOAD_ENV_PLACEHOLDER_BLOCKED nodes[0].with.message"]);
+  });
+
   it("blocks file subgraphs, skill tools, host paths and provider overrides", () => {
     const yaml = graph(
       `  - { id: a, type: subgraph, uses: ./other.graph.yaml }
@@ -211,7 +218,7 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
       metadata: { name: child }
       state: { channels: { x: { type: string } } }
       nodes:
-        - { id: w, type: wait, with: { duration: "1ms" } }
+        - { id: w, type: wait, with: { deadline: "1ms" } }
       edges:
         - { from: START, to: w }
         - { from: w, to: END }
@@ -244,7 +251,7 @@ describe("untrusted reserved channels, host-loaded definitions and inbound webho
       kind: Graph
       metadata: { name: child }
       nodes:
-        - { id: w, type: wait, with: { duration: "1ms" } }
+        - { id: w, type: wait, with: { deadline: "1ms" } }
       edges:
         - { from: START, to: w }
         - { from: w, to: END }`;
@@ -459,6 +466,56 @@ describe("RunService upload policy", () => {
     });
   });
 
+  it("keeps expanded values out of the errors a trusted upload and preflight return", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-redact-"));
+    const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50 });
+    await s.init();
+    cleanup.push(async () => {
+      await s.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    process.env["FG_UPLOAD_REDACT"] = "zq9-backend";
+    const yaml = SHELL.replace("NAME", "redact")
+      .replace("runtime:\n  checkpoint: { enabled: true, backend: memory }", () => 'secrets: [FG_UPLOAD_REDACT]\nruntime:\n  checkpoint: { enabled: true, backend: "${FG_UPLOAD_REDACT}" }');
+    try {
+      expect(yaml).toContain('backend: "${FG_UPLOAD_REDACT}"');
+      const err = await s.startRun({ threadId: "rd1", yaml }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ status: 400, code: "INVALID_GRAPH" });
+      expect((err as Error).message).toContain("[REDACTED]");
+      expect(JSON.stringify({ message: (err as Error).message, diagnostics: (err as { diagnostics: unknown }).diagnostics })).not.toContain("zq9-backend");
+      const preflight = await s.preflight({ yaml });
+      expect(preflight.ok).toBe(false);
+      expect(JSON.stringify(preflight)).not.toContain("zq9-backend");
+    } finally {
+      delete process.env["FG_UPLOAD_REDACT"];
+    }
+  });
+
+  it("refuses shell nodes from token-mode callers by default and allows them with the opt-in", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-token-"));
+    const open = async (extra: { trustTokenCallers?: boolean }): Promise<RunService> => {
+      const auth: ServerAuthConfig = { mode: "token", explicit: true, insecureDev: false };
+      const s = new RunService({ host: "127.0.0.1", port: 0, graphStoreDir: dir, eventBufferSize: 50, auth, authToken: "shared", ...extra });
+      await s.init();
+      cleanup.push(() => s.close());
+      return s;
+    };
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+
+    const locked = await open({});
+    expect(locked.principalFor()).toMatchObject({ via: "token", trusted: false });
+    await expect(locked.startRun({ threadId: "tk1", yaml: SHELL.replace("NAME", "tk-shell") })).rejects.toMatchObject({
+      status: 403,
+      code: "UPLOAD_NODE_TYPE_BLOCKED",
+    });
+    expect(await locked.getRun("tk1")).toBeNull();
+
+    const opted = await open({ trustTokenCallers: true });
+    expect(opted.principalFor()).toMatchObject({ via: "token", trusted: true });
+    await opted.startRun({ threadId: "tk2", yaml: SHELL.replace("NAME", "tk2-shell") });
+    expect(await settle(opted, "tk2", ["interrupted", "error"])).toBe("interrupted");
+  });
+
   it("never expands env placeholders for untrusted authors, and never stores expanded values", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-raw-"));
     cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
@@ -468,10 +525,14 @@ describe("RunService upload policy", () => {
       return s;
     };
     process.env["FG_UPLOAD_TEST_SECRET"] = "s3cr3t";
+    process.env["FG_UPLOAD_TEST_CONFIG"] = "config-value";
     const yaml = (name: string) => `
 apiVersion: flowgraph/v1
 kind: Graph
 metadata: { name: ${name} }
+secrets: [FG_UPLOAD_TEST_CONFIG]
+config:
+  vars: { key: "\${FG_UPLOAD_TEST_CONFIG}" }
 state:
   channels:
     approval: { type: object }
@@ -496,8 +557,9 @@ runtime:
       expect(await settle(first, "t3", ["interrupted", "error"])).toBe("interrupted");
       // The graph store, the session and getRun keep the YAML as uploaded.
       const stored = await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8");
-      expect(stored).toContain("${FG_UPLOAD_TEST_SECRET}");
+      expect(stored).toBe(yaml("t-env"));
       expect(stored).not.toContain("s3cr3t");
+      expect(stored).not.toContain("config-value");
       expect(JSON.parse(await fs.readFile(path.join(dir, "t3.graph.yaml.meta.json"), "utf-8"))).toMatchObject({ yamlFormat: "raw" });
       expect(first.registry.get("t3")?.yaml).not.toContain("s3cr3t");
       const detail = await first.getRun("t3", tina);
@@ -506,11 +568,13 @@ runtime:
       cleanup.push(() => first.close());
       const second = first;
 
-      // A trusted resume fills the placeholder at run time only.
+      // A trusted resume leaves a placeholder in a node body literal; only declared config values expand.
       await second.resumeRun({ threadId: "t3", resume: { approved: true } }, tina);
       expect(await settle(second, "t3", ["interrupted", "completed", "error"])).toBe("interrupted");
-      expect(JSON.stringify(second.registry.get("t3")?.events)).toContain("key=s3cr3t");
-      expect(await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8")).not.toContain("s3cr3t");
+      const events = JSON.stringify(second.registry.get("t3")?.events);
+      expect(events).toContain("key=${FG_UPLOAD_TEST_SECRET}");
+      expect(events).not.toContain("s3cr3t");
+      expect(await fs.readFile(path.join(dir, "t3.graph.yaml"), "utf-8")).not.toContain("config-value");
       expect((await second.getRun("t3", tina))?.yaml).not.toContain("s3cr3t");
       // An author who lost trust cannot run the stored placeholder.
       await expect(second.resumeRun({ threadId: "t3", resume: { approved: true } }, principal("tina", false))).rejects.toMatchObject({
@@ -518,6 +582,7 @@ runtime:
       });
     } finally {
       delete process.env["FG_UPLOAD_TEST_SECRET"];
+      delete process.env["FG_UPLOAD_TEST_CONFIG"];
     }
   });
 

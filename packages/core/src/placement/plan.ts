@@ -32,15 +32,17 @@ export interface PlacementPlan {
 export async function planPlacements(spec: GraphSpec, opts: CompilePlacementOptions | undefined): Promise<PlacementPlan | undefined> {
   // Same rule as `flowgraph validate`, for callers that compile without loadGraph: runsOn below the top
   // level (inline subgraph or map inner) is never resolved, so refuse it instead of running the node here.
+  const nodes = Array.isArray(spec.nodes) ? spec.nodes : [];
   if (graphHasPlacement(spec)) {
     const structural = placementDiagnostics(spec).filter(
       (d) => d.code === "PLACEMENT_NOT_TOP_LEVEL" || d.code === "PLACEMENT_NESTED",
     );
     if (structural.length) throw new PlacementUnsatisfiedError(structural.map((d) => d.message).join("\n"), [], structural);
   }
-  if (!spec.nodes?.some((n) => n.runsOn !== undefined)) return undefined;
+  if (!nodes.some((n) => n != null && n.runsOn !== undefined)) return undefined;
   // Same rule as `flowgraph validate`: map and router cannot be placed at all, even if they would resolve local.
-  for (const n of spec.nodes) {
+  for (const n of nodes) {
+    if (n == null) continue;
     if (n.runsOn !== undefined && UNPLACEABLE_TYPES.has(n.type)) {
       const d: Diagnostic = { severity: "error", code: "PLACEMENT_NOT_SUPPORTED", message: unplaceableMessage(n.id, n.type), path: `nodes.${n.id}.runsOn` };
       throw new PlacementUnsatisfiedError(d.message, [], [d]);

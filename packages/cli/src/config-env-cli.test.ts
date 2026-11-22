@@ -14,7 +14,7 @@ const graph = {
   kind: "Graph",
   metadata: { name: "config-env" },
   config: { vars: { token: "${FG_CLI_UNDECLARED}" } },
-  nodes: [{ id: "step", type: "router", with: { routes: { done: { default: true, to: "END" } } } }],
+  nodes: [{ id: "step", type: "router", with: { routes: [ { name: "done", default: true, to: "END" } ] } }],
   edges: [
     { from: "START", to: "step" },
     { from: "step", to: "END" },

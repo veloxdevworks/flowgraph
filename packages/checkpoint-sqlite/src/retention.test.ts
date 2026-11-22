@@ -163,7 +163,7 @@ describe("sqlite checkpoint retention", () => {
     const interruptId = (await compiled.getState(threadId))?.checkpointId;
     expect(interruptId).toBeTruthy();
 
-    const resumed = await compiled.resume({ threadId, resume: { go: true }, onInterrupt: "fail" });
+    const resumed = await compiled.resume({ threadId, resume: { signal: "go" }, onInterrupt: "fail" });
     expect(resumed.status).toBe("completed");
     expect(resumed.state["tag"]).toBe("done");
     const history = await compiled.getStateHistory(threadId);
@@ -176,7 +176,7 @@ describe("sqlite checkpoint retention", () => {
     await expect(recompiled.resumeFrom({
       threadId,
       checkpointId: interruptId!,
-      resume: { go: true },
+      resume: { signal: "go" },
       onInterrupt: "fail",
     })).rejects.toMatchObject({ code: "HISTORICAL_DECISION_REPLAY" });
     (second as unknown as { db: { close(): void } }).db.close();

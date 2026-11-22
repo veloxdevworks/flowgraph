@@ -2,7 +2,16 @@ import { describe, expect, it } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { persistGraph, listPersistedGraphs, loadPersistedGraph, parseGraphYaml, appendEventJournal, loadEventJournal } from "./graph-source.js";
+import {
+  persistGraph,
+  listPersistedGraphs,
+  loadPersistedGraph,
+  parseGraphYaml,
+  appendEventJournal,
+  loadEventJournal,
+  redactExpandedError,
+  redactExpandedValues,
+} from "./graph-source.js";
 import { SessionRegistry } from "./session-registry.js";
 import type { ServerEvent } from "./types.js";
 
@@ -86,7 +95,7 @@ nodes:
             imports:
               - { nodes: "/tmp/anything.mjs" }
             nodes:
-              - { id: w, type: wait, with: { duration: "1ms" } }
+              - { id: w, type: wait, with: { deadline: "1ms" } }
             edges:
               - { from: START, to: w }
               - { from: w, to: END }
@@ -107,7 +116,7 @@ nodes:
           imports:
             - { reducers: "/tmp/anything.mjs" }
           nodes:
-            - { id: w, type: wait, with: { duration: "1ms" } }
+            - { id: w, type: wait, with: { deadline: "1ms" } }
           edges:
             - { from: START, to: w }
             - { from: w, to: END }
@@ -204,20 +213,146 @@ describe("stored graph YAML", () => {
     return MINIMAL.replace(/name: hello/, "name: hello\n  description: \"${FG_GS_TEST_VALUE}\"");
   }
 
-  it("stores raw YAML and expands it only when asked", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-graphs-raw-"));
-    process.env["FG_GS_TEST_VALUE"] = "expanded-value";
+  const declared = MINIMAL
+    .replace("state:", () => 'secrets: [FG_GS_TEST_VALUE]\nconfig:\n  vars: { token: "${FG_GS_TEST_VALUE}", escaped: "$${FG_GS_TEST_VALUE}", other: "$${FG_GS_NOT_DECLARED}" }\nstate:')
+    .replace("fn: missing", () => 'fn: missing\n      input: { body: "${FG_GS_TEST_BODY}", kept: "$${FG_GS_TEST_BODY}" }');
+
+  /** Run `fn` with `process.env` replaced by a view that records every name looked up. */
+  function recordingEnv<T>(fn: () => T): { result: T; read: Set<string> } {
+    const real = process.env;
+    const read = new Set<string>();
+    process.env = new Proxy(real, {
+      get: (target, key) => (typeof key === "string" && read.add(key), Reflect.get(target, key)),
+      has: (target, key) => (typeof key === "string" && read.add(key), Reflect.has(target, key)),
+      getOwnPropertyDescriptor: (target, key) => (typeof key === "string" && read.add(key), Reflect.getOwnPropertyDescriptor(target, key)),
+    });
     try {
-      const parsed = parseGraphYaml(yaml, { expandEnv: true });
-      expect(parsed.spec?.metadata?.description).toBe("expanded-value");
-      await persistGraph(dir, "t", yaml, parsed.spec!, { yamlFormat: "raw" });
-      expect(await fs.readFile(path.join(dir, "t.graph.yaml"), "utf-8")).not.toContain("expanded-value");
+      return { result: fn(), read };
+    } finally {
+      process.env = real;
+    }
+  }
+
+  it("expands only declared names in config, never node bodies or metadata, and keeps $${X} literal", () => {
+    process.env["FG_GS_TEST_VALUE"] = "declared-value";
+    process.env["FG_GS_TEST_BODY"] = "body-value";
+    try {
+      const { result: parsed, read } = recordingEnv(() => parseGraphYaml(declared, { expandEnv: true }));
+      expect(parsed.diagnostics.filter((d) => d.severity === "error")).toEqual([]);
+      const spec = parsed.spec!;
+      expect(spec.config?.vars).toEqual({ token: "declared-value", escaped: "${FG_GS_TEST_VALUE}", other: "${FG_GS_NOT_DECLARED}" });
+      const w = spec.nodes[0]!.with as { input: Record<string, string> };
+      expect(w.input).toEqual({ body: "${FG_GS_TEST_BODY}", kept: "$${FG_GS_TEST_BODY}" });
+      expect(read.has("FG_GS_TEST_VALUE")).toBe(true);
+      expect(read.has("FG_GS_TEST_BODY")).toBe(false);
+      expect(parsed.yaml).toBe(declared);
+
+      const meta = parseGraphYaml(yaml, { expandEnv: true });
+      expect(meta.spec?.metadata?.description).toBe("${FG_GS_TEST_VALUE}");
+    } finally {
+      delete process.env["FG_GS_TEST_VALUE"];
+      delete process.env["FG_GS_TEST_BODY"];
+    }
+  });
+
+  it("refuses an undeclared ${NAME} in config without reading it", () => {
+    process.env["FG_GS_TEST_BODY"] = "body-value";
+    try {
+      const undeclared = MINIMAL.replace("state:", 'config:\n  vars: { token: "${FG_GS_TEST_BODY}" }\nstate:');
+      const { result: parsed, read } = recordingEnv(() => parseGraphYaml(undeclared, { expandEnv: true }));
+      expect(parsed.spec).toBeNull();
+      expect(read.has("FG_GS_TEST_BODY")).toBe(false);
+      expect(parsed.yaml).not.toContain("body-value");
+      expect(parsed.diagnostics.filter((d) => d.code === "SECRET_UNDECLARED").map((d) => d.path)).toEqual(["config.vars.token"]);
+    } finally {
+      delete process.env["FG_GS_TEST_BODY"];
+    }
+  });
+
+  it("keeps expanded values of any length out of schema and validation diagnostics", () => {
+    const badBackend = (value: string) => {
+      process.env["FG_GS_TEST_VALUE"] = value;
+      return parseGraphYaml(
+        MINIMAL.replace("state:", () => 'secrets: [FG_GS_TEST_VALUE]\nruntime:\n  checkpoint: { backend: "${FG_GS_TEST_VALUE}" }\nstate:'),
+        { expandEnv: true },
+      );
+    };
+    try {
+      for (const value of ["leaky-backend-value", "zq9"]) {
+        const parsed = badBackend(value);
+        expect(parsed.spec).toBeNull();
+        const text = JSON.stringify(parsed.diagnostics);
+        expect(parsed.diagnostics.some((d) => d.path?.startsWith("runtime.checkpoint") && d.message.includes("[REDACTED]"))).toBe(true);
+        expect(text).not.toContain(value);
+        expect(parsed.yaml).not.toContain(value);
+      }
+    } finally {
+      delete process.env["FG_GS_TEST_VALUE"];
+    }
+  });
+
+  it("masks short expanded values only where quoted or whole, never inside paths or words", () => {
+    const withEnv = <T>(env: Record<string, string>, run: () => T): T => {
+      Object.assign(process.env, env);
+      try {
+        return run();
+      } finally {
+        for (const name of Object.keys(env)) delete process.env[name];
+      }
+    };
+    for (const value of ["e", "on", "1"]) {
+      const parsed = withEnv({ FG_GS_SHORT: value }, () =>
+        parseGraphYaml(
+          MINIMAL.replace("state:", () => 'secrets: [FG_GS_SHORT]\nruntime:\n  checkpoint: { backend: "${FG_GS_SHORT}" }\nstate:'),
+          { expandEnv: true },
+        ),
+      );
+      expect(parsed.spec).toBeNull();
+      const schema = parsed.diagnostics.find((d) => d.path === "runtime.checkpoint.backend");
+      expect(schema).toEqual({
+        severity: "error",
+        code: "SCHEMA_ERROR",
+        path: "runtime.checkpoint.backend",
+        message: 'runtime.checkpoint.backend: must be one of memory | sqlite | postgres (got "[REDACTED]")',
+      });
+    }
+
+    const graph = MINIMAL.replace("state:", () => 'secrets: [FG_GS_ON, FG_GS_PREFIXED, FG_GS_LONG]\nconfig:\n  vars: { a: "${FG_GS_ON}", b: "x-${FG_GS_PREFIXED}", c: "${FG_GS_LONG}" }\nstate:');
+    const { spec } = withEnv({ FG_GS_ON: "on", FG_GS_PREFIXED: "zq", FG_GS_LONG: "long-host-value" }, () => parseGraphYaml(graph, { expandEnv: true }));
+    expect(spec).not.toBeNull();
+    const redact = (text: string) => redactExpandedValues(spec, text);
+    expect(redact('Unknown checkpoint backend "on".')).toBe('Unknown checkpoint backend "[REDACTED]".');
+    expect(redact("on")).toBe("[REDACTED]");
+    expect(redact("one option on runtime.checkpoint")).toBe("one option on runtime.checkpoint");
+    expect(redact('got "x-zq" and \'zq\'')).toBe('got "[REDACTED]" and \'[REDACTED]\'');
+    expect(redact("plain zq and long-host-value here")).toBe("plain zq and [REDACTED] here");
+
+    const cause = new Error('Unknown checkpoint backend "on".');
+    const err = new Error("on", { cause });
+    expect(redactExpandedError(spec!, err)).toBe(err);
+    expect(err.message).toBe("[REDACTED]");
+    expect(err.stack?.split("\n")[0]).toBe("Error: [REDACTED]");
+    expect(err.stack).not.toContain('"on"');
+    expect(cause.message).toBe('Unknown checkpoint backend "[REDACTED]".');
+    expect(cause.stack?.split("\n")[0]).toBe('Error: Unknown checkpoint backend "[REDACTED]".');
+  });
+
+  it("stores raw YAML and expands declared config values only when asked", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-graphs-raw-"));
+    process.env["FG_GS_TEST_VALUE"] = "declared-value";
+    try {
+      const parsed = parseGraphYaml(declared, { expandEnv: true });
+      expect(parsed.spec?.config?.vars?.token).toBe("declared-value");
+      await persistGraph(dir, "t", parsed.yaml, parsed.spec!, { yamlFormat: "raw" });
+      const stored = await fs.readFile(path.join(dir, "t.graph.yaml"), "utf-8");
+      expect(stored).toBe(declared);
+      expect(stored).not.toContain("declared-value");
       const plain = await loadPersistedGraph(dir, "t");
-      expect(plain?.spec.metadata?.description).toBe("${FG_GS_TEST_VALUE}");
-      expect(plain?.yaml).toBe(yaml);
+      expect(plain?.spec.config?.vars?.token).toBe("${FG_GS_TEST_VALUE}");
+      expect(plain?.yaml).toBe(declared);
       const trusted = await loadPersistedGraph(dir, "t", { expandEnv: true });
-      expect(trusted?.spec.metadata?.description).toBe("expanded-value");
-      expect(trusted?.yaml).toBe(yaml);
+      expect(trusted?.spec.config?.vars).toEqual({ token: "declared-value", escaped: "${FG_GS_TEST_VALUE}", other: "${FG_GS_NOT_DECLARED}" });
+      expect(trusted?.yaml).toBe(declared);
       expect(trusted?.meta?.yamlFormat).toBe("raw");
     } finally {
       delete process.env["FG_GS_TEST_VALUE"];

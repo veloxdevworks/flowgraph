@@ -38,9 +38,9 @@ describe("wait node", () => {
     await closeWebhookServers();
   });
 
-  it("duration mode emits node.output with durationMs and wakeAt before sleeping", async () => {
+  it("deadline mode emits node.output with durationMs and wakeAt before sleeping", async () => {
     const events: FlowgraphEvent[] = [];
-    const compiled = await compileGraph(waitGraph({ duration: "50ms" }), {
+    const compiled = await compileGraph(waitGraph({ deadline: "50ms" }), {
       sinks: [(e) => { events.push(e); }],
     });
 
@@ -53,7 +53,7 @@ describe("wait node", () => {
     const output = events.find((e) => e.type === "node.output");
     expect(output?.scope.nodeId).toBe("gate");
     const wait = (output?.data as { wait: { mode: string; durationMs: number; wakeAt: string } }).wait;
-    expect(wait.mode).toBe("duration");
+    expect(wait.mode).toBe("deadline");
     expect(wait.durationMs).toBe(50);
 
     const wakeAtMs = Date.parse(wait.wakeAt);
@@ -153,11 +153,40 @@ describe("wait node", () => {
 
     const r2 = await compiled.resume({
       threadId: "wait-sig-resume",
-      resume: { deployFinished: true },
+      resume: { signal: "deploy-finished", deployFinished: true },
       onInterrupt: "fail",
     });
     expect(r2.status).toBe("completed");
-    expect(r2.state["approval"]).toEqual({ deployFinished: true });
+    expect(r2.state["approval"]).toEqual({
+      value: { signal: "deploy-finished", deployFinished: true },
+    });
+  });
+
+  it("completes a signal wait only when the resume names that signal", async () => {
+    const events: FlowgraphEvent[] = [];
+    const compiled = await compileGraph(
+      waitGraph({ signal: "deploy-finished", output: { to: "approval" } }),
+      { sinks: [(event) => { events.push(event); }] },
+    );
+    const started = await compiled.run({ threadId: "wait-sig-name", onInterrupt: "fail" });
+    expect(started.status).toBe("interrupted");
+
+    const wrong = await compiled.resume({
+      threadId: "wait-sig-name",
+      resume: { signal: "other", deployFinished: true },
+      onInterrupt: "fail",
+    });
+    expect(wrong.status).toBe("interrupted");
+    expect(interruptData(wrong.interrupts)["signal"]).toBe("deploy-finished");
+    expect(events.some((event) => event.type === "log" && (event.data as { level?: string; msg?: string }).level === "warn" && (event.data as { msg?: string }).msg?.includes('did not name signal "deploy-finished"'))).toBe(true);
+
+    const named = await compiled.resume({
+      threadId: "wait-sig-name",
+      resume: "deploy-finished",
+      onInterrupt: "fail",
+    });
+    expect(named.status).toBe("completed");
+    expect(named.state["approval"]).toEqual({ value: "deploy-finished" });
   });
 
   it("until mode re-evaluates the condition after resume", async () => {

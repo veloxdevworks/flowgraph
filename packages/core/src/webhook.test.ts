@@ -58,7 +58,7 @@ describe("webhook node (emit)", () => {
 
     const r2 = await compiled.resume({
       threadId: "wh-emit-1",
-      resume: { done: true },
+      resume: { signal: "done" },
       onInterrupt: "fail",
     });
     expect(r2.status).toBe("completed");

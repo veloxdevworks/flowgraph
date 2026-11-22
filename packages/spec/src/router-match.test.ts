@@ -2,7 +2,11 @@ import { describe, it, expect } from "vitest";
 import { RouterWithSchema } from "./index.js";
 
 describe("model routers reject allMatches", () => {
-  const routes = { a: { to: "left" }, b: { to: "right", default: true } };
+  const routes = [{ name: "a", to: "left" }, { name: "b", to: "right", default: true }];
+  const ruleRoutes = [
+    { name: "a", when: "{{ true }}", to: "left" },
+    { name: "b", default: true, to: "right" },
+  ];
 
   it("accepts mode: model with the default firstMatch", () => {
     expect(RouterWithSchema.safeParse({ mode: "model", input: "route this", routes }).success).toBe(true);
@@ -12,7 +16,7 @@ describe("model routers reject allMatches", () => {
   });
 
   it("accepts mode: rules with allMatches", () => {
-    expect(RouterWithSchema.safeParse({ mode: "rules", match: "allMatches", routes }).success).toBe(
+    expect(RouterWithSchema.safeParse({ mode: "rules", match: "allMatches", routes: ruleRoutes }).success).toBe(
       true,
     );
   });
@@ -27,7 +31,11 @@ describe("model routers reject allMatches", () => {
 });
 
 describe("model routers route on explicit input", () => {
-  const routes = { a: { to: "left" }, b: { to: "right", default: true } };
+  const routes = [{ name: "a", to: "left" }, { name: "b", to: "right", default: true }];
+  const ruleRoutes = [
+    { name: "a", when: "{{ true }}", to: "left" },
+    { name: "b", default: true, to: "right" },
+  ];
 
   it.each([undefined, "", "   "])("rejects mode: model with input %j", (input) => {
     const r = RouterWithSchema.safeParse({ mode: "model", routes, ...(input === undefined ? {} : { input }) });
@@ -38,6 +46,6 @@ describe("model routers route on explicit input", () => {
   });
 
   it("does not require input for mode: rules", () => {
-    expect(RouterWithSchema.safeParse({ mode: "rules", routes }).success).toBe(true);
+    expect(RouterWithSchema.safeParse({ mode: "rules", routes: ruleRoutes }).success).toBe(true);
   });
 });

@@ -16,7 +16,6 @@ import { defineNode, type CompiledNode, type BuildContext, type NodeResult } fro
 import type { NodeRunContext } from "../context.js";
 import { assertHostProbeAllowed, assertSecretAllowed, nodePolicyOf } from "../node-policy.js";
 import { secretScope } from "../runtime/secret-scope.js";
-import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import {
   findMissingBins,
@@ -32,7 +31,6 @@ import {bindNodeReplay,isPendingStep,pendingStep,uncertainStep} from "../provide
 const configSchema = ShellWithSchema;
 type Config = z.infer<typeof configSchema>;
 
-const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_BUFFER = 10 * 1024 * 1024;
 
 /**
@@ -50,12 +48,12 @@ export const shellNode = defineNode<Config>({
   type: "shell",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { sideEffecting: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { sideEffecting: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {
@@ -95,7 +93,6 @@ export const shellNode = defineNode<Config>({
           ? (renderDeep(config.input, scope) as Record<string, unknown>)
           : Object.keys(scope.input).length > 0 ? scope.input : undefined;
 
-        const timeoutMs = config.timeout ? parseDuration(config.timeout) : DEFAULT_TIMEOUT_MS;
         const allowedExit = config.expect?.exitCode ?? [0];
 
         assertHostProbeAllowed(nodePolicyOf(ctx), config.requires, `shell node "${ctx.nodeId}"`);
@@ -156,7 +153,6 @@ export const shellNode = defineNode<Config>({
           args,
           cwd,
           shell: useShell,
-          timeoutMs,
         });
           replay.set(key,slot,pendingStep("shell",{identity}));await replay.flush(key);
           proc = await runProcess({
@@ -165,7 +161,6 @@ export const shellNode = defineNode<Config>({
             shell: useShell,
             cwd,
             env,
-            timeoutMs,
             ...(ctx.signal ? { signal: ctx.signal } : {}),
             ...(stdinData !== undefined ? { stdin: stdinData } : {}),
             onAbort:()=>replay.delete(key,slot),
@@ -244,7 +239,7 @@ function runProcess(opts: {
   shell: boolean;
   cwd: string;
   env: NodeJS.ProcessEnv;
-  timeoutMs: number;
+  timeoutMs?: number;
   signal?: AbortSignal;
   stdin?: string;
   onAbort?:()=>void;
@@ -282,7 +277,7 @@ function runProcess(opts: {
     let settled = false;
     let timedOut = false;
 
-    const timer = setTimeout(() => {
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
       timedOut = true;
       kill("SIGKILL");
     }, timeoutMs);
@@ -290,7 +285,7 @@ function runProcess(opts: {
     const finish = (err?: Error, exitCode = 1) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal?.removeEventListener("abort",onAbort);
       if (signal?.aborted) { reject(signal.reason ?? new Error("Aborted"));return; }
       if (err) {

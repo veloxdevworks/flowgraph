@@ -48,7 +48,7 @@ const waitChild = {
   apiVersion: "flowgraph/v1",
   kind: "Graph",
   metadata: { name: "child" },
-  nodes: [{ id: "w", type: "wait", with: { duration: "1ms" } }],
+  nodes: [{ id: "w", type: "wait", with: { deadline: "1ms" } }],
   edges: [
     { from: "START", to: "w" },
     { from: "w", to: "END" },
@@ -118,15 +118,15 @@ describe("reserved channel names", () => {
   });
 
   it("refuses run input with an unknown __ name, with or without a policy", async () => {
-    const g = await compileGraph(graph([{ id: "w", type: "wait", with: { duration: "1ms" } }]));
+    const g = await compileGraph(graph([{ id: "w", type: "wait", with: { deadline: "1ms" } }]));
     await expect(g.run({ input: { __future: 1 } })).rejects.toMatchObject({ code: "RESERVED_CHANNEL_BLOCKED" });
   });
 
   it("refuses declaring or writing an unknown __ channel under a policy", async () => {
-    const declared = graph([{ id: "w", type: "wait", with: { duration: "1ms" } }]);
+    const declared = graph([{ id: "w", type: "wait", with: { deadline: "1ms" } }]);
     (declared.state!.channels as Record<string, unknown>).__future = { type: "object" };
     expect(await codeOf(compileGraph(declared, { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
-    const written = graph([{ id: "w", type: "wait", with: { duration: "1ms", output: { to: "__future" } } }]);
+    const written = graph([{ id: "w", type: "wait", with: { deadline: "1ms", output: { to: "__future" } } }]);
     (written.state!.channels as Record<string, unknown>).__future = { type: "object" };
     expect(await codeOf(compileGraph(written, { nodePolicy: POLICY }))).toBe("RESERVED_CHANNEL_BLOCKED");
   });
@@ -216,7 +216,7 @@ describe("host-loaded definitions under a policy", () => {
   it("refuses inbound webhooks (INBOUND_WEBHOOK_BLOCKED)", async () => {
     const wait = graph([{ id: "w", type: "wait", with: { webhook: true } }]);
     expect(await codeOf(compileGraph(wait, { nodePolicy: POLICY }))).toBe("INBOUND_WEBHOOK_BLOCKED");
-    const server = graph([{ id: "w", type: "wait", with: { duration: "1ms" } }], { runtime: { webhookServer: { host: "0.0.0.0", port: 1 } } });
+    const server = graph([{ id: "w", type: "wait", with: { deadline: "1ms" } }], { runtime: { webhookServer: { host: "0.0.0.0", port: 1 } } });
     expect(await codeOf(compileGraph(server, { nodePolicy: POLICY }))).toBe("INBOUND_WEBHOOK_BLOCKED");
   });
 });

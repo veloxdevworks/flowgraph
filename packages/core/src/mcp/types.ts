@@ -20,10 +20,13 @@ export interface McpToolInfo {
 export interface McpHub {
   /** List tools exposed by a named server from mcpServers. */
   listTools(server: string): Promise<McpToolInfo[]>;
-  /** Invoke a tool on a server. */
-  callTool(server: string, name: string, args: unknown): Promise<unknown>;
-  /** Read a resource URI from a server. */
-  readResource(server: string, uri: string): Promise<unknown>;
+  /**
+   * Invoke a tool on a server. `options.signal` aborts when the node times out
+   * or the run is cancelled. The hub should cancel the client request.
+   */
+  callTool(server: string, name: string, args: unknown, options?: { signal?: AbortSignal }): Promise<unknown>;
+  /** Read a resource URI from a server. Honor `options.signal` the same way as `callTool`. */
+  readResource(server: string, uri: string, options?: { signal?: AbortSignal }): Promise<unknown>;
   /** Tear down all server connections. */
   close(): Promise<void>;
 }

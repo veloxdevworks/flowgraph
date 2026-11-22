@@ -8,7 +8,7 @@ import { ShellWithSchema } from "@flowgraph/spec";
 import type { GraphSpec } from "@flowgraph/spec";
 import { normalizeShellText } from "./nodes/shell.js";
 
-function shellSpec(nodeWith: Record<string, unknown>): GraphSpec {
+function shellSpec(nodeWith: Record<string, unknown>, node: Record<string, unknown> = {}): GraphSpec {
   return {
     metadata: { name: "shell-test" },
     state: {
@@ -22,6 +22,7 @@ function shellSpec(nodeWith: Record<string, unknown>): GraphSpec {
       {
         id: "run",
         type: "shell",
+        ...node,
         with: nodeWith,
       },
     ],
@@ -42,9 +43,9 @@ describe("ShellWithSchema", () => {
   it("requires command", () => {
     expect(ShellWithSchema.safeParse({}).success).toBe(false);
     expect(ShellWithSchema.safeParse({ command: "echo" }).success).toBe(true);
-    expect(
-      ShellWithSchema.safeParse({ command: "echo", args: ["hi"], timeout: "5s" }).success,
-    ).toBe(true);
+    const timed = ShellWithSchema.safeParse({ command: "echo", args: ["hi"], timeout: "5s" });
+    expect(timed.success).toBe(false);
+    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("shell with.timeout is not supported");
     expect(ShellWithSchema.safeParse({ command: "echo hi | wc -c", shell: true }).success).toBe(true);
   });
 
@@ -77,7 +78,7 @@ describe("shell node: run data never becomes shell syntax", () => {
   it("refuses to compile a templated command", async () => {
     await expect(
       compileGraph(shellSpec({ command: "echo Hello {{ state.title }}", output: { to: "out" } }), {}),
-    ).rejects.toThrow(/config error: .*command cannot contain \{\{ \}\} templates/);
+    ).rejects.toThrow(/NODE_CONFIG_ERROR at nodes\.run\.with\.command: .*command cannot contain \{\{ \}\} templates/);
     const diags = validateSpec(shellSpec({ command: "echo Hello {{ state.title }}", shell: true }));
     expect(diags).toContainEqual(
       expect.objectContaining({ severity: "error", message: expect.stringMatching(/command cannot contain \{\{ \}\} templates/) }),
@@ -288,9 +289,8 @@ describe("shell node", () => {
       shellSpec({
         command: "node",
         args: ["-e", "setTimeout(()=>{}, 60000)"],
-        timeout: "200ms",
         output: { to: "out" },
-      }),
+      }, { timeout: "200ms" }),
       {},
     );
     const r = await compiled.run({ input: {} });

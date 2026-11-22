@@ -31,7 +31,7 @@ describe("provider option diagnostics", () => {
         with: {
           mode: "model",
           match: "allMatches",
-          routes: { a: { to: "END" }, b: { default: true, to: "END" } },
+          routes: [ { name: "a", to: "END" }, { name: "b", default: true, to: "END" } ],
         },
       },
     ]);
@@ -50,7 +50,7 @@ describe("provider option diagnostics", () => {
         with: {
           mode: "model",
           match: "allMatches",
-          routes: { a: { to: "END" }, b: { default: true, to: "END" } },
+          routes: [ { name: "a", to: "END" }, { name: "b", default: true, to: "END" } ],
         },
       },
     ]);

@@ -32,7 +32,7 @@ const child = {
   apiVersion: "flowgraph/v1",
   kind: "Graph",
   metadata: { name: "child" },
-  nodes: [{ id: "w", type: "wait", with: { duration: "1ms" } }],
+  nodes: [{ id: "w", type: "wait", with: { deadline: "1ms" } }],
   edges: [
     { from: "START", to: "w" },
     { from: "w", to: "END" },

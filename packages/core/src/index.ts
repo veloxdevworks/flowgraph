@@ -223,6 +223,7 @@ export {
   secretNamesIn,
   secretReferenceDiagnostics,
 } from "./runtime/secret-declarations.js";
+export { expandGraphEnv, MIN_REDACTED_CONFIG_VALUE, recordGraphEnvExpansion, type GraphEnvExpansion } from "./runtime/config-env.js";
 
 export {
   createLogger,
@@ -288,6 +289,8 @@ export {
   reportToolResult,
   requireToolApproval,
 } from "./providers/index.js";
+export { effectiveModel, modelRequest } from "./providers/model-choice.js";
+export type { ModelSource } from "./providers/model-choice.js";
 export type {
   ProviderAdapter,
   ProviderValidateNode,

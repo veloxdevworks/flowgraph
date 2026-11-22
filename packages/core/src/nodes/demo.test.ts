@@ -347,10 +347,7 @@ describe("demo results across a loop-back", () => {
           type: "router",
           with: {
             mode: "rules",
-            routes: {
-              again: { when: "{{ state.outputs.capture.ok }}", to: "remove" },
-              done: { default: true, to: "END" },
-            },
+            routes: [ { name: "again", when: "{{ state.outputs.capture.ok }}", to: "remove" }, { name: "done", default: true, to: "END" } ],
           },
         },
         { id: "remove", type: "shell", with: { command: "rm", args: ["-f", source] } },
@@ -358,7 +355,7 @@ describe("demo results across a loop-back", () => {
       edges: [
         { from: "START", to: "capture" },
         { from: "capture", to: "decide" },
-        { from: "decide", branch: [{ to: "remove" }, { to: "END" }] },
+        { from: "decide", branch: [{ when: "{{ state.outputs.capture.ok }}", to: "remove" }, { default: true, to: "END" }] },
         { from: "remove", to: "capture" },
       ],
       runtime: { checkpoint: { enabled: false, backend: "memory" } },

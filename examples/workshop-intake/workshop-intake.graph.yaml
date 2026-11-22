@@ -52,10 +52,10 @@ nodes:
     with:
       mode: rules
       routes:
-        done:
+        - name: done
           when: "{{ state.brief.complete }}"
           to: END
-        needs-follow-up:
+        - name: needs-follow-up
           default: true
           to: follow-up
 

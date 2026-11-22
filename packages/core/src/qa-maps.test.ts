@@ -255,10 +255,7 @@ describe("PLAT-311 / PLAT-312 / PLAT-325: map invocation semantics", () => {
           id: "route",
           type: "router",
           with: {
-            routes: {
-              again: { when: "{{ state.round < 2 }}", to: "fan" },
-              done: { default: true, to: "END" },
-            },
+            routes: [ { name: "again", when: "{{ state.round < 2 }}", to: "fan" }, { name: "done", default: true, to: "END" } ],
           },
         },
       ],

@@ -136,7 +136,7 @@ nodes:
       metadata: { name: pr-slow-child }
       state: { channels: { out: { type: object } } }
       nodes:
-        - { id: w, type: wait, with: { duration: 30s } }
+        - { id: w, type: wait, with: { deadline: 30s } }
       edges: [ { from: START, to: w }, { from: w, to: END } ]
     with: { stateMap: { out: { out: out } } }
 edges: [ { from: START, to: slow }, { from: slow, to: END } ]

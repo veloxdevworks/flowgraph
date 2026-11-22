@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { existsSync, readFileSync, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,7 +8,7 @@ import { ScriptWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { runScriptSandboxed } from "./nodes/script.js";
 import { defineProvider } from "./providers/types.js";
 
-function scriptSpec(nodeWith: Record<string, unknown>): GraphSpec {
+function scriptSpec(nodeWith: Record<string, unknown>, node: Record<string, unknown> = {}): GraphSpec {
   return {
     metadata: { name: "script-test" },
     state: {
@@ -21,6 +22,7 @@ function scriptSpec(nodeWith: Record<string, unknown>): GraphSpec {
       {
         id: "run",
         type: "script",
+        ...node,
         with: nodeWith,
       },
     ],
@@ -45,10 +47,9 @@ describe("ScriptWithSchema", () => {
     expect(ScriptWithSchema.safeParse({ code: "export default async () => 1" }).success).toBe(true);
   });
 
-  it("accepts permissions and timeout", () => {
+  it("accepts permissions and rejects with.timeout", () => {
     const r = ScriptWithSchema.safeParse({
       code: "export default async () => ({})",
-      timeout: "5s",
       permissions: {
         fsRead: ["/tmp"],
         fsWrite: ["/tmp/out"],
@@ -59,6 +60,9 @@ describe("ScriptWithSchema", () => {
       env: { MARK: "1" },
     });
     expect(r.success).toBe(true);
+    const timed = ScriptWithSchema.safeParse({ code: "export default async () => ({})", timeout: "5s" });
+    expect(timed.success).toBe(false);
+    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("script with.timeout is not supported");
   });
 });
 
@@ -122,7 +126,7 @@ export default async function() { return leftPad("a", 3); }
     await expect(
       runScriptSandboxed(
         `export default async function() { await new Promise(r => setTimeout(r, 60_000)); }`,
-        { timeoutMs: 200 },
+        { timeoutMs: 200, stopGraceMs: 50 },
       ),
     ).rejects.toThrow(/timed out/);
   }, 10_000);
@@ -381,9 +385,8 @@ export default async function() {
     const compiled = await compileGraph(
       scriptSpec({
         code: `export default async function() { await new Promise(r => setTimeout(r, 60_000)); }`,
-        timeout: "200ms",
         output: { to: "out" },
-      }),
+      }, { timeout: "200ms" }),
       {},
     );
     const r = await compiled.run({ input: {} });
@@ -485,4 +488,112 @@ export default async function() {
       await fs.rm(workspace, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === "win32")("stops a grandchild that traps SIGTERM", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-group-"));
+    const pidFile = path.join(dir, "grandchild.pid");
+    const grandchild = `
+      process.on("SIGTERM", () => {});
+      require("node:fs").writeFileSync(process.env.PID_FILE, String(process.pid));
+      setInterval(() => {}, 1000);
+    `;
+    const code = `
+      export default async function () {
+        process.on("SIGTERM", () => {});
+        const { spawn } = await import("node:child_process");
+        spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore", env: process.env });
+        await new Promise(() => {});
+      }
+    `;
+    const ac = new AbortController();
+    let pid = 0;
+    const pending = runScriptSandboxed(code, {
+      signal: ac.signal,
+      stopGraceMs: 50,
+      permissions: { childProcess: true, fsWrite: [dir] },
+      env: { PID_FILE: pidFile },
+      workspace: dir,
+    });
+    try {
+      pid = await grandchildPid(pidFile, dir);
+      ac.abort(new Error("stop"));
+      await expect(pending).rejects.toThrow(/stop/);
+      await expectStopped(pid);
+    } finally {
+      ac.abort(new Error("stop"));
+      if (pid > 0) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("stops a grandchild that ignores SIGTERM after the direct child exits", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-script-group-"));
+    const pidFile = path.join(dir, "grandchild.pid");
+    const code = `
+      export default async function () {
+        const { spawn } = await import("node:child_process");
+        spawn("sh", ["-c", "trap '' TERM; echo $$ > \\"$PID_FILE\\"; sleep 30"], {
+          stdio: "ignore",
+          env: process.env,
+        });
+        await new Promise(() => {});
+      }
+    `;
+    const ac = new AbortController();
+    let pid = 0;
+    const pending = runScriptSandboxed(code, {
+      signal: ac.signal,
+      stopGraceMs: 50,
+      permissions: { childProcess: true, fsWrite: [dir] },
+      env: { PID_FILE: pidFile },
+      workspace: dir,
+    });
+    try {
+      pid = await grandchildPid(pidFile, dir);
+      ac.abort(new Error("stop"));
+      await expect(pending).rejects.toThrow(/stop/);
+      await expectStopped(pid);
+    } finally {
+      ac.abort(new Error("stop"));
+      if (pid > 0) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });
+
+/** `kill(pid, 0)` still succeeds while the kernel has not reaped the process. */
+async function expectStopped(pid: number): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  expect(() => process.kill(pid, 0)).toThrow();
+}
+
+function grandchildPid(pidFile: string, dir: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      watcher.close();
+      reject(new Error("grandchild did not start"));
+    }, 4000);
+    const finish = () => {
+      if (!existsSync(pidFile)) return;
+      const raw = readFileSync(pidFile, "utf8").trim();
+      if (!/^[1-9]\d*$/.test(raw)) return;
+      clearTimeout(timer);
+      watcher.close();
+      resolve(Number(raw));
+    };
+    const watcher = watch(dir, finish);
+    finish();
+  });
+}

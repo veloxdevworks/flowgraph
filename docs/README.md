@@ -90,8 +90,12 @@ nodes:
     with:
       input: "{{ state.summary }}"
       routes:
-        bug:     { when: "contains(lower(state.summary), 'error')", to: file-bug }
-        feature: { default: true, to: file-feature }
+        - name: bug
+          when: "contains(lower(state.summary), 'error')"
+          to: file-bug
+        - name: feature
+          default: true
+          to: file-feature
   - id: file-bug
     type: skill
     uses: ./skills/create-jira-bug

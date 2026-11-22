@@ -43,7 +43,7 @@ describe("PLAT-295 / PLAT-323 / PLAT-337: real CLI", { timeout: 30_000 }, () => 
         graph({
           id: "step",
           type: "router",
-          with: { routes: { done: { default: true, to: "END" } } },
+          with: { routes: [ { name: "done", default: true, to: "END" } ] },
         }),
       ),
     );
@@ -85,7 +85,7 @@ describe("PLAT-295 / PLAT-323 / PLAT-337: real CLI", { timeout: 30_000 }, () => 
       const spec = graph({
         id: "step",
         type: "router",
-        with: { routes: { review: { default: true, to: "gate" } } },
+        with: { routes: [ { name: "review", default: true, to: "gate" } ] },
       });
       spec.nodes.push({
         id: "gate",

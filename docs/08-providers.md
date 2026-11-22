@@ -128,7 +128,7 @@ providers:
 config:
   defaults:
     provider: main
-    model: claude-3-5-sonnet-latest   # optional per-run override on agent nodes
+    model: claude-3-5-sonnet-latest   # used only for the default provider, after that provider's own model
 ```
 
 **Shorthand:** `config.defaults.provider: anthropic` (bare vendor name) synthesizes a LangChain provider when no matching `providers` entry exists.
@@ -280,7 +280,7 @@ Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/ope
 
 ## 6. Selection, defaults, and validation
 
-- Default provider/model come from `config.defaults` ([02 §config](./02-graph-spec.md#7-config)); per-node `provider:`/`model:` override. Retry and timeout are not part of `config.defaults`: use `runtime.retry` / `runtime.timeoutDefault`, or set `retry` / `timeout` on the node.
+- Model choice is the node `model`, then the provider's own model, then `config.defaults.model` only when the node uses `config.defaults.provider`. `config.defaults.model` without `config.defaults.provider` is ignored, and validate warns about it. A default model does not replace another provider's model. Retry and timeout are not part of `config.defaults`: use `runtime.retry` / `runtime.timeoutDefault`, or set `retry` / `timeout` on the node.
 - On `flowgraph run`, the CLI reads `providers:` from the graph YAML, constructs LangChain adapters from the built-in core provider, or lazy-loads `@flowgraph/provider-claude` / `@flowgraph/provider-cursor` by `kind`, and passes them to `compileGraph({ providers })`. Missing vendor packages or API keys fail fast with install/env hints.
 - `validate()` runs at compile time and during `flowgraph validate`: unknown model (when the provider lists known ids), builtin tools unsupported by the provider, or other options the provider cannot honor ⇒ diagnostics before any model call. Compile errors stop compilation; compile warnings are logged, listed on `compiled.diagnostics`, and included in every run result's `issues`. Offline, `flowgraph validate` checks LangChain entries in `providers:` (known model from `model`, builtin tools) and calls `validate()` on providers registered in the process, without loading vendor packages or calling the network. A node `model` override and `with.maxTokens` are forwarded by the LangChain adapter; providers that cannot honor an option must report it from `validate()` instead of ignoring it.
 

@@ -1,10 +1,10 @@
 import type { GraphSpec, NodeSpec } from "@flowgraph/spec";
-import { evalGuard } from "@flowgraph/expr";
+import { evalGuard, guardExpression } from "@flowgraph/expr";
 import { Command } from "@langchain/langgraph";
 import type { Hook } from "../hooks/types.js";
 
 export const ROUTING_CHANNEL = "__routing";
-const phases = new Set(["node:before", "node:after", "node:error"]);
+const phases = new Set(["node:error"]);
 
 export function recoveryTargets(spec: GraphSpec, node: NodeSpec, hooks: Hook[] = []): string[] {
   const targets = new Set<string>();
@@ -50,6 +50,75 @@ export function isEdgeGuardError(err: unknown): err is EdgeGuardError {
   return err instanceof Error && (err as { code?: unknown }).code === EDGE_GUARD_ERROR;
 }
 
+/** Same no-match failure for a branch edge and a rules-mode router. */
+export const NO_MATCH = "NO_MATCH";
+
+export type NoMatchError = Error & {
+  code: typeof NO_MATCH;
+  retryable: false;
+  from?: string;
+};
+
+export function isNoMatchError(err: unknown): err is NoMatchError {
+  return err instanceof Error && (err as { code?: unknown }).code === NO_MATCH;
+}
+
+export function noMatchError(subject: string, from?: string): NoMatchError {
+  const err = new Error(`${subject} has no matching route and no default`) as NoMatchError;
+  err.code = NO_MATCH;
+  err.retryable = false;
+  if (from !== undefined) err.from = from;
+  return err;
+}
+
+/** A router `when` that throws is a routing failure, not a node error to swallow or retry. */
+export const ROUTER_GUARD_ERROR = "ROUTER_GUARD_ERROR";
+
+export type RouterGuardError = Error & {
+  code: typeof ROUTER_GUARD_ERROR;
+  retryable: false;
+  from: string;
+  when: string;
+};
+
+export function isRouterGuardError(err: unknown): err is RouterGuardError {
+  return err instanceof Error && (err as { code?: unknown }).code === ROUTER_GUARD_ERROR;
+}
+
+export function routerGuardError(routerId: string, when: string, cause: unknown): RouterGuardError {
+  const reason = cause instanceof Error ? cause.message : String(cause);
+  const err = new Error(
+    `router "${routerId}" guard \`${when}\` could not be evaluated: ${reason}`,
+    { cause },
+  ) as RouterGuardError;
+  err.code = ROUTER_GUARD_ERROR;
+  err.retryable = false;
+  err.from = routerId;
+  err.when = when;
+  return err;
+}
+
+export function isRoutingFailure(err: unknown): boolean {
+  return isNoMatchError(err) || isRouterGuardError(err);
+}
+
+/** Values a guard may read: state, the node input, config, and the run. */
+export interface GuardScope {
+  state: Record<string, unknown>;
+  input?: Record<string, unknown> | undefined;
+  config?: Record<string, unknown> | undefined;
+  run?: Record<string, unknown> | undefined;
+}
+
+function guardScope(scope: GuardScope): Record<string, unknown> {
+  return {
+    state: scope.state,
+    input: scope.input ?? {},
+    config: scope.config ?? {},
+    run: scope.run ?? {},
+  };
+}
+
 /**
  * Evaluate one branch guard. A guard that throws (bad path, wrong type, unknown
  * function) fails the run: falling through to the default branch or END would
@@ -58,11 +127,11 @@ export function isEdgeGuardError(err: unknown): err is EdgeGuardError {
 export function evalBranchGuard(
   from: string,
   branch: { to: string; when: string },
-  state: Record<string, unknown>,
+  scope: GuardScope,
 ): boolean {
-  const expr = branch.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
+  const expr = guardExpression(branch.when);
   try {
-    return Boolean(evalGuard(expr, { state }));
+    return Boolean(evalGuard(expr, guardScope(scope)));
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw Object.assign(
@@ -72,23 +141,46 @@ export function evalBranchGuard(
   }
 }
 
-export function normalTargets(
-  spec: GraphSpec,
-  id: string,
-  state: Record<string, unknown>,
-): string[] {
+/** First matching `when`, otherwise the single default. No match fails the run. */
+export function selectBranchTarget(
+  from: string,
+  branches: Array<{ to: string; when?: string | undefined; default?: boolean | undefined }>,
+  scope: GuardScope,
+): string {
+  let fallback: string | undefined;
+  for (const branch of branches) {
+    const isDefault = branch.default === true;
+    const when = branch.when?.trim();
+    if (isDefault && when) {
+      throw Object.assign(new Error(`Edge "${from}" -> "${branch.to}" sets both when and default`), {
+        code: "BRANCH_ENTRY",
+        retryable: false as const,
+      });
+    }
+    if (!isDefault && !when) {
+      throw Object.assign(new Error(`Edge "${from}" -> "${branch.to}" needs when or default`), {
+        code: "BRANCH_ENTRY",
+        retryable: false as const,
+      });
+    }
+    if (isDefault) {
+      fallback ??= branch.to;
+      continue;
+    }
+    if (evalBranchGuard(from, { to: branch.to, when: when! }, scope)) return branch.to;
+  }
+  if (fallback === undefined) throw noMatchError(`Edge "${from}"`, from);
+  return fallback;
+}
+
+export function normalTargets(spec: GraphSpec, id: string, scope: GuardScope): string[] {
   const targets = new Set<string>();
   for (const edge of spec.edges) {
     const sources = Array.isArray(edge.from) ? edge.from : [edge.from];
     if (!sources.includes(id)) continue;
     if ("to" in edge)
       for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) targets.add(to);
-    else {
-      const chosen =
-        edge.branch.find((b) => !b.default && !!b.when && evalBranchGuard(id, { to: b.to, when: b.when }, state)) ??
-        edge.branch.find((b) => b.default);
-      targets.add(chosen?.to ?? "END");
-    }
+    else targets.add(selectBranchTarget(id, edge.branch, scope));
   }
   return [...targets];
 }

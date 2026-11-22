@@ -37,7 +37,7 @@ it("PLAT-358: model router calls count usage and enforce hard budgets", async ()
       {
         id: "route",
         type: "router",
-        with: { mode: "model", input: "route this", provider: "route-paid", routes: { done: { to: "END" } } },
+        with: { mode: "model", input: "route this", provider: "route-paid", routes: [ { name: "done", to: "END" } ] },
       },
     ],
     { budget: { maxTokens: 100, onExceed: "fail" } },

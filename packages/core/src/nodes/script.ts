@@ -24,7 +24,6 @@ import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { assertHostProbeAllowed, assertScriptFileAllowed, nodePolicyOf } from "../node-policy.js";
-import { parseDuration } from "../runtime/duration.js";
 import { applyOutput } from "./output.js";
 import { secretScope } from "../runtime/secret-scope.js";
 import { findMissingBins, missingToolIssue } from "../runtime/requires.js";
@@ -33,7 +32,6 @@ import { DEFAULT_INHERITED_ENV, pickHostEnv } from "../runtime/child-env.js";
 const configSchema = ScriptWithSchema;
 type Config = z.infer<typeof configSchema>;
 
-const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_BUFFER = 10 * 1024 * 1024;
 const STDERR_EXCERPT = 500;
 
@@ -48,6 +46,8 @@ export type RunScriptSandboxedOptions = {
   input?: unknown;
   env?: Record<string, string>;
   timeoutMs?: number;
+  /** How long a stop waits for the direct child before SIGKILL. Defaults to 2s. */
+  stopGraceMs?: number;
   permissions?: ScriptPermissions;
   signal?: AbortSignal;
   /**
@@ -83,7 +83,7 @@ export async function runScriptSandboxed(
     throw new Error("script: code is empty");
   }
 
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs;
   // Resolve symlinks (e.g. macOS /tmp → /private/var/folders/…) so Node's
   // permission model can realpath the entry script without needing /var.
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg-script-")));
@@ -120,7 +120,8 @@ export async function runScriptSandboxed(
       args: nodeArgs,
       cwd,
       env,
-      timeoutMs,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
     });
 
@@ -281,12 +282,12 @@ export const scriptNode = defineNode<Config>({
   type: "script",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { sideEffecting: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { sideEffecting: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {
@@ -309,7 +310,6 @@ export const scriptNode = defineNode<Config>({
             )
           : undefined;
 
-        const timeoutMs = config.timeout ? parseDuration(config.timeout) : DEFAULT_TIMEOUT_MS;
         const permissions = normalizeScriptPermissions(config.permissions);
         let code = config.code;
         if (config.file !== undefined) {
@@ -347,7 +347,6 @@ export const scriptNode = defineNode<Config>({
         }
 
         ctx.logger.debug("script exec", {
-          timeoutMs,
           permissions,
           codeLength: code.length,
         });
@@ -357,7 +356,6 @@ export const scriptNode = defineNode<Config>({
           {
             input,
             ...(env ? { env } : {}),
-            timeoutMs,
             ...(permissions ? { permissions } : {}),
             ...(ctx.signal ? { signal: ctx.signal } : {}),
             workspace: ctx.workspace,
@@ -391,71 +389,140 @@ export const scriptNode = defineNode<Config>({
   },
 });
 
+/**
+ * After SIGTERM, SIGKILL the process group. If the direct child is still
+ * running, wait this long so it can exit on its own. If it has already
+ * closed, SIGKILL immediately so a grandchild that ignores SIGTERM is not
+ * left reparented to init.
+ */
+const DEFAULT_STOP_GRACE_MS = 2_000;
+
 function runProcess(opts: {
   command: string;
   args: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
-  timeoutMs: number;
+  timeoutMs?: number;
+  stopGraceMs?: number;
   signal?: AbortSignal;
 }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const { command, args, cwd, env, timeoutMs, signal } = opts;
+  const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(signal.reason ?? new Error("Aborted"));
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted"));
       return;
     }
 
+    // A new process group so a timeout or abort reaches grandchildren, including
+    // a script that traps SIGTERM. Windows has no POSIX process groups.
+    const grouped = process.platform !== "win32";
     const child = spawn(command, args, {
       shell: false,
       cwd,
       env,
-      signal,
+      detached: grouped,
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     let stdout = "";
     let stderr = "";
     let settled = false;
-    let timedOut = false;
+    let stopReason: Error | undefined;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let closeResult: { err?: Error; exitCode: number } | undefined;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, timeoutMs);
+    const killGroup = (sig: NodeJS.Signals) => {
+      const pid = child.pid;
+      if (grouped && pid !== undefined) {
+        try {
+          process.kill(-pid, sig);
+          return;
+        } catch {
+          // The group has already exited.
+        }
+      }
+      try { child.kill(sig); } catch { /* already exited */ }
+    };
 
-    const finish = (err?: Error, exitCode = 1) => {
+    const settle = () => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      if (err) {
-        reject(err);
+      if (timer) clearTimeout(timer);
+      if (grace) clearTimeout(grace);
+      signal?.removeEventListener("abort", onAbort);
+      if (stopReason) {
+        reject(stopReason);
         return;
       }
-      if (timedOut) {
-        reject(new Error(`script: timed out after ${timeoutMs}ms`));
+      if (closeResult?.err) {
+        reject(closeResult.err);
         return;
       }
-      resolve({ stdout, stderr, exitCode });
+      resolve({ stdout, stderr, exitCode: closeResult?.exitCode ?? 1 });
+    };
+
+    const finishStop = () => {
+      if (grace) clearTimeout(grace);
+      grace = undefined;
+      killGroup("SIGKILL");
+      settle();
+    };
+
+    // Wait out the grace only while the direct child is still running.
+    const requestStop = (reason: Error) => {
+      if (stopReason) return;
+      stopReason = reason;
+      killGroup("SIGTERM");
+      if (settled) return;
+      if (closeResult) {
+        finishStop();
+        return;
+      }
+      grace = setTimeout(finishStop, stopGraceMs);
+    };
+
+    const onAbort = () => {
+      const reason = signal?.reason;
+      requestStop(reason instanceof Error ? reason : new Error("Aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        requestStop(new Error(`script: timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }
+
+    const noteClose = (err?: Error, exitCode = 1) => {
+      if (!closeResult?.err) closeResult = { ...(err ? { err } : {}), exitCode };
+      if (!stopReason) {
+        settle();
+        return;
+      }
+      finishStop();
+    };
+
+    const overflow = (which: "stdout" | "stderr") => {
+      if (stopReason) return;
+      stopReason = new Error(`script: ${which} exceeded maxBuffer (${MAX_BUFFER} bytes)`);
+      killGroup("SIGKILL");
     };
 
     child.stdout?.on("data", (chunk: Buffer | string) => {
       stdout += String(chunk);
-      if (stdout.length > MAX_BUFFER) {
-        child.kill("SIGKILL");
-        finish(new Error(`script: stdout exceeded maxBuffer (${MAX_BUFFER} bytes)`));
-      }
+      if (stdout.length > MAX_BUFFER) overflow("stdout");
     });
     child.stderr?.on("data", (chunk: Buffer | string) => {
       stderr += String(chunk);
-      if (stderr.length > MAX_BUFFER) {
-        child.kill("SIGKILL");
-        finish(new Error(`script: stderr exceeded maxBuffer (${MAX_BUFFER} bytes)`));
-      }
+      if (stderr.length > MAX_BUFFER) overflow("stderr");
     });
 
-    child.on("error", (err) => finish(err));
-    child.on("close", (code) => finish(undefined, code ?? 1));
+    child.on("error", (err) => noteClose(err));
+    child.on("close", (code) => noteClose(undefined, code ?? 1));
     child.stdin?.end();
   });
 }

@@ -25,8 +25,12 @@ nodes:
     with:
       input: "{{ state.summary }}"
       routes:
-        bug:     { when: "{{ contains(lower(state.summary), 'error') }}", to: file-bug }
-        default: { default: true, to: file-feature }
+        - name: bug
+          when: "{{ contains(lower(state.summary), 'error') }}"
+          to: file-bug
+        - name: default
+          default: true
+          to: file-feature
 edges:
   - { from: START, to: summarize }
   - { from: summarize, to: classify }

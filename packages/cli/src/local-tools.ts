@@ -10,6 +10,7 @@ const loadToolsFs = lazyOptionalImport<typeof import("@flowgraph/tools-fs")>(
 function hasMutatingFsHook(spec: GraphSpec, mutatingToolNames: Set<string>): boolean {
   for (const hook of spec.runtime?.hooks ?? []) {
     if (hook.on !== "agent:beforeToolCall") continue;
+    if (hook.do !== "interrupt" && hook.do !== "deny") continue;
     const tool = hook.where?.["tool"];
     if (typeof tool === "string" && mutatingToolNames.has(tool)) return true;
   }
@@ -64,7 +65,7 @@ export async function registerLocalTools(
   ) {
     warnings.push(
       `localTools.fs enables mutating operations (${enabledMutating.join(", ")}) without ` +
-        `runtime.hooks gating (agent:beforeToolCall + do: interrupt) or permission: ask ` +
+        `runtime.hooks gating (agent:beforeToolCall + do: interrupt or do: deny) or permission: ask ` +
         `on an agent node. Consider adding approval gates before running in production.`,
     );
   }

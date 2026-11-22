@@ -15,7 +15,7 @@ import { applyOutput } from "./runtime/apply-output.js";
 import {mkdir, realpath} from "node:fs/promises";
 import { walkNodes } from "./discover-skills.js";
 import { MapWithSchema } from "@flowgraph/spec";
-import { evalGuard, renderDeep } from "@flowgraph/expr";
+import { evalGuard, guardExpression, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory } from "./registry.js";
 import { resolveGraphInput } from "./inputs.js";
 import { createEventBus, withEventThread, type EventBus, type EventSink, type FlowgraphEvent } from "./events.js";
@@ -62,13 +62,15 @@ import {
   collectNodeWriteChannels,
   demoToolExposureDiagnostics,
   ensureDeclaredOutputChannels,
+  graphShapeDiagnostics,
+  graphStructureDiagnostics,
   provesObjective,
 } from "./runtime/validate-graph.js";
 import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { sharedHistoryChannels } from "./context/shared.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { graphFile } from "./runtime/graph-files.js";
-import { barrierEdgeDiagnostics, nodeRouteTargets, nodeToolTargets, topologyDiagnostics } from "./runtime/validate-graph.js";
+import { barrierEdgeDiagnostics, nodeRouteTargets, nodeToolTargets, nodesById, topologyDiagnostics } from "./runtime/validate-graph.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
 
 /**
@@ -107,7 +109,7 @@ import { hitlRouteTargets } from "./nodes/hitl-routes.js";
 import { acquireThreadRun, adoptThreadRunClaim, defaultThreadRunOwner, threadAdmissionError, type ThreadRunClaim } from "./checkpoint/execution-claim.js";
 import { flowFailure } from "./runtime/failure.js";
 import { captureSubgraphHostContext, SUBGRAPH_HOST_CONTEXT } from "./runtime/subgraph-host-context.js";
-import { evalBranchGuard, exclusiveRouting, isEdgeGuardError, normalTargets, recoveryTargets, ROUTING_CHANNEL } from "./runtime/routing-policy.js";
+import { exclusiveRouting, isEdgeGuardError, isNoMatchError, isRouterGuardError, isRoutingFailure, normalTargets, recoveryTargets, ROUTING_CHANNEL, selectBranchTarget, type GuardScope } from "./runtime/routing-policy.js";
 
 import { finishInterruptDeadline, preserveInterruptDeadline, seedInterruptDeadlines, interruptFingerprint } from "./runtime/interrupt-lifecycle.js";
 import { MemoryRuntime, MEMORY_RUNTIME, createEphemeralMemoryRuntime, LOCAL_MEMORY_IDENTITY, type RuntimeMemoryConfig } from "./memory/runtime.js";
@@ -449,6 +451,7 @@ function compileWarningIssue(diag: Diagnostic, raisedAt: string): RunIssue {
 }
 
 export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): Promise<CompiledGraph> {
+  throwIfInvalid(graphShapeDiagnostics(spec));
   const plan = await planPlacements(spec, opts.placement);
   const assembled = await assembleCompiledLangGraph(spec, opts, plan);
   const {
@@ -465,7 +468,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   } = assembled;
   const compiledAt = new Date().toISOString();
   const compileIssues = assembled.warnings.map((d) => compileWarningIssue(d, compiledAt));
-  const declaredInputKeys = new Set([...Object.keys(buildStateAnnotation(graphSpec).spec), ...(graphSpec.inputs ?? []).map(field => field.key)]);
+  const declaredInputKeys = new Set([
+    ...Object.keys(buildStateAnnotation(graphSpec).spec),
+    ...(Array.isArray(graphSpec.inputs) ? graphSpec.inputs : []).flatMap((field) => (field && typeof field.key === "string" ? [field.key] : [])),
+  ]);
 
   const authoredMapNames = new Map<string, string>();
   for (const node of graphSpec.nodes) {
@@ -1440,12 +1446,25 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   };
 }
 
+function throwIfInvalid(diagnostics: Diagnostic[]): void {
+  const invalid = diagnostics.filter((d) => d.severity === "error");
+  if (!invalid.length) return;
+  throw Object.assign(new Error(`Invalid graph: ${invalid.map((d) => `${d.code}${d.path ? ` at ${d.path}` : ""}: ${d.message}`).join("; ")}`), {
+    code: invalid[0]!.code,
+    diagnostics: invalid,
+    retryable: false,
+  });
+}
+
 async function assembleCompiledLangGraph(
   spec: GraphSpec,
   opts: CompileOptions,
   plan?: PlacementPlan,
   embedded = false,
 ): Promise<AssembledGraph> {
+  // Before any other walk, so a cyclic or heavily shared programmatic spec fails here, not with a
+  // RangeError or after exponential work.
+  throwIfInvalid(graphShapeDiagnostics(spec));
   const sourceFile = graphFile(spec);
   const unexpandedEnv = unexpandedEnvDiagnostics(spec);
   // Auto-declare channels targeted by output/collect/stateMap.out so LangGraph
@@ -1461,7 +1480,8 @@ async function assembleCompiledLangGraph(
       retryable: false,
     });
   }
-  const policyEdges = spec.nodes.flatMap(node => recoveryTargets(spec, node, opts.hooks).map(to => ({ from: node.id, to })));
+  const policyNodes = (Array.isArray(spec.nodes) ? spec.nodes : []).filter((node) => node != null);
+  const policyEdges = policyNodes.flatMap((node) => recoveryTargets(spec, node, opts.hooks).map((to) => ({ from: node.id, to })));
   const invalidTopology = topologyDiagnostics({ ...spec, edges: [...spec.edges, ...policyEdges] }).filter((d) => d.severity === "error");
   if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
 
@@ -1518,6 +1538,10 @@ async function assembleCompiledLangGraph(
     });
     assertNoReservedChannels(opts.nodePolicy, channels, `graph "${spec.metadata?.name ?? "graph"}"`);
   }
+  // The structural errors validateSpec reports for the graph, its map bodies and inline
+  // subgraphs; lints such as inputs, triggers and hitl routes stay validate-time at every level.
+  // After imports and extra factories, so plugin types resolve.
+  throwIfInvalid(graphStructureDiagnostics(spec));
   // A policy that refuses MCP also withholds the host's hub, so nothing in the run can reach it.
   const exposed = demoToolExposureDiagnostics(spec)[0];
   if (exposed) throw new Error(`${exposed.path}: ${exposed.message}`);
@@ -1591,6 +1615,7 @@ async function assembleCompiledLangGraph(
   const defaultTimeout = spec.runtime?.timeoutDefault;
 
   const mapJoinById = new Map<string, string>();
+  const routeNodes = nodesById(spec);
 
   for (const nodeSpec of spec.nodes) {
     assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
@@ -1669,7 +1694,7 @@ async function assembleCompiledLangGraph(
     ): Promise<NodeRun> =>
       runWithPolicy<NodeRun>(
         (attempt, signal) => {
-          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig, !embedded);
+          const ctx = buildNodeCtx(nsRecord, state, baseCtx, events, graphWorkspace, attemptBase + attempt, inputOverride, lgConfig, !embedded, nodeTimeout);
           if (signal && receivesTimeoutSignal) ctx.signal = signal;
           return compiled.run(state, ctx).then((res) => {
             finishInterruptDeadline(runScopeOf(lgConfig), nodeSpec.id);
@@ -1700,7 +1725,7 @@ async function assembleCompiledLangGraph(
     // Routers (and any routing-capable node) declare Command.goto destinations via
     // `ends` so LangGraph accepts goto without requiring a duplicate branch edge.
     const recovery = recoveryTargets(spec, nodeSpec, opts.hooks);
-    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id), ...nodeToolTargets(spec, nodeSpec.id), ...recovery].map(target => target === "END" ? END : target))];
+    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id, routeNodes), ...nodeToolTargets(spec, nodeSpec.id), ...recovery].map(target => target === "END" ? END : target))];
     const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
 
     const executeNode = async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
@@ -1713,11 +1738,13 @@ async function assembleCompiledLangGraph(
         lgInterrupt({ reason: "paused", __flowgraphPause: true, ...(data !== undefined ? { data } : {}) });
       }
 
-      // `when` guard
+      const renderedInput = nsRecord["input"]
+        ? (renderDeep(nsRecord["input"] as Record<string, string>, { state, config: baseCtx.config, run: runMeta }) as Record<string, unknown>)
+        : {};
+      // `when` guard — same scope and brace rule as branch edges and router rules
       if (nodeSpec.when) {
-        const expr = nodeSpec.when.replace(/^\s*\{\{|\}\}\s*$/g, "").trim();
-        const guardScope = { state, config: baseCtx.config ?? {}, run: runMeta };
-        if (!evalGuard(expr, guardScope)) {
+        const guardScope = { state, input: renderedInput, config: baseCtx.config ?? {}, run: runMeta };
+        if (!evalGuard(guardExpression(nodeSpec.when), guardScope)) {
           events.emit("node.skipped", { nodeId: nodeSpec.id }, scope);
           return {};
         }
@@ -1798,13 +1825,21 @@ async function assembleCompiledLangGraph(
           events.emit("node.error", { nodeId: nodeSpec.id, error: terminal.reason, code: terminal.code }, scope);
           throw terminal;
         }
+        if (isRoutingFailure(err)) {
+          recordGuardError(err, lgConfig);
+          throw err;
+        }
 
-        // node:error — swallow (veto) / route / retry
+        // node:error — fail, continue, route, or retry
         if (hooks.has("node:error")) {
           const error = err instanceof Error ? err : new Error(String(err));
           const r = await hooks.run("node:error", { state, run: runMeta, payload: { nodeId: nodeSpec.id, nodeType: nodeSpec.type, error } });
           const c = r.control;
-          if (c?.kind === "veto") {
+          if (c?.kind === "fail") {
+            events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(error, "NODE_ERROR") }, scope);
+            throw err;
+          }
+          if (c?.kind === "continue" || c?.kind === "veto") {
             events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(error,"NODE_ERROR"), swallowed: true }, scope);
             const swallowed: RunIssue = stampIssue(
               {
@@ -1842,7 +1877,7 @@ async function assembleCompiledLangGraph(
           }
         }
         const policy = nodeSpec.on?.error;
-        if (policy === "continue" || policy === "ignore") {
+        if (policy === "continue") {
           events.emit("node.error", { nodeId: nodeSpec.id, ...errorInfo(err,"NODE_ERROR"), swallowed: true, policy }, scope);
           const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `node "${nodeSpec.id}" continued after an error: ${String(err)}`, impact: "The node produced no result; subsequent nodes and sibling branches continue." }, { nodeId: nodeSpec.id, nodeType: nodeSpec.type });
           events.emit("run.issue", issue, scope);
@@ -1923,25 +1958,49 @@ async function assembleCompiledLangGraph(
   // A branch guard that throws fails the run. Record why first, so the run's
   // issues name the edge and the expression next to the error status.
   const recordGuardError = (err: unknown, lgConfig?: LangGraphRunnableConfig): unknown => {
-    if (!isEdgeGuardError(err)) return err;
     const runMeta = (runScopeOf(lgConfig)?.meta ?? baseCtx.meta) as RunMeta | undefined;
+    const from = isEdgeGuardError(err) ? err.from : isNoMatchError(err) ? err.from : isRouterGuardError(err) ? err.from : undefined;
+    if (!isEdgeGuardError(err) && !isNoMatchError(err) && !isRouterGuardError(err)) return err;
     const issue = stampIssue(
-      {
-        code: ISSUE_CODE.EDGE_GUARD_ERROR,
-        severity: "error",
-        message: err.message,
-        impact: "The run stopped at this edge instead of taking the default branch or ending.",
-        remediation: "Fix the `when` expression, or guard missing values (for example `state.a != null && state.a.b`).",
-        detail: { from: err.from, to: err.to, when: err.when },
-      },
-      { nodeId: err.from },
+      isEdgeGuardError(err)
+        ? {
+            code: ISSUE_CODE.EDGE_GUARD_ERROR,
+            severity: "error",
+            message: err.message,
+            impact: "The run stopped at this edge instead of taking the default branch or ending.",
+            remediation: "Fix the `when` expression, or guard missing values (for example `state.a != null && state.a.b`).",
+            detail: { from: err.from, to: err.to, when: err.when },
+          }
+        : isRouterGuardError(err)
+          ? {
+              code: ISSUE_CODE.ROUTER_GUARD_ERROR,
+              severity: "error",
+              message: err.message,
+              impact: "The run stopped because a router rule could not be evaluated.",
+              remediation: "Fix the `when` expression, or guard missing values (for example `state.a != null && state.a.b`).",
+              detail: { when: err.when },
+            }
+          : {
+              code: ISSUE_CODE.NO_MATCH,
+              severity: "error",
+              message: err.message,
+              impact: "The run stopped because no route matched and there is no default.",
+            },
+      from ? { nodeId: from } : {},
     );
-    events.emit("run.issue", issue, { nodeId: err.from });
+    events.emit("run.issue", issue, from ? { nodeId: from } : {});
     if (runMeta) {
       try { appendRunIssue(runScopeOf(lgConfig)?.replayWorkspace ?? (!embedded ? runScopeOf(lgConfig)?.workspace : undefined) ?? graphWorkspace, runIssuesKey(runMeta), issue); } catch { /* the error still fails the run */ }
     }
     return err;
   };
+
+  const edgeScope = (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig): GuardScope => ({
+    state,
+    input: {},
+    config: (baseCtx.config ?? {}) as Record<string, unknown>,
+    run: (runScopeOf(lgConfig)?.meta ?? baseCtx.meta ?? {}) as Record<string, unknown>,
+  });
 
   // Edges. Router nodes drive exclusive routing via Command{ goto } + `ends`
   // declared from with.routes — skip their static/branch edges so a UI fan-out
@@ -1953,7 +2012,7 @@ async function assembleCompiledLangGraph(
     graph.addConditionalEdges((mapJoinById.get(node.id) ?? node.id) as typeof START, (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
       const selected = (state[ROUTING_CHANNEL] as Record<string, string | string[] | null> | undefined)?.[node.id];
       let targets: string[];
-      try { targets = selected == null ? normalTargets(spec, node.id, state) : Array.isArray(selected) ? selected : [selected]; }
+      try { targets = selected == null ? normalTargets(spec, node.id, edgeScope(state, lgConfig)) : Array.isArray(selected) ? selected : [selected]; }
       catch (err) { throw recordGuardError(err, lgConfig); }
       return targets.map(to => to === "END" ? END : to);
     }, Object.fromEntries([...spec.nodes.map(n => n.id), END].map(id => [id, id])) as Record<string, typeof END>);
@@ -1982,14 +2041,10 @@ async function assembleCompiledLangGraph(
       const branches = edge.branch;
       graph.addConditionalEdges(from as typeof START, (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {
         try {
-          for (const b of branches) {
-            if (b.default || !b.when) continue;
-            if (evalBranchGuard(source, { to: b.to, when: b.when }, state)) return b.to;
-          }
+          return selectBranchTarget(source, branches, edgeScope(state, lgConfig));
         } catch (err) {
           throw recordGuardError(err, lgConfig);
         }
-        return branches.find((b) => b.default)?.to ?? "END";
       });
     }
   }
@@ -2352,9 +2407,9 @@ function collectRouteEnds(nodeSpec: { type: string; with?: unknown }): string[] 
   if (nodeSpec.type !== "router") return [];
   const withBlock = (nodeSpec.with ?? {}) as Record<string, unknown>;
   const routes = withBlock["routes"];
-  if (!routes || typeof routes !== "object" || Array.isArray(routes)) return [];
+  if (!Array.isArray(routes)) return [];
   const ends = new Set<string>();
-  for (const raw of Object.values(routes as Record<string, unknown>)) {
+  for (const raw of routes) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const to = (raw as Record<string, unknown>)["to"];
     if (typeof to === "string" && to.trim()) {
@@ -2708,6 +2763,7 @@ function buildNodeCtx(
   inputOverride?: Record<string, unknown>,
   lgConfig?: LangGraphRunnableConfig,
   usePinnedWorkspace = true,
+  timeout?: string,
 ) {
   // Embedded subgraphs have no run of their own: their nodes report the
   // top graph's run and thread (from the run scope in the invoke config).
@@ -2758,6 +2814,7 @@ function buildNodeCtx(
     nodeId,
     nodeType,
     attempt,
+    ...(timeout ? { timeout } : {}),
     _input,
     _onceUpdates,
     _issueUpdates,
@@ -3073,13 +3130,16 @@ function addCheckpointedMap(
     if (isInterruptLike(err) || ctx.baseCtx.signal?.aborted) throw err;
     const terminal = flowFailure(err);
     if (terminal) throw terminal;
+    if (isRoutingFailure(err)) throw err;
     const error = err instanceof Error ? err : new Error(String(err));
     const meta = (runScopeOf(lgConfig)?.meta ?? ctx.baseCtx.meta) as RunMeta;
     const hook = await ctx.hooks.run("node:error", { state, run: meta, payload: { nodeId: mapId, nodeType: "map", error } });
     const innerPolicy = itemId === mapId ? undefined : (config.node as { on?: { error?: string } }).on?.error;
-    const policy = hook.control?.kind === "route" ? `route:${hook.control.to}` : hook.control?.kind === "veto" ? "continue" : innerPolicy ?? nodeSpec.on?.error;
-    ctx.events.emit("node.error", { nodeId: itemId, ...errorInfo(error,"NODE_ERROR"), ...(policy && policy !== "fail" ? { swallowed: true, policy } : {}) }, { nodeId: itemId, nodeType: itemId === mapId ? "map" : innerType });
-    if (!policy || policy === "fail") throw err;
+    const control = hook.control;
+    const directed = control?.kind === "route" ? `route:${control.to}` : control?.kind === "continue" || control?.kind === "veto" ? "continue" : control?.kind === "fail" ? "fail" : undefined;
+    const policy = directed ?? innerPolicy ?? nodeSpec.on?.error;
+    ctx.events.emit("node.error", { nodeId: itemId, ...errorInfo(error,"NODE_ERROR"), ...(policy && policy !== "fail" && policy !== "ignore" ? { swallowed: true, policy } : {}) }, { nodeId: itemId, nodeType: itemId === mapId ? "map" : innerType });
+    if (!policy || policy === "fail" || policy === "ignore" || (policy !== "continue" && !policy.startsWith("route:"))) throw err;
     const issue = stampIssue({ code: "ERROR_SWALLOWED", severity: "warning", message: `map item/node "${itemId}" failed: ${error.message}`, impact: "Failed items have no collected value; admitted siblings finish before recovery." }, { nodeId: itemId, nodeType: innerType });
     ctx.events.emit("run.issue", issue, { nodeId: itemId, nodeType: innerType });
     try { appendRunIssue(runScopeOf(lgConfig)?.replayWorkspace ?? (!ctx.embedded ? runScopeOf(lgConfig)?.workspace : undefined) ?? ctx.graphWorkspace, runIssuesKey(meta), issue); } catch { /* the issue is also checkpointed */ }
@@ -3151,6 +3211,7 @@ function addCheckpointedMap(
             undefined,
             itemLgConfig,
             !ctx.embedded,
+            nodeTimeout,
           );
           if (signal && innerReceivesTimeoutSignal) nodeCtx.signal = signal;
           return runMapItem(buildCtx, mapId, config, state, nodeCtx, task, memo).then((value) => {

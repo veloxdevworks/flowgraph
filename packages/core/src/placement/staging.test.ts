@@ -33,7 +33,7 @@ const workerRecord = (rel: string, content: string) => ({ kind: "artifact", path
 const child = spec({
   metadata: { name: "child" },
   state: { channels: { doc: { type: "object" }, docs: { type: "array" }, result: { type: "object" }, scratch: { type: "object" } } },
-  nodes: [{ id: "noop", type: "wait", with: { duration: "1ms" } }],
+  nodes: [{ id: "noop", type: "wait", with: { deadline: "1ms" } }],
   edges: [{ from: "START", to: "noop" }, { from: "noop", to: "END" }],
 });
 const parent = (out: Record<string, string> = { result: "result" }) =>

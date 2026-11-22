@@ -40,7 +40,8 @@ function graphDiagnostics(spec: GraphSpec, prefix: string, out: Diagnostic[]): v
   for (const [name, server] of Object.entries(spec.mcpServers ?? {})) {
     visit(server, `${prefix}mcpServers.${name}`, `MCP server "${name}"`, 0);
   }
-  for (const node of spec.nodes ?? []) {
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (!node || typeof node !== "object") continue;
     const at = `${prefix}nodes.${node.id}`;
     for (const [key, value] of Object.entries(node)) {
       if (key !== "spec") visit(value, `${at}.${key}`, `Node "${node.id}"`, 0);
