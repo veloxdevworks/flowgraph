@@ -6,6 +6,7 @@
  * can invoke those tools back through the runtime (events/contracts/HITL).
  */
 
+import type { z } from "zod";
 import type { MeteredCallOptions } from "../usage/ledger.js";
 import type { NodeRunContext } from "../context.js";
 import type { ProviderContextManager } from "../context/types.js";
@@ -159,4 +160,50 @@ export interface ProviderAdapter {
 
 export function defineProvider(adapter: ProviderAdapter): ProviderAdapter {
   return adapter;
+}
+
+/** Context passed to a provider plugin when instantiating a `kind: plugin` entry. */
+export interface ProviderPluginContext {
+  /** Provider key declared under `providers:`. */
+  name: string;
+  /** Optional default model from `providers.<name>.model`. */
+  model?: string | undefined;
+  /** Optional env var name from `providers.<name>.apiKeyEnv`. */
+  apiKeyEnv?: string | undefined;
+  /** Resolved API key value when `apiKeyEnv` is set and present in the host environment. */
+  apiKey?: string | undefined;
+}
+
+/**
+ * Factory for a `kind: plugin` provider entry. Validates `options` (via Zod
+ * `optionsSchema` and/or `validateOptions`) before building the adapter.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface ProviderPlugin<Options = any> {
+  /** Plugin name matched by `providers.<name>.plugin` (or `<name>` when omitted). */
+  name: string;
+  /** Optional Zod schema validating `providers.<name>.options`. */
+  optionsSchema?: z.ZodType<Options>;
+  /** Optional semantic validator for `providers.<name>.options`. */
+  validateOptions?: (
+    options: Options,
+    ctx: ProviderPluginContext,
+  ) => Array<{ severity: "error" | "warning"; message: string }>;
+  /** Create a ProviderAdapter configured with the validated options. */
+  create(options: Options, ctx: ProviderPluginContext): ProviderAdapter | Promise<ProviderAdapter>;
+}
+
+export function defineProviderPlugin<Options = Record<string, unknown>>(
+  plugin: ProviderPlugin<Options>,
+): ProviderPlugin<Options> {
+  return plugin;
+}
+
+export function isProviderPlugin(value: unknown): value is ProviderPlugin {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    typeof (value as { name?: unknown }).name === "string" &&
+    typeof (value as { create?: unknown }).create === "function"
+  );
 }

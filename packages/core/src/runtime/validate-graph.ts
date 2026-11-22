@@ -4,7 +4,7 @@
 
 import { findMergeableRouters, hookVerbMessage, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
 import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
-import { registry } from "../registry.js";
+import { registry, type NodeRegistry } from "../registry.js";
 import { templateRootRefs } from "../node-policy.js";
 import { childChannelRefsInMapping, stateMapOutEntries } from "../nodes/subgraph-merge.js";
 import { isOutputNone, keepsRawOutput, OUTPUTS_CHANNEL } from "./apply-output.js";
@@ -126,11 +126,11 @@ export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; l
   return [...new Map(edges.map((edge) => [`${edge.from}:${edge.to}:${edge.label ?? ""}`, edge])).values()];
 }
 
-export function topologyDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function topologyDiagnostics(spec: GraphSpec, reg: NodeRegistry = registry): Diagnostic[] {
   const byId = nodesById(spec);
   const nodes = recordNodes(spec.nodes);
   const ids = new Set(["START", "END", ...nodes.map((n) => n.id)]);
-  const diagnostics = reachabilityDiagnostics(spec, byId);
+  const diagnostics = reachabilityDiagnostics(spec, byId, reg);
   for (const node of nodes) {
     for (const target of [...nodeRouteTargets(spec, node.id, byId), ...nodeToolTargets(spec, node.id)]) {
       if (!ids.has(target)) diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Node "${node.id}" references unknown target "${target}"`, path: `nodes.${node.id}` });
@@ -189,12 +189,12 @@ function reachableFromStart(linked: Neighbours): Set<string> {
 }
 
 /** A later duplicate is visited here, so its own type can still reach END. */
-function reachingEnd(spec: GraphSpec, linked: Neighbours): Set<string> {
+function reachingEnd(spec: GraphSpec, linked: Neighbours, reg: NodeRegistry = registry): Set<string> {
   const canReach = new Set<string>();
   const queue: string[] = [];
   for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
     if (node == null) continue;
-    if (registry.get(node.type)?.capabilities?.terminal || (linked.outgoing.get(node.id) ?? []).includes("END")) {
+    if (reg.get(node.type)?.capabilities?.terminal || (linked.outgoing.get(node.id) ?? []).includes("END")) {
       queue.push(node.id);
     }
   }
@@ -215,15 +215,15 @@ export function nodesReachableFromStart(spec: GraphSpec, byId = nodesById(spec))
 }
 
 /** Nodes that can eventually reach END. */
-export function nodesThatReachEnd(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
-  return reachingEnd(spec, neighbours(spec, byId));
+export function nodesThatReachEnd(spec: GraphSpec, byId = nodesById(spec), reg: NodeRegistry = registry): Set<string> {
+  return reachingEnd(spec, neighbours(spec, byId), reg);
 }
 
-export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec)): Diagnostic[] {
+export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec), reg: NodeRegistry = registry): Diagnostic[] {
   const linked = neighbours(spec, byId);
   const diagnostics: Diagnostic[] = [];
   const fromStart = reachableFromStart(linked);
-  const toEnd = reachingEnd(spec, linked);
+  const toEnd = reachingEnd(spec, linked, reg);
   const nodes = recordNodes(spec.nodes);
   const tools = new Set(nodes.flatMap((node) => nodeToolTargets(spec, node.id)));
 
@@ -248,7 +248,7 @@ export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec))
   return diagnostics;
 }
 
-export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function channelReducerDiagnostics(spec: GraphSpec, reg: NodeRegistry = registry): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const channels = spec.state?.channels ?? {};
 
@@ -288,7 +288,7 @@ export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
 
     if (typeof reducer === "string" && reducer.startsWith("custom:")) {
       const reducerName = reducer.slice("custom:".length);
-      if (!registry.getReducer(reducerName)) {
+      if (!reg.getReducer(reducerName)) {
         diagnostics.push({
           severity: "error",
           code: "UNREGISTERED_REDUCER",
@@ -1395,13 +1395,13 @@ function lintableGraph(spec: GraphSpec): boolean {
  * nested graph (inline subgraph `spec`); the top level gets them, and the lints
  * that walk the whole tree, from {@link graphLintDiagnostics}.
  */
-export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function graphBodyLintDiagnostics(spec: GraphSpec, reg: NodeRegistry = registry): Diagnostic[] {
   if (!lintableGraph(spec)) return [];
   return [
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
-    ...topologyDiagnostics(spec),
-    ...channelReducerDiagnostics(spec),
+    ...topologyDiagnostics(spec, reg),
+    ...channelReducerDiagnostics(spec, reg),
     ...undeclaredOutputChannelDiagnostics(spec),
     ...nodeChannelNameCollisionDiagnostics(spec),
     ...fanInLastWriteDiagnostics(spec),
@@ -1543,6 +1543,8 @@ export interface GraphStructureOptions {
    * those from `graphLintDiagnostics`).
    */
   lints?: boolean;
+  /** Registry to look up node types and custom reducers against (defaults to global base registry). */
+  registry?: NodeRegistry;
 }
 
 /**
@@ -1565,7 +1567,7 @@ export function graphStructureDiagnostics(spec: GraphSpec, options: GraphStructu
   const shape = graphShapeDiagnostics(spec);
   if (shape.length) return shape;
   const out: Diagnostic[] = [];
-  graphStructure(spec, "", out, options.lints === true, false);
+  graphStructure(spec, "", out, options.lints === true, false, options.registry ?? registry);
   return out;
 }
 
@@ -1588,7 +1590,7 @@ function edgeTargets(edge: GraphSpec["edges"][number]): string[] {
   return edge.branch.map((entry) => entry.to);
 }
 
-function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean): void {
+function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean, reg: NodeRegistry): void {
   const push = (...items: Diagnostic[]) => out.push(...(prefix ? items.map((d) => nested(d, prefix)) : items));
   // A map schema has already reported this value. The lint does not report it again.
   const shape = (code: string, path: string, message: string) => {
@@ -1697,11 +1699,11 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
     }
   }
 
-  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out, lints, schemaChecked);
+  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out, lints, schemaChecked, reg);
 
   if (lints) {
     push(...inputFieldDiagnostics(spec), ...triggerDiagnostics(spec));
-    if (prefix) push(...graphBodyLintDiagnostics(spec));
+    if (prefix) push(...graphBodyLintDiagnostics(spec, reg));
   }
 }
 
@@ -1730,9 +1732,9 @@ function graphStructureChecksHook(value: unknown, issuePath: ReadonlyArray<Prope
 }
 
 /** Type registration and `with` shape for one node, then the graphs nested in it. */
-function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean): void {
+function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean, reg: NodeRegistry): void {
   const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
-  const factory = registry.get(node.type);
+  const factory = reg.get(node.type);
   if (!factory) {
     push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
   } else {
@@ -1761,11 +1763,11 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
     if (isRecord(body) && typeof body.type === "string") {
       const id = typeof body.id === "string" ? body.id : undefined;
       // MapWithSchema has already parsed this body, including a subgraph spec.
-      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out, lints, true);
+      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out, lints, true, reg);
     }
   }
   if (node.type === "subgraph" && isRecord(node.spec)) {
-    if (Array.isArray(node.spec.nodes)) graphStructure(node.spec, `${prefix}${path}.spec.`, out, lints, schemaChecked);
+    if (Array.isArray(node.spec.nodes)) graphStructure(node.spec, `${prefix}${path}.spec.`, out, lints, schemaChecked, reg);
     else if (!schemaChecked) push({ severity: "error", code: "SCHEMA_ERROR", path: `${path}.spec.nodes`, message: "Expected array" });
   }
 }
@@ -1852,17 +1854,17 @@ export function triggerDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
-export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function graphLintDiagnostics(spec: GraphSpec, reg: NodeRegistry = registry): Diagnostic[] {
   if (!lintableGraph(spec)) return [];
   return [
     ...defaultModelDiagnostics(spec),
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
     ...hitlRouterMergeDiagnostics(spec),
-    ...topologyDiagnostics(spec),
+    ...topologyDiagnostics(spec, reg),
     ...staticGraphDiagnostics(spec),
     ...demoToolExposureDiagnostics(spec),
-    ...channelReducerDiagnostics(spec),
+    ...channelReducerDiagnostics(spec, reg),
     ...undeclaredOutputChannelDiagnostics(spec),
     ...nodeChannelNameCollisionDiagnostics(spec),
     ...fanInLastWriteDiagnostics(spec),

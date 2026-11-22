@@ -1,5 +1,5 @@
 /**
- * Offline diagnostics for runtime.memory / runtime.store / memory nodes.
+ * Offline diagnostics for runtime.memory and memory nodes.
  */
 import type { GraphSpec, Diagnostic } from "@flowgraph/spec";
 import { walkNodes } from "../discover-skills.js";
@@ -18,37 +18,16 @@ function durableCheckpoint(spec: GraphSpec): string | undefined {
 export function memoryLintDiagnostics(spec: GraphSpec): Diagnostic[] {
   const out: Diagnostic[] = [];
   const mem = spec.runtime?.memory;
-  const store = spec.runtime?.store;
 
-  if (mem && store) {
-    out.push({
-      severity: "error",
-      code: "MEMORY_STORE_AND_MEMORY",
-      message: "runtime.store and runtime.memory are mutually exclusive; use runtime.memory (ctx.store keeps working on top of it)",
-      path: "runtime.store",
-    });
-  }
-
-  const storeBackend = store && store.enabled !== false ? (store.backend ?? "memory") : undefined;
-  const wantsDurable =
-    (mem && (mem.backend ?? "checkpoint") === "checkpoint") || storeBackend === "sqlite" || storeBackend === "postgres";
+  const wantsDurable = !!mem && (mem.backend ?? "checkpoint") === "checkpoint";
   if (wantsDurable) {
     const ck = durableCheckpoint(spec);
-    const what = mem ? "runtime.memory" : `runtime.store.backend "${String(storeBackend)}"`;
     if (!ck) {
       out.push({
         severity: "error",
         code: "MEMORY_BACKEND_UNAVAILABLE",
-        message: `${what} needs a durable checkpointer; set runtime.checkpoint.backend: sqlite` +
-          (mem ? " (or runtime.memory.backend: memory for tests)" : ""),
-        path: mem ? "runtime.memory.backend" : "runtime.store.backend",
-      });
-    } else if (!mem && storeBackend !== ck) {
-      out.push({
-        severity: "error",
-        code: "MEMORY_BACKEND_UNAVAILABLE",
-        message: `runtime.store.backend "${String(storeBackend)}" must match runtime.checkpoint.backend "${ck}" — memory lives in the checkpoint database`,
-        path: "runtime.store.backend",
+        message: "runtime.memory needs a durable checkpointer; set runtime.checkpoint.backend: sqlite (or runtime.memory.backend: memory for tests)",
+        path: "runtime.memory.backend",
       });
     }
   }
@@ -213,18 +192,15 @@ export function memoryHostDiagnostics(
   host: { memoryBackends: readonly string[]; hostName: string },
 ): Diagnostic[] {
   const mem = spec.runtime?.memory;
-  const store = spec.runtime?.store;
-  const storeBackend = store && store.enabled !== false ? (store.backend ?? "memory") : undefined;
-  const wantsDurable =
-    (mem && (mem.backend ?? "checkpoint") === "checkpoint") || storeBackend === "sqlite" || storeBackend === "postgres";
+  const wantsDurable = !!mem && (mem.backend ?? "checkpoint") === "checkpoint";
   const ck = durableCheckpoint(spec);
   if (!wantsDurable || !ck || host.memoryBackends.includes(ck)) return [];
   return [
     {
       severity: "error",
       code: "MEMORY_BACKEND_UNAVAILABLE",
-      message: `${host.hostName} cannot store ${mem ? "runtime.memory" : "runtime.store"} in a ${ck} checkpointer yet (supported: ${host.memoryBackends.join(", ") || "none"})`,
-      path: mem ? "runtime.memory.backend" : "runtime.store.backend",
+      message: `${host.hostName} cannot store runtime.memory in a ${ck} checkpointer yet (supported: ${host.memoryBackends.join(", ") || "none"})`,
+      path: "runtime.memory.backend",
     },
   ];
 }

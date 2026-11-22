@@ -12,7 +12,7 @@ import { defineNode, type CompiledNode, type BuildContext, type NodeResult } fro
 import type { NodeRunContext } from "../context.js";
 import { providerFor, providerNamesFor } from "../providers/registry.js";
 import { modelRequest } from "../providers/model-choice.js";
-import { normalizeTools, mergeTools, type ToolRef, type ToolWiring } from "../providers/tools.js";
+import { normalizeTools, expandSkillTools, mergeTools, type ToolRef, type ToolWiring } from "../providers/tools.js";
 import { expandMcpTools, requireMcpHub } from "../mcp/expand.js";
 import type { AgentRequest, ProviderRunContext, TokenUsage } from "../providers/types.js";
 import { checkToolCall, reportToolResult } from "../providers/governance.js";
@@ -64,7 +64,6 @@ export const agentNode = defineNode<Config>({
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const providerName =
-          (config.hub === "deepagents" ? "deepagents" : undefined) ??
           nodeProvider ?? ctx.config.defaults?.provider ?? defaultProviderName(ctx);
         if (!providerName) {
           throw new Error(
@@ -129,10 +128,14 @@ export const agentNode = defineNode<Config>({
 
         const declared = (config.tools ?? []) as ToolRef[];
         const reportsIssues = declared.some(t => "function" in t && t.function === "report_issue");
-        const { normalized, mcpRefs } = normalizeTools(declared.filter(t => !("function" in t && t.function === "report_issue")), wiring);
+        const { normalized, mcpRefs, skillRefs } = normalizeTools(declared.filter(t => !("function" in t && t.function === "report_issue")), wiring);
         let { specs, executors } = reportsIssues ? mergeTools(normalized, reportIssueTool()) : normalized;
         const remember = rememberTool(ctx, memoryConfig, scope);
         if (remember) ({ specs, executors } = mergeTools({ specs, executors }, remember));
+        if (skillRefs.length > 0) {
+          const expanded = await expandSkillTools(skillRefs, ctx);
+          ({ specs, executors } = mergeTools({ specs, executors }, expanded));
+        }
         if (mcpRefs.length > 0) {
           const expanded = await expandMcpTools(mcpRefs, requireMcpHub(ctx));
           ({ specs, executors } = mergeTools({ specs, executors }, expanded));

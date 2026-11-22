@@ -104,18 +104,10 @@ describe("subgraph store sharing", () => {
     expect((await store.get(["mem"], "fromChild"))?.value).toEqual({ v: "child" });
   });
 
-  it("a child that declares a sqlite store shares the parent's store instead of failing", async () => {
-    const compiled = await compileGraph(parentSpec("child-sqlite.graph.yaml"), { cwd: dir, checkpointer: "memory" });
-    const r = await compiled.run({ threadId: "sg-store-3" });
-    expect(r.status).toBe("completed");
-    expect(r.state["child"]).toEqual({ childHasStore: true, seen: { v: "parent" } });
-  });
-
-  it("a child with runtime.store.enabled: false gets no store", async () => {
+  it("a child with removed runtime.store fails to load", async () => {
     const compiled = await compileGraph(parentSpec("child-nostore.graph.yaml"), { cwd: dir, checkpointer: "memory" });
-    const r = await compiled.run({ threadId: "sg-store-4" });
-    expect(r.status).toBe("completed");
-    expect(r.state["child"]).toEqual({ childHasStore: false, seen: null });
-    expect(r.state["back"]).toBeNull();
+    const r = await compiled.run({ threadId: "sg-store-3" });
+    expect(r.status).toBe("error");
+    expect(r.error?.message).toMatch(/store/);
   });
 });

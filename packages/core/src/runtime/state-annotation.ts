@@ -6,7 +6,7 @@
 import { RemoveMessage } from "@langchain/core/messages";
 import { Annotation, messagesStateReducer } from "@langchain/langgraph";
 import type { GraphSpec } from "@flowgraph/spec";
-import { registry } from "../registry.js";
+import { registry, type NodeRegistry } from "../registry.js";
 import { ISSUES_CHANNEL_CAP, issueDedupeKey, type RunIssue } from "./run-issues.js";
 import { MAP_MEMO_CHANNEL, reduceMapMemo } from "./map-memo.js";
 import { ROUTING_CHANNEL } from "./routing-policy.js";
@@ -61,6 +61,7 @@ export function channelReducerAndDefault(
   channelName: string,
   ch: ChannelDef,
   warn?: ReducerWarn,
+  reg: NodeRegistry = registry,
 ): ChannelReducerAndDefault {
   if (ch.reducer === "append") {
     return {
@@ -95,7 +96,7 @@ export function channelReducerAndDefault(
 
   if (typeof ch.reducer === "string" && ch.reducer.startsWith("custom:")) {
     const reducerName = ch.reducer.slice("custom:".length);
-    const fn = registry.getReducer(reducerName);
+    const fn = reg.getReducer(reducerName);
     if (!fn) {
       throw new Error(
         `Channel "${channelName}" uses reducer "custom:${reducerName}" but no reducer is registered under that name. ` +
@@ -126,13 +127,14 @@ export function channelReducerAndDefault(
 export function buildStateAnnotation(
   spec: GraphSpec,
   warn?: ReducerWarn,
+  reg: NodeRegistry = registry,
 ): ReturnType<typeof Annotation.Root> {
   const channels = spec.state?.channels ?? {};
   const fields: Record<string, unknown> = {};
 
   for (const [name, ch] of Object.entries(channels)) {
     if (!ch || typeof ch !== "object") continue;
-    const { reducer, default: defaultFn } = channelReducerAndDefault(name, ch, warn);
+    const { reducer, default: defaultFn } = channelReducerAndDefault(name, ch, warn, reg);
     fields[name] = Annotation<unknown>({
       reducer,
       default: defaultFn,

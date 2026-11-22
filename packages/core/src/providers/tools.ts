@@ -1,5 +1,5 @@
 /**
- * Normalize tool refs, splitting MCP refs for async expansion at run time.
+ * Normalize tool refs, splitting skill and MCP refs for async expansion at run time.
  */
 
 import type { ToolSpec } from "./types.js";
@@ -7,12 +7,19 @@ import type { NodeRunContext } from "../context.js";
 import { assertNodeTypeAllowed, assertToolAllowed, BUILTIN_TOOL_TARGETS, nodePolicyOf } from "../node-policy.js";
 import { getTool } from "./registry.js";
 import { loadResolvedSkill, runSkill } from "../nodes/skill-runner.js";
-import type { SkillDef } from "@flowgraph/skills";
+import {
+  isRequiredSkillInput,
+  skillInputValueSchema,
+  type SkillDef,
+  type SkillInputDecl,
+} from "@flowgraph/skills";
 import type { McpHub } from "../mcp/types.js";
 import { isMcpToolRef, type McpToolRef } from "../mcp/expand.js";
 
+export type SkillToolRef = { skill: string };
+
 export type ToolRef =
-  | { skill: string }
+  | SkillToolRef
   | { node: string }
   | { function: string }
   | { builtin: string[] }
@@ -46,22 +53,82 @@ export interface ToolWiring {
   mcp?: McpHub | undefined;
 }
 
+/** Build a JSON Schema object describing a skill's declared inputs. */
+export function skillInputsSchema(
+  inputs: Record<string, SkillInputDecl> | undefined,
+): Record<string, unknown> | undefined {
+  if (!inputs || Object.keys(inputs).length === 0) return undefined;
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const [key, decl] of Object.entries(inputs)) {
+    properties[key] = skillInputValueSchema(decl);
+    if (isRequiredSkillInput(decl)) required.push(key);
+  }
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+  };
+}
+
+/** Build the ToolSpec exposed to an agent from a loaded SKILL.md definition. */
+export function skillToolSpec(skill: SkillDef, ref: string): ToolSpec {
+  const name = toolName(skill.frontMatter.name || ref);
+  const description = skill.frontMatter.description?.trim();
+  const schema = skillInputsSchema(skill.frontMatter.inputs);
+  return {
+    name,
+    kind: "skill",
+    ref,
+    ...(description ? { description } : {}),
+    ...(schema ? { schema } : {}),
+  };
+}
+
 /**
- * Build ToolSpecs + executors for non-MCP refs. MCP refs are returned separately
- * for async expansion via expandMcpTools().
+ * Resolve each skill ref, build its ToolSpec from the skill's description and
+ * inputs, and wire its executor.
+ */
+export async function expandSkillTools(
+  refs: SkillToolRef[],
+  ctx: NodeRunContext,
+): Promise<NormalizedTools> {
+  const specs: ToolSpec[] = [];
+  const executors = new Map<string, ToolExecutor>();
+  for (const ref of refs) {
+    assertNodeTypeAllowed(nodePolicyOf(ctx), "skill", `agent tool "${toolName(ref.skill)}"`);
+    const skill = await loadResolvedSkill(ref.skill, ctx);
+    const spec = skillToolSpec(skill, ref.skill);
+    specs.push(spec);
+    executors.set(spec.name, async (args, callCtx) => {
+      assertNodeTypeAllowed(nodePolicyOf(callCtx), "skill", `agent tool "${spec.name}"`);
+      return runSkill(skill, (args ?? {}) as Record<string, unknown>, callCtx);
+    });
+  }
+  return { specs, executors };
+}
+
+/**
+ * Build ToolSpecs + executors for synchronous refs. Skill and MCP refs are
+ * returned separately for async expansion via expandSkillTools() and expandMcpTools().
  */
 export function normalizeTools(
   refs: ToolRef[] | undefined,
   wiring: ToolWiring = {},
-): { normalized: NormalizedTools; mcpRefs: McpToolRef[] } {
+): { normalized: NormalizedTools; mcpRefs: McpToolRef[]; skillRefs: SkillToolRef[] } {
   const specs: ToolSpec[] = [];
   const executors = new Map<string, ToolExecutor>();
   const mcpRefs: McpToolRef[] = [];
-  if (!refs) return { normalized: { specs, executors }, mcpRefs };
+  const skillRefs: SkillToolRef[] = [];
+  if (!refs) return { normalized: { specs, executors }, mcpRefs, skillRefs };
 
   for (const ref of refs) {
     if (isMcpToolRef(ref)) {
       mcpRefs.push(ref);
+      continue;
+    }
+    if ("skill" in ref) {
+      skillRefs.push(ref);
       continue;
     }
     if ("function" in ref) {
@@ -75,15 +142,6 @@ export function normalizeTools(
         const d = getTool(ref.function);
         if (!d) throw new Error(`tool function "${ref.function}" is not registered (registerTool).`);
         return d.handler(args, ctx);
-      });
-    } else if ("skill" in ref) {
-      const name = toolName(ref.skill);
-      specs.push({ name, kind: "skill", ref: ref.skill });
-      let cached: SkillDef | undefined;
-      executors.set(name, async (args, ctx) => {
-        assertNodeTypeAllowed(nodePolicyOf(ctx), "skill", `agent tool "${name}"`);
-        cached ??= await loadResolvedSkill(ref.skill, ctx);
-        return runSkill(cached, (args ?? {}) as Record<string, unknown>, ctx);
       });
     } else if ("node" in ref) {
       const meta = wiring.resolveToolMeta?.(ref.node);
@@ -126,10 +184,10 @@ export function normalizeTools(
     }
   }
 
-  return { normalized: { specs, executors }, mcpRefs };
+  return { normalized: { specs, executors }, mcpRefs, skillRefs };
 }
 
-/** Merge two NormalizedTools maps (MCP tools appended; executors must not collide). */
+/** Merge two NormalizedTools maps (appended specs; executors must not collide). */
 export function mergeTools(a: NormalizedTools, b: NormalizedTools): NormalizedTools {
   const executors = new Map(a.executors);
   for (const [k, v] of b.executors) executors.set(k, v);

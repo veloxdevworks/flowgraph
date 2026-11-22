@@ -216,11 +216,17 @@ export function contextLintDiagnostics(spec: GraphSpec): Diagnostic[] {
           path: ctxCfg.record !== undefined ? `${cpath}.record` : `${cpath}.compact`,
         });
       }
-      if (w["hub"] === "deepagents") {
+      const providerName = typeof record["provider"] === "string"
+        ? record["provider"]
+        : spec.config?.defaults?.provider;
+      const isDeepAgents =
+        providerName === "deepagents" ||
+        (typeof providerName === "string" && spec.providers?.[providerName]?.kind === "deepagents");
+      if (isDeepAgents) {
         out.push({
           severity: "warning",
           code: "CONTEXT_HUB_UNSUPPORTED",
-          message: "hub: deepagents runs its own tool loop; with.context only fits the history and prompt it starts from",
+          message: "deepagents runs its own tool loop; with.context only fits the history and prompt it starts from",
           path: cpath,
         });
       }

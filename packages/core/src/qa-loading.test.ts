@@ -228,14 +228,14 @@ describe("PLAT-304 / PLAT-305 / PLAT-335: source-relative imports", () => {
     const dir = await directory();
     await mkdir(join(dir, "child"));
     const module = (value: string) =>
-      `export default [{ type: 'qa-source-node', configSchema: { safeParse: (data) => ({success:true,data}) }, build() { return { async run() { return {update: {message: ${JSON.stringify(value)}}}; } }; } }];`;
+      `export default [{ type: 'qa/source-node', configSchema: { safeParse: (data) => ({success:true,data}) }, build() { return { async run() { return {update: {message: ${JSON.stringify(value)}}}; } }; } }];`;
     await writeFile(join(dir, "child/register.mjs"), module("child-module"));
     await writeFile(join(dir, "register.mjs"), module("wrong-parent-module"));
     await writeFile(
       join(dir, "child/flow.yaml"),
       JSON.stringify(
         graph(
-          [{ id: "value", type: "qa-source-node" }],
+          [{ id: "value", type: "qa/source-node" }],
           [
             { from: "START", to: "value" },
             { from: "value", to: "END" },

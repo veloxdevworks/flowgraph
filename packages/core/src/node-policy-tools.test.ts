@@ -59,7 +59,7 @@ async function codeOf(p: Promise<unknown> | (() => unknown)): Promise<string | u
   }
 }
 
-const agent = (tools: unknown[]) => ({ id: "a", type: "agent", with: { provider: "mock", prompt: "hi", tools } });
+const agent = (tools: unknown[]) => ({ id: "a", type: "agent", provider: "mock", with: { prompt: "hi", tools } });
 
 describe("node policy: agent tools, functions and host programs", () => {
   const marker = path.join(os.tmpdir(), `fg-svc-policy-${process.pid}`);
@@ -86,7 +86,7 @@ describe("node policy: agent tools, functions and host programs", () => {
     const map = {
       id: "m",
       type: "map",
-      with: { over: "{{ state.items }}", as: "x", node: { type: "agent", with: { provider: "mock", prompt: "p", tools: [{ function: "start_service" }] } }, collect: { to: "out" } },
+      with: { over: "{{ state.items }}", as: "x", node: { type: "agent", provider: "mock", with: { prompt: "p", tools: [{ function: "start_service" }] } }, collect: { to: "out" } },
     };
     await expect(codeOf(compileGraph(graph([map]), { checkpointer: "none", nodePolicy: UNTRUSTED }))).resolves.toBe("TOOL_BLOCKED");
     // Allowed tools still compile.

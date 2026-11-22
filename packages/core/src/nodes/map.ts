@@ -70,7 +70,7 @@ export async function runMapItem(
   const innerType = String(innerSpec["type"] ?? "");
   assertNodeTypeAllowed(nodePolicyOf(ctx), innerType, `map node "${mapId}" inner node`);
   assertNodeSpecAllowed(nodePolicyOf(ctx), innerSpec, `map node "${mapId}" inner node`);
-  const factory = registry.get(innerType);
+  const factory = (buildCtx.registry ?? registry).get(innerType);
   if (!factory) {
     throw new Error(`map node "${mapId}": inner node type "${innerType}" is not registered.`);
   }

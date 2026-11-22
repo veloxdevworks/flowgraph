@@ -1,6 +1,6 @@
 import type { Diagnostic, GraphSpec, NodeSpec } from "@flowgraph/spec";
-import type { ProviderAdapter } from "./types.js";
-import { getProvider } from "./registry.js";
+import type { ProviderAdapter, ProviderPlugin } from "./types.js";
+import { getProvider, getProviderPlugin, validatePluginProviderOptions } from "./registry.js";
 import { langchainConfigDiagnostics } from "./langchain/provider.js";
 import { providerSecretDiagnostics } from "../runtime/secret-declarations.js";
 import { effectiveModel } from "./model-choice.js";
@@ -11,16 +11,14 @@ export type ProviderValidation = Pick<ProviderAdapter, "name" | "validate"> & {
 };
 
 function providerNameOf(spec: GraphSpec, node: NodeSpec): string | undefined {
-  const withBlock = (node.with ?? {}) as { provider?: unknown };
   if (typeof node.provider === "string") return node.provider;
-  if (typeof withBlock.provider === "string") return withBlock.provider;
   const fallback = spec.config?.defaults?.provider;
   return typeof fallback === "string" ? fallback : undefined;
 }
 
 function isModelNode(node: NodeSpec): boolean {
   const type = String(node.type);
-  if (type === "agent" || type === "intelligent") return true;
+  if (type === "agent") return true;
   if (type === "router" && (node.with as { mode?: unknown } | undefined)?.mode === "model")
     return true;
   return false;
@@ -64,9 +62,40 @@ export function offlineProviderValidations(spec: GraphSpec): ProviderValidation[
 export function providerConfigDiagnostics(
   spec: GraphSpec,
   providers: readonly ProviderValidation[] = [],
+  opts: { pluginRegistry?: ReadonlyMap<string, ProviderPlugin>; checkPluginOptions?: boolean } = {},
 ): Diagnostic[] {
   const byName = new Map(providers.map((p) => [p.name, p]));
   const out: Diagnostic[] = [];
+
+  if (opts.checkPluginOptions !== false) {
+    for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
+      if (cfg?.kind !== "plugin") continue;
+      const pluginName = cfg.plugin ?? name;
+      const plugin = opts.pluginRegistry?.get(pluginName) ?? getProviderPlugin(pluginName);
+      if (!plugin) continue;
+      const checked = validatePluginProviderOptions(plugin, cfg.options, {
+        name,
+        ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+        ...(cfg.apiKeyEnv !== undefined ? { apiKeyEnv: cfg.apiKeyEnv } : {}),
+      });
+      for (const err of checked.errors) {
+        out.push({
+          severity: "error",
+          code: "PROVIDER_OPTIONS_INVALID",
+          message: `Provider "${name}" (plugin "${pluginName}"): ${err}`,
+          path: `providers.${name}.options`,
+        });
+      }
+      for (const warn of checked.warnings) {
+        out.push({
+          severity: "warning",
+          code: "PROVIDER_CONFIG_UNSUPPORTED",
+          message: `Provider "${name}" (plugin "${pluginName}"): ${warn}`,
+          path: `providers.${name}.options`,
+        });
+      }
+    }
+  }
 
   for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
     if (!node || typeof node !== "object" || !isModelNode(node)) continue;
@@ -106,7 +135,7 @@ export function providerConfigDiagnostics(
       }
     }
 
-    const models = adapter?.capabilities.models;
+    const models = adapter?.capabilities?.models;
     const model = typeof node.model === "string" ? node.model : undefined;
     if (model && models && models.length > 0 && !models.includes(model)) {
       out.push({

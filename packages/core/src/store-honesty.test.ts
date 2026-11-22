@@ -40,41 +40,27 @@ async function hasStore(s: GraphSpec, opts: Parameters<typeof compileGraph>[1] =
 }
 
 describe("resolveStore honesty", () => {
-  it("throws when YAML asks for a sqlite store without an instance", async () => {
-    await expect(compileGraph(spec({ enabled: true, backend: "sqlite" }), {})).rejects.toThrow(
-      /MEMORY_BACKEND_UNAVAILABLE: runtime\.store\.backend "sqlite" needs a durable checkpointer.*Silent in-memory fallback is not allowed/s,
-    );
+  it("rejects removed runtime.store in GraphSpecSchema", async () => {
+    const { GraphSpecSchema } = await import("@flowgraph/spec");
+    expect(GraphSpecSchema.safeParse(spec({ enabled: true, backend: "sqlite" })).success).toBe(false);
+    expect(GraphSpecSchema.safeParse(spec({ enabled: true, backend: "postgres" })).success).toBe(false);
   });
 
-  it("throws when YAML asks for a postgres store without an instance", async () => {
-    await expect(compileGraph(spec({ enabled: true, backend: "postgres" }), {})).rejects.toThrow(
-      /store\.backend "postgres"/,
-    );
-  });
-
-  it("throws for an unknown store backend that bypassed schema validation", async () => {
-    await expect(compileGraph(spec({ enabled: true, backend: "redis" }), {})).rejects.toThrow(
-      /Unknown store backend "redis"/,
-    );
-  });
-
-  it("uses an injected store instance even when YAML asks for sqlite", async () => {
+  it("uses an injected store instance", async () => {
     const store = new InMemoryStore();
-    expect(await hasStore(spec({ enabled: true, backend: "sqlite" }), { store })).toBe(true);
+    expect(await hasStore(spec(), { store })).toBe(true);
     expect((await store.get(["probe"], "k"))?.value).toEqual({ v: 1 });
   });
 
-  it("honors an explicit store: \"memory\" override even when YAML asks for sqlite", async () => {
-    expect(await hasStore(spec({ enabled: true, backend: "sqlite" }), { store: "memory" })).toBe(true);
+  it('honors an explicit store: "memory" override', async () => {
+    expect(await hasStore(spec(), { store: "memory" })).toBe(true);
   });
 
-  it("defaults to an in-memory store when runtime.store is absent", async () => {
+  it("defaults to an in-memory store", async () => {
     expect(await hasStore(spec())).toBe(true);
   });
 
-  it("gives no store for backend: none, enabled: false, or store: \"none\"", async () => {
-    expect(await hasStore(spec({ enabled: true, backend: "none" }))).toBe(false);
-    expect(await hasStore(spec({ enabled: false, backend: "sqlite" }))).toBe(false);
-    expect(await hasStore(spec({ enabled: true, backend: "sqlite" }), { store: "none" })).toBe(false);
+  it('gives no store for store: "none"', async () => {
+    expect(await hasStore(spec(), { store: "none" })).toBe(false);
   });
 });

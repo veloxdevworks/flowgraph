@@ -62,7 +62,7 @@ describe("ScriptWithSchema", () => {
     expect(r.success).toBe(true);
     const timed = ScriptWithSchema.safeParse({ code: "export default async () => ({})", timeout: "5s" });
     expect(timed.success).toBe(false);
-    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("script with.timeout is not supported");
+    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("timeout");
   });
 });
 

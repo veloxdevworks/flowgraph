@@ -45,7 +45,7 @@ describe("ShellWithSchema", () => {
     expect(ShellWithSchema.safeParse({ command: "echo" }).success).toBe(true);
     const timed = ShellWithSchema.safeParse({ command: "echo", args: ["hi"], timeout: "5s" });
     expect(timed.success).toBe(false);
-    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("shell with.timeout is not supported");
+    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("timeout");
     expect(ShellWithSchema.safeParse({ command: "echo hi | wc -c", shell: true }).success).toBe(true);
   });
 

@@ -82,7 +82,9 @@ describe("context lint", () => {
       ],
     } as unknown as GraphSpec;
     expect(codes(spec)).toEqual(["warning:CONTEXT_HISTORY_IN_MAP"]);
-    expect(codes(graph({ hub: "deepagents", context: { maxTokens: 8000 } }))).toEqual(["warning:CONTEXT_HUB_UNSUPPORTED"]);
+    const deepagentsSpec = graph({ context: { maxTokens: 8000 } });
+    (deepagentsSpec.nodes[0] as { provider?: string }).provider = "deepagents";
+    expect(codes(deepagentsSpec)).toEqual(["warning:CONTEXT_HUB_UNSUPPORTED"]);
   });
 
   it("rejects unknown context keys and strategies at schema level", () => {

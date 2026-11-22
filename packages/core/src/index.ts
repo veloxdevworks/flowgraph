@@ -3,13 +3,13 @@
 export {
   loadGraph,
   validateSpec,
-  normalizeNodeTypeAliases,
   envExpansionCollisionDiagnostics,
   NODE_BODY_ENV_EXPANSION,
 } from "./loader.js";
+export type { ValidateSpecOptions } from "./loader.js";
 export { hostSupportDiagnostics, type HostSupportOptions } from "./runtime/host-support.js";
 export { loadGraphImports, readGraphImportAliases, withUnresolvedImports } from "./runtime/load-imports.js";
-export type { LoadGraphImportsOptions, LoadGraphImportsResult } from "./runtime/load-imports.js";
+export type { LoadGraphImportsOptions, LoadGraphImportsResult, GraphImportAliases } from "./runtime/load-imports.js";
 export {
   collectNodeWriteChannels,
   ensureDeclaredOutputChannels,
@@ -187,8 +187,8 @@ export type {
 export { findFreePorts } from "./runtime/port.js";
 export type { FindFreePortsOptions } from "./runtime/port.js";
 
-export { registry, defineNode, describeNodeTypes } from "./registry.js";
-export type { NodeFactory, CompiledNode, NodeResult, NodeContract, NodeCapabilities, ReducerFn, NodeUiMeta, NodeTypeDescriptor } from "./registry.js";
+export { registry, NodeRegistry, defineNode, describeNodeTypes } from "./registry.js";
+export type { NodeFactory, RegisterNodeOptions, CompiledNode, NodeResult, NodeContract, NodeCapabilities, ReducerFn, NodeUiMeta, NodeTypeDescriptor } from "./registry.js";
 export { registerFunction } from "./nodes/function.js";
 export { registerFunction as registerFn } from "./nodes/function.js";
 export { runScriptSandboxed } from "./nodes/script.js";
@@ -265,10 +265,18 @@ export type {
 // Provider abstraction for agent nodes
 export {
   defineProvider,
+  defineProviderPlugin,
+  isProviderPlugin,
   registerProvider,
   getProvider,
   hasProvider,
   listProviders,
+  registerProviderPlugin,
+  unregisterProviderPlugin,
+  getProviderPlugin,
+  listProviderPlugins,
+  validatePluginProviderOptions,
+  createPluginProvider,
   providerFor,
   providerNamesFor,
   graphProviderList,
@@ -284,6 +292,9 @@ export {
   apiKeyEnvForProviderKind,
   hasApiKey,
   normalizeTools,
+  expandSkillTools,
+  skillToolSpec,
+  skillInputsSchema,
   mergeTools,
   checkToolCall,
   reportToolResult,
@@ -293,6 +304,9 @@ export { effectiveModel, modelRequest } from "./providers/model-choice.js";
 export type { ModelSource } from "./providers/model-choice.js";
 export type {
   ProviderAdapter,
+  ProviderPlugin,
+  ProviderPluginContext,
+  PluginOptionsValidationResult,
   ProviderValidateNode,
   ProviderCapabilities,
   ProviderRunContext,
@@ -307,9 +321,11 @@ export type {
   TokenUsage,
   ToolFunctionDef,
   GraphProviders,
+  SkillToolRef,
   ToolRef,
   ToolWiring,
   ToolExecutor,
+  NormalizedTools,
   GovernanceCtx,
   CliVendor,
   CliProviderOptions,

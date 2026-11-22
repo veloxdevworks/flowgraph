@@ -1,6 +1,10 @@
 export {
   defineProvider,
+  defineProviderPlugin,
+  isProviderPlugin,
   type ProviderAdapter,
+  type ProviderPlugin,
+  type ProviderPluginContext,
   type ProviderValidateNode,
   type ProviderCapabilities,
   type ProviderRunContext,
@@ -20,6 +24,12 @@ export {
   getProvider,
   hasProvider,
   listProviders,
+  registerProviderPlugin,
+  unregisterProviderPlugin,
+  getProviderPlugin,
+  listProviderPlugins,
+  validatePluginProviderOptions,
+  createPluginProvider,
   providerFor,
   providerNamesFor,
   graphProviderList,
@@ -28,6 +38,7 @@ export {
   getTool,
   type ToolFunctionDef,
   type GraphProviders,
+  type PluginOptionsValidationResult,
 } from "./registry.js";
 
 export { mockProvider, createScriptedProvider } from "./mock.js";
@@ -41,7 +52,18 @@ export {
   type CliVendor,
   type CliProviderOptions,
 } from "./cli.js";
-export { normalizeTools, mergeTools, type ToolRef, type ToolWiring, type ToolExecutor } from "./tools.js";
+export {
+  normalizeTools,
+  expandSkillTools,
+  skillToolSpec,
+  skillInputsSchema,
+  mergeTools,
+  type SkillToolRef,
+  type ToolRef,
+  type ToolWiring,
+  type ToolExecutor,
+  type NormalizedTools,
+} from "./tools.js";
 export {
   checkToolCall,
   reportToolResult,

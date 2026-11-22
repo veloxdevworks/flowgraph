@@ -1,5 +1,7 @@
 /**
  * Resolve and load graph `imports` (nodes, providers, reducers, skill/subgraph aliases).
+ * Loaded plugins, providers, and reducers stay scoped to the compile's forked
+ * registry instead of mutating process-wide registries.
  */
 
 import * as fs from "node:fs/promises";
@@ -8,18 +10,26 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import * as esbuild from "esbuild";
-import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
-import { registry, type NodeFactory, type ReducerFn } from "../registry.js";
-import { registerProvider, type ProviderAdapter } from "../providers/index.js";
+import { isNamespacedPluginType, type Diagnostic, type GraphSpec } from "@flowgraph/spec";
+import { registry, type NodeFactory, type NodeRegistry, type ReducerFn } from "../registry.js";
+import { isProviderPlugin, type ProviderAdapter, type ProviderPlugin } from "../providers/index.js";
 
 export interface LoadGraphImportsOptions {
   cwd?: string;
+  /** Per-compile registry to register imported nodes and reducers into. Defaults to a fork of the base registry. */
+  registry?: NodeRegistry;
 }
 
-export interface LoadGraphImportsResult {
+export interface GraphImportAliases {
   skillAliases: Record<string, string>;
   agentAliases: Record<string, string>;
   subgraphAliases: Record<string, string>;
+}
+
+export interface LoadGraphImportsResult extends GraphImportAliases {
+  registry: NodeRegistry;
+  providers: ProviderAdapter[];
+  providerPlugins: Map<string, ProviderPlugin>;
 }
 
 function isTypeScriptPath(filePath: string): boolean {
@@ -128,7 +138,7 @@ async function importModuleSpecifier(
   return importResolvedPath(resolved);
 }
 
-function registerReducerExports(mod: Record<string, unknown>): void {
+function registerReducerExports(mod: Record<string, unknown>, target: NodeRegistry): void {
   const def = mod["default"];
   if (def == null) return;
 
@@ -143,7 +153,7 @@ function registerReducerExports(mod: Record<string, unknown>): void {
         typeof (entry as { reducer: unknown }).reducer === "function"
       ) {
         const { name, reducer } = entry as { name: string; reducer: ReducerFn };
-        if (!registry.getReducer(name)) registry.registerReducer(name, reducer);
+        target.registerReducer(name, reducer);
       }
     }
     return;
@@ -151,24 +161,23 @@ function registerReducerExports(mod: Record<string, unknown>): void {
 
   if (typeof def === "object") {
     for (const [name, fn] of Object.entries(def as Record<string, unknown>)) {
-      if (typeof fn === "function" && !registry.getReducer(name)) {
-        registry.registerReducer(name, fn as ReducerFn);
+      if (typeof fn === "function") {
+        target.registerReducer(name, fn as ReducerFn);
       }
     }
   }
 }
 
-async function loadReducerImport(specifier: string, cwd: string): Promise<void> {
+async function loadReducerImport(specifier: string, cwd: string, target: NodeRegistry): Promise<void> {
   const mod = await importModuleSpecifier(specifier, cwd);
-  // Side-effect: module may call registry.registerReducer during evaluation.
-  registerReducerExports(mod);
+  registerReducerExports(mod, target);
 }
 
 /**
  * Read skill, agent and subgraph aliases from `imports`.
  * Does not read or execute modules.
  */
-export function readGraphImportAliases(spec: GraphSpec): LoadGraphImportsResult {
+export function readGraphImportAliases(spec: GraphSpec): GraphImportAliases {
   const skillAliases: Record<string, string> = {};
   const agentAliases: Record<string, string> = {};
   const subgraphAliases: Record<string, string> = {};
@@ -183,11 +192,10 @@ export function readGraphImportAliases(spec: GraphSpec): LoadGraphImportsResult 
 }
 
 /**
- * Rewrite static diagnostics for types and reducers that only an import module
- * would register. Validate does not load those modules, so a declared `nodes`
- * or `reducers` import turns the matching diagnostic into a warning. An unknown
- * type or reducer with no matching import stays an error. A typo is a warning
- * once a `nodes` import exists, because validate cannot tell it from a plugin type.
+ * Rewrite static diagnostics for namespaced plugin types and reducers that only
+ * an import module would register. Validate does not load those modules, so a
+ * declared `nodes` import turns an unregistered namespaced type into a warning
+ * while bare typos stay `UNKNOWN_NODE_TYPE` errors.
  */
 export function withUnresolvedImports(spec: GraphSpec, diagnostics: Diagnostic[]): Diagnostic[] {
   const imports = spec.imports ?? [];
@@ -196,12 +204,15 @@ export function withUnresolvedImports(spec: GraphSpec, diagnostics: Diagnostic[]
   if (!hasNodes && !hasReducers) return diagnostics;
   return diagnostics.map((d) => {
     if (hasNodes && d.code === "UNKNOWN_NODE_TYPE") {
-      return {
-        ...d,
-        severity: "warning",
-        code: "PLUGIN_TYPE_UNRESOLVED",
-        message: `${d.message}. Validate does not load imports, so this type stays unresolved.`,
-      };
+      const match = /has unregistered type "([^"]+)"/.exec(d.message);
+      if (match && isNamespacedPluginType(match[1]!)) {
+        return {
+          ...d,
+          severity: "warning",
+          code: "PLUGIN_TYPE_UNRESOLVED",
+          message: `${d.message}. Validate does not load imports, so this type stays unresolved.`,
+        };
+      }
     }
     if (hasReducers && d.code === "UNREGISTERED_REDUCER") {
       return {
@@ -215,7 +226,8 @@ export function withUnresolvedImports(spec: GraphSpec, diagnostics: Diagnostic[]
 }
 
 /**
- * Load and execute `nodes`, `providers` and `reducers` modules.
+ * Load and execute `nodes`, `providers` and `reducers` modules into a per-compile
+ * registry and provider collection. Does not mutate the process-wide registries.
  * `flowgraph validate` and other static checks must use `readGraphImportAliases`
  * instead. Run and compile call this because the graph is about to execute.
  */
@@ -224,25 +236,51 @@ export async function loadGraphImports(
   opts: LoadGraphImportsOptions = {},
 ): Promise<LoadGraphImportsResult> {
   const cwd = opts.cwd ?? process.cwd();
+  const targetRegistry = opts.registry ?? registry.fork();
   const aliases = readGraphImportAliases(spec);
+  const providersByName = new Map<string, ProviderAdapter>();
+  const providerPlugins = new Map<string, ProviderPlugin>();
 
   for (const imp of spec.imports ?? []) {
     if ("nodes" in imp) {
       const mod = await importModuleSpecifier(imp.nodes, cwd);
       const factories = normalizeDefaultExport<NodeFactory>(mod["default"]);
       for (const f of factories) {
-        if (!registry.has(f.type)) registry.register(f);
+        targetRegistry.register(f, { plugin: true });
       }
     } else if ("providers" in imp) {
       const mod = await importModuleSpecifier(imp.providers, cwd);
-      const provs = normalizeDefaultExport<ProviderAdapter>(mod["default"]);
-      for (const p of provs) registerProvider(p);
+      const entries = normalizeDefaultExport<ProviderAdapter | ProviderPlugin>(mod["default"]);
+      for (const entry of entries) {
+        if (isProviderPlugin(entry)) {
+          if (providerPlugins.has(entry.name)) {
+            throw Object.assign(
+              new Error(`Provider plugin "${entry.name}" is imported more than once.`),
+              { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
+            );
+          }
+          providerPlugins.set(entry.name, entry);
+        } else {
+          if (providersByName.has(entry.name)) {
+            throw Object.assign(
+              new Error(`Provider "${entry.name}" is imported more than once.`),
+              { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
+            );
+          }
+          providersByName.set(entry.name, entry);
+        }
+      }
     } else if ("reducers" in imp) {
-      await loadReducerImport(imp.reducers, cwd);
+      await loadReducerImport(imp.reducers, cwd, targetRegistry);
     }
   }
 
-  return aliases;
+  return {
+    ...aliases,
+    registry: targetRegistry,
+    providers: [...providersByName.values()],
+    providerPlugins,
+  };
 }
 
 function normalizeDefaultExport<T>(value: unknown): T[] {

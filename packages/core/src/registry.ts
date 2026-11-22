@@ -1,10 +1,11 @@
 /**
  * Node Registry — maps type strings to NodeFactory implementations.
- * Third-party node plugins register factories here.
+ * Each graph compilation forks from the base registry so imported plugins stay
+ * scoped to that compile rather than leaking into process-wide state.
  */
 
 import { z } from "zod";
-import { zodToConfigJsonSchema } from "@flowgraph/spec";
+import { isNamespacedPluginType, zodToConfigJsonSchema } from "@flowgraph/spec";
 import type { ContextConfigInput } from "./context/types.js";
 import type { NodeRunContext } from "./context.js";
 
@@ -47,6 +48,8 @@ export interface CompiledNode {
 
 export interface BuildContext {
   graphName: string;
+  /** Per-compile node & reducer registry (defaults to the global base registry). */
+  registry?: NodeRegistry;
   /**
    * Set when this node was placed on a remote worker (ADR-0020). Only `subgraph` reads it:
    * it replaces the in-process child run with a dispatch, keeping its state seeding and merge.
@@ -103,42 +106,79 @@ export interface NodeFactory<Config = any> {
 
 export type ReducerFn = (current: unknown, incoming: unknown) => unknown;
 
-class Registry {
+export interface RegisterNodeOptions {
+  /** When true, require a namespaced plugin type (e.g. `acme:greet` or `@acme/pkg:greet`). */
+  plugin?: boolean;
+}
+
+function registryError(code: string, message: string): Error & { code: string; retryable: false } {
+  return Object.assign(new Error(message), { code, retryable: false as const });
+}
+
+export class NodeRegistry {
+  private readonly parent?: NodeRegistry | undefined;
   private factories = new Map<string, NodeFactory>();
   private reducers = new Map<string, ReducerFn>();
 
-  register(factory: NodeFactory): void {
-    if (this.factories.has(factory.type)) {
-      throw new Error(`Node type "${factory.type}" is already registered`);
+  constructor(parent?: NodeRegistry) {
+    this.parent = parent;
+  }
+
+  /** Create an isolated child registry that reads from this registry without mutating it. */
+  fork(): NodeRegistry {
+    return new NodeRegistry(this);
+  }
+
+  register(factory: NodeFactory, opts: RegisterNodeOptions = {}): void {
+    if (this.has(factory.type)) {
+      const target = this.parent?.has(factory.type) ? "built-in or host node type" : "node type";
+      throw registryError(
+        "PLUGIN_TYPE_COLLISION",
+        `Node type "${factory.type}" collides with an already-registered ${target}.`,
+      );
+    }
+    if (opts.plugin && !isNamespacedPluginType(factory.type)) {
+      throw registryError(
+        "PLUGIN_TYPE_INVALID",
+        `Plugin node type "${factory.type}" must be namespaced (for example "acme:my-node" or "@acme/pkg:my-node").`,
+      );
     }
     this.factories.set(factory.type, factory);
   }
 
   get(type: string): NodeFactory | undefined {
-    return this.factories.get(type);
+    return this.factories.get(type) ?? this.parent?.get(type);
   }
 
   has(type: string): boolean {
-    return this.factories.has(type);
+    return this.factories.has(type) || (this.parent?.has(type) ?? false);
   }
 
   types(): string[] {
-    return [...this.factories.keys()];
+    if (!this.parent) return [...this.factories.keys()];
+    return [...new Set([...this.parent.types(), ...this.factories.keys()])];
   }
 
   registerReducer(name: string, fn: ReducerFn): void {
-    if (this.reducers.has(name)) {
-      throw new Error(`Reducer "${name}" is already registered`);
+    if (this.hasReducer(name)) {
+      throw registryError(
+        "PLUGIN_REDUCER_COLLISION",
+        `Reducer "${name}" is already registered.`,
+      );
     }
     this.reducers.set(name, fn);
   }
 
   getReducer(name: string): ReducerFn | undefined {
-    return this.reducers.get(name);
+    return this.reducers.get(name) ?? this.parent?.getReducer(name);
+  }
+
+  hasReducer(name: string): boolean {
+    return this.reducers.has(name) || (this.parent?.hasReducer(name) ?? false);
   }
 }
 
-export const registry = new Registry();
+export const registry = new NodeRegistry();
 
 /** Helper for defining a node factory with proper typing */
 export function defineNode<Config>(factory: NodeFactory<Config>): NodeFactory<Config> {
@@ -159,9 +199,9 @@ export interface NodeTypeDescriptor {
 }
 
 /** Every registered node type (built-in and plugin) as UI descriptors. */
-export function describeNodeTypes(): NodeTypeDescriptor[] {
-  return registry.types().map((type) => {
-    const f = registry.get(type)!;
+export function describeNodeTypes(reg: NodeRegistry = registry): NodeTypeDescriptor[] {
+  return reg.types().map((type) => {
+    const f = reg.get(type)!;
     let configSchema: Record<string, unknown> | undefined;
     try {
       configSchema = zodToConfigJsonSchema(f.configSchema);

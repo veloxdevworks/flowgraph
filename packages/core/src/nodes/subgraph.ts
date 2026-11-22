@@ -297,9 +297,7 @@ async function loadChild(
  * (`runtime.store.enabled: false` or `backend: none`) gets no store; otherwise the child's
  * own `runtime.store.backend` is ignored — the host decides the backend, not the child.
  */
-function childStore(spec: GraphSpec, ctx: NodeRunContext): BaseStore | "none" {
-  const childRuntime = spec.runtime?.store;
-  if (childRuntime?.enabled === false || childRuntime?.backend === "none") return "none";
+function childStore(_spec: GraphSpec, ctx: NodeRunContext): BaseStore | "none" {
   return ctx.store ?? "none";
 }
 
