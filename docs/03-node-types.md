@@ -190,9 +190,9 @@ Runs a **skill**: a portable, contract-bearing unit defined by a `SKILL.md` file
 
 - `uses` resolves to a skill (by alias from `imports`, relative path, or package).
 - The skill's declared **input contract** is validated against the provided `input`.
-- The skill's declared **output contract** is validated against what it returns and mapped via `output`.
+- The skill's declared **output contract** (`outputs`) is validated against what it returns (failing with `SKILL_OUTPUT_INVALID` on mismatch) and mapped via `output`.
 - If the skill's `env` requirements are unmet, compilation/preflight fails with a precise "missing `JIRA_TOKEN`" / "requires `git` on PATH" message ([04 §Preflight](./04-skills.md#5-preflight--environment-checks)).
-- Skills may themselves be **executable** (a TS handler), **command-based** (run a CLI), or **agent-backed** (delegate to an intelligent provider) — see [04 §Skill kinds](./04-skills.md#3-skill-kinds).
+- Skills are either **executable** (a TS/JS handler) or **command-based** (spawn a CLI) — see [04 §Skill kinds](./04-skills.md#3-skill-kinds).
 
 ---
 
@@ -235,9 +235,9 @@ Model-based routing:
 ```yaml
 - id: classify-intent
   type: router
+  provider: claude
   with:
     mode: model
-    provider: claude
     input: "{{ state.userMessage }}"
     instruction: "Pick the route that best matches the user's intent."
     routes:
@@ -381,7 +381,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 
 `json` is set when `stdout` parses as JSON.
 
-**Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kind_of: command` handlers. An explicit `with.input` is rendered and sent instead. When neither is set, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
+**Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kindOf: command` handlers. An explicit `with.input` is rendered and sent instead. When neither is set, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
 
 **Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"` (with `MY_TOKEN` in the graph's top-level `secrets:`). Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
 
@@ -1482,7 +1482,7 @@ OpenAI image dimensions are checked offline and again after rendering, before in
 
 ## 10. Custom node types (plugins)
 
-Third parties extend the registry by publishing a node plugin package and importing it (`imports[].nodes`). A plugin exports `NodeFactory`s:
+Third parties extend a graph's per-compile registry by publishing a node plugin package and importing it (`imports[].nodes`). Plugin node types **must be namespaced** (`<namespace>:<name>`, `<namespace>/<name>`, or `@<scope>/<pkg>:<name>`). An unnamespaced plugin type fails with `PLUGIN_TYPE_INVALID`, and colliding with a built-in type or another plugin fails with `PLUGIN_TYPE_COLLISION`. Imported plugins and reducers are isolated to the graph compilation that imported them rather than mutating the process-wide registry. A plugin exports `NodeFactory`s:
 
 ```ts
 // @acme/flowgraph-nodes-aws
@@ -1490,27 +1490,26 @@ import { defineNode } from "@flowgraph/core";
 import { z } from "zod";
 
 export const s3Put = defineNode({
-  type: "aws.s3.put",
+  type: "aws:s3-put",
   configSchema: z.object({
     bucket: z.string(),
     key: z.string(),
     body: z.string(),
   }),
   capabilities: { sideEffecting: true },
-  build(ctx, config) {
+  build(_ctx, _nodeSpec, config) {
     return {
       contract: { inputs: {/*...*/}, outputs: {/*...*/} },
+      capabilities: { sideEffecting: true },
       async run(state, runCtx) {
-        const body = runCtx.render(config.body);          // evaluate {{ }} against state
-        await runCtx.secrets.with("AWS_ACCESS_KEY_ID", /* ... */);
-        // ... do the put ...
+        // ... perform the upload using config, state and runCtx ...
         return { update: { /* ... */ } };
       },
     };
   },
 });
 
-export default [s3Put];   // registered when the package is imported
+export default [s3Put];   // registered in the per-compile registry when imported
 ```
 
 Custom nodes get the full runtime treatment (events, hooks, tracing, retries) automatically. They should declare accurate `capabilities` (especially `sideEffecting`) so replay/retry stays safe. Where a node depends on environment/tools, prefer expressing those as a **skill** or documenting them so preflight can warn.

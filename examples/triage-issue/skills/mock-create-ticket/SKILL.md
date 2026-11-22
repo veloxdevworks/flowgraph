@@ -7,7 +7,7 @@ description: >
   Creates a ticket in a mock issue tracker. In production, swap the handler
   to target a real Jira/Linear/GitHub API.
 
-kind_of: executable
+kindOf: executable
 handler: ./handler.js
 
 inputs:
@@ -52,7 +52,6 @@ env:
       secret: true
       optional: true
 
-sideEffecting: true
 timeout: 10s
 ---
 
