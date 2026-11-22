@@ -33,6 +33,12 @@ export type NodeCapabilities = {
    * to settle. The node must guard work that ignores cancellation before retrying.
    */
   receivesTimeoutSignal?: boolean;
+  /**
+   * Whether this node type can access host resources (processes, local files,
+   * ports, binaries, etc.). Defaults to `true` for safety: untrusted upload
+   * policies allow only node types explicitly marked `hostAccess: false`.
+   */
+  hostAccess?: boolean;
 };
 
 export type NodeResult =
@@ -159,6 +165,15 @@ class Registry {
 
   has(type: string): boolean {
     return this.factories.has(type);
+  }
+
+  /**
+   * True only when `type` is registered AND explicitly marked `hostAccess: false`.
+   * Any unregistered type or plugin/package type without `hostAccess: false`
+   * defaults to unsafe for untrusted uploads.
+   */
+  isUntrustedSafe(type: string): boolean {
+    return this.factories.get(type)?.capabilities?.hostAccess === false;
   }
 
   types(): string[] {

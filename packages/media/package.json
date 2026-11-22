@@ -24,17 +24,18 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
-    "@flowgraph/core": "workspace:*"
+    "@flowgraph/core": "workspace:^",
+    "@flowgraph/spec": "workspace:^"
   },
   "dependencies": {
     "@flowgraph/expr": "workspace:*",
-    "@flowgraph/spec": "workspace:*",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@flowgraph/core": "workspace:*",
     "@flowgraph/node-demo": "workspace:*",
     "@flowgraph/node-workshop": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
     "@langchain/langgraph": "^1.4.7",
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",

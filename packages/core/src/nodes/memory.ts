@@ -27,13 +27,13 @@ export const memoryNode = defineNode<Config>({
   type: "memory",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: {},
+  capabilities: { hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const nodeId = String(nodeSpec["id"] ?? "memory");
     return {
       contract: {},
-      capabilities: {},
+      capabilities: { hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const mem = ctx.memory;

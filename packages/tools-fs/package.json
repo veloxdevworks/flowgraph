@@ -12,6 +12,10 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -20,8 +24,8 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
-    "@flowgraph/core": "workspace:*",
-    "@flowgraph/spec": "workspace:*"
+    "@flowgraph/core": "workspace:^",
+    "@flowgraph/spec": "workspace:^"
   },
   "dependencies": {
     "zod": "^3.24.0"

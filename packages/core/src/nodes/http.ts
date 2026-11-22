@@ -25,12 +25,12 @@ export const httpNode = defineNode<Config>({
   type: "http",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { sideEffecting: true, stopsOnTimeout: true },
+  capabilities: { sideEffecting: true, stopsOnTimeout: true, hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { sideEffecting: true, stopsOnTimeout: true },
+      capabilities: { sideEffecting: true, stopsOnTimeout: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {

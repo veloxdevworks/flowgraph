@@ -10,6 +10,7 @@
 import { literalCallbackExpr, evalExpr, parseExpr, scanTemplate, type Expr } from "@flowgraph/expr";
 import type { NodeRunContext } from "./context.js";
 import type { OutboundHttpPolicy } from "./outbound-http.js";
+import { registry } from "./registry.js";
 
 /** Key of the policy on the run context (copied into every node context). */
 export const NODE_POLICY = Symbol.for("flowgraph.nodePolicy");
@@ -17,6 +18,12 @@ export const NODE_POLICY = Symbol.for("flowgraph.nodePolicy");
 export interface NodePolicy {
   /** Node types that may not be built or run (map inners and agent skill tools included). */
   blockedTypes?: readonly string[] | undefined;
+  /**
+   * Allowlist mode: allow only registered node types explicitly marked
+   * `capabilities.hostAccess === false`. Any other type (including newly
+   * registered plugins or packages) is refused with NODE_TYPE_BLOCKED.
+   */
+  requireSafeNodeTypes?: boolean | undefined;
   /** Refuse subgraph `uses` references, which load graph files from the host's disk. Inline `spec` is allowed. */
   blockSubgraphFiles?: boolean | undefined;
   /** Make `{{ secret.X }}` in http / webhook templates fail instead of reading the host environment. */
@@ -102,8 +109,16 @@ function suffix(policy: NodePolicy): string {
 
 /** Throws NODE_TYPE_BLOCKED when the policy blocks `type`. `where` names the node for the message. */
 export function assertNodeTypeAllowed(policy: NodePolicy | undefined, type: string, where: string): void {
-  if (!policy?.blockedTypes?.includes(type)) return;
-  throw new NodePolicyError("NODE_TYPE_BLOCKED", `${where}: node type "${type}" is not allowed here${suffix(policy)}`);
+  if (!policy) return;
+  if (policy.blockedTypes?.includes(type)) {
+    throw new NodePolicyError("NODE_TYPE_BLOCKED", `${where}: node type "${type}" is not allowed here${suffix(policy)}`);
+  }
+  if (policy.requireSafeNodeTypes && !registry.isUntrustedSafe(type)) {
+    throw new NodePolicyError(
+      "NODE_TYPE_BLOCKED",
+      `${where}: node type "${type}" is not marked safe for untrusted graphs${suffix(policy)}`,
+    );
+  }
 }
 
 /** Throws SUBGRAPH_FILE_BLOCKED when the policy refuses file-based subgraphs. */

@@ -75,7 +75,7 @@ export const subgraphNode = defineNode<Config>({
   type: "subgraph",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, hostAccess: false },
 
   build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const uses = String(nodeSpec["uses"] ?? "");
@@ -87,7 +87,7 @@ export const subgraphNode = defineNode<Config>({
 
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const nodeCtx = ctx as NodeCtx;

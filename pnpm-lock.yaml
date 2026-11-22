@@ -531,9 +531,6 @@ importers:
       '@flowgraph/expr':
         specifier: workspace:*
         version: link:../expr
-      '@flowgraph/spec':
-        specifier: workspace:*
-        version: link:../spec
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -547,6 +544,9 @@ importers:
       '@flowgraph/node-workshop':
         specifier: workspace:*
         version: link:../node-workshop
+      '@flowgraph/spec':
+        specifier: workspace:*
+        version: link:../spec
       '@langchain/langgraph':
         specifier: ^1.4.7
         version: 1.4.12(@langchain/core@1.2.1(@opentelemetry/api@1.9.1)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.1))(openai@6.45.0(@aws-sdk/credential-provider-node@3.972.69)(@smithy/signature-v4@5.6.5)(zod@3.25.76)))(zod@3.25.76)
@@ -568,9 +568,6 @@ importers:
       '@flowgraph/expr':
         specifier: workspace:*
         version: link:../expr
-      '@flowgraph/spec':
-        specifier: workspace:*
-        version: link:../spec
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -578,6 +575,9 @@ importers:
       '@flowgraph/core':
         specifier: workspace:*
         version: link:../core
+      '@flowgraph/spec':
+        specifier: workspace:*
+        version: link:../spec
       '@types/node':
         specifier: ^26.0.0
         version: 26.1.0
@@ -596,9 +596,6 @@ importers:
       '@flowgraph/expr':
         specifier: workspace:*
         version: link:../expr
-      '@flowgraph/spec':
-        specifier: workspace:*
-        version: link:../spec
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -606,6 +603,9 @@ importers:
       '@flowgraph/core':
         specifier: workspace:*
         version: link:../core
+      '@flowgraph/spec':
+        specifier: workspace:*
+        version: link:../spec
       '@types/node':
         specifier: ^26.0.0
         version: 26.1.0
@@ -624,9 +624,6 @@ importers:
       '@flowgraph/expr':
         specifier: workspace:*
         version: link:../expr
-      '@flowgraph/spec':
-        specifier: workspace:*
-        version: link:../spec
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -637,6 +634,9 @@ importers:
       '@flowgraph/node-port':
         specifier: workspace:*
         version: link:../node-port
+      '@flowgraph/spec':
+        specifier: workspace:*
+        version: link:../spec
       '@langchain/core':
         specifier: ^1.2.0
         version: 1.2.1(@opentelemetry/api@1.9.1)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.1))(openai@6.45.0(@aws-sdk/credential-provider-node@3.972.69)(@smithy/signature-v4@5.6.5)(zod@3.25.76))
@@ -658,9 +658,6 @@ importers:
       '@flowgraph/expr':
         specifier: workspace:*
         version: link:../expr
-      '@flowgraph/spec':
-        specifier: workspace:*
-        version: link:../spec
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -668,6 +665,9 @@ importers:
       '@flowgraph/core':
         specifier: workspace:*
         version: link:../core
+      '@flowgraph/spec':
+        specifier: workspace:*
+        version: link:../spec
       '@types/node':
         specifier: ^26.0.0
         version: 26.1.0
@@ -686,9 +686,6 @@ importers:
       '@flowgraph/expr':
         specifier: workspace:*
         version: link:../expr
-      '@flowgraph/spec':
-        specifier: workspace:*
-        version: link:../spec
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -696,6 +693,9 @@ importers:
       '@flowgraph/core':
         specifier: workspace:*
         version: link:../core
+      '@flowgraph/spec':
+        specifier: workspace:*
+        version: link:../spec
       '@types/node':
         specifier: ^26.0.0
         version: 26.1.0

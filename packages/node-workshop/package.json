@@ -28,15 +28,16 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
-    "@flowgraph/core": "workspace:*"
+    "@flowgraph/core": "workspace:^",
+    "@flowgraph/spec": "workspace:^"
   },
   "dependencies": {
     "@flowgraph/expr": "workspace:*",
-    "@flowgraph/spec": "workspace:*",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",

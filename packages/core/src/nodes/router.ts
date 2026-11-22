@@ -25,12 +25,12 @@ export const routerNode = defineNode<Config>({
   type: "router",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { routing: true },
+  capabilities: { routing: true, hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { routing: true },
+      capabilities: { routing: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<import("../registry.js").NodeResult> {
         const scope = buildScope(state, ctx);

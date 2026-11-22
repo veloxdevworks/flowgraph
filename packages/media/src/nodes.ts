@@ -147,7 +147,7 @@ function buildMediaNode(spec: ModalitySpec) {
   return defineNode<Config>({
     type: spec.type,
     configSchema: spec.schema,
-    capabilities: { sideEffecting: true, receivesTimeoutSignal: true },
+    capabilities: { sideEffecting: true, receivesTimeoutSignal: true, hostAccess: false },
     ui: spec.ui,
 
     build(_buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
@@ -155,7 +155,7 @@ function buildMediaNode(spec: ModalitySpec) {
 
       return {
         contract: {},
-        capabilities: { sideEffecting: true, receivesTimeoutSignal: true },
+        capabilities: { sideEffecting: true, receivesTimeoutSignal: true, hostAccess: false },
 
         async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
           const scope = {

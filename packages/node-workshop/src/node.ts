@@ -25,12 +25,12 @@ export const workshopNode = defineNode<WorkshopWith>({
   type: "workshop",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: WorkshopWithSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: WorkshopWith): CompiledNode {
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {
