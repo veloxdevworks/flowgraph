@@ -38,22 +38,22 @@ nodes:
     type: function
     with:
       fn: intakeFeature
-      input:
-        feature: "{{ state.feature }}"
       output:
         map:
           feature: "{{ result.feature }}"
           design: "{{ result.design }}"
+    input:
+      feature: "{{ state.feature }}"
 
   - id: jira-in-progress
     type: function
     with:
       fn: updateJira
-      input:
-        ticket: "{{ state.feature.ticket }}"
-        status: "In Progress"
-        title: "{{ state.feature.title }}"
       output: { to: jira }
+    input:
+      ticket: "{{ state.feature.ticket }}"
+      status: "In Progress"
+      title: "{{ state.feature.title }}"
 
   - id: choose-track
     type: hitl
@@ -69,13 +69,13 @@ nodes:
     type: function
     with:
       fn: applyTrackChoice
-      input:
-        choice: "{{ state.trackChoice.choice }}"
-        feature: "{{ state.feature }}"
       output:
         map:
           track: "{{ result.track }}"
           feature: "{{ result.feature }}"
+    input:
+      choice: "{{ state.trackChoice.choice }}"
+      feature: "{{ state.feature }}"
 
   - id: route-track
     type: router
@@ -96,21 +96,21 @@ nodes:
     type: function
     with:
       fn: buildArtifact
-      input:
-        feature: "{{ state.feature }}"
-        track: "{{ state.track }}"
-        design: "{{ state.design }}"
       output: { to: artifact }
+    input:
+      feature: "{{ state.feature }}"
+      track: "{{ state.track }}"
+      design: "{{ state.design }}"
 
   - id: deploy-staging
     type: function
     with:
       fn: deploy
-      input:
-        artifact: "{{ state.artifact }}"
-        environment: staging
-        track: "{{ state.track }}"
       output: { to: deploy }
+    input:
+      artifact: "{{ state.artifact }}"
+      environment: staging
+      track: "{{ state.track }}"
 
   - id: promote-gate
     type: hitl
@@ -126,23 +126,23 @@ nodes:
     when: "{{ state.promoteApproval.approved }}"
     with:
       fn: applyPromote
-      input:
-        feature: "{{ state.feature }}"
       output:
         map:
           track: "{{ result.track }}"
           feature: "{{ result.feature }}"
+    input:
+      feature: "{{ state.feature }}"
 
   - id: chat-design
     type: function
     with:
       fn: chatOwner
-      input:
-        owner: "{{ state.feature.owner }}"
-        kind: design-review
-        title: "{{ state.feature.title }}"
-        ticket: "{{ state.feature.ticket }}"
       output: { to: notifications }
+    input:
+      owner: "{{ state.feature.owner }}"
+      kind: design-review
+      title: "{{ state.feature.title }}"
+      ticket: "{{ state.feature.ticket }}"
 
   - id: design-review
     type: hitl
@@ -158,131 +158,131 @@ nodes:
     when: "{{ state.designApproval.approved == false }}"
     with:
       fn: reviseDesign
-      input:
-        design: "{{ state.design }}"
-        feature: "{{ state.feature }}"
       output: { to: design }
+    input:
+      design: "{{ state.design }}"
+      feature: "{{ state.feature }}"
 
   - id: kickoff-reviews
     type: function
     when: "{{ state.designApproval.approved }}"
     with:
       fn: kickoffReviews
-      input:
-        feature: "{{ state.feature }}"
+    input:
+      feature: "{{ state.feature }}"
 
   - id: critique-design
     type: function
     with:
       fn: critiqueDesign
-      input:
-        feature: "{{ state.feature }}"
-        design: "{{ state.design }}"
       output: { to: reviews }
+    input:
+      feature: "{{ state.feature }}"
+      design: "{{ state.design }}"
 
   - id: critique-performance
     type: function
     with:
       fn: critiquePerformance
-      input:
-        feature: "{{ state.feature }}"
-        design: "{{ state.design }}"
       output: { to: reviews }
+    input:
+      feature: "{{ state.feature }}"
+      design: "{{ state.design }}"
 
   - id: critique-security
     type: function
     with:
       fn: critiqueSecurity
-      input:
-        feature: "{{ state.feature }}"
-        design: "{{ state.design }}"
       output: { to: reviews }
+    input:
+      feature: "{{ state.feature }}"
+      design: "{{ state.design }}"
 
   - id: aggregate-reviews
     type: function
     with:
       fn: aggregateReviews
-      input:
-        reviews: "{{ state.reviews }}"
-        feature: "{{ state.feature }}"
       output: { to: synthesis }
+    input:
+      reviews: "{{ state.reviews }}"
+      feature: "{{ state.feature }}"
 
   - id: follow-up-plan
     type: function
     with:
       fn: followUpPlan
-      input:
-        synthesis: "{{ state.synthesis }}"
-        feature: "{{ state.feature }}"
       output: { to: plan }
+    input:
+      synthesis: "{{ state.synthesis }}"
+      feature: "{{ state.feature }}"
 
   - id: production-build
     type: function
     with:
       fn: buildArtifact
-      input:
-        feature: "{{ state.feature }}"
-        track: "{{ state.track }}"
-        design: "{{ state.design }}"
-        plan: "{{ state.plan }}"
       output: { to: artifact }
+    input:
+      feature: "{{ state.feature }}"
+      track: "{{ state.track }}"
+      design: "{{ state.design }}"
+      plan: "{{ state.plan }}"
 
   - id: i18n
     type: function
     with:
       fn: runI18n
-      input:
-        artifact: "{{ state.artifact }}"
-        checks: "{{ state.checks }}"
       output: { to: checks }
+    input:
+      artifact: "{{ state.artifact }}"
+      checks: "{{ state.checks }}"
 
   - id: a11y
     type: function
     with:
       fn: runA11y
-      input:
-        artifact: "{{ state.artifact }}"
-        checks: "{{ state.checks }}"
       output: { to: checks }
+    input:
+      artifact: "{{ state.artifact }}"
+      checks: "{{ state.checks }}"
 
   - id: unit-tests
     type: function
     with:
       fn: runUnitTests
-      input:
-        artifact: "{{ state.artifact }}"
-        checks: "{{ state.checks }}"
       output: { to: checks }
+    input:
+      artifact: "{{ state.artifact }}"
+      checks: "{{ state.checks }}"
 
   - id: e2e-tests
     type: function
     with:
       fn: runE2e
-      input:
-        artifact: "{{ state.artifact }}"
-        checks: "{{ state.checks }}"
-        fixAttempt: "{{ state.fixAttempt }}"
       output: { to: checks }
+    input:
+      artifact: "{{ state.artifact }}"
+      checks: "{{ state.checks }}"
+      fixAttempt: "{{ state.fixAttempt }}"
 
   - id: o11y
     type: function
     with:
       fn: runO11y
-      input:
-        artifact: "{{ state.artifact }}"
-        checks: "{{ state.checks }}"
       output: { to: checks }
+    input:
+      artifact: "{{ state.artifact }}"
+      checks: "{{ state.checks }}"
 
   - id: chat-release
     type: function
     with:
       fn: chatOwner
-      input:
-        owner: "{{ state.feature.owner }}"
-        kind: release-review
-        title: "{{ state.feature.title }}"
-        ticket: "{{ state.feature.ticket }}"
       output: { to: notifications }
+    input:
+      owner: "{{ state.feature.owner }}"
+      kind: release-review
+      title: "{{ state.feature.title }}"
+      ticket: "{{ state.feature.ticket }}"
 
   - id: release-gate
     type: hitl
@@ -298,61 +298,61 @@ nodes:
     when: "{{ state.releaseApproval.approved == false }}"
     with:
       fn: fixAndRetest
-      input:
-        artifact: "{{ state.artifact }}"
-        fixAttempt: "{{ state.fixAttempt }}"
       output:
         map:
           artifact: "{{ result.artifact }}"
           fixAttempt: "{{ result.fixAttempt }}"
+    input:
+      artifact: "{{ state.artifact }}"
+      fixAttempt: "{{ state.fixAttempt }}"
 
   - id: deploy-production
     type: function
     when: "{{ state.releaseApproval.approved }}"
     with:
       fn: deploy
-      input:
-        artifact: "{{ state.artifact }}"
-        environment: production
-        track: "{{ state.track }}"
       output: { to: deploy }
+    input:
+      artifact: "{{ state.artifact }}"
+      environment: production
+      track: "{{ state.track }}"
 
   - id: jira-done
     type: function
     with:
       fn: updateJira
-      input:
-        ticket: "{{ state.feature.ticket }}"
-        status: Done
-        title: "{{ state.feature.title }}"
-        environment: "{{ state.deploy.environment }}"
       output: { to: jira }
+    input:
+      ticket: "{{ state.feature.ticket }}"
+      status: Done
+      title: "{{ state.feature.title }}"
+      environment: "{{ state.deploy.environment }}"
 
   - id: chat-shipped
     type: function
     with:
       fn: chatOwner
-      input:
-        owner: "{{ state.feature.owner }}"
-        kind: shipped
-        title: "{{ state.feature.title }}"
-        ticket: "{{ state.feature.ticket }}"
-        environment: "{{ state.deploy.environment }}"
       output: { to: notifications }
+    input:
+      owner: "{{ state.feature.owner }}"
+      kind: shipped
+      title: "{{ state.feature.title }}"
+      ticket: "{{ state.feature.ticket }}"
+      environment: "{{ state.deploy.environment }}"
 
   - id: record-outcome
     type: function
     with:
       fn: recordOutcome
-      input:
-        feature: "{{ state.feature }}"
-        track: "{{ state.track }}"
-        deploy: "{{ state.deploy }}"
-        jira: "{{ state.jira }}"
-        checks: "{{ state.checks }}"
-        synthesis: "{{ state.synthesis }}"
-        plan: "{{ state.plan }}"
       output: { to: outcome }
+    input:
+      feature: "{{ state.feature }}"
+      track: "{{ state.track }}"
+      deploy: "{{ state.deploy }}"
+      jira: "{{ state.jira }}"
+      checks: "{{ state.checks }}"
+      synthesis: "{{ state.synthesis }}"
+      plan: "{{ state.plan }}"
 
 edges:
   - { from: START, to: intake }

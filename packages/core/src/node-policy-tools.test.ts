@@ -27,7 +27,7 @@ function graph(nodes: unknown[]): GraphSpec {
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "tool-policy-graph" },
-    state: { channels: { out: { type: "object" } } },
+    state: { channels: { out: { type: "any" } } },
     nodes,
     edges,
   } as unknown as GraphSpec;

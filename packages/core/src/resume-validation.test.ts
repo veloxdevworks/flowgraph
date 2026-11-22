@@ -119,7 +119,7 @@ describe("re-prompt on invalid resume", () => {
               type: "hitl",
               with: {
                 mode: "form",
-                message: "Name item {{ item.it }}",
+                message: "Name item {{ it }}",
                 schema: titleSchema,
                 maxResumeAttempts: 2,
                 output: { to: "itemResult" },

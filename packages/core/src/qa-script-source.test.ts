@@ -14,13 +14,14 @@ async function directory() {
   dirs.push(dir);
   return dir;
 }
-function graph(withConfig: Record<string, unknown>) {
+function graph(settings: Record<string, unknown>) {
+  const { input, ...withConfig } = settings;
   return GraphSpecSchema.parse({
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "script-source" },
     state: { channels: { value: { type: "number" }, answer: { type: "object" } } },
-    nodes: [{ id: "transform", type: "script", with: { ...withConfig, output: { to: "answer" } } }],
+    nodes: [{ id: "transform", type: "script", ...(input !== undefined ? { input } : {}), with: { ...withConfig, output: { to: "answer" } } }],
     edges: [
       { from: "START", to: "transform" },
       { from: "transform", to: "END" },

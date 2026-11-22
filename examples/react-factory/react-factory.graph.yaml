@@ -24,9 +24,9 @@ nodes:
     type: function
     with:
       fn: reactFactory.detectConventions
-      input:
-        repo: "{{ state.repo }}"
       output: { to: conventions }
+    input:
+      repo: "{{ state.repo }}"
 
   - id: learn-conventions
     type: memory

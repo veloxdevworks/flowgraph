@@ -235,10 +235,10 @@ describe("schemas in node config", () => {
     expect(HitlWithSchema.safeParse({ mode: "form", message: "m", ui: { fields: { a: { widget: "slider" } } } }).success).toBe(false);
   });
 
-  it("channel items / properties use the same dialect", () => {
-    expect(ChannelSchema.safeParse({ type: "array", items: { type: "integer" } }).success).toBe(true);
-    expect(ChannelSchema.safeParse({ type: "object", properties: { a: { type: "any" } } }).success).toBe(false);
-    expect(ChannelSchema.safeParse({ type: "object", properties: { a: { type: "string", required: true } } }).success).toBe(false);
+  it("a channel schema uses the same dialect", () => {
+    expect(ChannelSchema.safeParse({ type: "array", schema: { type: "array", items: { type: "integer" } } }).success).toBe(true);
+    expect(ChannelSchema.safeParse({ type: "object", schema: { type: "object", properties: { a: { type: "any" } } } }).success).toBe(false);
+    expect(ChannelSchema.safeParse({ type: "object", schema: { type: "object", properties: { a: { type: "string", required: true } } } }).success).toBe(false);
   });
 });
 

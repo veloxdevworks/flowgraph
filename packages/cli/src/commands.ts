@@ -3,7 +3,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, hostSupportDiagnostics, compileGraph, consoleSink, loadGraphImports, readGraphImportAliases, withUnresolvedImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, hostSupportDiagnostics, compileGraph, consoleSink, loadGraphImports, readGraphImportAliases, withUnresolvedImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, decodeCliInput, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
 import { isError, generateJsonSchema, type Diagnostic } from "@flowgraph/spec";
 import { buildRecoveryCommand } from "./recovery-command.js";
 import { buildMediaCommand } from "./media-command.js";
@@ -321,8 +321,9 @@ program
     // Parse --input flags and validate against declared `inputs` schema (fail fast)
     let rawInput: Record<string, unknown>;
     try {
-      rawInput = await parseInputFlags(opts.input ?? [], cwd);
-      // Checked here to fail before preflight work; compiled.run() resolves the raw input once.
+      rawInput = await parseInputFlags(spec, opts.input ?? [], cwd);
+      // Checked here to fail before preflight work. The text was decoded once, by declared type,
+      // so compiled.run() checks these typed values as they are.
       resolveGraphInput(spec, rawInput);
     } catch (err) {
       if (isInputValidationError(err)) {
@@ -838,8 +839,9 @@ program
     try { raw = await fs.readFile(resolved, "utf-8"); }
     catch { printError(`Cannot read ${graphPath}`); process.exit(2); }
 
-    const { changed, output, notes } = migrateSpec(raw);
+    const { changed, output, notes, manual } = migrateSpec(raw);
     for (const note of notes) printInfo(`  • ${note}`);
+    for (const item of manual) printWarning(`  • needs a decision: ${item}`);
     if (!changed) {
       printSuccess(`${graphPath} is already up to date (flowgraph/v1).`);
       return;
@@ -857,11 +859,17 @@ program
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * `--input key=value` text is decoded once, by the type the graph declares for the key.
+ * `key=@file.json` is already JSON: the parsed value is used as it is.
+ */
 async function parseInputFlags(
+  spec: import("@flowgraph/spec").GraphSpec,
   flags: string[],
   cwd: string,
 ): Promise<Record<string, unknown>> {
-  const result: Record<string, unknown> = {};
+  const text: Record<string, string> = {};
+  const files: Record<string, unknown> = {};
   for (const flag of flags) {
     const eq = flag.indexOf("=");
     if (eq < 0) continue;
@@ -870,13 +878,12 @@ async function parseInputFlags(
     if (val.startsWith("@")) {
       const filePath = path.resolve(cwd, val.slice(1));
       const raw = await fs.readFile(filePath, "utf-8");
-      result[key] = JSON.parse(raw) as unknown;
+      files[key] = JSON.parse(raw) as unknown;
     } else {
-      try { result[key] = JSON.parse(val) as unknown; }
-      catch { result[key] = val; }
+      text[key] = val;
     }
   }
-  return result;
+  return { ...decodeCliInput(spec, text), ...files };
 }
 
 function toMermaid(spec: import("@flowgraph/spec").GraphSpec): string {

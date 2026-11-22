@@ -5,11 +5,14 @@
  */
 
 import { isAlias, isMap, isSeq, parseDocument, YAMLMap } from "yaml";
+import { migrateDataContracts } from "./migrate-data-contracts.js";
 
 export interface MigrateResult {
   changed: boolean;
   output: string;
   notes: string[];
+  /** Rewrites that need a decision; the fields are left as they are. */
+  manual: string[];
 }
 
 const CURRENT_API_VERSION = "flowgraph/v1";
@@ -193,5 +196,10 @@ export function migrateSpec(raw: string): MigrateResult {
     // Leave unparseable YAML untouched; validator will report syntax errors.
   }
 
-  return { changed: output !== raw, output, notes };
+  // 4. Data-contract migrations (channel items/properties, inputs, map item refs, etc.)
+  const contracts = migrateDataContracts(output);
+  output = contracts.output;
+  notes.push(...contracts.notes);
+
+  return { changed: output !== raw, output, notes, manual: contracts.manual };
 }

@@ -37,7 +37,7 @@ function parallelSpec(warm: number): GraphSpec {
     metadata: { name: "sqlite-parallel-side" },
     state: { channels: { n: { type: "number" }, sideOut: { type: "string" }, gate: { type: "object" } } },
     nodes: [
-      { id: "bump", type: "function", with: { fn: "sqlBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } },
+      { id: "bump", type: "function", with: { fn: "sqlBump", output: { to: "n" } }, input: { n: "{{ state.n }}" } },
       { id: "fan", type: "function", with: { fn: "sqlFan" } },
       { id: "effect", type: "function", with: { fn: "sqlSide", output: { to: "sideOut" } } },
       { id: "ask", type: "hitl", with: { mode: "approve", message: "approve the side effect?", output: { to: "gate" } } },
@@ -60,7 +60,7 @@ function parallelSpec(warm: number): GraphSpec {
 
 function mapSpec(warm: number): GraphSpec {
   const bump = warm > 0
-    ? [{ id: "bump", type: "function", with: { fn: "sqlBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } }]
+    ? [{ id: "bump", type: "function", with: { fn: "sqlBump", output: { to: "n" } }, input: { n: "{{ state.n }}" } }]
     : [];
   return {
     metadata: { name: "sqlite-map-items" },
@@ -76,7 +76,7 @@ function mapSpec(warm: number): GraphSpec {
           concurrency: 2,
           node: {
             type: "hitl",
-            with: { mode: "approve", message: "Approve {{ item.n }}", output: { to: "itemResult" } },
+            with: { mode: "approve", message: "Approve {{ n }}", output: { to: "itemResult" } },
           },
           collect: { to: "out" },
         },

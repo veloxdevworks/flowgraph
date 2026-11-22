@@ -157,7 +157,7 @@ describe("node output defaults", () => {
             as: "n",
             concurrency: 2,
             // Inner node omits output → writes state.outputs.<innerId>; unwrap peels it.
-            node: { type: "function", with: { fn: "double", input: { n: "{{ item.n }}" } } },
+            node: { type: "function", with: { fn: "double" }, input: { n: "{{ n }}" } },
             collect: { to: "doubled" },
           },
         },

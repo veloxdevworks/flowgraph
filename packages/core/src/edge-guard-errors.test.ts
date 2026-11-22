@@ -22,14 +22,14 @@ function graph(when: string, extraNodes: unknown[] = [], on?: unknown): GraphSpe
   registerFunction("edgeGuardFail", () => {
     throw new Error("expected failure");
   });
-  const mark = (id: string) => ({ id, type: "function", with: { fn: "edgeGuardMark", input: { id }, output: { to: "seen" } } });
+  const mark = (id: string) => ({ id, type: "function", with: { fn: "edgeGuardMark", output: { to: "seen" } }, input: { id } });
   return GraphSpecSchema.parse({
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "edge-guard" },
     state: { channels: { seen: { type: "array", reducer: "append" }, n: { type: "number", default: 0 } } },
     nodes: [
-      on ? { id: "a", type: "function", with: { fn: "edgeGuardMark", input: { id: "a" }, output: { to: "seen" } }, on } : mark("a"),
+      on ? { id: "a", type: "function", with: { fn: "edgeGuardMark", output: { to: "seen" } }, input: { id: "a" }, on } : mark("a"),
       mark("yes"),
       mark("fallback"),
       ...extraNodes,

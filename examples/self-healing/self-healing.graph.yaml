@@ -66,10 +66,10 @@ nodes:
     type: function
     with:
       fn: selfHealing.applyAndVerify
-      input:
-        action: "{{ state.fix.action }}"
-        service: "{{ state.alert.service }}"
       output: { to: result }
+    input:
+      action: "{{ state.fix.action }}"
+      service: "{{ state.alert.service }}"
 
   - id: record-attempt
     type: memory

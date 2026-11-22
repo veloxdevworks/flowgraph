@@ -97,7 +97,7 @@ function fnGraph(name: string, fn: string, runtime: Record<string, unknown> = { 
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name },
-    state: { channels: { out: { type: "object" } } },
+    state: { channels: { out: { type: "any" } } },
     nodes: [{ id: "n", type: "function", with: { fn, output: { to: "out" } } }],
     edges: [
       { from: "START", to: "n" },
@@ -182,6 +182,7 @@ describe("ctx.memory semantics through a graph", () => {
     const spec = fnGraph("h", "mtExpose", {
       memory: { subject: { type: "customer", key: "{{ input.email }}", hash: true } },
     });
+    spec.inputs = [{ key: "email", type: "string" }];
     const r = await run(spec, be, "h1", { email: "Pat@Example.com" });
     const subject = (r.state["out"] as { scope: { subject: { key: string } } }).scope.subject;
     expect(subject.key).toMatch(/^sha256:[0-9a-f]{64}$/);

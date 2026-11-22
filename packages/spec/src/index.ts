@@ -96,6 +96,7 @@ export {
   FormFieldHintSchema,
   InputFieldSchema,
   InputFieldTypeSchema,
+  OutputFieldSchema,
   isError,
 } from "./schema.js";
 
@@ -122,6 +123,7 @@ export type {
   OutputMapping,
   InputField,
   InputFieldType,
+  OutputField,
   Trigger,
   CronTrigger,
   IntervalTrigger,
@@ -143,6 +145,16 @@ export type {
 
 export { generateJsonSchema, zodToConfigJsonSchema } from "./json-schema.js";
 
+export {
+  channelContractProblem,
+  channelTypeConflict,
+  channelValueProblem,
+  compileChannelContract,
+  inputFieldChannel,
+  type ChannelContractCheck,
+  type ChannelContractInput,
+} from "./channel-contract.js";
+export { inputValueProblem, type InputValueField } from "./input-contract.js";
 export {
   validateJsonSchema,
   compileContractSchema,
