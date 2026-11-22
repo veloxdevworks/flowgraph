@@ -780,4 +780,43 @@ describe("migrateSpec", () => {
     expect(res.output).toBe(raw);
     expect(res.notes).toEqual([]);
   });
+
+  it("drops fields older engines ignored: branch beside to, and timeout on a deadline wait", () => {
+    const raw = `apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: ignored-fields
+nodes:
+  - id: pause
+    type: wait
+    with:
+      deadline: 5s
+      timeout: 1h # never applied
+  - id: gate
+    type: wait
+    with:
+      signal: go
+      timeout: 1h
+edges:
+  - { from: START, to: pause }
+  - from: pause
+    to: gate
+    branch:
+      - when: "true"
+        to: END
+  - { from: gate, to: END }
+`;
+    const first = migrateSpec(raw);
+    expect(first.changed).toBe(true);
+    expect(first.notes).toEqual([
+      'node "pause": removed with.timeout (it was ignored with a deadline wait)',
+      'edge 1 from "pause": removed "branch" (it was ignored because the edge has "to")',
+    ]);
+    const parsed = parse(first.output) as { nodes: Array<{ with: Record<string, unknown> }>; edges: Array<Record<string, unknown>> };
+    expect(parsed.nodes[0]!.with).toEqual({ deadline: "5s" });
+    expect(parsed.nodes[1]!.with).toEqual({ signal: "go", timeout: "1h" });
+    expect(parsed.edges[1]).toEqual({ from: "pause", to: "gate" });
+    expect(GraphSpecSchema.safeParse(parsed).success).toBe(true);
+    expect(migrateSpec(first.output).changed).toBe(false);
+  });
 });
