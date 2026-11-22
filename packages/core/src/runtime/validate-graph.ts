@@ -1536,6 +1536,24 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
   }
 }
 
+/**
+ * True when this config issue is a hook event or verb on a nested graph the
+ * map walk will check itself. The schema path runs through that graph's
+ * `runtime.hooks`, and the graph has `nodes`, so `graphStructure` reports it.
+ */
+function graphStructureChecksHook(value: unknown, issuePath: ReadonlyArray<PropertyKey>): boolean {
+  const field = issuePath[issuePath.length - 1];
+  if (field !== "on" && field !== "do") return false;
+  const hooksAt = issuePath.lastIndexOf("hooks");
+  if (hooksAt < 2 || issuePath[hooksAt - 1] !== "runtime") return false;
+  let cursor = value;
+  for (const segment of issuePath.slice(0, hooksAt - 1)) {
+    if (!cursor || typeof cursor !== "object") return false;
+    cursor = (cursor as Record<PropertyKey, unknown>)[segment];
+  }
+  return !!cursor && typeof cursor === "object" && Array.isArray((cursor as { nodes?: unknown }).nodes);
+}
+
 /** Type registration and `with` shape for one node, then the graphs nested in it. */
 function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean): void {
   const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
@@ -1546,6 +1564,9 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
     const configResult = factory.configSchema.safeParse(node.with ?? {});
     if (!configResult.success) {
       for (const issue of configResult.error.issues) {
+        // A map schema parses the nested graph, including its hooks. The walk
+        // below reports that same event or verb, so the config issue is not repeated.
+        if (node.type === "map" && graphStructureChecksHook(node.with, issue.path)) continue;
         const fieldPath = issue.path.join(".");
         push({
           severity: "error",

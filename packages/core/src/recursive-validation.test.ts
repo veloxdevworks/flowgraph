@@ -90,21 +90,46 @@ describe("inline subgraph specs are validated like the top-level graph", () => {
     await expect(compileGraph(spec)).rejects.toThrow(/Invalid graph: .*nodes\.sub\.spec\.nodes\.x\.with\.command/);
   });
 
-  it("reports a bad hook verb inside a map body and an inline subgraph once", () => {
-    const hooks = { runtime: { hooks: [{ on: "node:before", do: "retry" }] } };
-    const child = { ...head, metadata: { name: "item" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], ...hooks };
-    const mapped = errors(validateSpec(graph([mapOf({ type: "subgraph", spec: child })]))).filter((d) => d.code === "HOOK_DIRECTIVE_UNKNOWN");
-    expect(mapped).toEqual([
+  it("reports each hook problem inside a map body once, including a nested map", () => {
+    const body = (hook: { on: string; do: string }) => ({
+      type: "subgraph",
+      spec: {
+        ...head,
+        metadata: { name: "item" },
+        nodes: [{ id: "y", ...echo }],
+        edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }],
+        runtime: { hooks: [hook] },
+      },
+    });
+    const hookReports = (diagnostics: Diagnostic[]) => diagnostics.filter((d) => /hook/i.test(`${d.code} ${d.path ?? ""} ${d.message}`));
+    const cases = [
+      { on: "node:before", do: "retry", path: "do", message: "Use allow, deny or interrupt." },
+      { on: "node:after", do: "route:next", path: "do", message: "Use redact." },
+      { on: "node:before", do: "ignore", path: "do", message: "Use allow, deny or interrupt." },
+      { on: "intelligent:beforeStep", do: "allow", path: "on", message: 'Unknown hook event "intelligent:beforeStep".' },
+    ];
+    for (const hook of cases) {
+      const found = hookReports(validateSpec(graph([mapOf(body(hook))])));
+      expect(found, `${hook.on} ${hook.do}`).toEqual([
+        expect.objectContaining({
+          path: `nodes.m.with.node.spec.runtime.hooks[0].${hook.path}`,
+          message: expect.stringContaining(hook.message),
+        }),
+      ]);
+    }
+    const nestedMap = hookReports(validateSpec(graph([
+      mapOf({ type: "map", with: { over: "{{ item.xs }}", node: body({ on: "node:before", do: "retry" }) } }),
+    ])));
+    expect(nestedMap).toEqual([
       expect.objectContaining({
-        path: "nodes.m.with.node.spec.runtime.hooks[0].do",
+        path: "nodes.m.with.node.with.node.spec.runtime.hooks[0].do",
         message: expect.stringContaining("Use allow, deny or interrupt."),
       }),
     ]);
     const spec = graph([inline([{ id: "a", ...echo }])]);
     const nested = spec.nodes[0] as { spec: { runtime?: unknown } };
-    nested.spec.runtime = hooks.runtime;
-    const inlined = errors(validateSpec(spec)).filter((d) => d.code === "HOOK_DIRECTIVE_UNKNOWN");
-    expect(inlined).toEqual([
+    nested.spec.runtime = { hooks: [{ on: "node:before", do: "retry" }] };
+    expect(hookReports(validateSpec(spec))).toEqual([
       expect.objectContaining({
         path: "nodes.sub.spec.runtime.hooks[0].do",
         message: expect.stringContaining("Use allow, deny or interrupt."),
