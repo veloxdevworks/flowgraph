@@ -32,7 +32,7 @@ function mapHitlSpec(): GraphSpec {
             type: "hitl",
             with: {
               mode: "approve",
-              message: "Approve item {{ item.n }}",
+              message: "Approve item {{ n }}",
               output: { to: "itemResult" },
             },
           },
@@ -63,7 +63,7 @@ describe("checkpointed map + HITL", () => {
             concurrency: 2,
             node: {
               type: "function",
-              with: { fn: "echo-item", input: { n: "{{ item.n }}" } },
+              with: { fn: "echo-item" }, input: { n: "{{ n }}" },
             },
             collect: { to: "doubled" },
           },
@@ -208,7 +208,7 @@ describe("checkpointed map + HITL", () => {
             concurrency: 2,
             node: {
               type: "function",
-              with: { fn: "maybe-fail", input: { n: "{{ item.n }}" } },
+              with: { fn: "maybe-fail" }, input: { n: "{{ n }}" },
             },
             collect: { to: "doubled" },
           },

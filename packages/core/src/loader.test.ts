@@ -22,7 +22,7 @@ function parallelFanOutSpec(reducer: "append" | undefined): GraphSpec {
     metadata: { name: "parallel-fanout" },
     state: {
       channels: {
-        tags: reducer === "append" ? { type: "array", reducer: "append" } : { type: "array" },
+        tags: reducer === "append" ? { type: "array", reducer: "append" } : { type: "any" },
       },
     },
     nodes: [

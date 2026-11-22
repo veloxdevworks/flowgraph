@@ -1,4 +1,4 @@
-import type { Diagnostic, GraphSpec } from "@flowgraph/spec";
+import { channelValueProblem, type Diagnostic, type GraphSpec } from "@flowgraph/spec";
 import { guardExpression, literalCallbackExpr, parseExpr, scanTemplate, stdlib, tokenize } from "@flowgraph/expr";
 
 const MAX_DEPTH = 256;
@@ -125,20 +125,20 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
   for (const [name, channel] of Object.entries(spec.state?.channels ?? {})) {
     if (!channel || typeof channel !== "object") continue;
     const value = channel.default;
-    if (value === undefined || channel.type === "any") continue;
-    const matches =
-      channel.type === "array" || channel.type === "messages"
-        ? Array.isArray(value)
-        : channel.type === "object"
-          ? value !== null && typeof value === "object" && !Array.isArray(value)
-          : channel.type === "number"
-            ? typeof value === "number" && Number.isFinite(value)
-            : typeof value === channel.type;
-    if (!matches)
+    if (value === undefined) continue;
+    let problem: string | undefined;
+    try {
+      problem = channelValueProblem(channel, value);
+    } catch {
+      continue;
+    }
+    if (problem)
       diagnostics.push({
         severity: "error",
         code: "CHANNEL_DEFAULT_TYPE",
-        message: `Channel "${name}" default must have type ${channel.type}`,
+        message: channel.schema
+          ? `Channel "${name}" default does not match its schema: ${problem}`
+          : `Channel "${name}" default must have type ${channel.type}`,
         path: `state.channels.${name}.default`,
       });
   }

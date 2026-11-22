@@ -38,7 +38,7 @@ const mapped = (over = "{{ state.items }}", extra = {}) => ({
     as: "n",
     node: {
       type: "function",
-      with: { fn: "qaMapValue", input: { n: "{{ item.n }}", round: "{{ state.round }}" } },
+      with: { fn: "qaMapValue" }, input: { n: "{{ n }}", round: "{{ state.round }}" },
     },
     collect: { to: "results" },
     ...extra,
@@ -81,7 +81,7 @@ describe("PLAT-296: concurrency preserves work", () => {
     const nodes = ["a", "b", "c"].map((id) => ({
       id,
       type: "function",
-      with: { fn: "qaStaticBranch", input: { name: id }, output: { to: "effects" } },
+      with: { fn: "qaStaticBranch", output: { to: "effects" } }, input: { name: id },
     }));
     const result = await (
       await compileGraph(
@@ -249,7 +249,7 @@ describe("PLAT-311 / PLAT-312 / PLAT-325: map invocation semantics", () => {
         {
           id: "next-round",
           type: "function",
-          with: { fn: "qaNextRound", input: { n: "{{ state.round }}" }, output: { to: "round" } },
+          with: { fn: "qaNextRound", output: { to: "round" } }, input: { n: "{{ state.round }}" },
         },
         {
           id: "route",
@@ -284,9 +284,8 @@ describe("PLAT-311 / PLAT-312 / PLAT-325: map invocation semantics", () => {
                 type: "function",
                 with: {
                   fn: "qaMapValue",
-                  input: { n: "{{ item.n }}" },
                   output: { map: { value: "{{ result.twice }}" } },
-                },
+                }, input: { n: "{{ n }}" },
               },
             }),
           ],
@@ -309,7 +308,7 @@ describe("PLAT-311 / PLAT-312 / PLAT-325: map invocation semantics", () => {
                 type: "function",
                 with: {
                   fn: "qaMapValue",
-                  output: { map: { value: "{{ { item: item.n, result: result.suffix } }}" } },
+                  output: { map: { value: "{{ { item: n, result: result.suffix } }}" } },
                 },
               },
             }),

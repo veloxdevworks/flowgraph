@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { contractSchemaProblem } from "./validate-json-schema.js";
+import { channelTypeConflict } from "./channel-contract.js";
 import { hookEventFires, hookVerbAllowed, hookVerbMessage } from "./hooks.js";
 
 // ---------------------------------------------------------------------------
@@ -198,19 +199,6 @@ export const ChannelTypeSchema = z.union([
   z.literal("any"),
 ]);
 
-export const ChannelSchema = z.object({
-  type: ChannelTypeSchema,
-  description: z.string().optional(),
-  default: z.unknown().optional(),
-  reducer: ReducerSchema.optional(),
-  items: PropertySchema.optional(),
-  properties: z.record(PropertySchema).optional(),
-});
-
-export const StateSchema = z.object({
-  channels: z.record(ChannelSchema),
-});
-
 // ---------------------------------------------------------------------------
 // Retry / timeout
 // ---------------------------------------------------------------------------
@@ -255,6 +243,45 @@ function relocatedField(message: string) {
 export function isRelocatedFieldDef(def: object): boolean {
   return relocatedFields.has(def);
 }
+
+const NODE_INPUT_MOVED =
+  "with.input was removed; set the node's own input: instead. Any value is allowed there, templates render at every depth, and the node reads it as {{ input }}";
+
+// ---------------------------------------------------------------------------
+// Channel data contracts
+// ---------------------------------------------------------------------------
+
+/** A draft-07 schema checked on every write. No `{{ }}` rendering happens here: it is the plain dialect. */
+const DataSchemaSchema = z.record(z.unknown()).superRefine((schema, ctx) => {
+  const problem = contractSchemaProblem(schema);
+  if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
+});
+
+export const ChannelSchema = z
+  .object({
+    type: ChannelTypeSchema,
+    description: z.string().optional(),
+    default: z.unknown().optional(),
+    reducer: ReducerSchema.optional(),
+    schema: DataSchemaSchema.optional().describe(
+      "JSON Schema (draft-07) the channel's value must match after every write. `type` is shorthand for a schema with just that type.",
+    ),
+    items: relocatedField(
+      "channel items was removed; describe the contents with schema, e.g. schema: { type: array, items: { type: string } }",
+    ),
+    properties: relocatedField(
+      "channel properties was removed; describe the contents with schema, e.g. schema: { type: object, properties: { name: { type: string } } }",
+    ),
+  })
+  .superRefine((channel, ctx) => {
+    if (!channel.schema) return;
+    const conflict = channelTypeConflict({ type: channel.type, schema: channel.schema });
+    if (conflict) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schema"], message: conflict });
+  });
+
+export const StateSchema = z.object({
+  channels: z.record(ChannelSchema),
+});
 
 
 // ---------------------------------------------------------------------------
@@ -851,7 +878,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
 // function node (formerly "code") — legacy programmatic escape hatch
 export const FunctionWithSchema = BaseWithSchema.extend({
   fn: z.string().describe("Registered function name"),
-  input: z.record(z.string()).optional(),
+  input: relocatedField(NODE_INPUT_MOVED),
 });
 
 // memory node — read/write scoped durable memory (requires runtime.memory)
@@ -910,7 +937,7 @@ export const ShellWithSchema = BaseWithSchema.extend({
   cwd: z.string().optional(),
   env: z.record(z.string()).optional(),
   inheritEnv: z.array(z.string().min(1)).optional().describe("Host environment variable names to pass to the child, in addition to the default allowlist (PATH, HOME, TMPDIR, TEMP, TMP, LANG, LC_ALL, and Windows SystemRoot/WINDIR)"),
-  input: z.record(z.unknown()).optional().describe("Rendered, passed via FLOWGRAPH_INPUT env + stdin JSON"),
+  input: relocatedField(NODE_INPUT_MOVED),
   timeout: relocatedField(
     "shell with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
   ),
@@ -1145,7 +1172,7 @@ export const ScriptWithSchema = BaseWithSchema.extend({
     .optional()
     .describe("Self-contained Node.js ESM source with a default-export function; mutually exclusive with file."),
   file: z.string().trim().min(1).optional().describe("Self-contained ESM source file, relative to the declaring graph; mutually exclusive with code."),
-  input: z.record(z.unknown()).optional().describe("Structured input, with templates rendered recursively and value types preserved"),
+  input: relocatedField(NODE_INPUT_MOVED),
   env: z.record(z.string()).optional().describe("Environment variables available to the child process"),
   timeout: relocatedField(
     "script with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
@@ -1180,7 +1207,21 @@ export const SubgraphWithSchema = BaseWithSchema.extend({
     })
     .optional()
     .describe("Explicit projection between parent and child channels"),
+}).superRefine((value, ctx) => {
+  if (value.stateMap?.out !== undefined && value.output !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["output"],
+      message:
+        "subgraph: set stateMap.out or output, not both. stateMap.out names each parent channel to write; output projects the whole child result (to / map, or none)",
+    });
+  }
 });
+
+/** Names a template already binds, so a map item cannot take them. */
+const MAP_RESERVED_BINDINGS: ReadonlySet<string> = new Set([
+  "index", "state", "input", "config", "run", "secret", "secrets", "issues", "memory", "result",
+]);
 
 // map node
 export const MapWithSchema = z.object({
@@ -1190,12 +1231,22 @@ export const MapWithSchema = z.object({
     maxBytes: z.number().int().positive().max(64 * 1024 * 1024).optional(),
   })]).optional().describe("Reuse completed item results across loop rounds; opt in only for deterministic item work"),
   over: z.string().describe("Expression evaluating to an array"),
-  as: z.string().default("item"),
+  as: z
+    .string()
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "as must be an identifier, such as item or task")
+    .refine((name) => !MAP_RESERVED_BINDINGS.has(name), {
+      message: `as cannot be ${[...MAP_RESERVED_BINDINGS].join(", ")}: those names are already bound in templates (index is the item's position)`,
+    })
+    .default("item")
+    .describe("Name the current item is bound to in the node body: {{ <as> }}. {{ index }} is its position."),
   concurrency: z.number().int().positive().optional().default(5),
   node: z
     .lazy((): typeof MapBodyNodeSchema => MapBodyNodeSchema)
     .describe("The node run once per item: a node spec whose id is optional"),
   collect: OutputMappingSchema.optional(),
+  output: relocatedField(
+    "map with.output is not supported: write the collected results with with.collect (to / map), or set output on the node body (with.node.with.output) to project each item",
+  ),
 });
 
 // worktree node — git worktree add/remove/status against runtime.workspace
@@ -1524,7 +1575,12 @@ export const NodeSpecSchema = z.object({
     .describe(
       "Inline embedded subgraph spec (bundling output); mutually exclusive with `uses`",
     ),
-  input: z.record(z.string()).optional(),
+  input: z
+    .unknown()
+    .optional()
+    .describe(
+      "The node's input: any value. {{ }} templates render at every depth and the node reads the result as {{ input }}. A skill or subgraph needs an object, whose keys are its inputs.",
+    ),
   /**
    * Per-node workspace override (absolute or graph-relative; templates ok).
    * Defaults to `runtime.workspace` then the graph directory.
@@ -2041,27 +2097,62 @@ export const LocalToolsSchema = z.object({
 // Run `inputs` schema (pre-start parameters — not HITL)
 // ---------------------------------------------------------------------------
 
-export const InputFieldTypeSchema = z.enum([
-  "string",
-  "text",
-  "number",
-  "boolean",
-  "select",
-  "json",
-]);
-
-export const InputFieldSchema = z.object({
-  key: z.string().min(1),
-  label: z.string().optional(),
-  type: InputFieldTypeSchema.optional().default("string"),
-  required: z.boolean().optional(),
-  default: z.unknown().optional(),
-  description: z.string().optional(),
-  options: z.array(z.string()).optional(),
+export const InputFieldTypeSchema = z.enum(["string", "number", "boolean", "select", "json"], {
+  errorMap: (issue, ctx) =>
+    ctx.data === "text"
+      ? { message: "input type text was removed; use type: string with ui: { widget: textarea }" }
+      : issue.code === "invalid_enum_value"
+        ? { message: "expected one of string | number | boolean | select | json" }
+        : { message: ctx.defaultError },
 });
+
+/**
+ * One declared run parameter, and the whole contract for it: its `type`, whether it is
+ * `required`, its `default`, and (for `json`) an optional draft-07 `schema`. Presentation
+ * hints live apart, under `ui`. A declared key is also a state channel the value is seeded into.
+ */
+export const InputFieldSchema = z
+  .object({
+    key: z.string().min(1),
+    type: InputFieldTypeSchema.optional().default("string"),
+    required: z.boolean().optional(),
+    default: z.unknown().optional(),
+    description: z.string().optional(),
+    options: z.array(z.string()).optional(),
+    schema: DataSchemaSchema.optional().describe("JSON Schema (draft-07) the value must match; only for type: json"),
+    ui: FormFieldHintSchema.optional().describe("Presentation hints for forms (label, placeholder, help, widget); not part of the contract"),
+    label: relocatedField("input label moved to ui.label"),
+  })
+  .strict()
+  .superRefine((field, ctx) => {
+    if (field.schema !== undefined && field.type !== "json") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schema"], message: "schema is only allowed on type: json inputs" });
+    }
+  });
+
+/**
+ * A value a graph returns to its caller: the child channel `key`, optionally with its own
+ * contract. Declared on a subgraph file, it is checked when the subgraph returns and is the
+ * only part of the child the parent can read.
+ */
+export const OutputFieldSchema = z
+  .object({
+    key: z.string().min(1).describe("Channel of this graph that holds the value"),
+    type: ChannelTypeSchema.optional(),
+    schema: DataSchemaSchema.optional().describe("JSON Schema (draft-07) the value must match"),
+    required: z.boolean().optional().describe("Default true: the graph must have produced a value (not null) for this key"),
+    description: z.string().optional(),
+  })
+  .strict()
+  .superRefine((field, ctx) => {
+    if (!field.schema) return;
+    const conflict = channelTypeConflict({ type: field.type, schema: field.schema });
+    if (conflict) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schema"], message: conflict });
+  });
 
 export type InputField = z.infer<typeof InputFieldSchema>;
 export type InputFieldType = z.infer<typeof InputFieldTypeSchema>;
+export type OutputField = z.infer<typeof OutputFieldSchema>;
 
 // ---------------------------------------------------------------------------
 // Declared secrets
@@ -2108,8 +2199,14 @@ export const GraphSpecSchema = z.object({
    * Distinct from mid-run HITL interrupts.
    */
   inputs: z.array(InputFieldSchema).optional(),
-  /** Default run input seeded when a run starts (desktop Start inspector / CLI may override). */
-  input: z.record(z.unknown()).optional(),
+  /**
+   * What this graph returns to a caller. Checked when the graph runs as a subgraph, and then the only
+   * channels the parent can read. A top-level run does not check it.
+   */
+  outputs: z.array(OutputFieldSchema).optional(),
+  input: relocatedField(
+    "top-level input was removed; give the matching inputs entry a default (and declare the key there if it is not an input yet)",
+  ),
   nodes: z.array(NodeSpecSchema),
   edges: z.array(EdgeSpecSchema),
   /** Host environment variables this graph may read (see SecretsSchema). */

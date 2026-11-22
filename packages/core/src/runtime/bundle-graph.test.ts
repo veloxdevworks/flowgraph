@@ -238,7 +238,7 @@ describe("bundleGraphForRemote — script file sources", () => {
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "script-file" },
-    nodes: [{ id: "transform", type: "script", with: { file, input: { n: 1 } } }],
+    nodes: [{ id: "transform", type: "script", with: { file }, input: { n: 1 } }],
     edges: [
       { from: "START", to: "transform" },
       { from: "transform", to: "END" },
@@ -265,7 +265,8 @@ describe("bundleGraphForRemote — script file sources", () => {
       const result = await bundleGraphForRemote(parent, { cwd: dir });
       expect(result.blockers).toEqual([]);
       const inner = (result.spec.nodes[0]!.spec as GraphSpec).nodes[0]!;
-      expect(inner.with).toEqual({ code: source, input: { n: 1 } });
+      expect(inner.with).toEqual({ code: source });
+      expect((inner as { input?: unknown }).input).toEqual({ n: 1 });
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }

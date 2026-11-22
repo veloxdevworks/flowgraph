@@ -226,7 +226,7 @@ describe("graph inputs", () => {
         { key: "count", type: "string" },
         { key: "on", type: "boolean", default: "yes" },
         { key: "tier", type: "select", options: ["a", "b"], default: "c" },
-        { key: "data", type: "json", default: "{not json" },
+        { key: "data", type: "json", schema: { type: "array" }, default: { a: 1 } },
         { key: "title", default: 3 },
       ],
     });
@@ -256,7 +256,7 @@ describe("graph inputs", () => {
         { key: "on", type: "boolean", default: false },
         { key: "data", type: "json", default: { a: 1 } },
         { key: "raw", type: "json", default: "[1, 2]" },
-        { key: "note", type: "text", default: "hi" },
+        { key: "note", type: "string", default: "hi", ui: { widget: "textarea" } },
         { key: "plain" },
       ],
     });
@@ -412,8 +412,8 @@ describe("script code is not linted as a template", () => {
   });
 
   it("still checks templates in the script's other fields", () => {
-    const spec = graph([{ id: "s", type: "script", with: { code: jsx, input: { x: "{{ state. }}" } } }]);
-    expect(errors(validateSpec(spec))).toContainEqual(expect.objectContaining({ code: "EXPR_PARSE_ERROR", path: "nodes.s.with.input.x" }));
+    const spec = graph([{ id: "s", type: "script", with: { code: jsx }, input: { x: "{{ state. }}" } }]);
+    expect(errors(validateSpec(spec))).toContainEqual(expect.objectContaining({ code: "EXPR_PARSE_ERROR", path: "nodes.s.input.x" }));
   });
 
   it("still checks script code in a map body, which the map renders with the item", () => {

@@ -23,8 +23,8 @@ it.each([
 ])("PLAT-380: preserves declared map keys without an outputs wrapper: %j", async (map) => {
   const g = await compileGraph(graph({ id: "work", type: "map", with: {
     over: "{{ state.items }}", as: "n", node: { type: "function", with: {
-      fn: "output-shape-item", input: { n: "{{ item.n }}" }, output: { map },
-    }}, collect: { to: "rows" },
+      fn: "output-shape-item", output: { map },
+    }, input: { n: "{{ n }}" }}, collect: { to: "rows" },
   }}));
   const result = await g.run();
   expect(result.status).toBe("completed");

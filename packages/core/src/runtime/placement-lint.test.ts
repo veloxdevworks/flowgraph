@@ -148,9 +148,9 @@ describe("placed non-subgraph nodes", () => {
   const codes = (n: unknown) => placementDiagnostics(g([n])).map((x) => x.code);
 
   it("PLACEMENT_STATE_REFERENCE: a with template reading state is an error naming node, path and the fix", () => {
-    const d = placementDiagnostics(g([fn({ with: { fn: "x", input: { v: "{{ state.topic.name }}" } } })]));
+    const d = placementDiagnostics(g([fn({ with: { fn: "x", args: { v: "{{ state.topic.name }}" } } })]));
     expect(d).toHaveLength(1);
-    expect(d[0]).toMatchObject({ severity: "error", code: "PLACEMENT_STATE_REFERENCE", path: "nodes.f.with.input.v" });
+    expect(d[0]).toMatchObject({ severity: "error", code: "PLACEMENT_STATE_REFERENCE", path: "nodes.f.with.args.v" });
     expect(d[0]!.message).toContain('"f"');
     expect(d[0]!.message).toContain("state.topic.name");
     expect(d[0]!.message).toMatch(/input:.*stateMap\.in/s);
@@ -168,7 +168,7 @@ describe("placed non-subgraph nodes", () => {
         fn({
           when: "{{ state.go }}",
           input: { v: "{{ state.topic }}" },
-          with: { fn: "x", input: { v: "{{ input.v }}", e: "{{ env.HOME }}", r: "{{ run.threadId }}" }, output: { to: "out", map: { m: "{{ state.a }}" } } },
+          with: { fn: "x", args: { v: "{{ input.v }}", e: "{{ env.HOME }}", r: "{{ run.threadId }}" }, output: { to: "out", map: { m: "{{ state.a }}" } } },
         }),
       ),
     ).toEqual([]);

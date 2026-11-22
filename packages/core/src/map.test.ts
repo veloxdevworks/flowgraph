@@ -27,14 +27,14 @@ describe("map node — fan-out / fan-in", () => {
             over: "{{ state.numbers }}",
             as: "n",
             concurrency: 2,
-            node: { type: "function", with: { fn: "double", input: { n: "{{ item.n }}" }, output: { to: "value" } } },
+            node: { type: "function", with: { fn: "double", output: { to: "value" } }, input: { n: "{{ n }}" } },
             collect: { to: "doubled" },
           },
         },
         {
           id: "sum-doubled",
           type: "function",
-          with: { fn: "sum", input: { values: "{{ state.doubled }}" }, output: { to: "total" } },
+          with: { fn: "sum", output: { to: "total" } }, input: { values: "{{ state.doubled }}" },
         },
       ],
       edges: [
@@ -67,7 +67,7 @@ describe("map node — inner agent", () => {
           with: {
             over: "{{ state.docs }}",
             as: "doc",
-            node: { type: "agent", provider: "map-echo", with: { prompt: "{{ item.doc }}" } },
+            node: { type: "agent", provider: "map-echo", with: { prompt: "{{ doc }}" } },
             collect: { to: "summaries" },
           },
         },
@@ -99,7 +99,7 @@ describe("map node — item data is rendered once", () => {
           with: {
             over: "{{ state.items }}",
             as: "t",
-            node: { type: "function", with: { fn: "map-echo-text", input: { text: "item: {{ item.t }}" } } },
+            node: { type: "function", with: { fn: "map-echo-text" }, input: { text: "item: {{ t }}" } },
             collect: { to: "out" },
           },
         },
@@ -132,7 +132,7 @@ describe("map node — item data is rendered once", () => {
               as: "t",
               node: {
                 type: "shell",
-                with: { command: "node", args: ["-e", "process.stdout.write(process.argv[1])", "{{ item.t }}"] },
+                with: { command: "node", args: ["-e", "process.stdout.write(process.argv[1])", "{{ t }}"] },
               },
               collect: { to: "out" },
             },

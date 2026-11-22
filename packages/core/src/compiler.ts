@@ -2773,8 +2773,8 @@ function buildNodeCtx(
   // Rendered `input` and node:before replacements alike lose `__` keys.
   const _input = withoutReservedKeys(
     inputOverride
-      ?? (nodeSpec["input"]
-        ? (renderDeep(nodeSpec["input"] as Record<string, string>, scope) as Record<string, unknown>)
+      ?? (nodeSpec["input"] !== undefined
+        ? (renderDeep(nodeSpec["input"], scope) as Record<string, unknown>)
         : {}),
   );
 

@@ -5,10 +5,14 @@
  * applied. Extend with version-specific transforms as the contract evolves.
  */
 
+import { migrateDataContracts } from "./migrate-data-contracts.js";
+
 export interface MigrateResult {
   changed: boolean;
   output: string;
   notes: string[];
+  /** Rewrites that need a decision; the fields are left as they are. */
+  manual: string[];
 }
 
 const CURRENT_API_VERSION = "flowgraph/v1";
@@ -44,5 +48,9 @@ export function migrateSpec(raw: string): MigrateResult {
     },
   );
 
-  return { changed: output !== raw, output, notes };
+  const contracts = migrateDataContracts(output);
+  output = contracts.output;
+  notes.push(...contracts.notes);
+
+  return { changed: output !== raw, output, notes, manual: contracts.manual };
 }

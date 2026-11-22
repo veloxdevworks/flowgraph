@@ -5,7 +5,7 @@
 
 import { RemoveMessage } from "@langchain/core/messages";
 import { Annotation, messagesStateReducer } from "@langchain/langgraph";
-import type { GraphSpec } from "@flowgraph/spec";
+import { compileChannelContract, ContractSchemaError, type ChannelContractCheck, type GraphSpec } from "@flowgraph/spec";
 import { registry } from "../registry.js";
 import { ISSUES_CHANNEL_CAP, issueDedupeKey, type RunIssue } from "./run-issues.js";
 import { MAP_MEMO_CHANNEL, reduceMapMemo } from "./map-memo.js";
@@ -56,8 +56,68 @@ export type ChannelReducerAndDefault = {
 /** Optional sink for a removal the messages reducer ignores. */
 export type ReducerWarn = (message: string, data?: Record<string, unknown>) => void;
 
-/** Resolve reducer/default for a channel — exported for unit tests. */
+/** A write that leaves a channel holding a value its `type` or `schema` rejects. */
+export class ChannelWriteError extends Error {
+  readonly code = "CHANNEL_WRITE_INVALID";
+  readonly retryable = false;
+  constructor(
+    readonly channel: string,
+    readonly problems: string,
+    contract: "schema" | "type",
+    value?: unknown,
+  ) {
+    const got = problems.startsWith("/ must be ") ? ` (got ${describeValue(value)})` : "";
+    super(`Channel "${channel}" rejected a write: the value does not match its ${contract}: ${problems}${got}`);
+    this.name = "ChannelWriteError";
+  }
+}
+
+function describeValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/**
+ * Resolve reducer/default for a channel — exported for unit tests. The reducer also checks the
+ * value the channel would hold after the write against its `type` / `schema` (`null` is every
+ * channel's empty value and always passes), and throws
+ * {@link ChannelWriteError} (code `CHANNEL_WRITE_INVALID`) when it does not conform.
+ */
 export function channelReducerAndDefault(
+  channelName: string,
+  ch: ChannelDef,
+  warn?: ReducerWarn,
+): ChannelReducerAndDefault {
+  const base = baseReducerAndDefault(channelName, ch, warn);
+  const check = channelContractCheck(channelName, ch);
+  if (!check) return base;
+  const contract = ch.schema ? "schema" : "type";
+  return {
+    default: base.default,
+    reducer: (current, incoming) => {
+      const next = base.reducer(current, incoming);
+      if (next === undefined || next === null) return next;
+      const problems = check(next);
+      if (problems) throw new ChannelWriteError(channelName, problems, contract, next);
+      return next;
+    },
+  };
+}
+
+function channelContractCheck(channelName: string, ch: ChannelDef): ChannelContractCheck | undefined {
+  if (ch.reducer === "messages" || (ch.type === "messages" && !ch.schema)) return undefined;
+  try {
+    return compileChannelContract({ type: ch.type, schema: ch.schema });
+  } catch (cause) {
+    if (cause instanceof ContractSchemaError) {
+      throw new ContractSchemaError(`Channel "${channelName}": invalid schema: ${cause.message}`, { cause });
+    }
+    throw cause;
+  }
+}
+
+function baseReducerAndDefault(
   channelName: string,
   ch: ChannelDef,
   warn?: ReducerWarn,

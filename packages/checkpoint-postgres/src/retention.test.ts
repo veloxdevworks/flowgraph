@@ -720,7 +720,7 @@ function pgParallel(warm: number): GraphSpec {
     metadata: { name: "pg-parallel-side" },
     state: { channels: { n: { type: "number" }, sideOut: { type: "string" }, gate: { type: "object" } } },
     nodes: [
-      { id: "bump", type: "function", with: { fn: "pgBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } },
+      { id: "bump", type: "function", with: { fn: "pgBump", output: { to: "n" } }, input: { n: "{{ state.n }}" } },
       { id: "fan", type: "function", with: { fn: "pgFan" } },
       { id: "effect", type: "function", with: { fn: "pgSide", output: { to: "sideOut" } } },
       { id: "ask", type: "hitl", with: { mode: "approve", message: "approve the side effect?", output: { to: "gate" } } },
@@ -743,7 +743,7 @@ function pgParallel(warm: number): GraphSpec {
 
 function pgMap(warm: number): GraphSpec {
   const bump = warm > 0
-    ? [{ id: "bump", type: "function", with: { fn: "pgBump", input: { n: "{{ state.n }}" }, output: { to: "n" } } }]
+    ? [{ id: "bump", type: "function", with: { fn: "pgBump", output: { to: "n" } }, input: { n: "{{ state.n }}" } }]
     : [];
   return {
     metadata: { name: "pg-map-items" },
@@ -759,7 +759,7 @@ function pgMap(warm: number): GraphSpec {
           concurrency: 2,
           node: {
             type: "hitl",
-            with: { mode: "approve", message: "Approve {{ item.n }}", output: { to: "itemResult" } },
+            with: { mode: "approve", message: "Approve {{ n }}", output: { to: "itemResult" } },
           },
           collect: { to: "out" },
         },
