@@ -118,7 +118,8 @@ describe("on.error", () => {
 
 describe("wait deadline", () => {
   it("accepts deadline and signal and rejects removed duration", () => {
-    expect(WaitWithSchema.safeParse({ deadline: "1ms", signal: "ready" }).success).toBe(true);
+    expect(WaitWithSchema.safeParse({ deadline: "1ms" }).success).toBe(true);
+    expect(WaitWithSchema.safeParse({ signal: "ready" }).success).toBe(true);
     const renamed = WaitWithSchema.safeParse({ duration: "1ms" });
     expect(renamed.success).toBe(false);
     expect(renamed.error?.issues.some((issue) => issue.code === "unrecognized_keys" && issue.keys.includes("duration"))).toBe(true);
