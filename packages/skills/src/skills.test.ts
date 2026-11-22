@@ -12,7 +12,7 @@ describe("loadSkill", () => {
     expect(diagnostics.filter((d) => d.severity === "error")).toHaveLength(0);
     expect(skill).not.toBeNull();
     expect(skill!.frontMatter.name).toBe("mock-create-ticket");
-    expect(skill!.frontMatter.kind_of).toBe("executable");
+    expect(skill!.frontMatter.kindOf).toBe("executable");
     expect(skill!.handlerPath).toContain("handler.js");
   });
 

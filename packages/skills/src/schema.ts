@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ContractSchemaSchema, contractSchemaProblem, type PropertyDef } from "@flowgraph/spec";
+import { ContractSchemaSchema, DurationSchema, contractSchemaProblem, type PropertyDef } from "@flowgraph/spec";
 
 // ---------------------------------------------------------------------------
 // Skill front-matter schema
@@ -14,8 +14,8 @@ export const SkillKindSchema = z.enum(["executable", "command"], {
       ? {
           message:
             issue.received === "agent" || issue.received === "composite"
-              ? `kind_of "${String(issue.received)}" is not supported; use "executable" or "command"`
-              : `kind_of must be "executable" or "command"`,
+              ? `kindOf "${String(issue.received)}" is not supported; use "executable" or "command"`
+              : `kindOf must be "executable" or "command"`,
         }
       : { message: ctx.defaultError },
 });
@@ -77,15 +77,12 @@ export const BinDeclSchema = z.object({
       "must be a single executable name (letters, digits, '.', '_', '+' or '-'), not a path or a shell command",
     ),
   optional: z.boolean().optional().default(false),
-  minVersion: z.string().optional(),
 });
 
 export const EnvDeclSchema = z.object({
   vars: z.array(EnvVarDeclSchema).optional(),
   bin: z.array(BinDeclSchema).optional(),
-  network: z.boolean().optional(),
   node: z.string().optional(),
-  packages: z.array(z.string()).optional(),
 });
 
 export const SkillFrontMatterSchema = z.object({
@@ -95,16 +92,13 @@ export const SkillFrontMatterSchema = z.object({
   version: z.string().optional(),
   description: z.string().optional(),
   labels: z.record(z.string()).optional(),
-  kind_of: SkillKindSchema.optional().default("executable"),
+  kindOf: SkillKindSchema.optional().default("executable"),
   inputs: z.record(SkillInputSchema).optional(),
   outputs: z.record(SkillOutputSchema).optional(),
   env: EnvDeclSchema.optional(),
   handler: z.string().optional(),
   command: z.array(z.string()).optional(),
-  provider: z.string().optional(),
-  timeout: z.string().optional(),
-  sideEffecting: z.boolean().optional().default(false),
-  permissions: z.array(z.string()).optional(),
+  timeout: DurationSchema.optional(),
 });
 
 export type SkillFrontMatter = z.infer<typeof SkillFrontMatterSchema>;

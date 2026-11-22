@@ -43,16 +43,15 @@ describe("top-level secrets", () => {
 
 describe("host-owned runtime settings", () => {
   it.each([
-    [{ hitl: { onInterrupt: "fail" } }, "hitl.onInterrupt", "the host decides how interrupts are answered"],
-    [{ hitl: { onInterrupt: "prompt" } }, "hitl.onInterrupt", "CLI --on-interrupt"],
-    [{ checkpoint: { namespace: "team" } }, "checkpoint.namespace", "checkpoints are already kept per thread"],
-    [{ secrets: { provider: "env" } }, "secrets.provider", "top-level secrets:"],
-    [{ observability: { logLevel: "info" } }, "observability", "configure logging and OpenTelemetry in the host"],
-  ])("rejects %j with a clear message", (runtime, path, message) => {
+    [{ hitl: { onInterrupt: "fail" } }, "onInterrupt"],
+    [{ hitl: { onInterrupt: "prompt" } }, "onInterrupt"],
+    [{ checkpoint: { namespace: "team" } }, "namespace"],
+    [{ secrets: { provider: "env" } }, "provider"],
+    [{ observability: { logLevel: "info" } }, "observability"],
+  ])("rejects removed setting %j as an unrecognized key", (runtime, key) => {
     const r = RuntimeSchema.safeParse(runtime);
     expect(r.success).toBe(false);
-    const issue = r.error?.issues.find((i) => i.path.join(".") === path);
-    expect(issue?.message).toContain(message);
+    expect(r.error?.issues.some((i) => i.code === "unrecognized_keys" && i.keys.includes(key))).toBe(true);
   });
 
   it("keeps hitl breakpoints and secret redaction", () => {

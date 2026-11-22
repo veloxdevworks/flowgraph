@@ -1,6 +1,6 @@
 import type { ZodTypeAny } from "zod";
 import { ignoreOverride, zodToJsonSchema } from "zod-to-json-schema";
-import { GraphSpecSchema, MapBodyNodeSchema, NodeSpecSchema, isRelocatedFieldDef } from "./schema.js";
+import { GraphSpecSchema, MapBodyNodeSchema, NodeSpecSchema } from "./schema.js";
 
 /** Where the v1 Graph JSON Schema is published. A breaking schema change gets a new path. */
 export const GRAPH_JSON_SCHEMA_ID = "https://veloxdevworks.com/flowgraph/schema/v1.json";
@@ -8,9 +8,6 @@ export const GRAPH_JSON_SCHEMA_ID = "https://veloxdevworks.com/flowgraph/schema/
 const GRAPH_REF = "#/definitions/GraphSpec";
 const NODE_REF = "#/definitions/NodeSpec";
 const MAP_BODY_REF = "#/definitions/MapBodyNode";
-
-/** Marks a relocated placeholder so it can be removed after generation. */
-const RELOCATED = "x-flowgraph-relocated";
 
 /**
  * Generate a JSON Schema document for the Graph spec.
@@ -27,7 +24,6 @@ export function generateJsonSchema(): Record<string, unknown> {
     $refStrategy: "none",
     definitions: { NodeSpec: NodeSpecSchema, MapBodyNode: MapBodyNodeSchema },
     override: (def, refs) => {
-      if (isRelocatedFieldDef(def)) return { [RELOCATED]: true };
       if (def === inlineSpec._def) return { $ref: GRAPH_REF };
       const at = refs.currentPath.join("/");
       if (def === NodeSpecSchema._def && at !== NODE_REF) return { $ref: NODE_REF };
@@ -37,7 +33,6 @@ export function generateJsonSchema(): Record<string, unknown> {
   }) as Record<string, unknown>;
   const definitions = schema.definitions as Record<string, Record<string, unknown>>;
   for (const name of ["NodeSpec", "MapBodyNode"]) definitions[name]!.allOf = [mapBodyRule()];
-  dropRelocated(schema);
   markBarrierFromUnique(schema);
   unicodeSafePatterns(schema);
   const { $schema, $ref, ...rest } = schema;
@@ -57,31 +52,6 @@ function mapBodyRule(): Record<string, unknown> {
     if: { type: "object", properties: { type: { const: "map" } }, required: ["type"] },
     then: { type: "object", properties: { with: { type: "object", properties: { node: { $ref: MAP_BODY_REF } } } } },
   };
-}
-
-/**
- * Relocated settings (`runsOn.wait`, `http` `with.timeout`, `config.defaults.retry`, …)
- * are rejected by the Zod schema with a message naming the canonical field, but
- * would appear in the generated JSON Schema as `{}` and show up in editors.
- * Drop the properties so editors do not offer them.
- */
-function dropRelocated(node: unknown): void {
-  if (node == null || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    for (const item of node) dropRelocated(item);
-    return;
-  }
-  const rec = node as Record<string, unknown>;
-  const props = rec.properties;
-  if (props && typeof props === "object" && !Array.isArray(props)) {
-    const fields = props as Record<string, unknown>;
-    for (const [key, value] of Object.entries(fields)) {
-      if (!value || typeof value !== "object" || !(RELOCATED in value)) continue;
-      delete fields[key];
-      if (Array.isArray(rec.required)) rec.required = rec.required.filter((name) => name !== key);
-    }
-  }
-  for (const value of Object.values(rec)) dropRelocated(value);
 }
 
 function compilesAsUnicode(pattern: string): boolean {

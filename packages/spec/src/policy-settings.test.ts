@@ -37,54 +37,44 @@ describe("retry and timeout have one canonical place", () => {
     expect(graphDiags(spec)).toEqual([]);
   });
 
-  it("rejects config.defaults.retry and names runtime.retry or the node's retry", () => {
+  it("rejects config.defaults.retry as an unrecognized key", () => {
     const d = graphDiags(base({ config: { defaults: { retry: { maxAttempts: 5 } } } }));
     expect(d).toHaveLength(1);
     expect(d[0]).toMatchObject({
       severity: "error",
       code: "SCHEMA_ERROR",
-      path: "config.defaults.retry",
+      path: "config.defaults",
     });
-    expect(d[0]!.message).toContain("config.defaults.retry is not supported");
-    expect(d[0]!.message).toContain("runtime.retry");
-    expect(d[0]!.message).toContain("retry on the node");
+    expect(d[0]!.message).toContain("retry");
   });
 
-  it("rejects config.defaults.timeout and names runtime.timeoutDefault or the node's timeout", () => {
+  it("rejects config.defaults.timeout as an unrecognized key", () => {
     const d = graphDiags(base({ config: { defaults: { timeout: "30s" } } }));
     expect(d).toHaveLength(1);
     expect(d[0]).toMatchObject({
       severity: "error",
       code: "SCHEMA_ERROR",
-      path: "config.defaults.timeout",
+      path: "config.defaults",
     });
-    expect(d[0]!.message).toContain("config.defaults.timeout is not supported");
-    expect(d[0]!.message).toContain("runtime.timeoutDefault");
-    expect(d[0]!.message).toContain("timeout on the node");
+    expect(d[0]!.message).toContain("timeout");
   });
 
-  it("rejects http with.retry and names the node's retry or runtime.retry", () => {
+  it("rejects http with.retry as an unknown field", () => {
     const r = HttpWithSchema.safeParse({
       url: "https://example.com",
       retry: { maxAttempts: 4 },
     });
     expect(r.success).toBe(false);
-    const issue = r.error?.issues.find((i) => i.path.join(".") === "retry");
-    expect(issue?.message).toContain("http with.retry is not supported");
-    expect(issue?.message).toContain("retry on the node");
-    expect(issue?.message).toContain("runtime.retry");
+    expect(r.error?.issues.some((i) => i.code === "unrecognized_keys" && i.keys.includes("retry"))).toBe(true);
   });
 
-  it("rejects http with.timeout and names the node's timeout or runtime.timeoutDefault", () => {
+  it("rejects http with.timeout as an unknown field", () => {
     const r = HttpWithSchema.safeParse({
       url: "https://example.com",
       timeout: "200ms",
     });
     expect(r.success).toBe(false);
-    const issue = r.error?.issues.find((i) => i.path.join(".") === "timeout");
-    expect(issue?.message).toContain("http with.timeout is not supported");
-    expect(issue?.message).toContain("timeout on the node");
-    expect(issue?.message).toContain("runtime.timeoutDefault");
+    expect(r.error?.issues.some((i) => i.code === "unrecognized_keys" && i.keys.includes("timeout"))).toBe(true);
   });
 
   it("still accepts http with.url and expect without retry or timeout", () => {

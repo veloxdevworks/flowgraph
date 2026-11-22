@@ -22,8 +22,7 @@ function skillWithBin(name: string): SkillDef {
     body: "",
     frontMatter: {
       name: "needs-bin",
-      kind_of: "command",
-      sideEffecting: false,
+      kindOf: "command",
       env: { bin: [{ name, optional: false }] },
     },
   };
@@ -69,7 +68,7 @@ describe("SKILL.md front matter", () => {
     const source = [
       "---",
       "name: echo-skill",
-      "kind_of: command",
+      "kindOf: command",
       "command: [echo]",
       "---",
       "Run echo.",
@@ -88,7 +87,7 @@ describe("SKILL.md front matter", () => {
     const dir = await tempDir();
     await writeFile(
       join(dir, "SKILL.md"),
-      "---yaml\nname: ok\nkind_of: command\ncommand: [echo]\n---\nHello\n",
+      "---yaml\nname: ok\nkindOf: command\ncommand: [echo]\n---\nHello\n",
     );
     const { skill, diagnostics } = await loadSkill(dir);
     expect(diagnostics.filter((d) => d.severity === "error")).toEqual([]);
