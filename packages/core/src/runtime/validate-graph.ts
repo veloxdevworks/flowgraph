@@ -34,10 +34,27 @@ function isJoinBarrier(from: string | readonly string[]): from is readonly strin
   return Array.isArray(from) && from.length > 1;
 }
 
-/** Targets declared by a node's own `with.routes` (router or hitl); edges don't have to repeat them. */
-export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
-  if (!Array.isArray(spec.nodes)) return [];
-  const node = spec.nodes.find((n) => n != null && n.id === id);
+type NodeIndex = { nodes: GraphSpec["nodes"]; length: number; byId: Map<string, NodeSpec> };
+
+const nodeIndexCache = new WeakMap<GraphSpec, NodeIndex>();
+
+/** Nodes keyed by id. Built once for a spec and reused until its node list changes. */
+function nodesById(spec: GraphSpec): Map<string, NodeSpec> {
+  const nodes = spec.nodes;
+  const length = Array.isArray(nodes) ? nodes.length : 0;
+  const cached = nodeIndexCache.get(spec);
+  if (cached && cached.nodes === nodes && cached.length === length) return cached.byId;
+  const byId = new Map<string, NodeSpec>();
+  if (Array.isArray(nodes)) {
+    for (const node of nodes) {
+      if (node != null && !byId.has(node.id)) byId.set(node.id, node);
+    }
+  }
+  nodeIndexCache.set(spec, { nodes, length, byId });
+  return byId;
+}
+
+function routeTargetsOf(node: NodeSpec | undefined): string[] {
   if (!node) return [];
   const w = (node.with ?? {}) as Record<string, unknown>;
   if (node.type === "hitl") return hitlRouteTargets(w);
@@ -55,8 +72,13 @@ export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
   );
 }
 
-function outgoingTargets(spec: GraphSpec, from: string): string[] {
-  const targets: string[] = nodeRouteTargets(spec, from);
+/** Targets declared by a node's own `with.routes` (router or hitl); edges don't have to repeat them. */
+export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
+  return routeTargetsOf(nodesById(spec).get(id));
+}
+
+function outgoingTargets(spec: GraphSpec, from: string, byId: Map<string, NodeSpec>): string[] {
+  const targets: string[] = routeTargetsFor(spec, from, byId);
   for (const edge of spec.edges) {
     if (!edgeFromIds(edge.from).includes(from)) continue;
     if ("to" in edge) {
@@ -81,10 +103,9 @@ export function nodeToolTargets(spec: GraphSpec, id: string): string[] {
   return [...new Set(targets)];
 }
 
-export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
-  const listed = spec.nodes;
-  const node = Array.isArray(listed) ? listed.find((n) => n != null && n.id === id) : undefined;
-  const targets = declaredRouteTargets(spec, id);
+function routeTargetsFor(spec: GraphSpec, id: string, byId: Map<string, NodeSpec>): string[] {
+  const node = byId.get(id);
+  const targets = routeTargetsOf(node);
   if (node?.on?.error?.startsWith("route:")) targets.push(node.on.error.slice(6));
   const hooks = spec.runtime?.hooks;
   for (const hook of Array.isArray(hooks) ? hooks : []) {
@@ -94,6 +115,10 @@ export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
     targets.push(hook.do.slice(6));
   }
   return [...new Set(targets)];
+}
+
+export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
+  return routeTargetsFor(spec, id, nodesById(spec));
 }
 
 /** Public topology includes routes that do not require duplicate static edges. */
@@ -137,11 +162,10 @@ export function topologyDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
-function incomingSources(spec: GraphSpec, to: string): string[] {
+function incomingSources(spec: GraphSpec, to: string, byId: Map<string, NodeSpec>): string[] {
   const sources: string[] = [];
-  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
-    if (node == null || !nodeRouteTargets(spec, node.id).includes(to)) continue;
-    sources.push(node.id);
+  for (const node of byId.values()) {
+    if (routeTargetsFor(spec, node.id, byId).includes(to)) sources.push(node.id);
   }
   for (const edge of spec.edges) {
     if ("to" in edge) {
@@ -159,14 +183,15 @@ function incomingSources(spec: GraphSpec, to: string): string[] {
 
 /** Nodes reachable from START by following edges (excluding END). */
 export function nodesReachableFromStart(spec: GraphSpec): Set<string> {
+  const byId = nodesById(spec);
   const reachable = new Set<string>();
-  const queue = outgoingTargets(spec, "START").filter((t) => t !== "END");
+  const queue = outgoingTargets(spec, "START", byId).filter((t) => t !== "END");
 
   while (queue.length > 0) {
     const id = queue.shift()!;
     if (reachable.has(id)) continue;
     reachable.add(id);
-    for (const next of outgoingTargets(spec, id)) {
+    for (const next of outgoingTargets(spec, id, byId)) {
       if (next !== "END" && !reachable.has(next)) queue.push(next);
     }
   }
@@ -175,12 +200,12 @@ export function nodesReachableFromStart(spec: GraphSpec): Set<string> {
 
 /** Nodes that can eventually reach END. */
 export function nodesThatReachEnd(spec: GraphSpec): Set<string> {
+  const byId = nodesById(spec);
   const canReach = new Set<string>();
   const queue: string[] = [];
 
-  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
-    if (node == null) continue;
-    if (registry.get(node.type)?.capabilities?.terminal || outgoingTargets(spec, node.id).includes("END")) {
+  for (const node of byId.values()) {
+    if (registry.get(node.type)?.capabilities?.terminal || outgoingTargets(spec, node.id, byId).includes("END")) {
       queue.push(node.id);
     }
   }
@@ -189,7 +214,7 @@ export function nodesThatReachEnd(spec: GraphSpec): Set<string> {
     const id = queue.shift()!;
     if (canReach.has(id)) continue;
     canReach.add(id);
-    for (const pred of incomingSources(spec, id)) {
+    for (const pred of incomingSources(spec, id, byId)) {
       if (pred !== "START" && !canReach.has(pred)) queue.push(pred);
     }
   }
