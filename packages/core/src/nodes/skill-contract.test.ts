@@ -1,10 +1,14 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { GraphSpec } from "@flowgraph/spec";
+import { loadSkill } from "@flowgraph/skills";
 import { compileGraph } from "../compiler.js";
 import { createScriptedProvider } from "../providers/index.js";
+import type { NodeRunContext } from "../context.js";
+import { runSkill } from "./skill-runner.js";
 
 let fixtureDir = "";
 
@@ -85,7 +89,33 @@ outputs:
 `,
   );
 
-  // 3. Executable skill with timeout that waits on ctx.signal.
+  // 3. Executable skill with an output key that exists on Object.prototype.
+  const protoSkillDir = path.join(fixtureDir, "skills", "proto-output");
+  await fs.mkdir(protoSkillDir, { recursive: true });
+  await fs.writeFile(
+    path.join(protoSkillDir, "handler.mjs"),
+    `export default async function () {
+  return {};
+}
+`,
+  );
+  await fs.writeFile(
+    path.join(protoSkillDir, "SKILL.md"),
+    `---
+apiVersion: flowgraph/v1
+kind: Skill
+name: proto-output
+version: 0.1.0
+kindOf: executable
+handler: ./handler.mjs
+outputs:
+  toString:
+    type: string
+---
+`,
+  );
+
+  // 4. Executable skill with timeout that waits on ctx.signal.
   const slowSkillDir = path.join(fixtureDir, "skills", "abort-aware");
   await fs.mkdir(slowSkillDir, { recursive: true });
   await fs.writeFile(
@@ -117,6 +147,63 @@ timeout: 250ms
 ---
 `,
   );
+
+  // 5. Command skill that ignores SIGTERM and notifies a local socket once ready.
+  const stubbornDir = path.join(fixtureDir, "skills", "stubborn-cmd");
+  await fs.mkdir(stubbornDir, { recursive: true });
+  const stubbornScript = [
+    "const net = require('node:net');",
+    "const { spawn } = require('node:child_process');",
+    "process.on('SIGTERM', () => {});",
+    "const grand = spawn(process.execPath, ['-e', 'process.on(\"SIGTERM\", () => {}); setInterval(() => {}, 60000);'], { stdio: 'ignore' });",
+    "const input = JSON.parse(process.env.FLOWGRAPH_INPUT || '{}');",
+    "const sock = net.connect(input.port, '127.0.0.1', () => {",
+    "  sock.end(JSON.stringify({ pid: process.pid, grandPid: grand.pid }));",
+    "});",
+    "setInterval(() => {}, 60000);",
+  ].join(" ");
+  await fs.writeFile(
+    path.join(stubbornDir, "SKILL.md"),
+    `---
+apiVersion: flowgraph/v1
+kind: Skill
+name: stubborn-cmd
+version: 0.1.0
+kindOf: command
+command: ${JSON.stringify([process.execPath, "-e", stubbornScript])}
+timeout: 250ms
+inputs:
+  port:
+    type: number
+    required: true
+---
+`,
+  );
+
+  // 6. Command skill that writes more than a small maxBuffer to stdout or stderr.
+  const noisyDir = path.join(fixtureDir, "skills", "noisy-cmd");
+  await fs.mkdir(noisyDir, { recursive: true });
+  const noisyScript = [
+    "const input = JSON.parse(process.env.FLOWGRAPH_INPUT || '{}');",
+    "const chunk = 'x'.repeat(256);",
+    "if (input.stream === 'stderr') process.stderr.write(chunk);",
+    "else process.stdout.write(chunk);",
+  ].join(" ");
+  await fs.writeFile(
+    path.join(noisyDir, "SKILL.md"),
+    `---
+apiVersion: flowgraph/v1
+kind: Skill
+name: noisy-cmd
+version: 0.1.0
+kindOf: command
+command: ${JSON.stringify([process.execPath, "-e", noisyScript])}
+inputs:
+  stream:
+    type: string
+---
+`,
+  );
 });
 
 afterAll(async () => {
@@ -125,10 +212,21 @@ afterAll(async () => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
+function stubCtx(): NodeRunContext {
+  return {
+    nodeId: "test-skill",
+    workspace: fixtureDir,
+    config: {},
+    meta: { runId: "run-1", threadId: "thread-1", graphName: "test" },
+    emit: () => undefined,
+  } as unknown as NodeRunContext;
+}
+
 describe("skill data contract & runtime enforcement", () => {
-  it("DATA-6: command skills receive rendered input on both stdin and FLOWGRAPH_INPUT", async () => {
+  it("command skills receive rendered input on both stdin and FLOWGRAPH_INPUT", async () => {
     const spec = {
       apiVersion: "flowgraph/v1",
       kind: "Graph",
@@ -160,7 +258,7 @@ describe("skill data contract & runtime enforcement", () => {
     });
   });
 
-  it("DATA-6: skill-as-tool builds tool spec from skill description and inputs and executes the skill", async () => {
+  it("skill-as-tool builds tool spec from skill description and inputs and executes the skill", async () => {
     let seenTool: { name: string; description?: string; schema?: Record<string, unknown> } | undefined;
     const provider = createScriptedProvider("skill-tool-test", async (req, ctx) => {
       seenTool = req.tools?.find((t) => t.name === "stdin-echo");
@@ -211,8 +309,8 @@ describe("skill data contract & runtime enforcement", () => {
     });
   });
 
-  it("CUT-4: enforces declared skill outputs schema and fails with SKILL_OUTPUT_INVALID", async () => {
-    const makeSpec = (input: Record<string, unknown>) =>
+  it("enforces declared skill outputs schema and rejects inherited prototype properties", async () => {
+    const makeSpec = (uses: string, input: Record<string, unknown> = {}) =>
       ({
         apiVersion: "flowgraph/v1",
         kind: "Graph",
@@ -222,7 +320,7 @@ describe("skill data contract & runtime enforcement", () => {
           {
             id: "s",
             type: "skill",
-            uses: "./skills/checked-output",
+            uses,
             input,
             with: { output: { to: "out" } },
           },
@@ -234,22 +332,33 @@ describe("skill data contract & runtime enforcement", () => {
         runtime: { checkpoint: { enabled: false } },
       }) as unknown as GraphSpec;
 
-    const ok = await (await compileGraph(makeSpec({}), { cwd: fixtureDir })).run();
+    const ok = await (await compileGraph(makeSpec("./skills/checked-output"), { cwd: fixtureDir })).run();
     expect(ok.status).toBe("completed");
     expect(ok.state["out"]).toEqual({ count: 42 });
 
-    const wrongType = await (await compileGraph(makeSpec({ badType: true }), { cwd: fixtureDir })).run();
+    const wrongType = await (
+      await compileGraph(makeSpec("./skills/checked-output", { badType: true }), { cwd: fixtureDir })
+    ).run();
     expect(wrongType.status).toBe("error");
     expect((wrongType.error as Error & { code?: string })?.code).toBe("SKILL_OUTPUT_INVALID");
     expect(wrongType.error?.message).toContain("count");
 
-    const missing = await (await compileGraph(makeSpec({ missingKey: true }), { cwd: fixtureDir })).run();
+    const missing = await (
+      await compileGraph(makeSpec("./skills/checked-output", { missingKey: true }), { cwd: fixtureDir })
+    ).run();
     expect(missing.status).toBe("error");
     expect((missing.error as Error & { code?: string })?.code).toBe("SKILL_OUTPUT_INVALID");
     expect(missing.error?.message).toContain("missing");
+
+    const inherited = await (
+      await compileGraph(makeSpec("./skills/proto-output"), { cwd: fixtureDir })
+    ).run();
+    expect(inherited.status).toBe("error");
+    expect((inherited.error as Error & { code?: string })?.code).toBe("SKILL_OUTPUT_INVALID");
+    expect(inherited.error?.message).toContain('declared output "toString" is missing');
   });
 
-  it("CUT-4: enforces front-matter timeout and fails with SKILL_TIMEOUT", async () => {
+  it("enforces front-matter timeout on executable skills and fails with SKILL_TIMEOUT", async () => {
     const spec = {
       apiVersion: "flowgraph/v1",
       kind: "Graph",
@@ -290,5 +399,74 @@ describe("skill data contract & runtime enforcement", () => {
     expect(result.status).toBe("error");
     expect((result.error as Error & { code?: string })?.code).toBe("SKILL_TIMEOUT");
     expect(result.error?.message).toContain("timed out after 250ms");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "SIGKILLs a timed-out command skill and its process group after the grace period",
+    async () => {
+      const { skill } = await loadSkill(path.join(fixtureDir, "skills", "stubborn-cmd"));
+      expect(skill).not.toBeNull();
+
+      let resolveReady!: (pids: { pid: number; grandPid: number }) => void;
+      const ready = new Promise<{ pid: number; grandPid: number }>((resolve) => {
+        resolveReady = resolve;
+      });
+      const server = net.createServer((socket) => {
+        let data = "";
+        socket.setEncoding("utf8");
+        socket.on("data", (c) => (data += c));
+        socket.on("end", () => {
+          resolveReady(JSON.parse(data) as { pid: number; grandPid: number });
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const { port } = server.address() as net.AddressInfo;
+
+      const killSpy = vi.spyOn(process, "kill");
+      let settled = false;
+      try {
+        vi.useFakeTimers();
+        const runPromise = runSkill(skill!, { port }, stubCtx(), { stopGraceMs: 1_500 }).then(
+          () => {
+            settled = true;
+            return undefined;
+          },
+          (err: unknown) => {
+            settled = true;
+            return err;
+          },
+        );
+
+        const { pid } = await ready;
+        await vi.advanceTimersByTimeAsync(250);
+        expect(killSpy).toHaveBeenCalledWith(-pid, "SIGTERM");
+        expect(killSpy).not.toHaveBeenCalledWith(-pid, "SIGKILL");
+        expect(settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1_500);
+        const err = await runPromise;
+        expect(killSpy).toHaveBeenCalledWith(-pid, "SIGKILL");
+        expect((err as Error & { code?: string })?.code).toBe("SKILL_TIMEOUT");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  it("fails with SKILL_OUTPUT_LIMIT instead of silently truncating output over maxBuffer", async () => {
+    const { skill } = await loadSkill(path.join(fixtureDir, "skills", "noisy-cmd"));
+    expect(skill).not.toBeNull();
+
+    await expect(
+      runSkill(skill!, { stream: "stdout" }, stubCtx(), { maxBuffer: 64 }),
+    ).rejects.toMatchObject({
+      code: "SKILL_OUTPUT_LIMIT",
+    });
+
+    await expect(
+      runSkill(skill!, { stream: "stderr" }, stubCtx(), { maxBuffer: 64 }),
+    ).rejects.toMatchObject({
+      code: "SKILL_OUTPUT_LIMIT",
+    });
   });
 });
