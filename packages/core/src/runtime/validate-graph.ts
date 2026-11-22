@@ -82,7 +82,8 @@ export function nodeToolTargets(spec: GraphSpec, id: string): string[] {
 }
 
 export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
-  const node = recordNodes(spec.nodes).find((n) => n.id === id);
+  const listed = spec.nodes;
+  const node = Array.isArray(listed) ? listed.find((n) => n != null && n.id === id) : undefined;
   const targets = declaredRouteTargets(spec, id);
   if (node?.on?.error?.startsWith("route:")) targets.push(node.on.error.slice(6));
   const hooks = spec.runtime?.hooks;
@@ -138,8 +139,9 @@ export function topologyDiagnostics(spec: GraphSpec): Diagnostic[] {
 
 function incomingSources(spec: GraphSpec, to: string): string[] {
   const sources: string[] = [];
-  for (const node of recordNodes(spec.nodes)) {
-    if (nodeRouteTargets(spec, node.id).includes(to)) sources.push(node.id);
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (node == null || !nodeRouteTargets(spec, node.id).includes(to)) continue;
+    sources.push(node.id);
   }
   for (const edge of spec.edges) {
     if ("to" in edge) {
@@ -176,7 +178,8 @@ export function nodesThatReachEnd(spec: GraphSpec): Set<string> {
   const canReach = new Set<string>();
   const queue: string[] = [];
 
-  for (const node of recordNodes(spec.nodes)) {
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (node == null) continue;
     if (registry.get(node.type)?.capabilities?.terminal || outgoingTargets(spec, node.id).includes("END")) {
       queue.push(node.id);
     }
