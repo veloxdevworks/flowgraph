@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
+import { compileGraph } from "../compiler.js";
 import { validateSpec } from "../loader.js";
 import { declaredRouteTargets, graphEdges } from "./validate-graph.js";
 
@@ -99,5 +100,25 @@ describe("node lookup", () => {
     });
     expect(declaredRouteTargets(spec([router, shell("a"), shell("b")]), "a")).toEqual(["b"]);
     expect(declaredRouteTargets(spec([shell("a"), router, shell("b")]), "a")).toEqual([]);
+  });
+
+  it("rejects an unfiltered node:error route when no node reaches its target", async () => {
+    const spec: GraphSpec = {
+      ...head,
+      metadata: { name: "g" },
+      nodes: [shell("rec")],
+      edges: [
+        { from: "START", to: "END" },
+        { from: "rec", to: "END" },
+      ],
+      runtime: { hooks: [{ on: "node:error", do: "route:rec" }] },
+    };
+    expect(validateSpec(spec)).toEqual([
+      { severity: "warning", code: "NO_INBOUND_EDGE", message: 'Node "rec" has no inbound edges' },
+      { severity: "error", code: "UNREACHABLE_FROM_START", message: 'Node "rec" is not reachable from START', path: "nodes.rec" },
+    ]);
+    await expect(compileGraph(spec)).rejects.toThrow(
+      'Invalid graph: UNREACHABLE_FROM_START: Node "rec" is not reachable from START',
+    );
   });
 });
