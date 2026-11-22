@@ -93,6 +93,7 @@ beforeEach(async () => {
   dir = await mkdtemp(path.join(os.tmpdir(), "fg-media-"));
 });
 afterEach(async () => {
+  vi.useRealTimers();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -351,10 +352,14 @@ describe("async jobs and the journal", () => {
   });
 
   it("does not cancel the vendor job when the node aborts during poll", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const calls = newCalls();
+    let enteredPoll: () => void = () => {};
+    const pollEntered = new Promise<void>((resolve) => { enteredPoll = resolve; });
     const provider = asyncProvider(calls, [], {
       poll(_handle, ctx) {
         calls.poll++;
+        enteredPoll();
         return new Promise<JobStatus>((_resolve, reject) => {
           const signal = ctx.signal;
           if (!signal) {
@@ -371,11 +376,49 @@ describe("async jobs and the journal", () => {
       },
     });
     const g = graph([{ id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x" } }]);
-    const res = await (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "ta-poll" });
+    const pending = (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "ta-poll" });
+    await pollEntered;
+    await vi.advanceTimersByTimeAsync(50);
+    const res = await pending;
     expect(res.status).toBe("error");
     expect(String(res.error?.message ?? res.error)).toMatch(/timed out/);
     expect(calls.cancel).toBe(0);
     const left = await readdir(path.join(dir, ".flowgraph", "jobs", "ta-poll"));
+    expect(left).toHaveLength(1);
+  });
+
+  it("does not cancel the vendor job when poll rejects with another error as the node times out", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const calls = newCalls();
+    let enteredPoll: () => void = () => {};
+    const pollEntered = new Promise<void>((resolve) => { enteredPoll = resolve; });
+    const provider = asyncProvider(calls, [], {
+      poll(_handle, ctx) {
+        calls.poll++;
+        enteredPoll();
+        return new Promise<JobStatus>((_resolve, reject) => {
+          const signal = ctx.signal;
+          if (!signal) {
+            reject(new Error("missing signal"));
+            return;
+          }
+          const fail = () => reject(new Error("vendor rejected the poll"));
+          if (signal.aborted) {
+            fail();
+            return;
+          }
+          signal.addEventListener("abort", fail, { once: true });
+        });
+      },
+    });
+    const g = graph([{ id: "vid", type: "video", provider: "fake", timeout: "50ms", with: { prompt: "x" } }]);
+    const pending = (await compileGraph(g, { cwd: dir, mediaProviders: [provider] })).run({ threadId: "ta-poll-other" });
+    await pollEntered;
+    await vi.advanceTimersByTimeAsync(50);
+    const res = await pending;
+    expect(res.status).toBe("error");
+    expect(calls.cancel).toBe(0);
+    const left = await readdir(path.join(dir, ".flowgraph", "jobs", "ta-poll-other"));
     expect(left).toHaveLength(1);
   });
 
