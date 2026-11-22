@@ -197,6 +197,213 @@ describe("migrateSpec", () => {
     });
   });
 
+  it("preserves anchored webhook with: reused at top level, in nested spec, and in map bodies", () => {
+    const raw = [
+      "apiVersion: flowgraph/v1",
+      "kind: Graph",
+      "metadata:",
+      "  name: anchored-webhook",
+      "nodes:",
+      "  - id: first_hook",
+      "    type: webhook",
+      "    with: &w",
+      "      url: https://example.com/hook",
+      "      headers:",
+      "        X-Tag: shared",
+      "  - id: plain_http",
+      "    type: http",
+      "    with: *w",
+      "  - id: sub",
+      "    type: subgraph",
+      "    spec:",
+      "      apiVersion: flowgraph/v1",
+      "      kind: Graph",
+      "      metadata:",
+      "        name: child",
+      "      nodes:",
+      "        - id: child_http",
+      "          type: http",
+      "          with: *w",
+      "      edges:",
+      "        - from: START",
+      "          to: child_http",
+      "        - from: child_http",
+      "          to: END",
+      "  - id: fanout",
+      "    type: map",
+      "    with:",
+      "      over: \"{{ state.items }}\"",
+      "      node:",
+      "        id: item_http",
+      "        type: http",
+      "        with: *w",
+      "edges:",
+      "  - from: START",
+      "    to: first_hook",
+      "  - from: first_hook",
+      "    to: plain_http",
+      "  - from: plain_http",
+      "    to: sub",
+      "  - from: sub",
+      "    to: fanout",
+      "  - from: fanout",
+      "    to: END",
+      "",
+    ].join("\n");
+
+    const res = migrateSpec(raw);
+    expect(res.changed).toBe(true);
+    const parsed = parse(res.output, { merge: true }) as {
+      nodes: Array<{
+        id: string;
+        type: string;
+        with?: Record<string, unknown>;
+        spec?: { nodes: Array<{ id: string; type: string; with: Record<string, unknown> }> };
+      }>;
+    };
+
+    expect(parsed.nodes[0]).toMatchObject({
+      id: "first_hook",
+      type: "http",
+      with: { url: "https://example.com/hook", headers: { "X-Tag": "shared" }, method: "POST", once: true },
+    });
+    expect(parsed.nodes[1]?.with).toEqual({ url: "https://example.com/hook", headers: { "X-Tag": "shared" } });
+    expect(parsed.nodes[2]?.spec?.nodes[0]?.with).toEqual({ url: "https://example.com/hook", headers: { "X-Tag": "shared" } });
+    expect((parsed.nodes[3]?.with?.["node"] as { with: Record<string, unknown> })?.with).toEqual({
+      url: "https://example.com/hook",
+      headers: { "X-Tag": "shared" },
+    });
+  });
+
+  it("preserves url on later webhook nodes aliasing an anchored webhook with: &kw", () => {
+    const raw = [
+      "apiVersion: flowgraph/v1",
+      "kind: Graph",
+      "metadata:",
+      "  name: anchored-webhook-chain",
+      "nodes:",
+      "  - id: w1",
+      "    type: webhook",
+      "    with: &kw",
+      "      url: https://example.com/hook",
+      "  - id: w2",
+      "    type: webhook",
+      "    with: *kw",
+      "edges:",
+      "  - from: START",
+      "    to: w1",
+      "  - from: w1",
+      "    to: w2",
+      "  - from: w2",
+      "    to: END",
+      "",
+    ].join("\n");
+
+    const res = migrateSpec(raw);
+    expect(res.changed).toBe(true);
+    const parsed = parse(res.output, { merge: true }) as {
+      nodes: Array<{ id: string; type: string; with: Record<string, unknown> }>;
+    };
+    expect(parsed.nodes[0]).toMatchObject({
+      id: "w1",
+      type: "http",
+      with: { url: "https://example.com/hook", method: "POST", once: true },
+    });
+    expect(parsed.nodes[1]).toMatchObject({
+      id: "w2",
+      type: "http",
+      with: { url: "https://example.com/hook", method: "POST", once: true },
+    });
+  });
+
+  it("honors method from YAML merge keys (<<: *w) instead of overwriting with POST", () => {
+    const raw = [
+      "apiVersion: flowgraph/v1",
+      "kind: Graph",
+      "metadata:",
+      "  name: merge-key-hook",
+      "x-defaults: &w",
+      "  url: https://example.com/hook",
+      "  method: PUT",
+      "nodes:",
+      "  - id: notify",
+      "    type: webhook",
+      "    with:",
+      "      <<: *w",
+      "      timeout: 5s",
+      "edges:",
+      "  - from: START",
+      "    to: notify",
+      "  - from: notify",
+      "    to: END",
+      "",
+    ].join("\n");
+
+    const res = migrateSpec(raw);
+    expect(res.changed).toBe(true);
+    const parsed = parse(res.output, { merge: true }) as {
+      nodes: Array<{ id: string; type: string; with: Record<string, unknown> }>;
+    };
+    expect(parsed.nodes[0]).toMatchObject({
+      id: "notify",
+      type: "http",
+      with: {
+        url: "https://example.com/hook",
+        method: "PUT",
+        timeout: "5s",
+        once: true,
+      },
+    });
+  });
+
+  it("recurses into aliased subgraph spec: *alias", () => {
+    const raw = [
+      "apiVersion: flowgraph/v1",
+      "kind: Graph",
+      "metadata:",
+      "  name: aliased-spec-hook",
+      "x-child: &child_spec",
+      "  apiVersion: flowgraph/v1",
+      "  kind: Graph",
+      "  metadata:",
+      "    name: child",
+      "  nodes:",
+      "    - id: child_hook",
+      "      type: webhook",
+      "      with:",
+      "        url: https://example.com/child",
+      "  edges:",
+      "    - from: START",
+      "      to: child_hook",
+      "    - from: child_hook",
+      "      to: END",
+      "nodes:",
+      "  - id: sub",
+      "    type: subgraph",
+      "    spec: *child_spec",
+      "edges:",
+      "  - from: START",
+      "    to: sub",
+      "  - from: sub",
+      "    to: END",
+      "",
+    ].join("\n");
+
+    const res = migrateSpec(raw);
+    expect(res.changed).toBe(true);
+    const parsed = parse(res.output, { merge: true }) as {
+      nodes: Array<{
+        id: string;
+        spec?: { nodes: Array<{ id: string; type: string; with: Record<string, unknown> }> };
+      }>;
+    };
+    expect(parsed.nodes[0]?.spec?.nodes[0]).toMatchObject({
+      id: "child_hook",
+      type: "http",
+      with: { url: "https://example.com/child", method: "POST", once: true },
+    });
+  });
+
   it("leaves specs without webhook nodes or legacy headers unchanged", () => {
     const raw = "apiVersion: flowgraph/v1\nkind: Graph\nmetadata:\n  name: clean\nnodes: []\nedges: []\n";
     const res = migrateSpec(raw);

@@ -839,7 +839,14 @@ program
     try { raw = await fs.readFile(resolved, "utf-8"); }
     catch { printError(`Cannot read ${graphPath}`); process.exit(2); }
 
-    const { changed, output, notes, manual } = migrateSpec(raw);
+    let result: ReturnType<typeof migrateSpec>;
+    try {
+      result = migrateSpec(raw);
+    } catch (err) {
+      printError(`Cannot migrate ${graphPath}: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+    const { changed, output, notes, manual } = result;
     for (const note of notes) printInfo(`  • ${note}`);
     for (const item of manual) printWarning(`  • needs a decision: ${item}`);
     if (!changed) {

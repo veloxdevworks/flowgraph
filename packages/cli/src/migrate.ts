@@ -4,7 +4,7 @@
  * structural node rewrites are needed) so comments and formatting are kept.
  */
 
-import { isAlias, isMap, isSeq, parseDocument, YAMLMap } from "yaml";
+import { isAlias, isMap, isPair, isScalar, isSeq, parseDocument, visit, type Document, type Node, type YAMLMap } from "yaml";
 import { migrateDataContracts } from "./migrate-data-contracts.js";
 
 export interface MigrateResult {
@@ -22,28 +22,70 @@ const CANONICAL_KINDS: Record<string, string> = {
   subgraph: "Subgraph",
 };
 
-function resolveWithMapForWrite(
-  doc: ReturnType<typeof parseDocument>,
-  nodeMap: YAMLMap,
-): YAMLMap {
+function cloneWithoutAnchors<T extends Node>(node: T): T {
+  const cloned = node.clone() as T;
+  visit(cloned, (_key, n) => {
+    if (n && typeof n === "object" && "anchor" in n) {
+      delete (n as { anchor?: string }).anchor;
+    }
+  });
+  return cloned;
+}
+
+/**
+ * When a YAML node carries an anchor that may be referenced by aliases elsewhere
+ * in the document, materialize all alias uses into plain copies before mutating
+ * the node so no alias is left dangling and untouched nodes never inherit edits.
+ */
+function detachAnchorForWrite(doc: Document, targetNode: YAMLMap): void {
+  const anchor = targetNode.anchor;
+  if (!anchor) return;
+
+  visit(doc, {
+    Map(_key, map) {
+      const mergeIndex = map.items.findIndex(
+        (pair) =>
+          isPair(pair) &&
+          isScalar(pair.key) &&
+          pair.key.value === "<<" &&
+          isAlias(pair.value) &&
+          pair.value.source === anchor,
+      );
+      if (mergeIndex < 0) return;
+      const cloned = cloneWithoutAnchors(targetNode);
+      const existingKeys = new Set(
+        map.items
+          .filter((p): p is typeof p => isPair(p) && isScalar(p.key))
+          .map((p) => String((p.key as { value: unknown }).value)),
+      );
+      const expanded = cloned.items.filter(
+        (p) => !isScalar(p.key) || !existingKeys.has(String(p.key.value)),
+      );
+      map.items.splice(mergeIndex, 1, ...expanded);
+    },
+  });
+
+  visit(doc, {
+    Alias(_key, alias) {
+      if (alias.source === anchor) {
+        return cloneWithoutAnchors(targetNode);
+      }
+    },
+  });
+
+  delete targetNode.anchor;
+}
+
+function resolveWithMapForWrite(doc: Document, nodeMap: YAMLMap): YAMLMap {
   const rawWith = nodeMap.get("with", true);
   if (isAlias(rawWith)) {
     const target = rawWith.resolve(doc);
-    const cloned = isMap(target) ? (target.clone() as YAMLMap) : (doc.createNode({}) as YAMLMap);
-    delete cloned.anchor;
+    const cloned = isMap(target) ? cloneWithoutAnchors(target) : (doc.createNode({}) as YAMLMap);
     nodeMap.set("with", cloned);
     return cloned;
   }
   if (isMap(rawWith)) {
-    // If this `with:` map is itself an anchor referenced elsewhere, keep it
-    // untouched for aliases? Wait: only clone when it has an anchor so aliases
-    // elsewhere do not unexpectedly inherit `method: POST` / `once: true`.
-    if (rawWith.anchor) {
-      const cloned = rawWith.clone() as YAMLMap;
-      delete cloned.anchor;
-      nodeMap.set("with", cloned);
-      return cloned;
-    }
+    detachAnchorForWrite(doc, rawWith);
     return rawWith;
   }
   const created = doc.createNode({}) as YAMLMap;
@@ -51,7 +93,7 @@ function resolveWithMapForWrite(
   return created;
 }
 
-function resolveReadMap(doc: ReturnType<typeof parseDocument>, value: unknown): YAMLMap | undefined {
+function resolveReadMap(doc: Document, value: unknown): YAMLMap | undefined {
   if (isAlias(value)) {
     const resolved = value.resolve(doc);
     return isMap(resolved) ? resolved : undefined;
@@ -59,8 +101,13 @@ function resolveReadMap(doc: ReturnType<typeof parseDocument>, value: unknown): 
   return isMap(value) ? value : undefined;
 }
 
+function resolvedMapView(doc: Document, map: YAMLMap): Record<string, unknown> {
+  const js = map.toJS(doc);
+  return js && typeof js === "object" && !Array.isArray(js) ? (js as Record<string, unknown>) : {};
+}
+
 function rewriteNode(
-  doc: ReturnType<typeof parseDocument>,
+  doc: Document,
   nodeMap: YAMLMap,
   notes: string[],
   pathPrefix = "",
@@ -74,12 +121,13 @@ function rewriteNode(
   if (typeVal === "webhook") {
     nodeMap.set("type", "http");
     const withMap = resolveWithMapForWrite(doc, nodeMap);
+    const resolved = resolvedMapView(doc, withMap);
     const added: string[] = [];
-    if (!withMap.has("method")) {
+    if (!withMap.has("method") && !Object.prototype.hasOwnProperty.call(resolved, "method")) {
       withMap.set("method", "POST");
       added.push("method: POST");
     }
-    if (!withMap.has("once")) {
+    if (!withMap.has("once") && !Object.prototype.hasOwnProperty.call(resolved, "once")) {
       withMap.set("once", true);
       added.push("once: true");
     }
@@ -89,60 +137,101 @@ function rewriteNode(
     rewritten = true;
   }
 
-  // Recurse into inline subgraph `spec:`
+  // Recurse into inline subgraph `spec:` (including `spec: *alias`)
   const inlineSpec = nodeMap.get("spec", true);
-  if (isMap(inlineSpec)) {
+  if (isAlias(inlineSpec)) {
+    const target = inlineSpec.resolve(doc);
+    if (isMap(target) && containsWebhookContainer(doc, target)) {
+      const cloned = cloneWithoutAnchors(target);
+      nodeMap.set("spec", cloned);
+      if (rewriteContainer(doc, cloned, notes, `${label}.spec`)) rewritten = true;
+    }
+  } else if (isMap(inlineSpec) && containsWebhookContainer(doc, inlineSpec)) {
+    detachAnchorForWrite(doc, inlineSpec);
     if (rewriteContainer(doc, inlineSpec, notes, `${label}.spec`)) rewritten = true;
   }
 
   // Recurse into map body `with.node` and legacy inline `with.graph`
-  const withMap = resolveReadMap(doc, nodeMap.get("with", true));
-  if (withMap) {
-    const mapBodyNode = withMap.get("node", true);
+  const readWith = resolveReadMap(doc, nodeMap.get("with", true));
+  if (readWith) {
+    const mapBodyNode = readWith.get("node", true);
     if (isAlias(mapBodyNode)) {
       const target = mapBodyNode.resolve(doc);
       if (isMap(target) && containsWebhook(doc, target)) {
-        const cloned = target.clone() as YAMLMap;
-        delete cloned.anchor;
+        const cloned = cloneWithoutAnchors(target);
         const writableWith = resolveWithMapForWrite(doc, nodeMap);
         writableWith.set("node", cloned);
         if (rewriteNode(doc, cloned, notes, `${label}.map`)) rewritten = true;
       }
-    } else if (isMap(mapBodyNode)) {
-      if (rewriteNode(doc, mapBodyNode, notes, `${label}.map`)) rewritten = true;
+    } else if (isMap(mapBodyNode) && containsWebhook(doc, mapBodyNode)) {
+      const writableWith = resolveWithMapForWrite(doc, nodeMap);
+      const writableBody = writableWith.get("node", true);
+      if (isMap(writableBody)) {
+        detachAnchorForWrite(doc, writableBody);
+        if (rewriteNode(doc, writableBody, notes, `${label}.map`)) rewritten = true;
+      }
     }
 
-    const inlineGraph = withMap.get("graph", true);
-    if (isMap(inlineGraph)) {
-      if (rewriteContainer(doc, inlineGraph, notes, `${label}.graph`)) rewritten = true;
+    const refreshedWith = resolveReadMap(doc, nodeMap.get("with", true));
+    const inlineGraph = refreshedWith?.get("graph", true);
+    if (isAlias(inlineGraph)) {
+      const target = inlineGraph.resolve(doc);
+      if (isMap(target) && containsWebhookContainer(doc, target)) {
+        const cloned = cloneWithoutAnchors(target);
+        const writableWith = resolveWithMapForWrite(doc, nodeMap);
+        writableWith.set("graph", cloned);
+        if (rewriteContainer(doc, cloned, notes, `${label}.graph`)) rewritten = true;
+      }
+    } else if (isMap(inlineGraph) && containsWebhookContainer(doc, inlineGraph)) {
+      const writableWith = resolveWithMapForWrite(doc, nodeMap);
+      const writableGraph = writableWith.get("graph", true);
+      if (isMap(writableGraph)) {
+        detachAnchorForWrite(doc, writableGraph);
+        if (rewriteContainer(doc, writableGraph, notes, `${label}.graph`)) rewritten = true;
+      }
     }
   }
 
   return rewritten;
 }
 
-function containsWebhook(doc: ReturnType<typeof parseDocument>, nodeMap: YAMLMap): boolean {
+function containsWebhookContainer(
+  doc: Document,
+  container: YAMLMap,
+  visited = new Set<YAMLMap>(),
+): boolean {
+  if (visited.has(container)) return false;
+  visited.add(container);
+  const nodes = container.get("nodes", true);
+  if (!isSeq(nodes)) return false;
+  return nodes.items.some((n) => {
+    const m = resolveReadMap(doc, n);
+    return m !== undefined && containsWebhook(doc, m, visited);
+  });
+}
+
+function containsWebhook(
+  doc: Document,
+  nodeMap: YAMLMap,
+  visited = new Set<YAMLMap>(),
+): boolean {
+  if (visited.has(nodeMap)) return false;
+  visited.add(nodeMap);
   if (nodeMap.get("type") === "webhook") return true;
-  const spec = nodeMap.get("spec", true);
-  if (isMap(spec)) {
-    const nodes = spec.get("nodes", true);
-    if (isSeq(nodes) && nodes.items.some((n) => isMap(n) && containsWebhook(doc, n))) return true;
-  }
+  const spec = resolveReadMap(doc, nodeMap.get("spec", true));
+  if (spec && containsWebhookContainer(doc, spec, visited)) return true;
   const withMap = resolveReadMap(doc, nodeMap.get("with", true));
   if (withMap) {
     const body = resolveReadMap(doc, withMap.get("node", true));
-    if (body && containsWebhook(doc, body)) return true;
-    const inlineGraph = withMap.get("graph", true);
-    if (isMap(inlineGraph)) {
-      const nodes = inlineGraph.get("nodes", true);
-      if (isSeq(nodes) && nodes.items.some((n) => isMap(n) && containsWebhook(doc, n))) return true;
-    }
+    if (body && containsWebhook(doc, body, visited)) return true;
+    const inlineGraph = resolveReadMap(doc, withMap.get("graph", true));
+    if (inlineGraph && containsWebhookContainer(doc, inlineGraph, visited)) return true;
   }
   return false;
 }
 
 function rewriteContainer(
-  doc: ReturnType<typeof parseDocument>,
+  doc: Document,
   container: YAMLMap,
   notes: string[],
   pathPrefix = "",
@@ -185,15 +274,11 @@ export function migrateSpec(raw: string): MigrateResult {
   );
 
   // 3. type: webhook → type: http with once: true (and method: POST if absent)
-  try {
-    const doc = parseDocument(output);
-    if (doc.errors.length === 0 && isMap(doc.contents)) {
-      if (rewriteContainer(doc, doc.contents, notes)) {
-        output = doc.toString();
-      }
+  const doc = parseDocument(output, { merge: true });
+  if (doc.errors.length === 0 && isMap(doc.contents)) {
+    if (rewriteContainer(doc, doc.contents, notes)) {
+      output = doc.toString();
     }
-  } catch {
-    // Leave unparseable YAML untouched; validator will report syntax errors.
   }
 
   // 4. Data-contract migrations (channel items/properties, inputs, map item refs, etc.)
