@@ -1699,7 +1699,16 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
   const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
   const factory = registry.get(node.type);
   if (!factory) {
-    push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
+    if (node.type === "webhook") {
+      push({
+        severity: "error",
+        code: "WEBHOOK_NODE_REMOVED",
+        message: `${label} uses removed type "webhook". Use type "http" with once: true (and method: POST), or run "flowgraph migrate" to rewrite this graph.`,
+        path: `${path}.type`,
+      });
+    } else {
+      push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
+    }
   } else {
     const configResult = factory.configSchema.safeParse(node.with ?? {});
     if (!configResult.success) {

@@ -21,8 +21,28 @@ describe("http node (once: true)", () => {
     global.fetch = originalFetch;
   });
 
-  it("does not register legacy webhook node in core", () => {
+  it("does not register legacy webhook node in core and emits a coded migration diagnostic", async () => {
     expect(registry.has("webhook")).toBe(false);
+    const { validateSpec } = await import("./loader.js");
+    const legacy = {
+      apiVersion: "flowgraph/v1",
+      kind: "Graph",
+      metadata: { name: "legacy-wh" },
+      nodes: [{ id: "notify", type: "webhook", with: { url: "https://example.com/hook" } }],
+      edges: [
+        { from: "START", to: "notify" },
+        { from: "notify", to: "END" },
+      ],
+    } as unknown as GraphSpec;
+    const diags = validateSpec(legacy);
+    expect(diags).toContainEqual(
+      expect.objectContaining({
+        severity: "error",
+        code: "WEBHOOK_NODE_REMOVED",
+        path: "nodes.notify.type",
+        message: expect.stringContaining("flowgraph migrate"),
+      }),
+    );
   });
 
   it("calls fetch once and does not re-fire on replay after interrupt/resume", async () => {

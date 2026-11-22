@@ -49,7 +49,16 @@ function rawNodeTypeDiagnostics(parsed: unknown): Diagnostic[] {
       if (!value || typeof value !== "object") return;
       const rawNode = value as { id?: unknown; type?: unknown; with?: { node?: unknown }; spec?: unknown };
       if (typeof rawNode.type === "string" && !registry.has(rawNode.type)) {
-        diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_TYPE", path: `${base}.type`, message: `Node "${String(rawNode.id)}" has unregistered type "${rawNode.type}"` });
+        if (rawNode.type === "webhook") {
+          diagnostics.push({
+            severity: "error",
+            code: "WEBHOOK_NODE_REMOVED",
+            path: `${base}.type`,
+            message: `Node "${String(rawNode.id)}" uses removed type "webhook". Use type "http" with once: true (and method: POST), or run "flowgraph migrate" to rewrite this graph.`,
+          });
+        } else {
+          diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_TYPE", path: `${base}.type`, message: `Node "${String(rawNode.id)}" has unregistered type "${rawNode.type}"` });
+        }
       }
       if (rawNode.type === "map") node(rawNode.with?.node, `${base}.with.node`);
       if (rawNode.type === "subgraph") graph(rawNode.spec, `${base}.spec.`);
