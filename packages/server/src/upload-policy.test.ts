@@ -52,7 +52,7 @@ describe("checkUntrustedUpload", () => {
             : type === "service"
               ? `  - { id: a, type: service, with: { name: svc, command: "sleep 1" } }`
               : type === "worktree"
-                ? `  - { id: a, type: worktree, with: { action: status, path: wt } }`
+                ? `  - { id: a, type: worktree, with: { action: status } }`
                 : type === "demo"
                   ? `  - { id: a, type: demo, with: { file: { path: "out.txt" } } }`
                   : `  - { id: a, type: port, with: { output: { to: out } } }`;
@@ -453,14 +453,14 @@ describe("untrusted MCP, local tools and host probes", () => {
   });
 
   it("refuses requires host-program checks, including on map inners", () => {
-    expect(codesOf(graph(`  - { id: a, type: hitl, with: { mode: approve, message: "ok?", requires: [git] } }`))).toEqual([
+    expect(codesOf(graph(`  - { id: a, type: shell, with: { command: "true", requires: [{ bin: git }] } }`))).toContain(
       "UPLOAD_HOST_PROBE_BLOCKED nodes.a.with.requires",
-    ]);
+    );
     const mapped = graph(`  - id: a
     type: map
     with:
       over: "{{ state.items }}"
-      node: { id: inner, type: hitl, with: { mode: approve, message: "ok?", requires: [docker] } }`);
+      node: { id: inner, type: shell, with: { command: "true", requires: [{ bin: docker }] } }`);
     expect(codesOf(mapped)).toContain("UPLOAD_HOST_PROBE_BLOCKED nodes.a.map.inner.with.requires");
   });
 

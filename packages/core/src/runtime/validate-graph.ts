@@ -2,7 +2,7 @@
  * Offline graph lint helpers used by validateSpec.
  */
 
-import { findMergeableRouters, hookVerbMessage, inputFieldChannel, inputValueProblem, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
+import { engineVersionProblem, findMergeableRouters, hookVerbMessage, inputFieldChannel, inputValueProblem, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
 import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
 import { registry, type NodeRegistry } from "../registry.js";
 import { isReservedChannel, templateRootRefs } from "../node-policy.js";
@@ -23,6 +23,7 @@ import type { Hook } from "../hooks/types.js";
 import { KNOWN_PHASES, knownHookDirective } from "../hooks/builtin.js";
 import { recoveryTargets } from "./routing-policy.js";
 import { cronScheduleProblem, isKnownTimeZone } from "./cron-schedule.js";
+import { CORE_VERSION } from "../version.js";
 
 /** Node ids on an edge `from`: one source, or every source of a barrier. */
 function edgeFromIds(from: string | readonly string[]): string[] {
@@ -1636,6 +1637,7 @@ function isNodeSpec(value: unknown): value is NodeSpec {
 
 function isEdgeSpec(value: unknown): value is GraphSpec["edges"][number] {
   if (!isRecord(value) || !stringOrStrings(value.from)) return false;
+  if ("to" in value && value.branch !== undefined) return false;
   if ("to" in value) return stringOrStrings(value.to);
   return Array.isArray(value.branch) && value.branch.every((entry) => isRecord(entry) && typeof entry.to === "string");
 }
@@ -1673,6 +1675,12 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
     if (!knownHookDirective(hook.do, hook.on)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Hook directive "${hook.do}" is not valid for ${hook.on}. ${hookVerbMessage(hook.on)}` });
   }
 
+  const engine = (spec as { requires?: { engine?: unknown } }).requires?.engine;
+  if (typeof engine === "string") {
+    const problem = engineVersionProblem(engine, CORE_VERSION);
+    if (problem) push({ severity: "error", code: "ENGINE_VERSION_UNMET", path: "requires.engine", message: problem });
+  }
+
   for (const [index, node] of rawNodes.entries()) {
     if (!isRecord(node)) {
       malformed = true;
@@ -1701,6 +1709,10 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
   for (const [index, edge] of rawEdges.entries()) {
     if (isEdgeSpec(edge)) continue;
     malformed = true;
+    if (isRecord(edge) && "to" in edge && edge.branch !== undefined) {
+      shape("SCHEMA_ERROR", `edges[${index}]`, 'An edge takes "to" or "branch", not both');
+      continue;
+    }
     const from = isRecord(edge) ? edge.from : undefined;
     const to = isRecord(edge) && "to" in edge ? edge.to : undefined;
     if (!isRecord(edge) || !stringOrStrings(from)) {
