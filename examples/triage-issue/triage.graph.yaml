@@ -28,10 +28,10 @@ nodes:
     type: function
     with:
       fn: classifyIssue
-      input:
-        title: "{{ state.issue.title }}"
-        body:  "{{ state.issue.body }}"
       output: { to: label }
+    input:
+      title: "{{ state.issue.title }}"
+      body:  "{{ state.issue.body }}"
 
   - id: route
     type: router

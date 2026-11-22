@@ -32,7 +32,7 @@ it("reuses completed map items after closing and reopening SQLite at a loop gate
           memoize: true,
           over: "{{ state.items }}",
           as: "n",
-          node: { type: "function", with: { fn: "durableMemo", input: { n: "{{ item.n }}" } } },
+          node: { type: "function", with: { fn: "durableMemo" }, input: { n: "{{ n }}" } },
           collect: { to: "results" },
         },
       },

@@ -73,7 +73,7 @@ describe("context lint", () => {
         {
           id: "fan",
           type: "map",
-          with: { over: "{{ state.xs }}", as: "x", node: { type: "agent", provider: "mock", with: { prompt: "{{ item.x }}", context: { history: "chat" } } }, collect: { to: "out" } },
+          with: { over: "{{ state.xs }}", as: "x", node: { type: "agent", provider: "mock", with: { prompt: "{{ x }}", context: { history: "chat" } } }, collect: { to: "out" } },
         },
       ],
       edges: [

@@ -43,8 +43,8 @@ const child = spec({
   metadata: { name: "child" },
   state: { channels: { topic: { type: "string" }, shout: { type: "string" }, log: { type: "array", reducer: "append" } } },
   nodes: [
-    { id: "up", type: "function", with: { fn: "rxUpper", input: { text: "{{ state.topic }}" }, output: { to: "shout" } } },
-    { id: "lg", type: "function", with: { fn: "rxUpper", input: { text: "child-ran" }, output: { to: "log" } } },
+    { id: "up", type: "function", with: { fn: "rxUpper", output: { to: "shout" } }, input: { text: "{{ state.topic }}" } },
+    { id: "lg", type: "function", with: { fn: "rxUpper", output: { to: "log" } }, input: { text: "child-ran" } },
   ],
   edges: [
     { from: "START", to: "up" },
@@ -88,8 +88,8 @@ function fnParent(extra: Record<string, unknown> = {}, nodeExtra: Record<string,
         id: "dbl",
         type: "function",
         runsOn: ["os:windows"],
-        input: { x: "{{ state.seed }}" },
-        with: { fn: "rxDouble", input: { v: "{{ input.x }}" }, output: withOutput },
+        input: { v: "{{ state.seed }}" },
+        with: { fn: "rxDouble", output: withOutput },
         ...nodeExtra,
       },
     ],
@@ -122,7 +122,7 @@ describe("remote execution of placed nodes", () => {
     const g = spec({
       metadata: { name: "plain" },
       state: { channels: { out: { type: "string" } } },
-      nodes: [{ id: "u", type: "function", with: { fn: "rxUpper", input: { text: "hi" }, output: { to: "out" } } }],
+      nodes: [{ id: "u", type: "function", with: { fn: "rxUpper", output: { to: "out" } }, input: { text: "hi" } }],
       edges: [{ from: "START", to: "u" }, { from: "u", to: "END" }],
     });
     const transport = createFakeTransport({ w1: { labels: WIN } });
@@ -158,7 +158,7 @@ describe("remote execution of placed nodes", () => {
       const r = await compiled.run({ threadId: "t-fn" });
       expect(r.status).toBe("completed");
       // the wrapped node was handed the node's resolved input
-      expect(transport.dispatchCalls[0]!.req.input).toEqual({ x: 21 });
+      expect(transport.dispatchCalls[0]!.req.input).toEqual({ v: 21 });
       const wrapped = transport.dispatchCalls[0]!.req.spec.nodes[0] as { runsOn?: unknown; with: { output?: unknown } };
       expect(wrapped.runsOn).toBeUndefined();
       expect(wrapped.with.output).toBeUndefined();
@@ -177,10 +177,10 @@ describe("remote execution of placed nodes", () => {
 
   it("wrapperSpecForNode carries the resolved input through child channels", () => {
     const node = fnParent().nodes[0]!;
-    const w = wrapperSpecForNode(node, { x: 1, "a-b": 2 });
+    const w = wrapperSpecForNode(node, { v: 1, "a-b": 2 });
     const n = w.nodes[0] as { input: Record<string, string>; retry?: unknown; when?: unknown };
-    expect(n.input).toEqual({ x: "{{ state.x }}", "a-b": '{{ state["a-b"] }}' });
-    expect(Object.keys(w.state!.channels!)).toEqual(["x", "a-b"]);
+    expect(n.input).toEqual({ v: "{{ state.v }}", "a-b": '{{ state["a-b"] }}' });
+    expect(Object.keys(w.state!.channels!)).toEqual(["v", "a-b"]);
     expect(n.retry).toBeUndefined();
   });
 

@@ -298,9 +298,7 @@ export const scriptNode = defineNode<Config>({
           secret: secretScope(ctx),
         };
 
-        const input = config.input !== undefined
-          ? (renderDeep(config.input, scope) as Record<string, unknown>)
-          : scope.input;
+        const input = scope.input;
         const renderedEnvRaw = config.env
           ? (renderDeep(config.env, scope) as Record<string, string>)
           : undefined;

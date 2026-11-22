@@ -16,14 +16,14 @@ nodes:
     type: function
     with:
       fn: subgraphMergeStamp
-      input:
-        log: "{{ state.log }}"
-        item: child
       output:
         map:
           log: "{{ result.log }}"
           note: "{{ result.note }}"
           childOnly: "{{ result.childOnly }}"
+    input:
+      log: "{{ state.log }}"
+      item: child
 
 edges:
   - { from: START, to: stamp }

@@ -27,7 +27,7 @@ function mark(id: string) {
   return {
     id,
     type: "function",
-    with: { fn: "joinBarrierMark", input: { id }, output: { to: "seen", raw: false } },
+    with: { fn: "joinBarrierMark", output: { to: "seen", raw: false } }, input: { id },
   };
 }
 

@@ -31,6 +31,7 @@ export {
 export type { HitlRoute, HitlOutcomes } from "./nodes/hitl-routes.js";
 export { applyOutput, isOutputNone, keepsRawOutput, OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
 export {
+  decodeCliInput,
   resolveAndValidateInput,
   resolveGraphInput,
   isInputValidationError,
@@ -144,6 +145,7 @@ export {
   SERVICES_CHANNEL,
   WORKTREES_CHANNEL,
   ISSUES_CHANNEL,
+  ChannelWriteError,
   RESERVED_STATE_CHANNELS,
 } from "./runtime/state-annotation.js";
 export { ReplayMismatchError, ReplayStore, replayNodeKey, runScopeOf, type RunScope } from "./providers/replay-cache.js";

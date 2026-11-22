@@ -149,7 +149,7 @@ describe.each(backends)("untrusted uploads cannot start host programs (%s)", (_n
     expect(await codeOf(s.startRun({ threadId: `wr-${randomUUID()}`, yaml: writes, input: {} }, alice))).toBe("403 UPLOAD_RESERVED_CHANNEL_BLOCKED");
     const declares = gate("declares-reserved").replace("    secret: { type: string }", "    __worktrees: { type: array }");
     expect(await codeOf(s.startRun({ threadId: `dc-${randomUUID()}`, yaml: declares, input: {} }, alice))).toBe("403 UPLOAD_RESERVED_CHANNEL_BLOCKED");
-    const defaults = gate("default-reserved", "input:\n  __services: {}");
+    const defaults = gate("default-reserved", "inputs:\n  - { key: __services, type: json, default: {} }");
     expect(await codeOf(s.startRun({ threadId: `df-${randomUUID()}`, yaml: defaults, input: {} }, alice))).toBe("403 UPLOAD_RESERVED_CHANNEL_BLOCKED");
   });
 
@@ -211,6 +211,7 @@ nodes:
       apiVersion: flowgraph/v1
       kind: Graph
       metadata: { name: child-${name} }
+      state: { channels: { x: { type: any } } }
       nodes:
         - { id: w, type: wait, with: { deadline: "1ms" } }
       edges:

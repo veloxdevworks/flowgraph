@@ -159,7 +159,7 @@ describe("router model mode", () => {
 describe("node-as-tool state", () => {
   it("passes the agent state snapshot and unwraps the node result", async () => {
     const { registerFunction } = await import("./nodes/function.js");
-    registerFunction("echoTopic", (input) => input);
+    registerFunction("echoTopic", (input, ctx) => ({ topic: ctx.render("{{ state.topic }}"), ...(input as object) }));
 
     const scripted = createScriptedProvider("scripted-tool", async (_req, ctx) => {
       const result = await ctx.invokeTool("echo-topic", { extra: 1 });
@@ -182,7 +182,6 @@ describe("node-as-tool state", () => {
           when: "false",
           with: {
             fn: "echoTopic",
-            input: { topic: "{{ state.topic }}", extra: "{{ input.extra }}" },
           },
         },
         {

@@ -18,9 +18,9 @@ state:
 nodes:
   - id: echo
     type: function
+    input: { text: "{{ state.text }}" }
     with:
       fn: serverEcho
-      input: { text: "{{ state.text }}" }
       output: { to: out }
 edges:
   - { from: START, to: echo }
@@ -211,7 +211,7 @@ state:
   channels:
     out: { type: string }
 nodes:
-  - { id: n, type: function, with: { fn: storeIso, input: { who: ${name} }, output: { to: out } } }
+  - { id: n, type: function, input: { who: ${name} }, with: { fn: storeIso, output: { to: out } } }
 edges:
   - { from: START, to: n }
   - { from: n, to: END }

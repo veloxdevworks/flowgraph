@@ -324,9 +324,8 @@ describe("embedded host capabilities", () => {
           type: "function",
           with: {
             fn: "subgraphHostMutateVariables",
-            input: { project },
             output: { to: "result" },
-          },
+          }, input: { project },
         },
       ]);
     const parent = chain("mutable-vars-parent", [
@@ -418,7 +417,7 @@ describe("embedded host capabilities", () => {
             node: {
               type: "subgraph",
               spec: child,
-              input: { itemId: "{{ item.package }}" },
+              input: { itemId: "{{ package }}" },
               with: { stateMap: { out: { toolResult: "toolResult" } } },
             },
             collect: { to: "results" },

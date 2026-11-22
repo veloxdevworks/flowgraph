@@ -13,7 +13,7 @@ function graph(nodes: unknown[], edges: unknown[], extra: Record<string, unknown
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "routing-contract" },
-    state: { channels: { seen: { type: "string" }, n: { type: "number", default: 1 } } },
+    state: { channels: { seen: { type: "any" }, n: { type: "number", default: 1 } } },
     nodes,
     edges,
     ...extra,
@@ -23,7 +23,7 @@ function graph(nodes: unknown[], edges: unknown[], extra: Record<string, unknown
 const mark = (id: string) => ({
   id,
   type: "function",
-  with: { fn: "routeMark", input: { id }, output: { to: "seen" } },
+  with: { fn: "routeMark", output: { to: "seen" } }, input: { id },
 });
 
 describe("routing", () => {
@@ -214,9 +214,9 @@ describe("routing", () => {
         {
           id: "a",
           type: "function",
-          input: { n: "2" },
+          input: { id: "ran", n: "2" },
           when: "input.n == \"2\"",
-          with: { fn: "routeMark", input: { id: "ran" }, output: { to: "seen" } },
+          with: { fn: "routeMark", output: { to: "seen" } },
         },
         mark("b"),
       ],
@@ -268,7 +268,7 @@ describe("hooks", () => {
     const failed = await (await compileGraph(graph([node], edges, { runtime: { hooks: [{ on: "node:error", do: "fail" }] } }))).run();
     expect(failed.status).toBe("error");
     const denied = await (await compileGraph(graph(
-      [{ id: "bad", type: "function", with: { fn: "routeMark", input: { id: "ran" }, output: { to: "seen" } } }],
+      [{ id: "bad", type: "function", with: { fn: "routeMark", output: { to: "seen" } }, input: { id: "ran" } }],
       edges,
       { runtime: { hooks: [{ on: "node:before", do: "deny" }] } },
     ))).run();

@@ -33,8 +33,8 @@ export interface HookWhere {
 export interface HookPayload {
   nodeId?: string;
   nodeType?: string;
-  /** node:before / run:before — the input/initial state. */
-  input?: Record<string, unknown>;
+  /** node:before — the node's rendered input (any value); run:before — the initial state (an object). */
+  input?: unknown;
   /** node:after / state:beforeUpdate — the state delta. */
   update?: Record<string, unknown>;
   /** agent:*ToolCall — tool name + args/result. */

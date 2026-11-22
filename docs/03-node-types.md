@@ -7,7 +7,7 @@ A node is a unit of work. Every node resolves through the **Node Registry** ([Ar
 Regardless of type, every node:
 
 - has a unique `id`, optional `name`/`description`, and optional `notes` (freeform markdown for authors; ignored by the engine);
-- may declare an `input` mapping (state → node input object) and a `when` guard;
+- may declare an `input` (any value; `{{ … }}` templates render at every depth) as its one input path, and a `when` guard;
 - **auto-saves its result to `state.outputs.<nodeId>`** unless `with.output` is `none` (see [02 §8](./02-graph-spec.md#8-input--output-mapping)); optional `output.to` / `output.map` are projections for shared/typed channels, written alongside the raw result unless `raw: false`; each run replaces the node's previous `state.outputs.<nodeId>`;
 - may set `retry`, `timeout`, and `on.error` behavior;
 - is wrapped by the runtime middleware (events, hooks, OTel, retry/timeout — see [01 §4](./01-architecture.md#4-runtime-composition));
@@ -353,6 +353,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 # Argv mode (default)
 - id: greet
   type: shell
+  input: { name: "{{ state.name }}" }
   with:
     command: echo
     args: ["Hello, {{ input.name }}!"]
@@ -381,7 +382,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 
 `json` is set when `stdout` parses as JSON.
 
-**Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kindOf: command` handlers. An explicit `with.input` is rendered and sent instead. When neither is set, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
+**Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kindOf: command` handlers. `input` accepts any value and is rendered at every depth. `with.input` was removed from `shell`; use the node's `input:`. When the node has no `input`, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
 
 **Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"` (with `MY_TOKEN` in the graph's top-level `secrets:`). Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
 
@@ -552,9 +553,9 @@ Legacy escape hatch for programmatic embedders — prefer [`shell`](#5-shell--ru
 ```yaml
 - id: dedupe-findings
   type: function
+  input: { findings: "{{ state.findings }}" }
   with:
     fn: "dedupeFindings"          # resolved from the registered function table
-    input: { findings: "{{ state.findings }}" }
     output: { to: findings }
 ```
 
@@ -568,12 +569,7 @@ registerFunction("dedupeFindings", (input, ctx) => {
 });
 ```
 
-The handler's first argument is the node's `input` (rendered), or the model's tool arguments when the node is exposed as a tool. `with.input`, when set, replaces it and can read it through `{{ input.* }}`. These two declarations pass the same object:
-
-```yaml
-- { id: a, type: function, input: { findings: "{{ state.findings }}" }, with: { fn: dedupeFindings } }
-- { id: b, type: function, with: { fn: dedupeFindings, input: { findings: "{{ state.findings }}" } } }
-```
+The handler's first argument is the node's `input` (rendered at every depth, any value), or the model's tool arguments when the node is exposed as a tool. `with.input` was removed: set `input:` on the node. `flowgraph migrate` moves it.
 
 For substantial reusable logic, prefer a **skill** (portable, contract + env declared) over a `function` node.
 
@@ -587,7 +583,7 @@ The script **must** `export default` an async (or sync) function:
 
 ```js
 export default async function (input, ctx) {
-  // input  — rendered with.input object; when omitted, the node's input (or the model's tool arguments)
+  // input  — the node's rendered input (or the model's tool arguments)
   // ctx    — { nodeId, runId, threadId }
   return { greeting: `Hello, ${input.name}!` };
 }
@@ -597,13 +593,13 @@ export default async function (input, ctx) {
 - id: greet
   type: script
   timeout: 30s
+  input:
+    name: "{{ state.name }}"
   with:
     code: |
       export default async function (input) {
         return { greeting: `Hello, ${input.name}!` };
       }
-    input:
-      name: "{{ state.name }}"
     # Optional: widen the sandbox (denied by default)
     # permissions:
     #   fsRead: ["/path/to/data"]
@@ -617,7 +613,7 @@ export default async function (input, ctx) {
 
 ### How it runs
 
-`with.code` is never rendered as a template, so `{{` in source (JSX `style={{ color: "red" }}`, an object literal in a template string) is code and `flowgraph validate` does not parse it as an expression. Pass run data through `with.input`, which is rendered. Inside a `map` body the map renders the body's `with` with the item, code included, so there `{{` in code is still checked; use `with.file` for such source.
+`with.code` is never rendered as a template, so `{{` in source (JSX `style={{ color: "red" }}`, an object literal in a template string) is code and `flowgraph validate` does not parse it as an expression. Pass run data through the node's `input`, which is rendered. Inside a `map` body the map renders the body's `with` with the item, code included, so there `{{` in code is still checked; use `with.file` for such source.
 
 Choose exactly one of `with.code` or `with.file`. A file path is static and resolves
 relative to the graph file declaring the node, independently of `runtime.workspace`.
@@ -626,18 +622,18 @@ The file must contain the same default-export function as inline code:
 ```yaml
 - id: summarize
   type: script
+  input:
+    report:
+      title: "{{ state.title }}"
+      findings: "{{ state.findings }}"
+    options: { compact: true, limit: 10 }
   with:
     file: ./scripts/summarize.mjs
-    input:
-      report:
-        title: "{{ state.title }}"
-        findings: "{{ state.findings }}"
-      options: { compact: true, limit: 10 }
 ```
 
-When a script is exposed as a node tool, omitting `with.input` passes the model's tool arguments directly. An explicit `with.input` object can select or transform those arguments with `{{ input.qty }}`.
+When a script is exposed as a node tool, the model's tool arguments are its input and the node's own `input:` is not used.
 
-`with.input` accepts nested objects, arrays, numbers, booleans and null. Templates
+The node's `input` accepts nested objects, arrays, strings, numbers, booleans and null. Templates
 render recursively: a whole-value expression preserves its result's type, while
 embedded text remains a string. Missing or empty source files name the node and
 resolved path in the error. Hosts can set `NodePolicy.blockScriptFiles` to refuse
@@ -706,7 +702,9 @@ Provide **exactly one** of:
 
 The child graph runs with its own channels. `stateMap.in` seeds the child (omit it and channels that share a name are copied in). `stateMap.out` writes back: **keys are parent channels, values are child channels** or `{{ }}` expressions. Omit `stateMap.out` and channels that share a name merge. Either way the **parent's reducer** combines the write — an `append` channel receives only the items the child added, and a `merge` channel receives only the keys the child changed. Child-only channels and the child's `outputs` bag stay in the child unless `stateMap.out` names them.
 
-`output: none` writes nothing. `output.to` / `output.map` (with no `stateMap.out`) is the ordinary node projection of the whole child state.
+`output: none` writes nothing. `output.to` / `output.map` is the ordinary node projection of the whole child state. `output` and `stateMap.out` are alternatives: a node that sets both is rejected when the graph loads.
+
+**The call interface.** A subgraph file declares what it takes and returns with top-level `inputs:` and `outputs:` ([02 §2b](./02-graph-spec.md#2b-inputs-run-parameters), [§2c](./02-graph-spec.md#2c-outputs-what-a-subgraph-file-returns)). The parent's `input:` and `stateMap.in` are validated against the child's `inputs` when it is called (defaults, required, types; a key the child does not declare is an error, not a silent drop), and when the child declares `outputs` only those channels come back, each checked against its contract (`SUBGRAPH_OUTPUT_INVALID`). The node's `input:` must be an object. See [05 — Subgraph call boundary](./05-state-and-data.md#subgraph-call-boundary).
 
 A delta is applied only when the parent channel being written is the same channel that seeded the child. `in: { draft: "{{ state.input }}" }` and `out: { result: draft }` still copies `draft` into `result` when the child does not change it. Message channels keep edits to an existing id. A missing id becomes a removal only when the **child** channel uses the messages reducer (the child already applied that removal). A child channel that is `array`, `append`, or undeclared and returns only its reply does not wipe the parent thread; an explicit `RemoveMessage` in that reply is still applied. A second removal of an id that is already gone is ignored, so two parallel subgraphs can remove the same id. When one sibling removes an id and another edits it, writes apply in node-id order and the later sibling wins: an edit after a removal appends the message again, and a removal after an edit deletes it.
 
@@ -718,7 +716,7 @@ Child events are nested under the parent's span. The parent must use checkpointi
 
 On resume, the parent `subgraph` node re-executes from the top (recomputing `stateMap.in`). Side effects reached before a nested interrupt should use `ctx.once()` so they do not re-fire on replay (same pattern as top-level HITL nodes).
 
-`flowgraph validate` warns when an `out` key is not a declared parent channel (`UNDECLARED_OUTPUT_CHANNEL`; compile declares it as `type: any`) and errors when an `out` value names a child channel that does not exist (`SUBGRAPH_OUTPUT_UNKNOWN`). An inline `spec` is validated like a top-level graph, and so is a `uses:` file when the graph is loaded ([02 §11](./02-graph-spec.md#11-validation--diagnostics)).
+`flowgraph validate` warns when an `out` key is not a declared parent channel (`UNDECLARED_OUTPUT_CHANNEL`; compile declares it as `type: any`) and errors when an `out` value names a child channel that does not exist, or is not one of the child's declared `outputs` (`SUBGRAPH_OUTPUT_UNKNOWN`). It also errors when the parent passes a key the child does not declare (`SUBGRAPH_INPUT_UNKNOWN`) and when a required child input is neither passed nor defaulted (`SUBGRAPH_INPUT_MISSING`). An inline `spec` is validated like a top-level graph, and so is a `uses:` file when the graph is loaded ([02 §11](./02-graph-spec.md#11-validation--diagnostics)).
 
 ---
 
@@ -732,22 +730,24 @@ Each entry into a map has a separate collection round, in input order. Looping b
 
 An inner `output.map` always collects one object containing exactly its declared keys per item: `{value: "{{ result }}"}` produces `[{value: ...}, ...]`. Adding another key preserves that shape; the internal `outputs` wrapper is omitted. Inner `output.to` alone still collects the bare result. These item projections do not write separate parent channels; `collect` chooses the parent destination.
 
-The map renders the inner node's `with` and `input` once per item, with `state`, `input`, `config`, `run` and `item` in scope. Item data is never rendered a second time: an item whose text contains `{{ ... }}` reaches the inner node as that literal text, so it cannot evaluate expressions or read secrets. Map bodies have no `secret` scope.
+The map renders the inner node's `with` and `input` once per item, with `state`, `input`, `config`, `run`, the item and its `index` in scope. The item is bound directly under the name `as` (default `item`), so `as: task` is read as `{{ task }}` or `{{ task.title }}`, and `{{ index }}` is its zero-based position in `over`. The old `{{ item.<as> }}` form (`item.task`) is gone: with `as: task` it now reads a field called `task` on a non-existent `item`, and `flowgraph validate` reports `MAP_ITEM_REF_REMOVED`; `flowgraph migrate` rewrites it. `as` must be an identifier and cannot be a name templates already bind (`index`, `state`, `input`, `config`, `run`, `secret`, `secrets`, `issues`, `memory`, `result`). Item data is never rendered a second time: an item whose text contains `{{ ... }}` reaches the inner node as that literal text, so it cannot evaluate expressions or read secrets. Map bodies have no `secret` scope.
 
 ```yaml
 - id: implement-all
   type: map
   with:
     over: "{{ state.tasks }}"       # array
-    as: task                        # each item bound as {{ item.task }}
+    as: task                        # each item bound as {{ task }}; {{ index }} is its position
     concurrency: 3                  # max parallel
     node:                           # the per-item node (any type, incl. subgraph)
       type: subgraph
       uses: implement-task
-      input: { task: "{{ item.task }}" }
+      input: { task: "{{ task }}", position: "{{ index }}" }
     collect:
       to: results                   # results array written via append reducer
 ```
+
+An inner `when` is honoured per item, with the item and `index` in scope: an item whose `when` is false is skipped (a `node.skipped` event is emitted) and contributes nothing to the collected results. The map's own `with.output` is rejected rather than silently ignored; write the collected results with `with.collect`, or project each item with the inner node's own `with.output`.
 
 `with.node` is a node spec with the same fields as a graph node, except that `id` is optional (each item runs as `<map>[<index>]`). `flowgraph validate` and `compileGraph` check it like any node: an unknown key, a missing `type`, an unregistered type, or a `with` that does not match the body type's schema (for example a `shell` body without `command`) is an error before the run starts. A body's inline subgraph `spec` is validated like a top-level graph.
 

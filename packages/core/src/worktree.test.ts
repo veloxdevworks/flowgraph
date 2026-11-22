@@ -162,7 +162,7 @@ describe("worktree node + runtime.workspace", () => {
       await compileGraph(
         wtSpec([
           add({}),
-          { id: "dirty", type: "function", with: { fn: "wt-dirty", input: { p: "{{ state.worktree.path }}" } } },
+          { id: "dirty", type: "function", with: { fn: "wt-dirty" }, input: { p: "{{ state.worktree.path }}" } },
           { id: "drop", type: "worktree", with: { action: "remove", path: ".worktrees/demo", output: { to: "removed" } } },
         ]),
         {},

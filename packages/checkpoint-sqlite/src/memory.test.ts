@@ -253,7 +253,7 @@ function fnGraph(name: string, fn: string, extraRuntime: Record<string, unknown>
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name },
-    state: { channels: { out: { type: "object" } } },
+    state: { channels: { out: { type: "object" }, alert: { type: "any" }, ticket: { type: "any" } } },
     nodes: [{ id: "n", type: "function", with: { fn, output: { to: "out" } } }],
     edges: [
       { from: "START", to: "n" },

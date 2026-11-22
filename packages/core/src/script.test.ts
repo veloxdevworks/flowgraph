@@ -8,7 +8,8 @@ import { ScriptWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { runScriptSandboxed } from "./nodes/script.js";
 import { defineProvider } from "./providers/types.js";
 
-function scriptSpec(nodeWith: Record<string, unknown>, node: Record<string, unknown> = {}): GraphSpec {
+function scriptSpec(config: Record<string, unknown>, node: Record<string, unknown> = {}): GraphSpec {
+  const { input, ...nodeWith } = config;
   return {
     metadata: { name: "script-test" },
     state: {
@@ -22,6 +23,7 @@ function scriptSpec(nodeWith: Record<string, unknown>, node: Record<string, unkn
       {
         id: "run",
         type: "script",
+        ...(input !== undefined ? { input } : {}),
         ...node,
         with: nodeWith,
       },
@@ -56,10 +58,10 @@ describe("ScriptWithSchema", () => {
         childProcess: true,
         workerThreads: false,
       },
-      input: { x: "{{ state.x }}" },
       env: { MARK: "1" },
     });
     expect(r.success).toBe(true);
+    expect(ScriptWithSchema.safeParse({ code: "export default async () => ({})", input: { x: 1 } }).success).toBe(false);
     const timed = ScriptWithSchema.safeParse({ code: "export default async () => ({})", timeout: "5s" });
     expect(timed.success).toBe(false);
     if (!timed.success) expect(timed.error.issues[0]?.message).toContain("timeout");
@@ -297,9 +299,9 @@ export default async function() {
 });
 
 describe("script node", () => {
-  it("passes tool arguments by default and preserves explicit input mappings", async () => {
+  it("passes tool arguments as the input, whether or not the node declares an input", async () => {
     for (const mapped of [false, true]) {
-      const spec = scriptSpec({ code: "export default input => input;", ...(mapped ? { input: { qty: "{{ input.qty }}", unit: "{{ input.from }}" } } : {}) });
+      const spec = scriptSpec({ code: "export default input => input;", ...(mapped ? { input: { qty: "{{ state.name }}" } } : {}) });
       spec.nodes[0]!.id = "convert";
       spec.nodes[0]!.when = "false";
       spec.nodes.push({ id: "assistant", type: "agent", provider: "conversion-test", with: { prompt: "convert cups to ml", tools: [{ node: "convert" }], output: { to: "out" } } } as GraphSpec["nodes"][number]);
@@ -310,7 +312,7 @@ describe("script node", () => {
       });
       const result = await (await compileGraph(spec, { providers: [provider] })).run();
       expect(result.status, String(result.error)).toBe("completed");
-      expect(result.state.out).toEqual(mapped ? { qty: 2.5, unit: "cups" } : { qty: 2.5, from: "cups", to: "ml" });
+      expect(result.state.out).toEqual({ qty: 2.5, from: "cups", to: "ml" });
     }
   });
 

@@ -31,7 +31,7 @@ function loopSpec(node: Record<string, unknown>, channels: Record<string, unknow
           routes: [ { name: "again", when: "{{ state.round < 2 }}", to: "a" }, { name: "done", default: true, to: "END" } ],
         },
       },
-      { id: "count", type: "function", with: { fn: "outputReplaceRound", input: { n: "{{ state.round }}" }, output: { to: "round", raw: false } } },
+      { id: "count", type: "function", with: { fn: "outputReplaceRound", output: { to: "round", raw: false } }, input: { n: "{{ state.round }}" } },
     ],
     edges: [
       { from: "START", to: "a" },
@@ -213,7 +213,7 @@ describe("raw: false keeps only the projection", () => {
           with: {
             over: "{{ state.items }}",
             as: "n",
-            node: { type: "function", with: { fn: "outputReplaceItem", input: { n: "{{ item.n }}" } } },
+            node: { type: "function", with: { fn: "outputReplaceItem" }, input: { n: "{{ n }}" } },
             collect: { to: "all", map: { ns: "{{ result }}" }, raw: false },
           },
         },

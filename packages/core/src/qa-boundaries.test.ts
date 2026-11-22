@@ -16,14 +16,15 @@ function stubHomeAndTmpdir(): { home: string; tmp: string } {
   return { home, tmp };
 }
 
-function graph(type: string, config: Record<string, unknown>): GraphSpec {
+function graph(type: string, settings: Record<string, unknown>): GraphSpec {
+  const { input, ...config } = settings;
   return {
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "qa-boundaries" },
     config: { vars: { marker: "configured" } },
     secrets: ["FGQA_DECOY"],
-    nodes: [{ id: "execute", type, with: { ...config, output: { to: "answer" } } }],
+    nodes: [{ id: "execute", type, ...(input !== undefined ? { input } : {}), with: { ...config, output: { to: "answer" } } }],
     edges: [
       { from: "START", to: "execute" },
       { from: "execute", to: "END" },
@@ -80,7 +81,7 @@ describe("PLAT-297 / PLAT-326: explicit child credentials", () => {
     vi.stubEnv("FGQA_DECOY", "decoy-only");
     const compiled = await compileGraph(
       graph("script", {
-        // Compare against values passed through with.input so the assertion
+        // Compare against values passed through the node input so the assertion
         // does not hard-code host paths in the script source.
         code: "export default async (input) => ({ home: process.env.HOME === input.home, tmpdir: process.env.TMPDIR === input.tmp, path: typeof process.env.PATH === 'string' && process.env.PATH.length > 0, decoy: process.env.FGQA_DECOY ?? 'absent' });",
         input: { home, tmp },

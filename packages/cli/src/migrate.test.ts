@@ -90,4 +90,60 @@ command: ["echo", "hi"]
     expect(migratedSkill.output).toContain("kindOf: command");
     expect(migratedSkill.output).not.toContain("kind_of:");
   });
+
+  it("applies pre-v1 alias rewrites and data-contract rewrites together in one pass", () => {
+    const combined = `apiVersion: flowgraph/v0
+kind: Subgraph
+metadata:
+  name: combined-legacy
+inputs:
+  - key: topic
+    type: text
+    label: Topic
+input:
+  topic: default-topic
+state:
+  channels:
+    tags:
+      type: array
+      items: { type: string }
+nodes:
+  - id: fn
+    type: code
+    with:
+      fn: transform
+      input:
+        topic: "{{ state.topic }}"
+  - id: ai
+    type: intelligent
+    provider: mock
+    with:
+      prompt: "{{ state.tags }}"
+edges:
+  - { from: START, to: fn }
+  - { from: fn, to: ai }
+  - { from: ai, to: END }
+runtime:
+  checkpoint:
+    backend: sqlite
+  store:
+    backend: sqlite
+`;
+
+    const first = migrateSpec(combined);
+    expect(first.changed).toBe(true);
+    expect(first.manual).toEqual([]);
+    expect(first.output).toContain("type: function");
+    expect(first.output).toContain("type: agent");
+    expect(first.output).toContain("memory:");
+    expect(first.output).not.toContain("store:");
+    expect(first.output).toContain("widget: textarea");
+    expect(first.output).toContain("schema:");
+    const parsed = GraphSpecSchema.safeParse(parseYaml(first.output));
+    expect(parsed.success, JSON.stringify(parsed.success ? null : parsed.error.issues)).toBe(true);
+
+    const second = migrateSpec(first.output);
+    expect(second.changed).toBe(false);
+    expect(second.output).toBe(first.output);
+  });
 });

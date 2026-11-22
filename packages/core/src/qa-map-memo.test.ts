@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { GraphSpecSchema } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
 import { registerFunction } from "./nodes/function.js";
-function spec(memoize: unknown = true, inner = {}, rounds = 2) {
+function spec(memoize: unknown = true, inner: { input?: unknown; output?: unknown } = {}, rounds = 2) {
+  const { input: innerInput, ...innerWith } = inner;
   return GraphSpecSchema.parse({
     apiVersion: "flowgraph/v1",
     kind: "Graph",
@@ -25,7 +26,7 @@ function spec(memoize: unknown = true, inner = {}, rounds = 2) {
           concurrency: 1,
           node: {
             type: "function",
-            with: { fn: "memoValue", input: { n: "{{ item.n }}" }, ...inner },
+            with: { fn: "memoValue", ...innerWith }, input: innerInput ?? { n: "{{ n }}" },
           },
           collect: { to: "results" },
         },
@@ -35,9 +36,8 @@ function spec(memoize: unknown = true, inner = {}, rounds = 2) {
         type: "function",
         with: {
           fn: "memoNext",
-          input: { items: "{{ state.items }}", round: "{{ state.round }}" },
           output: { map: { items: "{{ result.items }}", round: "{{ result.round }}" } },
-        },
+        }, input: { items: "{{ state.items }}", round: "{{ state.round }}" },
       },
       {
         id: "route",
@@ -93,7 +93,7 @@ describe("PLAT-340: map item memoization", () => {
     registerFunction("memoValue", () => ++calls);
     registerFunction("memoNext", next);
     await (
-      await compileGraph(spec(true, { input: { n: "{{ item.n }}", round: "{{ state.round }}" } }))
+      await compileGraph(spec(true, { input: { n: "{{ n }}", round: "{{ state.round }}" } }))
     ).run({ input: { items: [1] } });
     expect(calls).toBe(2);
     calls = 0;

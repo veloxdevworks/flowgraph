@@ -215,7 +215,7 @@ describe("stored graph YAML", () => {
 
   const declared = MINIMAL
     .replace("state:", () => 'secrets: [FG_GS_TEST_VALUE]\nconfig:\n  vars: { token: "${FG_GS_TEST_VALUE}", escaped: "$${FG_GS_TEST_VALUE}", other: "$${FG_GS_NOT_DECLARED}" }\nstate:')
-    .replace("fn: missing", () => 'fn: missing\n      input: { body: "${FG_GS_TEST_BODY}", kept: "$${FG_GS_TEST_BODY}" }');
+    .replace("    with:\n      fn: missing", () => '    input: { body: "${FG_GS_TEST_BODY}", kept: "$${FG_GS_TEST_BODY}" }\n    with:\n      fn: missing');
 
   /** Run `fn` with `process.env` replaced by a view that records every name looked up. */
   function recordingEnv<T>(fn: () => T): { result: T; read: Set<string> } {
@@ -241,8 +241,7 @@ describe("stored graph YAML", () => {
       expect(parsed.diagnostics.filter((d) => d.severity === "error")).toEqual([]);
       const spec = parsed.spec!;
       expect(spec.config?.vars).toEqual({ token: "declared-value", escaped: "${FG_GS_TEST_VALUE}", other: "${FG_GS_NOT_DECLARED}" });
-      const w = spec.nodes[0]!.with as { input: Record<string, string> };
-      expect(w.input).toEqual({ body: "${FG_GS_TEST_BODY}", kept: "$${FG_GS_TEST_BODY}" });
+      expect(spec.nodes[0]!.input).toEqual({ body: "${FG_GS_TEST_BODY}", kept: "$${FG_GS_TEST_BODY}" });
       expect(read.has("FG_GS_TEST_VALUE")).toBe(true);
       expect(read.has("FG_GS_TEST_BODY")).toBe(false);
       expect(parsed.yaml).toBe(declared);
