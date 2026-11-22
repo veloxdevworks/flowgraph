@@ -31,6 +31,12 @@ export function registerMediaVendor(vendor: MediaVendor): void {
   bareProviders.delete(vendor.vendor);
 }
 
+/** Drop a vendor registered for a test or a plugin that is going away. */
+export function unregisterMediaVendor(vendor: string): void {
+  vendors.delete(vendor);
+  bareProviders.delete(vendor);
+}
+
 export function getMediaVendor(vendor: string): MediaVendor | undefined {
   return vendors.get(vendor);
 }

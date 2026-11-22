@@ -6,7 +6,7 @@ import { AudioWithSchema, ImageWithSchema, Model3dWithSchema, VideoWithSchema, t
 import { compileGraph } from "../compiler.js";
 import { defineNode, describeNodeTypes, registry } from "../registry.js";
 import { z } from "zod";
-import { deriveMediaProviders, getMediaVendor, registerMediaVendor } from "./registry.js";
+import { deriveMediaProviders, getMediaVendor, registerMediaVendor, unregisterMediaVendor } from "./registry.js";
 import type { JobHandle, JobStatus, MediaCallContext, MediaProvider, MediaRequest } from "./types.js";
 
 // 1x1 transparent PNG
@@ -540,6 +540,7 @@ describe("credentials are configured once", () => {
       expect(() => deriveMediaProviders({ t: { kind: "media", vendor: "does-not-exist" } })).toThrow(/unknown media vendor/);
     } finally {
       if (previous) registerMediaVendor(previous);
+      else unregisterMediaVendor("xai");
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
