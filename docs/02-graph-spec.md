@@ -24,7 +24,22 @@ edges: [ ... ]              # required — static + conditional edges
 runtime: { ... }            # optional — checkpoint/retry/hook defaults
 ```
 
-`apiVersion` pins the schema contract. The loader rejects unknown major versions and warns on unknown minor fields (forward-compatible).
+`apiVersion` pins the schema contract. The loader rejects unknown major versions.
+
+The spec is strict at every depth: an unknown key anywhere in the file (the top level, `metadata`, `runtime`, a node, a node's `with`, an edge, a hook) is an error, with a "did you mean" suggestion when it is close to a real key. Maps that hold your own data (state values, `inputs` defaults, `http` headers, env maps) stay open. The one place for data the spec does not define is a top-level `extensions:` map, keyed `<vendor>.<name>`:
+
+```yaml
+extensions:
+  acme.catalog:
+    owner: platform-team
+```
+
+A graph can also name the engine versions it runs on. `requires.engine` is a semver range checked against the running engine, and the graph is refused with a clear error when it is not met:
+
+```yaml
+requires:
+  engine: ">=1.4.0 <2"
+```
 
 ## 2. `metadata`
 
@@ -269,7 +284,7 @@ A node whose labels the local host satisfies runs in-process as usual. Otherwise
 
 ## 6. `edges`
 
-Edges define control flow. Two forms: **static** and **conditional**. `START` and `END` are reserved node ids (mapped to LangGraph's `START`/`END`). `END` is never an edge source (`EDGE_FROM_END`) and `START` is never a target, on a static edge or a branch (`EDGE_TO_START`) or in a router or hitl `with.routes` (`ROUTE_TO_START`).
+Edges define control flow. Two forms: **static** and **conditional**. `START` and `END` are reserved node ids (mapped to LangGraph's `START`/`END`). `END` is never an edge source (`EDGE_FROM_END`) and `START` is never a target, on a static edge or a branch (`EDGE_TO_START`) or in a router or hitl `with.routes` (`ROUTE_TO_START`). An edge takes `to` or `branch`, never both.
 
 ### Static edges
 
@@ -582,7 +597,7 @@ Graphs and map bodies may nest up to 32 levels, counting the top level. A deeper
 
 `UNDECLARED_OUTPUT_CHANNEL` is a **warning**: a node writes a channel that `state.channels` does not declare. `compileGraph` declares it as `type: any` with last-write-wins, so the write is kept; declare the channel to choose its type and reducer.
 
-The same diagnostics power editor squiggles via the JSON Schema + a future Language Server (post-1.0). `flowgraph schema` prints the JSON Schema, published at `https://veloxdevworks.com/flowgraph/schema/v1.json` (its `$id`). Nodes, inline subgraph `spec` blocks and `map` bodies are recursive definitions (`NodeSpec`, `GraphSpec`, `MapBodyNode`), so editors check nested graphs as they check the top level. Settings the engine rejects as relocated (for example `runsOn.wait` or `config.defaults.retry`) are not offered. Each node type's own `with` fields are not typed in the JSON Schema yet; `flowgraph validate` checks them.
+The same diagnostics power editor squiggles via the JSON Schema + a future Language Server (post-1.0). `flowgraph schema` prints the JSON Schema, published at `https://veloxdevworks.com/flowgraph/schema/v1.json` (its `$id`). Nodes, inline subgraph `spec` blocks and `map` bodies are recursive definitions (`NodeSpec`, `GraphSpec`, `MapBodyNode`), so editors check nested graphs as they check the top level. Settings the engine rejects as relocated (for example `runsOn.wait` or `config.defaults.retry`) are not offered. Each node type has its own `with` definition (`With-<type>`), selected by the node's `type`; `flowgraph schema` includes every node type the CLI has registered, and the schema carries `requires` and `extensions`. Rules that need a refinement, such as which fields a hitl mode accepts, are checked by `flowgraph validate` and not by the JSON Schema.
 
 ## 12. Versioning the spec
 

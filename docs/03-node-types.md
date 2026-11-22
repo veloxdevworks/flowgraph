@@ -1020,10 +1020,11 @@ Prefer cheap `hitl` `approve` / `review` when a single decision is enough. Use `
   type: wait
   with:
     deadline: 30s                   # fixed delay (in-process sleep; not durable)
+    # Set exactly one of deadline, until, signal, webhook (an empty `with` is an error).
     # or: until: "{{ state.ready }}"  (durable interrupt until condition is true on resume)
     # or: signal: deploy-finished    (durable interrupt; resume with that signal name)
     # or: webhook: true              (durable interrupt; embedded HTTP listener resumes)
-    # optional on until/signal/webhook:
+    # optional on until/signal/webhook only (rejected with deadline):
     timeout: 24h                    # informational deadline (see below)
 ```
 
