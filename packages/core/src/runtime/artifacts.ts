@@ -1,5 +1,5 @@
 /**
- * Artifact store for generated media. Files live under
+ * Shared artifact utilities. Files live under
  * `<workspace>/.flowgraph/artifacts/<thread>/<node>/`; state holds only the
  * `Artifact` record.
  */
@@ -11,10 +11,19 @@ import * as path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Artifact } from "@flowgraph/spec";
-import type { MediaCallContext, MediaOutput } from "./types.js";
 
 /** Largest single download, in bytes. */
 export const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024;
+
+export type ArtifactOutputInput =
+  | { bytes: Uint8Array; mimeType: string; ext?: string | undefined; meta?: Record<string, unknown> | undefined }
+  | {
+      url: string;
+      headers?: Record<string, string> | undefined;
+      mimeType?: string | undefined;
+      ext?: string | undefined;
+      meta?: Record<string, unknown> | undefined;
+    };
 
 const MIME_EXT: Record<string, string> = {
   "image/png": "png",
@@ -148,11 +157,11 @@ export function artifactDir(workspace: string, scope: string, nodeId: string): s
 }
 
 /** Build the `saveOutput` function handed to providers. */
-export function createOutputWriter(opts: OutputWriterOptions): MediaCallContext["saveOutput"] {
+export function createOutputWriter(opts: OutputWriterOptions): (out: ArtifactOutputInput) => Promise<Artifact> {
   let counter = 0;
   const dir = artifactDir(opts.workspace, opts.scope, opts.nodeId);
 
-  return async (out: MediaOutput): Promise<Artifact> => {
+  return async (out: ArtifactOutputInput): Promise<Artifact> => {
     await mkdir(dir, { recursive: true });
     const index = counter++;
     const stem = `${safeSegment(opts.jobKey)}-${index}`;

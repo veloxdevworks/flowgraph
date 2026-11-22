@@ -18,10 +18,9 @@ import * as path from "node:path";
 import { z } from "zod";
 import { SubgraphWithSchema, type GraphSpec } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
-import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
+import { defineNode, registry, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { BaseStore } from "@langchain/langgraph";
 import { graphProviderList } from "../providers/registry.js";
-import { mediaProviderList } from "../media/registry.js";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import type { NodeRunContext } from "../context.js";
 import { assertSubgraphFileAllowed, isReservedChannel, nodePolicyOf, withoutReservedKeys } from "../node-policy.js";
@@ -265,6 +264,12 @@ async function loadChild(
     });
   };
 
+  const extraContext: Record<symbol, unknown> = {};
+  const ctxSymbols = ctx as unknown as Record<symbol, unknown>;
+  for (const sym of registry.subgraphContextSymbols()) {
+    if (sym in ctxSymbols) extraContext[sym] = ctxSymbols[sym];
+  }
+
   const { compiledLg } = await compileGraphForEmbedding(spec, {
     ...subgraphHostOptions(ctx),
     cwd,
@@ -274,7 +279,7 @@ async function loadChild(
     ...(nodePolicyOf(ctx) ? { nodePolicy: nodePolicyOf(ctx)! } : {}),
     // The parent's own providers, so the child answers with the same ones.
     providers: graphProviderList(ctx),
-    mediaProviders: mediaProviderList(ctx),
+    extraContext,
     ...(parentMemoryRuntime(ctx) ? { memory: parentMemoryRuntime(ctx)! } : { memory: "ephemeral" as const }),
   });
 

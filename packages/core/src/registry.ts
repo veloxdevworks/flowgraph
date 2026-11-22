@@ -4,9 +4,10 @@
  */
 
 import { z } from "zod";
-import { zodToConfigJsonSchema } from "@flowgraph/spec";
+import { zodToConfigJsonSchema, type Diagnostic, type GraphSpec } from "@flowgraph/spec";
 import type { ContextConfigInput } from "./context/types.js";
 import type { NodeRunContext } from "./context.js";
+import type { NodePolicy } from "./node-policy.js";
 
 export interface NodeContract {
   inputs?: Record<string, unknown>;
@@ -103,9 +104,47 @@ export interface NodeFactory<Config = any> {
 
 export type ReducerFn = (current: unknown, incoming: unknown) => unknown;
 
+export interface RunEndHookContext {
+  spec: GraphSpec;
+  threadId: string;
+  state?: Record<string, unknown> | undefined;
+  policy?: NodePolicy | undefined;
+}
+
+export interface HydrateHookContext {
+  spec: GraphSpec;
+  threadId: string;
+  snapshotValues?: Record<string, unknown> | undefined;
+  nodePolicy?: NodePolicy | undefined;
+}
+
+export interface CompileContextHookInput {
+  spec: GraphSpec;
+  opts: Record<string, unknown>;
+  contextBag: Record<symbol, unknown>;
+}
+
+export interface RunLifecycleHooks {
+  onRunEnd?: (ctx: RunEndHookContext) => Promise<void>;
+  onHydrate?: (ctx: HydrateHookContext) => Promise<void>;
+}
+
+export type GraphValidatorFn = (spec: GraphSpec) => Diagnostic[];
+export type ToolInvokeCheckFn = (nodeSpec: Record<string, unknown>) => string | undefined;
+export type CompileContextHookFn = (input: CompileContextHookInput) => void;
+export type ProviderSecretResolverFn = (cfg: Record<string, unknown>) => string | undefined;
+export type PreflightNodeCheckFn = (node: { id?: string; type?: string; with?: unknown }, path: string, cwd: string) => Promise<Diagnostic[]>;
+
 class Registry {
   private factories = new Map<string, NodeFactory>();
   private reducers = new Map<string, ReducerFn>();
+  private validators = new Map<string, { fn: GraphValidatorFn; compile: boolean }>();
+  private toolInvokeChecks = new Map<string, ToolInvokeCheckFn>();
+  private runLifecycles = new Map<string, RunLifecycleHooks>();
+  private compileContexts = new Map<string, CompileContextHookFn>();
+  private subgraphSymbols = new Set<symbol>();
+  private providerSecretResolvers = new Map<string, ProviderSecretResolverFn>();
+  private preflightChecks = new Map<string, PreflightNodeCheckFn>();
 
   register(factory: NodeFactory): void {
     if (this.factories.has(factory.type)) {
@@ -135,6 +174,92 @@ class Registry {
 
   getReducer(name: string): ReducerFn | undefined {
     return this.reducers.get(name);
+  }
+
+  registerValidator(id: string, fn: GraphValidatorFn, opts: { compile?: boolean } = {}): void {
+    this.validators.set(id, { fn, compile: opts.compile ?? false });
+  }
+
+  runValidators(spec: GraphSpec): Diagnostic[] {
+    const out: Diagnostic[] = [];
+    for (const { fn } of this.validators.values()) out.push(...fn(spec));
+    return out;
+  }
+
+  runCompileValidators(spec: GraphSpec): Diagnostic[] {
+    const out: Diagnostic[] = [];
+    for (const { fn, compile } of this.validators.values()) {
+      if (compile) out.push(...fn(spec));
+    }
+    return out;
+  }
+
+  registerToolInvokeCheck(id: string, fn: ToolInvokeCheckFn): void {
+    this.toolInvokeChecks.set(id, fn);
+  }
+
+  checkToolInvoke(nodeSpec: Record<string, unknown> | undefined): string | undefined {
+    if (!nodeSpec) return undefined;
+    for (const fn of this.toolInvokeChecks.values()) {
+      const msg = fn(nodeSpec);
+      if (msg) return msg;
+    }
+    return undefined;
+  }
+
+  registerRunLifecycle(id: string, hooks: RunLifecycleHooks): void {
+    this.runLifecycles.set(id, hooks);
+  }
+
+  async runEndHooks(ctx: RunEndHookContext): Promise<void> {
+    for (const { onRunEnd } of this.runLifecycles.values()) {
+      if (onRunEnd) await onRunEnd(ctx);
+    }
+  }
+
+  async runHydrateHooks(ctx: HydrateHookContext): Promise<void> {
+    for (const { onHydrate } of this.runLifecycles.values()) {
+      if (onHydrate) await onHydrate(ctx);
+    }
+  }
+
+  registerCompileContext(id: string, fn: CompileContextHookFn): void {
+    this.compileContexts.set(id, fn);
+  }
+
+  applyCompileContexts(input: CompileContextHookInput): void {
+    for (const fn of this.compileContexts.values()) fn(input);
+  }
+
+  registerSubgraphContextSymbol(sym: symbol): void {
+    this.subgraphSymbols.add(sym);
+  }
+
+  subgraphContextSymbols(): symbol[] {
+    return [...this.subgraphSymbols];
+  }
+
+  registerProviderSecretResolver(kind: string, fn: ProviderSecretResolverFn): void {
+    this.providerSecretResolvers.set(kind, fn);
+  }
+
+  resolveProviderDefaultSecret(cfg: Record<string, unknown>): string | undefined {
+    const kind = typeof cfg.kind === "string" ? cfg.kind : undefined;
+    if (!kind) return undefined;
+    return this.providerSecretResolvers.get(kind)?.(cfg);
+  }
+
+  registerPreflightCheck(nodeType: string, fn: PreflightNodeCheckFn): void {
+    this.preflightChecks.set(nodeType, fn);
+  }
+
+  async runPreflightChecks(
+    node: { id?: string; type?: string; with?: unknown },
+    path: string,
+    cwd: string,
+  ): Promise<Diagnostic[]> {
+    const fn = typeof node.type === "string" ? this.preflightChecks.get(node.type) : undefined;
+    return fn ? fn(node, path, cwd) : [];
   }
 }
 

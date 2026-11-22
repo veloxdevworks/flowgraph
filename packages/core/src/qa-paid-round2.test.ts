@@ -265,57 +265,6 @@ it("PLAT-376: concurrent reservations cannot exceed the available headroom", asy
   expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(2);
   expect(ledger.snapshot()).toMatchObject({ costUSD: 0.2, pendingCalls: 0 });
 });
-it("PLAT-359: an ordinary fan-out rejection leaves no never-started sibling receipts", async () => {
-  const { mkdtemp, rm } = await import("node:fs/promises"),
-    { tmpdir } = await import("node:os"),
-    { join } = await import("node:path");
-  const cwd = await mkdtemp(join(tmpdir(), "fg-paid-siblings-"));
-  const seen: string[] = [];
-  let reject = true;
-  const nodes = ["a", "b", "c"].map((id) => ({
-    id,
-    type: "image",
-    provider: "siblings",
-    with: { prompt: id },
-  }));
-  const spec = graph(nodes, { budget: { maxTokens: 100, onExceed: "fail" } }, [
-    { from: "START", to: ["a", "b", "c"] },
-    ...nodes.map((n) => ({ from: n.id, to: "END" })),
-  ]);
-  const provider: import("./media/types.js").MediaProvider = {
-    name: "siblings",
-    vendor: "test",
-    modalities: ["image"],
-    async start(req) {
-      seen.push(req.prompt!);
-      if (reject && req.prompt === "a")
-        throw Object.assign(new Error("invalid request"), { mediaSubmissionRejected: true });
-      return { id: req.prompt!, done: [], costUSD: 0 };
-    },
-  };
-  try {
-    const { MemorySaver } = await import("@langchain/langgraph");
-    const saver = new MemorySaver();
-    const compiled = await compileGraph(spec, {
-      cwd,
-      checkpointer: saver,
-      mediaProviders: [provider],
-    });
-    const first = await compiled.run({ threadId: "siblings" });
-    expect(first.status).toBe("error");
-    expect(first.usage?.unknownCalls).toBe(0);
-    const { inspectThreadUsage } = await import("./usage/ledger.js");
-    await vi.waitFor(async () =>
-      expect(Object.keys((await inspectThreadUsage(saver, "siblings")).pending)).toHaveLength(0),
-    );
-    reject = false;
-    const next = await compiled.resume({ threadId: "siblings", resume: true });
-    expect(next.status).toBe("completed");
-    expect(next.usage?.pendingCalls).toBe(0);
-  } finally {
-    await rm(cwd, { recursive: true, force: true });
-  }
-});
 
 it("PLAT-376: an unestimated call cannot use fully reserved dollar headroom",async()=>{
   const ledger=await UsageLedger.open({},"full-reservation",{maxUSD:0.2,onExceed:"fail"});

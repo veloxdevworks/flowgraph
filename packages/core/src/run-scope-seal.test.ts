@@ -12,11 +12,10 @@ import { AIMessage } from "@langchain/core/messages";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
-import { createLangChainProvider } from "./index.js";
+import { createLangChainProvider, getTool, registerTool } from "./index.js";
 import type { NodePolicy } from "./node-policy.js";
 import type { Hook } from "./hooks/types.js";
 import { registerFunction } from "./nodes/function.js";
-import { resetServiceManager } from "./runtime/service-manager.js";
 import "./nodes/index.js";
 
 const POLICY: NodePolicy = {
@@ -28,8 +27,7 @@ const POLICY: NodePolicy = {
 };
 
 const markers: string[] = [];
-afterEach(async () => {
-  await resetServiceManager();
+afterEach(() => {
   for (const m of markers.splice(0)) fs.rmSync(m, { force: true });
 });
 
@@ -37,6 +35,25 @@ beforeAll(() => {
   // The node's own input as the engine built it (what a subgraph would get).
   registerFunction("nodeInput", (_input, ctx) => ({ ...((ctx as { _input?: Record<string, unknown> })._input ?? {}) }));
   registerFunction("echoItem", (input) => (input as { v?: unknown }).v);
+  if (!getTool("start_service")) {
+    registerTool({
+      name: "start_service",
+      description: "test stub",
+      handler: (args) => {
+        const a = args as { args?: string[] };
+        const m = a.args?.find((s) => s.includes("id > "))?.split("id > ")[1];
+        if (m) fs.writeFileSync(m, "ran");
+        return { started: true };
+      },
+    });
+  }
+  if (!getTool("list_services")) {
+    registerTool({
+      name: "list_services",
+      description: "test stub",
+      handler: () => ({ services: [] }),
+    });
+  }
 });
 
 function newMarker(): string {

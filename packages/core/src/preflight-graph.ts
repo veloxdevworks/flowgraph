@@ -14,8 +14,7 @@ import { loadAgentDef } from "./agents/loader.js";
 import { loadGraph } from "./loader.js";
 import { subgraphAliases } from "./runtime/graph-files.js";
 import { checkBinOnPath } from "./runtime/which.js";
-import { playwrightProblem } from "./nodes/demo-playwright.js";
-import { iosToolchainReady } from "./nodes/demo-simulator.js";
+import { registry } from "./registry.js";
 import type { NodeSpec } from "@flowgraph/spec";
 
 export interface PreflightGraphOptions {
@@ -214,40 +213,7 @@ async function checkNodeRequires(
     });
   }
 
-  if (node.type === "demo") {
-    // A required capture fails the run at the end, so catch it before the run starts.
-    const strict = withBlock["strict"] === true;
-    const report = (message: string, at: string): void => {
-      diagnostics.push({
-        severity: strict ? "error" : "warning",
-        code: strict ? "BIN_NOT_FOUND" : "BIN_NOT_FOUND_OPTIONAL",
-        message: `demo node "${node.id}": ${message}${strict ? "" : " (capture will degrade)"}`,
-        path: at,
-      });
-    };
-
-    const sim = withBlock["simulator"] as { platform?: string } | undefined;
-    if (sim && typeof sim === "object") {
-      if (sim.platform === "ios" && !(await iosToolchainReady())) {
-        report("simulator.ios needs simctl, which ships with Xcode", `${path}.with.simulator`);
-      }
-      if (sim.platform === "android" && !(await checkBinOnPath("adb"))) {
-        report('simulator.android needs "adb" on PATH', `${path}.with.simulator`);
-      }
-    }
-
-    const browserMode = withBlock["screenshot"]
-      ? "screenshot"
-      : withBlock["video"]
-        ? "video"
-        : withBlock["steps"]
-          ? "steps"
-          : undefined;
-    if (browserMode) {
-      const shot = withBlock["screenshot"] as { video?: unknown } | undefined;
-      const problem = await playwrightProblem(cwd, { video: browserMode !== "screenshot" || Boolean(shot?.video) });
-      if (problem) report(problem, `${path}.with.${browserMode}`);
-    }
-  }
+  const extra = await registry.runPreflightChecks(node, path, cwd);
+  diagnostics.push(...extra);
 }
 

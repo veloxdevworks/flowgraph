@@ -252,12 +252,12 @@ function oneNode(node: unknown): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-describe("http and webhook nodes under an outbound policy", () => {
+describe("http nodes (standard and once: true) under an outbound policy", () => {
   it("refuse a loopback target the node would otherwise reach", async () => {
     const s = await server((_q, r) => r.end("hi"));
     for (const node of [
       { id: "h", type: "http", with: { url: `http://127.0.0.1:${s.port}/`, output: { to: "out" } } },
-      { id: "w", type: "webhook", with: { url: `http://127.0.0.1:${s.port}/`, output: { to: "out" } } },
+      { id: "w", type: "http", with: { url: `http://127.0.0.1:${s.port}/`, method: "POST", once: true, output: { to: "out" } } },
     ]) {
       const g = await compileGraph(oneNode(node), { checkpointer: "memory", nodePolicy: { outboundHttp: PUBLIC } });
       const r = await g.run({ input: {} });
