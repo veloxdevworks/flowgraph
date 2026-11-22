@@ -511,3 +511,212 @@ describe("loadGraph and subgraph files", () => {
     expect(diagnostics).toContainEqual(expect.objectContaining({ code: "UNKNOWN_NODE_TYPE", path: "nodes.sub.spec.nodes.x.type" }));
   });
 });
+
+const crashText = /startsWith|not iterable|TypeError|Unknown hook event "undefined"|trim is not a function|Cannot read properties/;
+
+function nestedSpec(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...head,
+    metadata: { name: "item" },
+    nodes: [{ id: "y", ...echo }],
+    edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }],
+    ...over,
+  };
+}
+
+type ErrorRow = { code: string; path?: string; message: string };
+
+/** validateSpec returns exactly these errors, and compileGraph throws the first code. */
+async function expectExact(spec: GraphSpec, rows: ErrorRow[]): Promise<void> {
+  let diagnostics: Diagnostic[] = [];
+  expect(() => {
+    diagnostics = validateSpec(spec);
+  }).not.toThrow();
+  expect(errors(diagnostics).map((d) => ({ code: d.code, ...(d.path ? { path: d.path } : {}), message: d.message }))).toEqual(rows);
+  let thrown: unknown;
+  try {
+    await compileGraph(spec);
+  } catch (err) {
+    thrown = err;
+  }
+  expect(thrown).toBeInstanceOf(Error);
+  expect(thrown).not.toBeInstanceOf(TypeError);
+  expect(thrown).toMatchObject({ code: rows[0]?.code });
+  expect(String((thrown as Error).message)).not.toMatch(crashText);
+}
+
+describe("malformed nested graphs", () => {
+  const body = "nodes.m.with.node.spec";
+
+  it("reports each map-body problem once, with the schema diagnostic", async () => {
+    const cases: Array<{ spec: Record<string, unknown>; path: string; message: string }> = [
+      {
+        spec: nestedSpec({ runtime: { hooks: [{ do: "allow" }] } }),
+        path: `${body}.runtime.hooks.0.on`,
+        message: "node.spec.runtime.hooks.0.on: Required",
+      },
+      {
+        spec: nestedSpec({ runtime: { hooks: [{ on: "node:before" }] } }),
+        path: `${body}.runtime.hooks.0.do`,
+        message: "node.spec.runtime.hooks.0.do: Required",
+      },
+      {
+        spec: nestedSpec({ runtime: { hooks: [{ on: "node:before", do: 5 }] } }),
+        path: `${body}.runtime.hooks.0.do`,
+        message: "node.spec.runtime.hooks.0.do: Expected string, received number",
+      },
+      {
+        spec: nestedSpec({ runtime: { hooks: { on: "node:before", do: "allow" } } }),
+        path: `${body}.runtime.hooks`,
+        message: "node.spec.runtime.hooks: Expected array, received object",
+      },
+      {
+        spec: (() => {
+          const spec = nestedSpec();
+          delete spec.edges;
+          return spec;
+        })(),
+        path: `${body}.edges`,
+        message: "node.spec.edges: Required",
+      },
+      {
+        spec: nestedSpec({ edges: [{ from: 5, to: "y" }, { from: "y", to: "END" }] }),
+        path: `${body}.edges.0`,
+        message: "node.spec.edges.0: Invalid input",
+      },
+      {
+        spec: nestedSpec({ edges: [{ from: "START", to: 5 }, { from: "y", to: "END" }] }),
+        path: `${body}.edges.0`,
+        message: "node.spec.edges.0: Invalid input",
+      },
+      {
+        spec: nestedSpec({
+          nodes: [{ ...echo, with: { command: "echo", args: ["hi"] } }],
+          edges: [{ from: "START", to: "END" }],
+        }),
+        path: `${body}.nodes.0.id`,
+        message: "node.spec.nodes.0.id: Required",
+      },
+      {
+        spec: nestedSpec({ nodes: [{ id: "a", type: 5, with: {} }], edges: [{ from: "START", to: "a" }, { from: "a", to: "END" }] }),
+        path: `${body}.nodes.0.type`,
+        message: "node.spec.nodes.0.type: Expected string, received number",
+      },
+      {
+        spec: nestedSpec({
+          nodes: [{ id: "y", type: "router", with: { routes: 5 } }],
+          edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }],
+        }),
+        path: `${body}.nodes.y.with.routes`,
+        message: "routes: routes must be a list of - name: entries",
+      },
+    ];
+    for (const item of cases) {
+      await expectExact(graph([mapOf({ type: "subgraph", spec: item.spec })]), [
+        { code: "NODE_CONFIG_ERROR", path: item.path, message: item.message },
+      ]);
+    }
+  });
+
+  it("reports an inline subgraph shape once, with a fitting code", async () => {
+    const spec = "nodes.sub.spec";
+    const cases: Array<{ spec: Record<string, unknown>; row: ErrorRow }> = [
+      {
+        spec: nestedSpec({ runtime: { hooks: [{ on: "node:before" }] } }),
+        row: { code: "SCHEMA_ERROR", path: `${spec}.runtime.hooks[0].do`, message: "Required" },
+      },
+      {
+        spec: nestedSpec({ runtime: { hooks: { on: "node:before", do: "allow" } } }),
+        row: { code: "SCHEMA_ERROR", path: `${spec}.runtime.hooks`, message: "Expected array" },
+      },
+      {
+        spec: nestedSpec({ edges: [{ from: 5, to: "y" }, { from: "y", to: "END" }] }),
+        row: { code: "SCHEMA_ERROR", path: `${spec}.edges[0].from`, message: "Expected string" },
+      },
+      {
+        spec: nestedSpec({
+          nodes: [{ ...echo, with: { command: "echo", args: ["hi"] } }],
+          edges: [{ from: "START", to: "END" }],
+        }),
+        row: { code: "SCHEMA_ERROR", path: `${spec}.nodes[0].id`, message: "Required" },
+      },
+      {
+        spec: nestedSpec({ nodes: [{ id: "y", type: 5, with: {} }], edges: [{ from: "START", to: "END" }] }),
+        row: { code: "SCHEMA_ERROR", path: `${spec}.nodes[0].type`, message: "Expected string" },
+      },
+      {
+        spec: nestedSpec({
+          nodes: [{ id: "y", type: "router", with: { routes: 5 } }],
+          edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }],
+        }),
+        row: {
+          code: "NODE_CONFIG_ERROR",
+          path: `${spec}.nodes.y.with.routes`,
+          message: "routes: routes must be a list of - name: entries",
+        },
+      },
+    ];
+    for (const item of cases) {
+      await expectExact(graph([{ id: "sub", type: "subgraph", spec: item.spec }]), [item.row]);
+    }
+  });
+
+  it("never throws a non-coded error for a fixed list of malformed graphs", async () => {
+    const places = ["top", "map", "nested map", "inline"] as const;
+    const broken = (): Record<string, unknown> => ({
+      ...head,
+      metadata: { name: "g" },
+      nodes: [{ id: "r", type: "router", with: { routes: [{ name: "go", when: 5 }, { name: "else", default: true }] } }, { id: "y", ...echo }],
+      edges: [
+        { from: "START", to: "r" },
+        { from: "r", branch: [{ to: "y", when: 5 }, { to: "END", default: true }] },
+        { from: "y", to: "END" },
+      ],
+    });
+    const defects: Array<{ name: string; spec: () => Record<string, unknown> }> = [
+      { name: "null node", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [null, { id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }] }) },
+      { name: "nodes object", spec: () => ({ ...head, metadata: { name: "g" }, nodes: { y: { id: "y", ...echo } }, edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }] }) },
+      { name: "router when", spec: broken },
+      { name: "branch when", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", branch: [{ to: "y", when: 5 }, { to: "END", default: true }] }, { from: "y", to: "END" }] }) },
+      { name: "null trigger", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], triggers: [null] }) },
+      { name: "cron schedule", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], triggers: [{ id: "t", type: "cron", schedule: 5 }] }) },
+      { name: "null input", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], inputs: [null] }) },
+      { name: "null channel", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], state: { channels: { out: null } } }) },
+      { name: "reducer type", spec: () => ({ ...head, metadata: { name: "g" }, nodes: [{ id: "y", ...echo }], edges: [{ from: "START", to: "y" }, { from: "y", to: "END" }], state: { channels: { out: { type: "string", reducer: 5 } } } }) },
+    ];
+    const place = (kind: (typeof places)[number], inner: Record<string, unknown>): GraphSpec => {
+      if (kind === "top") return inner as GraphSpec;
+      if (kind === "map") return graph([mapOf({ type: "subgraph", spec: inner })]);
+      if (kind === "nested map") {
+        return graph([mapOf({
+          type: "map",
+          with: { over: "{{ item.xs }}", node: { type: "subgraph", spec: inner } },
+        })]);
+      }
+      return graph([{ id: "sub", type: "subgraph", spec: inner }]);
+    };
+    for (const kind of places) {
+      for (const defect of defects) {
+        const spec = place(kind, defect.spec());
+        let diagnostics: Diagnostic[] = [];
+        expect(() => {
+          diagnostics = validateSpec(spec);
+        }, `${kind} ${defect.name}`).not.toThrow();
+        expect(errors(diagnostics).length, `${kind} ${defect.name}`).toBeGreaterThan(0);
+        expect(errors(diagnostics).every((d) => /^[A-Z0-9_]+$/.test(d.code) && !crashText.test(d.message)), `${kind} ${defect.name}`).toBe(true);
+        let thrown: unknown;
+        try {
+          await compileGraph(spec);
+        } catch (err) {
+          thrown = err;
+        }
+        if (thrown !== undefined) {
+          expect(thrown, `${kind} ${defect.name}`).toBeInstanceOf(Error);
+          expect(thrown, `${kind} ${defect.name}`).not.toBeInstanceOf(TypeError);
+          expect((thrown as { code?: string }).code, `${kind} ${defect.name}`).toMatch(/^[A-Z0-9_]+$/);
+          expect(String((thrown as Error).message), `${kind} ${defect.name}`).not.toMatch(crashText);
+        }
+      }
+    }
+  });
+});

@@ -70,7 +70,7 @@ import { warnFanInLastWrite } from "./runtime/fan-in-warning.js";
 import { sharedHistoryChannels } from "./context/shared.js";
 import { loadGraphImports } from "./runtime/load-imports.js";
 import { graphFile } from "./runtime/graph-files.js";
-import { barrierEdgeDiagnostics, nodeRouteTargets, nodeToolTargets, topologyDiagnostics } from "./runtime/validate-graph.js";
+import { barrierEdgeDiagnostics, nodeRouteTargets, nodeToolTargets, nodesById, topologyDiagnostics } from "./runtime/validate-graph.js";
 import { runWithPolicy, type RetryConfig as RetryConfigInput } from "./runtime/retry.js";
 
 /**
@@ -468,7 +468,10 @@ export async function compileGraph(spec: GraphSpec, opts: CompileOptions = {}): 
   } = assembled;
   const compiledAt = new Date().toISOString();
   const compileIssues = assembled.warnings.map((d) => compileWarningIssue(d, compiledAt));
-  const declaredInputKeys = new Set([...Object.keys(buildStateAnnotation(graphSpec).spec), ...(graphSpec.inputs ?? []).map(field => field.key)]);
+  const declaredInputKeys = new Set([
+    ...Object.keys(buildStateAnnotation(graphSpec).spec),
+    ...(Array.isArray(graphSpec.inputs) ? graphSpec.inputs : []).flatMap((field) => (field && typeof field.key === "string" ? [field.key] : [])),
+  ]);
 
   const authoredMapNames = new Map<string, string>();
   for (const node of graphSpec.nodes) {
@@ -1477,7 +1480,8 @@ async function assembleCompiledLangGraph(
       retryable: false,
     });
   }
-  const policyEdges = spec.nodes.flatMap(node => recoveryTargets(spec, node, opts.hooks).map(to => ({ from: node.id, to })));
+  const policyNodes = (Array.isArray(spec.nodes) ? spec.nodes : []).filter((node) => node != null);
+  const policyEdges = policyNodes.flatMap((node) => recoveryTargets(spec, node, opts.hooks).map((to) => ({ from: node.id, to })));
   const invalidTopology = topologyDiagnostics({ ...spec, edges: [...spec.edges, ...policyEdges] }).filter((d) => d.severity === "error");
   if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
 
@@ -1611,6 +1615,7 @@ async function assembleCompiledLangGraph(
   const defaultTimeout = spec.runtime?.timeoutDefault;
 
   const mapJoinById = new Map<string, string>();
+  const routeNodes = nodesById(spec);
 
   for (const nodeSpec of spec.nodes) {
     assertNodeTypeAllowed(opts.nodePolicy, nodeSpec.type, `node "${nodeSpec.id}"`);
@@ -1720,7 +1725,7 @@ async function assembleCompiledLangGraph(
     // Routers (and any routing-capable node) declare Command.goto destinations via
     // `ends` so LangGraph accepts goto without requiring a duplicate branch edge.
     const recovery = recoveryTargets(spec, nodeSpec, opts.hooks);
-    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id), ...nodeToolTargets(spec, nodeSpec.id), ...recovery].map(target => target === "END" ? END : target))];
+    const routeEnds = [...new Set([...collectRouteEnds(nodeSpec), ...nodeRouteTargets(spec, nodeSpec.id, routeNodes), ...nodeToolTargets(spec, nodeSpec.id), ...recovery].map(target => target === "END" ? END : target))];
     const addNodeOpts = routeEnds.length > 0 ? { ends: routeEnds } : undefined;
 
     const executeNode = async (state: Record<string, unknown>, lgConfig?: LangGraphRunnableConfig) => {

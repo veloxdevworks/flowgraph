@@ -34,9 +34,17 @@ function isJoinBarrier(from: string | readonly string[]): from is readonly strin
   return Array.isArray(from) && from.length > 1;
 }
 
-/** Targets declared by a node's own `with.routes` (router or hitl); edges don't have to repeat them. */
-export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
-  const node = spec.nodes.find((n) => n.id === id);
+/** First node for each id. A later duplicate keeps the earlier node, as `find` did. */
+export function nodesById(spec: GraphSpec): Map<string, NodeSpec> {
+  const byId = new Map<string, NodeSpec>();
+  if (!Array.isArray(spec.nodes)) return byId;
+  for (const node of spec.nodes) {
+    if (node != null && !byId.has(node.id)) byId.set(node.id, node);
+  }
+  return byId;
+}
+
+function routeTargetsOf(node: NodeSpec | undefined): string[] {
   if (!node) return [];
   const w = (node.with ?? {}) as Record<string, unknown>;
   if (node.type === "hitl") return hitlRouteTargets(w);
@@ -54,37 +62,29 @@ export function declaredRouteTargets(spec: GraphSpec, id: string): string[] {
   );
 }
 
-function outgoingTargets(spec: GraphSpec, from: string): string[] {
-  const targets: string[] = nodeRouteTargets(spec, from);
-  for (const edge of spec.edges) {
-    if (!edgeFromIds(edge.from).includes(from)) continue;
-    if ("to" in edge) {
-      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      targets.push(...tos);
-    }
-    if ("branch" in edge) {
-      for (const b of edge.branch) targets.push(b.to);
-    }
-  }
-  return targets;
+/** Targets declared by a node's own `with.routes` (router or hitl); edges don't have to repeat them. */
+export function declaredRouteTargets(spec: GraphSpec, id: string, byId?: Map<string, NodeSpec>): string[] {
+  return routeTargetsOf((byId ?? nodesById(spec)).get(id));
 }
 
 export function nodeToolTargets(spec: GraphSpec, id: string): string[] {
-  const node = spec.nodes.find((n) => n.id === id);
+  const nodes = recordNodes(spec.nodes);
+  const node = nodes.find((n) => n.id === id);
   if (!node || (node.type !== "agent" && node.type !== "intelligent")) return [];
   const withBlock = (node?.with ?? {}) as { tools?: Array<{ node?: string }>; agent?: string };
   const targets = (Array.isArray(withBlock.tools) ? withBlock.tools : []).flatMap((tool) => tool && typeof tool.node === "string" ? [tool.node] : []);
   // Reusable AGENT.md definitions resolve tools at run time.
-  if (typeof withBlock.agent === "string" && withBlock.agent) targets.push(...spec.nodes.filter((n) => n.id !== id).map((n) => n.id));
+  if (typeof withBlock.agent === "string" && withBlock.agent) targets.push(...nodes.filter((n) => n.id !== id).map((n) => n.id));
   return [...new Set(targets)];
 }
 
-export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
-  const node = spec.nodes.find((n) => n.id === id);
-  const targets = declaredRouteTargets(spec, id);
+function routeTargetsFor(spec: GraphSpec, id: string, byId: Map<string, NodeSpec>): string[] {
+  const node = byId.get(id);
+  const targets = routeTargetsOf(node);
   if (node?.on?.error?.startsWith("route:")) targets.push(node.on.error.slice(6));
-  for (const hook of spec.runtime?.hooks ?? []) {
-    if (!hook.do.startsWith("route:") || hook.on !== "node:error") continue;
+  const hooks = spec.runtime?.hooks;
+  for (const hook of Array.isArray(hooks) ? hooks : []) {
+    if (!hook || typeof hook.do !== "string" || !hook.do.startsWith("route:") || hook.on !== "node:error") continue;
     if (hook.where?.nodeId !== undefined && hook.where.nodeId !== id) continue;
     if (hook.where?.nodeType !== undefined && hook.where.nodeType !== node?.type) continue;
     targets.push(hook.do.slice(6));
@@ -92,18 +92,23 @@ export function nodeRouteTargets(spec: GraphSpec, id: string): string[] {
   return [...new Set(targets)];
 }
 
+export function nodeRouteTargets(spec: GraphSpec, id: string, byId?: Map<string, NodeSpec>): string[] {
+  return routeTargetsFor(spec, id, byId ?? nodesById(spec));
+}
+
 /** Public topology includes routes that do not require duplicate static edges. */
 export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; label?: string }> {
+  const byId = nodesById(spec);
   const edges: Array<{ from: string; to: string; label?: string }> = [];
   for (const edge of spec.edges) {
     const sources = edgeFromIds(edge.from);
-    if (!Array.isArray(edge.from) && declaredRouteTargets(spec, edge.from).length) continue;
+    if (!Array.isArray(edge.from) && declaredRouteTargets(spec, edge.from, byId).length) continue;
     const barrier = isJoinBarrier(edge.from);
     if ("to" in edge) {
       for (const from of sources) for (const to of Array.isArray(edge.to) ? edge.to : [edge.to]) edges.push({ from, to, ...(barrier ? { label: "barrier" } : {}) });
     } else for (const branch of edge.branch) edges.push({ from: edge.from, to: branch.to, ...(branch.when ? { label: branch.when } : branch.default ? { label: "default" } : {}) });
   }
-  for (const node of spec.nodes) {
+  for (const node of recordNodes(spec.nodes)) {
     const labelled = new Set<string>();
     if (node.type === "router" && Array.isArray(node.with?.routes)) {
       for (const [index, route] of (node.with.routes as Array<{ name?: string; when?: string; default?: boolean; to?: string }>).entries()) {
@@ -116,86 +121,113 @@ export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; l
       const routes = node.type === "hitl" ? normalizeHitlRoutes(node.with?.routes) : undefined;
       for (const [label, route] of Object.entries(routes ?? {})) if (typeof route?.to === "string") { edges.push({ from: node.id, to: route.to, label }); labelled.add(route.to); }
     }
-    for (const to of nodeRouteTargets(spec, node.id)) if (!labelled.has(to)) edges.push({ from: node.id, to, label: "route" });
+    for (const to of nodeRouteTargets(spec, node.id, byId)) if (!labelled.has(to)) edges.push({ from: node.id, to, label: "route" });
   }
   return [...new Map(edges.map((edge) => [`${edge.from}:${edge.to}:${edge.label ?? ""}`, edge])).values()];
 }
 
 export function topologyDiagnostics(spec: GraphSpec): Diagnostic[] {
-  const ids = new Set(["START", "END", ...spec.nodes.map((n) => n.id)]);
-  const diagnostics = reachabilityDiagnostics(spec);
-  for (const node of spec.nodes) {
-    for (const target of [...nodeRouteTargets(spec, node.id), ...nodeToolTargets(spec, node.id)]) {
+  const byId = nodesById(spec);
+  const nodes = recordNodes(spec.nodes);
+  const ids = new Set(["START", "END", ...nodes.map((n) => n.id)]);
+  const diagnostics = reachabilityDiagnostics(spec, byId);
+  for (const node of nodes) {
+    for (const target of [...nodeRouteTargets(spec, node.id, byId), ...nodeToolTargets(spec, node.id)]) {
       if (!ids.has(target)) diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Node "${node.id}" references unknown target "${target}"`, path: `nodes.${node.id}` });
     }
   }
   return diagnostics;
 }
 
-function incomingSources(spec: GraphSpec, to: string): string[] {
-  const sources: string[] = [];
-  for (const node of spec.nodes) {
-    if (nodeRouteTargets(spec, node.id).includes(to)) sources.push(node.id);
-  }
-  for (const edge of spec.edges) {
-    if ("to" in edge) {
-      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      if (tos.includes(to)) sources.push(...edgeFromIds(edge.from));
-    }
-    if ("branch" in edge) {
-      for (const b of edge.branch) {
-        if (b.to === to) sources.push(...edgeFromIds(edge.from));
-      }
-    }
-  }
-  return sources;
+type Neighbours = { outgoing: Map<string, string[]>; incoming: Map<string, string[]> };
+
+function addNeighbour(map: Map<string, string[]>, key: string, value: string): void {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
 }
 
-/** Nodes reachable from START by following edges (excluding END). */
-export function nodesReachableFromStart(spec: GraphSpec): Set<string> {
-  const reachable = new Set<string>();
-  const queue = outgoingTargets(spec, "START").filter((t) => t !== "END");
+/** Incoming and outgoing ids, from one pass over the nodes and one over the edges. */
+function neighbours(spec: GraphSpec, byId: Map<string, NodeSpec>): Neighbours {
+  const outgoing = new Map<string, string[]>();
+  const incoming = new Map<string, string[]>();
+  const link = (from: string, to: string) => {
+    addNeighbour(outgoing, from, to);
+    addNeighbour(incoming, to, from);
+  };
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (node == null) continue;
+    for (const to of routeTargetsFor(spec, node.id, byId)) link(node.id, to);
+  }
+  for (const edge of spec.edges) {
+    const sources = edgeFromIds(edge.from);
+    const targets: string[] = [];
+    if ("to" in edge) {
+      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
+      targets.push(...tos);
+    }
+    if ("branch" in edge) {
+      for (const branch of edge.branch) targets.push(branch.to);
+    }
+    for (const from of sources) for (const to of targets) link(from, to);
+  }
+  return { outgoing, incoming };
+}
 
+function reachableFromStart(linked: Neighbours): Set<string> {
+  const reachable = new Set<string>();
+  const queue = (linked.outgoing.get("START") ?? []).filter((target) => target !== "END");
   while (queue.length > 0) {
     const id = queue.shift()!;
     if (reachable.has(id)) continue;
     reachable.add(id);
-    for (const next of outgoingTargets(spec, id)) {
+    for (const next of linked.outgoing.get(id) ?? []) {
       if (next !== "END" && !reachable.has(next)) queue.push(next);
     }
   }
   return reachable;
 }
 
-/** Nodes that can eventually reach END. */
-export function nodesThatReachEnd(spec: GraphSpec): Set<string> {
+/** A later duplicate is visited here, so its own type can still reach END. */
+function reachingEnd(spec: GraphSpec, linked: Neighbours): Set<string> {
   const canReach = new Set<string>();
   const queue: string[] = [];
-
-  for (const node of spec.nodes) {
-    if (registry.get(node.type)?.capabilities?.terminal || outgoingTargets(spec, node.id).includes("END")) {
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (node == null) continue;
+    if (registry.get(node.type)?.capabilities?.terminal || (linked.outgoing.get(node.id) ?? []).includes("END")) {
       queue.push(node.id);
     }
   }
-
   while (queue.length > 0) {
     const id = queue.shift()!;
     if (canReach.has(id)) continue;
     canReach.add(id);
-    for (const pred of incomingSources(spec, id)) {
+    for (const pred of linked.incoming.get(id) ?? []) {
       if (pred !== "START" && !canReach.has(pred)) queue.push(pred);
     }
   }
   return canReach;
 }
 
-export function reachabilityDiagnostics(spec: GraphSpec): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-  const fromStart = nodesReachableFromStart(spec);
-  const toEnd = nodesThatReachEnd(spec);
-  const tools = new Set(spec.nodes.flatMap((node) => nodeToolTargets(spec, node.id)));
+/** Nodes reachable from START by following edges (excluding END). */
+export function nodesReachableFromStart(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
+  return reachableFromStart(neighbours(spec, byId));
+}
 
-  for (const node of spec.nodes) {
+/** Nodes that can eventually reach END. */
+export function nodesThatReachEnd(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
+  return reachingEnd(spec, neighbours(spec, byId));
+}
+
+export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec)): Diagnostic[] {
+  const linked = neighbours(spec, byId);
+  const diagnostics: Diagnostic[] = [];
+  const fromStart = reachableFromStart(linked);
+  const toEnd = reachingEnd(spec, linked);
+  const nodes = recordNodes(spec.nodes);
+  const tools = new Set(nodes.flatMap((node) => nodeToolTargets(spec, node.id)));
+
+  for (const node of nodes) {
     if (!fromStart.has(node.id) && !tools.has(node.id)) {
       diagnostics.push({
         severity: "error",
@@ -221,8 +253,16 @@ export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
   const channels = spec.state?.channels ?? {};
 
   for (const [name, ch] of Object.entries(channels)) {
-    const reducer = ch.reducer;
     const path = `state.channels.${name}`;
+    if (!ch || typeof ch !== "object") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path, message: "Expected object" });
+      continue;
+    }
+    const reducer = ch.reducer;
+    if (reducer !== undefined && typeof reducer !== "string") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path: `${path}.reducer`, message: "Expected string" });
+      continue;
+    }
 
     if (reducer === "append") {
       if (ch.type !== "array" && ch.type !== "any") {
@@ -246,7 +286,7 @@ export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
       }
     }
 
-    if (reducer?.startsWith("custom:")) {
+    if (typeof reducer === "string" && reducer.startsWith("custom:")) {
       const reducerName = reducer.slice("custom:".length);
       if (!registry.getReducer(reducerName)) {
         diagnostics.push({
@@ -360,7 +400,7 @@ export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {
   const existing = { ...(spec.state?.channels ?? {}) };
   let changed = false;
 
-  for (const node of spec.nodes) {
+  for (const node of recordNodes(spec.nodes)) {
     for (const name of collectNodeWriteChannels(node)) {
       if (name in existing) continue;
       existing[name] =
@@ -479,9 +519,10 @@ export function nodeChannelNameCollisionDiagnostics(spec: GraphSpec): Diagnostic
 
 export function unconditionalFanOutDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
+  const byId = nodesById(spec);
   const routerIds = new Set(
     spec.nodes
-      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id).length > 0))
+      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id, byId).length > 0))
       .map((n) => n.id),
   );
 
@@ -582,21 +623,24 @@ export interface SubgraphOutputSite {
 export function subgraphOutputSites(spec: GraphSpec): SubgraphOutputSite[] {
   const sites: SubgraphOutputSite[] = [];
   const walk = (graph: GraphSpec, prefix: string) => {
-    for (const node of graph.nodes ?? []) {
+    if (!Array.isArray(graph?.nodes)) return;
+    for (const node of graph.nodes) {
+      if (!isRecord(node)) continue;
       if (node.type === "subgraph") {
-        sites.push(siteFor(node, `${prefix}nodes.${node.id}.with.stateMap.out`, graph));
-        if (node.spec) walk(node.spec, `${prefix}nodes.${node.id}.spec.`);
+        const specNode = node as unknown as NodeSpec;
+        sites.push(siteFor(specNode, `${prefix}nodes.${specNode.id}.with.stateMap.out`, graph));
+        if (isRecord(specNode.spec)) walk(specNode.spec as GraphSpec, `${prefix}nodes.${specNode.id}.spec.`);
       }
       if (node.type === "map") {
-        const inner = (node.with as { node?: NodeSpec } | undefined)?.node;
-        if (inner && inner.type === "subgraph") {
-          const label = inner.id || node.id;
-          sites.push({
-            ...siteFor(inner, `${prefix}nodes.${node.id}.with.node.with.stateMap.out`, graph),
-            id: label,
-          });
-          if (inner.spec) walk(inner.spec, `${prefix}nodes.${node.id}.with.node.spec.`);
-        }
+        const inner = (node.with as { node?: unknown } | undefined)?.node;
+        if (!isRecord(inner) || inner.type !== "subgraph") continue;
+        const body = inner as unknown as NodeSpec;
+        const label = typeof body.id === "string" && body.id ? body.id : String(node.id ?? "");
+        sites.push({
+          ...siteFor(body, `${prefix}nodes.${String(node.id)}.with.node.with.stateMap.out`, graph),
+          id: label,
+        });
+        if (isRecord(body.spec)) walk(body.spec, `${prefix}nodes.${String(node.id)}.with.node.spec.`);
       }
     }
   };
@@ -808,7 +852,7 @@ export function demoToolExposureDiagnostics(spec: GraphSpec): Diagnostic[] {
     const w = (node.with ?? {}) as { tools?: unknown; node?: NodeSpec };
     if (Array.isArray(w.tools)) {
       for (const tool of w.tools as Array<{ node?: unknown }>) {
-        const target = spec.nodes.find((n) => n.id === tool?.node);
+        const target = (Array.isArray(spec.nodes) ? spec.nodes : []).find((n) => n != null && n.id === tool?.node);
         if (!provesObjective(target)) continue;
         diagnostics.push({
           severity: "error",
@@ -820,7 +864,10 @@ export function demoToolExposureDiagnostics(spec: GraphSpec): Diagnostic[] {
     }
     if (w.node) check(w.node, `${path}.with.node`);
   };
-  for (const node of spec.nodes) check(node, `nodes.${node.id}`);
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (!isRecord(node)) continue;
+    check(node as NodeSpec, `nodes.${String(node.id)}`);
+  }
   return diagnostics;
 }
 
@@ -833,9 +880,12 @@ const GATE_NODE_TYPES = new Set(["hitl", "workshop", "wait"]);
 /** Child nodes carried inside a node: the inline subgraph spec and a `map` inner node. */
 function childNodesOf(node: NodeSpec): NodeSpec[] {
   const out: NodeSpec[] = [];
-  if (node.spec) out.push(...(node.spec.nodes ?? []));
-  const inner = (node.with as { node?: NodeSpec } | undefined)?.node;
-  if (node.type === "map" && inner && typeof inner === "object") out.push(inner);
+  const specNodes = (node.spec as { nodes?: unknown } | undefined)?.nodes;
+  if (Array.isArray(specNodes)) {
+    for (const child of specNodes) if (isRecord(child)) out.push(child as unknown as NodeSpec);
+  }
+  const inner = (node.with as { node?: unknown } | undefined)?.node;
+  if (node.type === "map" && isRecord(inner)) out.push(inner as unknown as NodeSpec);
   return out;
 }
 
@@ -920,9 +970,10 @@ function findGate(node: NodeSpec): string | undefined {
 
 /** True when `graph` (or any inline child below it) has a node with `runsOn`. */
 export function graphHasPlacement(graph: GraphSpec): boolean {
-  const walk = (nodes: NodeSpec[]): boolean =>
-    nodes.some((n) => n.runsOn !== undefined || walk(childNodesOf(n)));
-  return walk(graph.nodes ?? []);
+  const walk = (nodes: unknown): boolean =>
+    Array.isArray(nodes) &&
+    nodes.some((n) => isRecord(n) && ((n as NodeSpec).runsOn !== undefined || walk(childNodesOf(n as NodeSpec))));
+  return walk(graph?.nodes);
 }
 
 export function placementNestedMessage(id: string): string {
@@ -1004,11 +1055,18 @@ export function placementDiagnostics(spec: GraphSpec): Diagnostic[] {
       }
     }
     const placed = placedAncestor || node.runsOn !== undefined;
-    if (node.spec) for (const child of node.spec.nodes ?? []) check(child, `${path}.spec.nodes.${child.id}`, depth + 1, placed);
-    const inner = (node.with as { node?: NodeSpec } | undefined)?.node;
-    if (node.type === "map" && inner && typeof inner === "object") check(inner, `${path}.with.node`, depth + 1, placed);
+    const children = (node.spec as { nodes?: unknown } | undefined)?.nodes;
+    if (Array.isArray(children)) {
+      for (const child of children) {
+        if (isRecord(child)) check(child as unknown as NodeSpec, `${path}.spec.nodes.${String(child.id)}`, depth + 1, placed);
+      }
+    }
+    const inner = (node.with as { node?: unknown } | undefined)?.node;
+    if (node.type === "map" && isRecord(inner)) check(inner as unknown as NodeSpec, `${path}.with.node`, depth + 1, placed);
   };
-  for (const node of spec.nodes ?? []) check(node, `nodes.${node.id}`, 0, false);
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (isRecord(node)) check(node as NodeSpec, `nodes.${String(node.id)}`, 0, false);
+  }
   return diagnostics;
 }
 
@@ -1051,9 +1109,10 @@ export function placementAdjacentHopDiagnostics(spec: GraphSpec): Diagnostic[] {
  * Matches `declaresRoutes` in the compiler.
  */
 function routeDeclaringIds(spec: GraphSpec): Set<string> {
+  const byId = nodesById(spec);
   return new Set(
-    spec.nodes
-      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id).length > 0))
+    recordNodes(spec.nodes)
+      .filter((n) => n.type === "router" || (n.type === "hitl" && declaredRouteTargets(spec, n.id, byId).length > 0))
       .map((n) => n.id),
   );
 }
@@ -1182,8 +1241,9 @@ export function unevenFanInDiagnostics(spec: GraphSpec): Diagnostic[] {
  */
 export function barrierEdgeDiagnostics(spec: GraphSpec, hooks: Hook[] = []): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
-  const nodeIds = new Set(spec.nodes.map((n) => n.id));
-  const byId = new Map(spec.nodes.map((n) => [n.id, n]));
+  const nodes = recordNodes(spec.nodes);
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const byId = new Map(nodes.map((n) => [n.id, n]));
   const adj = staticSuccessors(spec);
   const dist = hopDistances(adj);
   const reachable = nodesReachableFromStart(spec);
@@ -1297,11 +1357,46 @@ export function defaultModelDiagnostics(spec: GraphSpec): Diagnostic[] {
 }
 
 /**
+ * True when every node, edge, and hook has the strings the body lints read.
+ * A missing or non-string field is left to the schema diagnostic.
+ */
+function lintableGraph(spec: GraphSpec): boolean {
+  if (!Array.isArray(spec.nodes) || !Array.isArray(spec.edges)) return false;
+  for (const node of spec.nodes) {
+    if (!isRecord(node) || typeof node.id !== "string" || typeof node.type !== "string") return false;
+    const onError = (node.on as { error?: unknown } | undefined)?.error;
+    if (onError !== undefined && typeof onError !== "string") return false;
+    const routes = (node.with as { routes?: unknown } | undefined)?.routes;
+    if (routes !== undefined && (typeof routes !== "object" || routes === null)) return false;
+  }
+  for (const edge of spec.edges) {
+    if (!isRecord(edge)) return false;
+    const from = edge.from;
+    if (typeof from !== "string" && !(Array.isArray(from) && from.every((item) => typeof item === "string"))) return false;
+    if ("to" in edge) {
+      const to = edge.to;
+      if (typeof to !== "string" && !(Array.isArray(to) && to.every((item) => typeof item === "string"))) return false;
+    } else if (!Array.isArray(edge.branch) || edge.branch.some((entry) => !isRecord(entry) || typeof entry.to !== "string")) {
+      return false;
+    }
+  }
+  const hooks = spec.runtime?.hooks;
+  if (hooks !== undefined && !Array.isArray(hooks)) return false;
+  if (Array.isArray(hooks)) {
+    for (const hook of hooks) {
+      if (!isRecord(hook) || typeof hook.on !== "string" || typeof hook.do !== "string") return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Lints that read only one graph's own nodes, edges and channels. Run on each
  * nested graph (inline subgraph `spec`); the top level gets them, and the lints
  * that walk the whole tree, from {@link graphLintDiagnostics}.
  */
 export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+  if (!lintableGraph(spec)) return [];
   return [
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
@@ -1321,6 +1416,11 @@ export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Nodes a walk can read. A null entry or a `nodes` value that is not a list is reported elsewhere. */
+function recordNodes(nodes: unknown): NodeSpec[] {
+  return Array.isArray(nodes) ? nodes.filter((node): node is NodeSpec => isRecord(node)) : [];
 }
 
 /** A nested graph's diagnostic, with its path under the node that holds it. */
@@ -1465,35 +1565,102 @@ export function graphStructureDiagnostics(spec: GraphSpec, options: GraphStructu
   const shape = graphShapeDiagnostics(spec);
   if (shape.length) return shape;
   const out: Diagnostic[] = [];
-  graphStructure(spec, "", out, options.lints === true);
+  graphStructure(spec, "", out, options.lints === true, false);
   return out;
 }
 
-function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean): void {
-  const push = (...items: Diagnostic[]) => out.push(...(prefix ? items.map((d) => nested(d, prefix)) : items));
-  const nodes = Array.isArray(spec.nodes) ? spec.nodes : [];
-  const edges = Array.isArray(spec.edges) ? spec.edges : [];
+function stringOrStrings(value: unknown): value is string | string[] {
+  return typeof value === "string" || (Array.isArray(value) && value.every((item) => typeof item === "string"));
+}
 
-  for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
+function isNodeSpec(value: unknown): value is NodeSpec {
+  return isRecord(value) && typeof value.id === "string" && typeof value.type === "string";
+}
+
+function isEdgeSpec(value: unknown): value is GraphSpec["edges"][number] {
+  if (!isRecord(value) || !stringOrStrings(value.from)) return false;
+  if ("to" in value) return stringOrStrings(value.to);
+  return Array.isArray(value.branch) && value.branch.every((entry) => isRecord(entry) && typeof entry.to === "string");
+}
+
+function edgeTargets(edge: GraphSpec["edges"][number]): string[] {
+  if ("to" in edge) return Array.isArray(edge.to) ? edge.to : [edge.to];
+  return edge.branch.map((entry) => entry.to);
+}
+
+function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean): void {
+  const push = (...items: Diagnostic[]) => out.push(...(prefix ? items.map((d) => nested(d, prefix)) : items));
+  // A map schema has already reported this value. The lint does not report it again.
+  const shape = (code: string, path: string, message: string) => {
+    if (!schemaChecked) push({ severity: "error", code, path, message });
+  };
+  const rawNodes = (Array.isArray(spec.nodes) ? spec.nodes : []) as unknown[];
+  const rawEdges = (Array.isArray(spec.edges) ? spec.edges : []) as unknown[];
+  const rawHooks = spec.runtime?.hooks as unknown;
+  let malformed = !Array.isArray(spec.nodes) || !Array.isArray(spec.edges);
+
+  if (!Array.isArray(spec.nodes)) shape("SCHEMA_ERROR", "nodes", "Expected array");
+  if (spec.edges === undefined) shape("SCHEMA_ERROR", "edges", "Required");
+  else if (!Array.isArray(spec.edges)) shape("SCHEMA_ERROR", "edges", "Expected array");
+  if (rawHooks !== undefined && !Array.isArray(rawHooks)) shape("SCHEMA_ERROR", "runtime.hooks", "Expected array");
+  for (const [index, hook] of (Array.isArray(rawHooks) ? rawHooks : []).entries()) {
+    if (!isRecord(hook) || typeof hook.on !== "string") {
+      shape("HOOK_PHASE_UNKNOWN", `runtime.hooks[${index}].on`, isRecord(hook) && hook.on !== undefined ? "Expected string" : "Required");
+      continue;
+    }
+    if (typeof hook.do !== "string") {
+      shape(hook.do === undefined ? "SCHEMA_ERROR" : "HOOK_DIRECTIVE_UNKNOWN", `runtime.hooks[${index}].do`, hook.do === undefined ? "Required" : "Expected string");
+      continue;
+    }
     if (!KNOWN_PHASES.has(hook.on)) push({ severity: "error", code: "HOOK_PHASE_UNKNOWN", path: `runtime.hooks[${index}].on`, message: `Unknown hook event "${hook.on}".` });
-  }
-  for (const [index, hook] of (spec.runtime?.hooks ?? []).entries()) {
     if (!knownHookDirective(hook.do, hook.on)) push({ severity: "error", code: "HOOK_DIRECTIVE_UNKNOWN", path: `runtime.hooks[${index}].do`, message: `Hook directive "${hook.do}" is not valid for ${hook.on}. ${hookVerbMessage(hook.on)}` });
   }
 
-  const nodeIds = new Set(nodes.map((n) => n.id));
+  for (const [index, node] of rawNodes.entries()) {
+    if (!isRecord(node)) {
+      malformed = true;
+      shape("SCHEMA_ERROR", `nodes[${index}]`, "Expected object");
+      continue;
+    }
+    if (typeof node.id !== "string") {
+      malformed = true;
+      shape("SCHEMA_ERROR", `nodes[${index}].id`, node.id === undefined ? "Required" : "Expected string");
+    }
+    if (typeof node.type !== "string") {
+      malformed = true;
+      shape("SCHEMA_ERROR", `nodes[${index}].type`, node.type === undefined ? "Required" : "Expected string");
+    }
+  }
+  const nodes = rawNodes.filter(isNodeSpec);
+
+  const nodeIds = new Set<string>();
+  for (const node of rawNodes) if (isRecord(node) && typeof node.id === "string") nodeIds.add(node.id);
   const seen = new Set<string>();
   for (const node of nodes) {
     if (seen.has(node.id)) push({ severity: "error", code: "DUPLICATE_NODE_ID", message: `Duplicate node id: "${node.id}"`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
     seen.add(node.id);
   }
 
-  for (const [index, edge] of edges.entries()) {
+  for (const [index, edge] of rawEdges.entries()) {
+    if (isEdgeSpec(edge)) continue;
+    malformed = true;
+    const from = isRecord(edge) ? edge.from : undefined;
+    const to = isRecord(edge) && "to" in edge ? edge.to : undefined;
+    if (!isRecord(edge) || !stringOrStrings(from)) {
+      shape("SCHEMA_ERROR", `edges[${index}].from`, isRecord(edge) && from !== undefined ? "Expected string" : "Required");
+    }
+    if (!isRecord(edge) || ("to" in edge ? !stringOrStrings(to) : !Array.isArray(edge.branch))) {
+      shape("SCHEMA_ERROR", `edges[${index}].to`, isRecord(edge) && to !== undefined ? "Expected string" : "Required");
+    }
+  }
+  const edges = rawEdges.flatMap((edge, index) => (isEdgeSpec(edge) ? [{ edge, index }] : []));
+
+  for (const { edge, index } of edges) {
     const check = (ref: string) => {
       if (ref === "START" || ref === "END") return;
-      if (!nodeIds.has(ref)) push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"`, ...(prefix ? { path: `edges[${index}]` } : {}) });
+      if (!nodeIds.has(ref)) push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Edge references unknown node "${ref}"`, path: `edges[${index}]` });
     };
-    const targets = "to" in edge ? (Array.isArray(edge.to) ? edge.to : [edge.to]) : edge.branch.map((b) => b.to);
+    const targets = edgeTargets(edge);
     // A `from` list is checked in barrierEdgeDiagnostics, including unknown ids, START and END.
     if (!Array.isArray(edge.from)) {
       check(edge.from);
@@ -1507,28 +1674,30 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
     }
   }
 
-  if (!edges.some((e) => (Array.isArray(e.from) ? e.from : [e.from]).includes("START"))) {
+  if (!malformed && !edges.some(({ edge }) => (Array.isArray(edge.from) ? edge.from : [edge.from]).includes("START"))) {
     push({ severity: "error", code: "NO_START_EDGE", message: 'Graph has no edge from "START"', ...(prefix ? { path: "edges" } : {}) });
   }
 
   const allTargets = new Set<string>();
-  for (const edge of edges) {
-    if ("to" in edge) for (const t of Array.isArray(edge.to) ? edge.to : [edge.to]) allTargets.add(t);
-    if ("branch" in edge) for (const b of edge.branch) allTargets.add(b.to);
+  for (const { edge } of edges) {
+    for (const target of edgeTargets(edge)) allTargets.add(target);
   }
   // A router's or routing hitl's own `with.routes` also lead somewhere.
+  const byId = nodesById(spec);
   for (const node of nodes) {
-    const routeTargets = declaredRouteTargets(spec, node.id);
+    const routeTargets = declaredRouteTargets(spec, node.id, byId);
     for (const t of routeTargets) allTargets.add(t);
     if (routeTargets.includes("START")) {
       push({ severity: "error", code: "ROUTE_TO_START", path: `nodes.${node.id}.with.routes`, message: `${node.type === "hitl" ? "Hitl" : "Router"} "${node.id}" has a route to "START". Route to the first node instead.` });
     }
   }
-  for (const node of nodes) {
-    if (!allTargets.has(node.id)) push({ severity: "warning", code: "NO_INBOUND_EDGE", message: `Node "${node.id}" has no inbound edges`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
+  if (!malformed) {
+    for (const node of nodes) {
+      if (!allTargets.has(node.id)) push({ severity: "warning", code: "NO_INBOUND_EDGE", message: `Node "${node.id}" has no inbound edges`, ...(prefix ? { path: `nodes.${node.id}` } : {}) });
+    }
   }
 
-  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out, lints);
+  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out, lints, schemaChecked);
 
   if (lints) {
     push(...inputFieldDiagnostics(spec), ...triggerDiagnostics(spec));
@@ -1551,11 +1720,17 @@ function graphStructureChecksHook(value: unknown, issuePath: ReadonlyArray<Prope
     if (!cursor || typeof cursor !== "object") return false;
     cursor = (cursor as Record<PropertyKey, unknown>)[segment];
   }
-  return !!cursor && typeof cursor === "object" && Array.isArray((cursor as { nodes?: unknown }).nodes);
+  if (!cursor || typeof cursor !== "object" || !Array.isArray((cursor as { nodes?: unknown }).nodes)) return false;
+  const index = issuePath[hooksAt + 1];
+  const hooks = (cursor as { runtime?: { hooks?: unknown } }).runtime?.hooks;
+  if (typeof index !== "number" || !Array.isArray(hooks)) return false;
+  const hook = hooks[index];
+  // A missing or non-string field keeps the schema message, such as "Required".
+  return isRecord(hook) && typeof hook[field] === "string";
 }
 
 /** Type registration and `with` shape for one node, then the graphs nested in it. */
-function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean): void {
+function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean): void {
   const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
   const factory = registry.get(node.type);
   if (!factory) {
@@ -1563,10 +1738,12 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
   } else {
     const configResult = factory.configSchema.safeParse(node.with ?? {});
     if (!configResult.success) {
-      for (const issue of configResult.error.issues) {
-        // A map schema parses the nested graph, including its hooks. The walk
-        // below reports that same event or verb, so the config issue is not repeated.
-        if (node.type === "map" && graphStructureChecksHook(node.with, issue.path)) continue;
+      const issues = configResult.error.issues;
+      // A string hook event or verb is reported by the walk. Any other schema
+      // failure is the diagnostic for this body, so the nested lints do not run.
+      const hookWalk = node.type === "map" && issues.every((issue) => graphStructureChecksHook(node.with, issue.path));
+      for (const issue of issues) {
+        if (hookWalk && graphStructureChecksHook(node.with, issue.path)) continue;
         const fieldPath = issue.path.join(".");
         push({
           severity: "error",
@@ -1575,6 +1752,7 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
           path: fieldPath ? `${path}.with.${fieldPath}` : `${path}.with`,
         });
       }
+      if (node.type === "map" && !hookWalk) return;
     }
   }
   if (node.type === "map") {
@@ -1582,11 +1760,13 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
     // A body without a type is already reported against the map's own `with`.
     if (isRecord(body) && typeof body.type === "string") {
       const id = typeof body.id === "string" ? body.id : undefined;
-      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out, lints);
+      // MapWithSchema has already parsed this body, including a subgraph spec.
+      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out, lints, true);
     }
   }
-  if (node.type === "subgraph" && isRecord(node.spec) && Array.isArray(node.spec.nodes)) {
-    graphStructure(node.spec, `${prefix}${path}.spec.`, out, lints);
+  if (node.type === "subgraph" && isRecord(node.spec)) {
+    if (Array.isArray(node.spec.nodes)) graphStructure(node.spec, `${prefix}${path}.spec.`, out, lints, schemaChecked);
+    else if (!schemaChecked) push({ severity: "error", code: "SCHEMA_ERROR", path: `${path}.spec.nodes`, message: "Expected array" });
   }
 }
 
@@ -1623,6 +1803,10 @@ export function inputFieldDiagnostics(spec: GraphSpec): Diagnostic[] {
   const seen = new Set<string>();
   for (const [index, field] of (Array.isArray(spec.inputs) ? spec.inputs : []).entries()) {
     const path = `inputs[${index}]`;
+    if (!field || typeof field !== "object") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path, message: "Expected object" });
+      continue;
+    }
     if (seen.has(field.key)) {
       diagnostics.push({ severity: "error", code: "DUPLICATE_INPUT_KEY", path: `${path}.key`, message: `Input "${field.key}" is declared more than once` });
     }
@@ -1644,11 +1828,19 @@ export function triggerDiagnostics(spec: GraphSpec): Diagnostic[] {
   const seen = new Set<string>();
   for (const [index, trigger] of (Array.isArray(spec.triggers) ? spec.triggers : []).entries()) {
     const path = `triggers[${index}]`;
+    if (!trigger || typeof trigger !== "object") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path, message: "Expected object" });
+      continue;
+    }
     if (seen.has(trigger.id)) {
       diagnostics.push({ severity: "error", code: "DUPLICATE_TRIGGER_ID", path: `${path}.id`, message: `Trigger id "${trigger.id}" is used more than once; hosts use it to tell triggers apart` });
     }
     seen.add(trigger.id);
     if (trigger.type !== "cron") continue;
+    if (typeof trigger.schedule !== "string") {
+      diagnostics.push({ severity: "error", code: "SCHEMA_ERROR", path: `${path}.schedule`, message: trigger.schedule === undefined ? "Required" : "Expected string" });
+      continue;
+    }
     const problem = cronScheduleProblem(trigger.schedule);
     if (problem) {
       diagnostics.push({ severity: "error", code: "TRIGGER_CRON_INVALID", path: `${path}.schedule`, message: `Trigger "${trigger.id}" schedule "${trigger.schedule}": ${problem}` });
@@ -1661,6 +1853,7 @@ export function triggerDiagnostics(spec: GraphSpec): Diagnostic[] {
 }
 
 export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+  if (!lintableGraph(spec)) return [];
   return [
     ...defaultModelDiagnostics(spec),
     ...hitlRouteDiagnostics(spec),

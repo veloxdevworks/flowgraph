@@ -30,8 +30,10 @@ function collectAgentSkillTools(node: NodeSpec | Record<string, unknown>, uses: 
 }
 
 export function walkNodes(spec: GraphSpec, visit: (node: NodeSpec | Record<string, unknown>, path: string) => void): void {
-  const walk = (nodes: Array<NodeSpec | Record<string, unknown>>, path: string) => {
+  const walk = (nodes: unknown, path: string) => {
+    if (!Array.isArray(nodes)) return;
     for (const node of nodes) {
+      if (!node || typeof node !== "object") continue;
       const id = String((node as { id?: unknown }).id ?? "?");
       visit(node, `${path}.${id}`);
       const type = String((node as { type?: unknown }).type ?? "");
@@ -40,8 +42,8 @@ export function walkNodes(spec: GraphSpec, visit: (node: NodeSpec | Record<strin
         if (inner && typeof inner === "object") walk([inner], `${path}.${id}.map`);
       }
       if (type === "subgraph") {
-        const inline = (node as { spec?: GraphSpec }).spec;
-        if (inline?.nodes) walk(inline.nodes, `${path}.${id}.subgraph`);
+        const inline = (node as { spec?: { nodes?: unknown } }).spec;
+        if (inline && Array.isArray(inline.nodes)) walk(inline.nodes, `${path}.${id}.subgraph`);
       }
     }
   };
