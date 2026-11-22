@@ -6,7 +6,7 @@ import { AudioWithSchema, ImageWithSchema, Model3dWithSchema, VideoWithSchema, t
 import { compileGraph } from "../compiler.js";
 import { defineNode, describeNodeTypes, registry } from "../registry.js";
 import { z } from "zod";
-import { deriveMediaProviders, registerMediaVendor } from "./registry.js";
+import { deriveMediaProviders, getMediaVendor, registerMediaVendor } from "./registry.js";
 import type { JobHandle, JobStatus, MediaCallContext, MediaProvider, MediaRequest } from "./types.js";
 
 // 1x1 transparent PNG
@@ -417,6 +417,8 @@ describe("async jobs and the journal", () => {
     await vi.advanceTimersByTimeAsync(50);
     const res = await pending;
     expect(res.status).toBe("error");
+    expect(String(res.error?.message ?? res.error)).toMatch(/timed out/);
+    expect(String(res.error?.message ?? res.error)).not.toMatch(/vendor rejected the poll/);
     expect(calls.cancel).toBe(0);
     const left = await readdir(path.join(dir, ".flowgraph", "jobs", "ta-poll-other"));
     expect(left).toHaveLength(1);
@@ -514,9 +516,35 @@ describe("credentials are configured once", () => {
   });
 
   it("defaults the key env when the entry sets none, and rejects unknown media vendors", () => {
-    const derived = deriveMediaProviders({ g: { kind: "langchain", vendor: "xai" } });
-    expect(derived).toHaveLength(1);
-    expect(() => deriveMediaProviders({ t: { kind: "media", vendor: "does-not-exist" } })).toThrow(/unknown media vendor/);
+    const saved = {
+      XAI_API_KEY: process.env.XAI_API_KEY,
+      GROK_API_KEY: process.env.GROK_API_KEY,
+    };
+    const previous = getMediaVendor("xai");
+    const seen: Array<Record<string, unknown>> = [];
+    try {
+      process.env.XAI_API_KEY = "isolated-xai-key";
+      delete process.env.GROK_API_KEY;
+      registerMediaVendor({
+        vendor: "xai",
+        modalities: ["image", "video"],
+        defaultApiKeyEnv: "XAI_API_KEY",
+        create(opts) {
+          seen.push({ ...opts });
+          return { name: opts.name, vendor: "xai", modalities: ["image", "video"], async start() { return { id: "x" }; } };
+        },
+      });
+      const derived = deriveMediaProviders({ g: { kind: "langchain", vendor: "xai" } });
+      expect(derived).toHaveLength(1);
+      expect(seen.at(-1)).toMatchObject({ name: "g", apiKeyEnv: "XAI_API_KEY" });
+      expect(() => deriveMediaProviders({ t: { kind: "media", vendor: "does-not-exist" } })).toThrow(/unknown media vendor/);
+    } finally {
+      if (previous) registerMediaVendor(previous);
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it("a graph's providers: block resolves media nodes by entry name", async () => {
