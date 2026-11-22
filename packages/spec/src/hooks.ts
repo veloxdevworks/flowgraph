@@ -21,39 +21,27 @@ export const HOOK_EVENTS = [
 
 export type HookEventName = (typeof HOOK_EVENTS)[number];
 
-/** Names that still parse, rewritten to an event that runs. */
-export const HOOK_EVENT_ALIASES: Readonly<Record<string, HookEventName>> = {
-  "intelligent:beforeToolCall": "agent:beforeToolCall",
-  "intelligent:afterToolCall": "agent:afterToolCall",
-};
-
 export const HOOK_WHERE_KEYS = ["nodeId", "nodeType", "tool", "channel"] as const;
 
 const GATE_VERBS = new Set(["allow", "deny", "interrupt"]);
 const ERROR_VERBS = new Set(["retry", "continue", "fail"]);
 
-export function canonicalHookEvent(on: string): string {
-  return HOOK_EVENT_ALIASES[on] ?? on;
-}
-
 export function hookEventFires(on: string): boolean {
-  return (HOOK_EVENTS as readonly string[]).includes(canonicalHookEvent(on));
+  return (HOOK_EVENTS as readonly string[]).includes(on);
 }
 
 export function hookVerbAllowed(on: string, verb: string): boolean {
-  const event = canonicalHookEvent(on);
-  if (event === "node:before" || event === "agent:beforeToolCall") return GATE_VERBS.has(verb);
-  if (event === "node:error") return ERROR_VERBS.has(verb) || isRouteVerb(verb);
-  if (event === "state:beforeUpdate" || event === "node:after") return verb === "redact";
+  if (on === "node:before" || on === "agent:beforeToolCall") return GATE_VERBS.has(verb);
+  if (on === "node:error") return ERROR_VERBS.has(verb) || isRouteVerb(verb);
+  if (on === "state:beforeUpdate" || on === "node:after") return verb === "redact";
   return false;
 }
 
 export function hookVerbMessage(on: string): string {
-  const event = canonicalHookEvent(on);
-  if (event === "node:before" || event === "agent:beforeToolCall") return "Use allow, deny or interrupt.";
-  if (event === "node:error") return "Use retry, continue, fail or route:<node>.";
-  if (event === "state:beforeUpdate" || event === "node:after") return "Use redact.";
-  return `Hook event "${event}" does not take a control verb.`;
+  if (on === "node:before" || on === "agent:beforeToolCall") return "Use allow, deny or interrupt.";
+  if (on === "node:error") return "Use retry, continue, fail or route:<node>.";
+  if (on === "state:beforeUpdate" || on === "node:after") return "Use redact.";
+  return `Hook event "${on}" does not take a control verb.`;
 }
 
 function isRouteVerb(verb: string): boolean {

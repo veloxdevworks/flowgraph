@@ -25,12 +25,12 @@ export const routerNode = defineNode<Config>({
   type: "router",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { routing: true },
+  capabilities: { routing: true, hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { routing: true },
+      capabilities: { routing: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<import("../registry.js").NodeResult> {
         const scope = buildScope(state, ctx);
@@ -133,7 +133,7 @@ async function runModelRouter(
   nodeProvider: string | undefined,
   nodeModel: string | undefined,
 ): Promise<import("../registry.js").NodeResult> {
-  const providerName = nodeProvider ?? config.provider ?? ctx.config.defaults?.provider ?? (providerNamesFor(ctx).includes("mock") ? "mock" : providerNamesFor(ctx)[0]);
+  const providerName = nodeProvider ?? ctx.config.defaults?.provider ?? (providerNamesFor(ctx).includes("mock") ? "mock" : providerNamesFor(ctx)[0]);
   if (!providerName) {
     throw new Error(`router "${nodeId}" mode=model: no provider available. Register a provider or set provider/config.defaults.provider.`);
   }

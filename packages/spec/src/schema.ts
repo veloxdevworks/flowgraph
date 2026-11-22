@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { contractSchemaProblem } from "./validate-json-schema.js";
+import { channelTypeConflict } from "./channel-contract.js";
 import { hookEventFires, hookVerbAllowed, hookVerbMessage } from "./hooks.js";
 
 // ---------------------------------------------------------------------------
@@ -7,7 +8,18 @@ import { hookEventFires, hookVerbAllowed, hookVerbMessage } from "./hooks.js";
 // ---------------------------------------------------------------------------
 
 export const VersionSchema = z.literal("flowgraph/v1");
-export const KindSchema = z.union([z.literal("Graph"), z.literal("Skill"), z.literal("Subgraph")]);
+export const KindSchema = z.literal("Graph");
+
+/**
+ * Namespaced plugin node type: `<namespace>:<name>`, `<namespace>/<name>`,
+ * or `@<scope>/<pkg>:<name>` / `@<scope>/<pkg>/<name>`.
+ */
+export const PLUGIN_NODE_TYPE_PATTERN =
+  /^(?:@[a-z0-9][a-z0-9-]*\/)?[a-z][a-z0-9-]*[:/][a-z][a-z0-9-]*$/;
+
+export function isNamespacedPluginType(type: string): boolean {
+  return PLUGIN_NODE_TYPE_PATTERN.test(type);
+}
 
 export const MetadataSchema = z.object({
   name: z
@@ -198,19 +210,6 @@ export const ChannelTypeSchema = z.union([
   z.literal("any"),
 ]);
 
-export const ChannelSchema = z.object({
-  type: ChannelTypeSchema,
-  description: z.string().optional(),
-  default: z.unknown().optional(),
-  reducer: ReducerSchema.optional(),
-  items: PropertySchema.optional(),
-  properties: z.record(PropertySchema).optional(),
-});
-
-export const StateSchema = z.object({
-  channels: z.record(ChannelSchema),
-});
-
 // ---------------------------------------------------------------------------
 // Retry / timeout
 // ---------------------------------------------------------------------------
@@ -256,7 +255,44 @@ export function isRelocatedFieldDef(def: object): boolean {
   return relocatedFields.has(def);
 }
 
+const NODE_INPUT_MOVED =
+  "with.input was removed; set the node's own input: instead. Any value is allowed there, templates render at every depth, and the node reads it as {{ input }}";
 
+// ---------------------------------------------------------------------------
+// Channel data contracts
+// ---------------------------------------------------------------------------
+
+/** A draft-07 schema checked on every write. No `{{ }}` rendering happens here: it is the plain dialect. */
+const DataSchemaSchema = z.record(z.unknown()).superRefine((schema, ctx) => {
+  const problem = contractSchemaProblem(schema);
+  if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
+});
+
+export const ChannelSchema = z
+  .object({
+    type: ChannelTypeSchema,
+    description: z.string().optional(),
+    default: z.unknown().optional(),
+    reducer: ReducerSchema.optional(),
+    schema: DataSchemaSchema.optional().describe(
+      "JSON Schema (draft-07) the channel's value must match after every write. `type` is shorthand for a schema with just that type.",
+    ),
+    items: relocatedField(
+      "channel items was removed; describe the contents with schema, e.g. schema: { type: array, items: { type: string } }",
+    ),
+    properties: relocatedField(
+      "channel properties was removed; describe the contents with schema, e.g. schema: { type: object, properties: { name: { type: string } } }",
+    ),
+  })
+  .superRefine((channel, ctx) => {
+    if (!channel.schema) return;
+    const conflict = channelTypeConflict({ type: channel.type, schema: channel.schema });
+    if (conflict) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schema"], message: conflict });
+  });
+
+export const StateSchema = z.object({
+  channels: z.record(ChannelSchema),
+});
 // ---------------------------------------------------------------------------
 // Output mapping
 // ---------------------------------------------------------------------------
@@ -320,7 +356,7 @@ export type OutputMapping = z.infer<typeof OutputMappingSchema>;
 // Node `with` blocks — per-type config
 // ---------------------------------------------------------------------------
 
-const BaseWithSchema = z.object({
+export const BaseWithSchema = z.object({
   output: OutputMappingSchema.optional(),
 });
 
@@ -504,24 +540,11 @@ export const AgentWithSchema = BaseWithSchema.extend({
   maxSteps: z.number().int().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
   permission: z.union([z.literal("auto"), z.literal("ask"), z.literal("deny")]).optional(),
-  /**
-   * Optional hub implementation for this agent node. `deepagents` reuses the
-   * graph's LangChain ChatModel/key (see `@flowgraph/provider-deepagents`).
-   */
-  hub: z.enum(["deepagents"]).optional(),
   /** Long-term memory: recall into the prompt within a token budget, and the `remember` tool. */
   memory: AgentMemorySchema.optional(),
   /** Context budget and history management (see AgentContextSchema). */
   context: AgentContextSchema.optional(),
-  // provider-namespaced escape hatches (any shape)
-  claude: z.record(z.unknown()).optional(),
-  cursor: z.record(z.unknown()).optional(),
-  langchain: z.record(z.unknown()).optional(),
-  deepagents: z.record(z.unknown()).optional(),
-});
-
-/** @deprecated Use AgentWithSchema */
-export const IntelligentWithSchema = AgentWithSchema;
+}).strict();
 
 // skill node
 export const SkillWithSchema = BaseWithSchema;
@@ -566,7 +589,6 @@ export const RouterWithSchema = z
     mode: z.union([z.literal("rules"), z.literal("model")]).default("rules"),
     input: z.string().optional(),
     instruction: z.string().optional(),
-    provider: z.string().optional(),
     routes: z.array(RouterRouteSchema, {
       invalid_type_error: "routes must be a list of - name: entries",
       required_error: "routes must be a list of - name: entries",
@@ -574,6 +596,7 @@ export const RouterWithSchema = z
     match: z.union([z.literal("firstMatch"), z.literal("allMatches")]).optional().default("firstMatch"),
     output: OutputMappingSchema.optional(),
   })
+  .strict()
   .superRefine((value, ctx) => {
     if (value.mode === "model" && value.match === "allMatches") {
       ctx.addIssue({
@@ -649,21 +672,11 @@ export const HttpWithSchema = BaseWithSchema.extend({
   query: z.record(z.unknown()).optional(),
   body: z.unknown().optional(),
   expect: z.object({ status: z.array(z.number()) }).optional(),
-  timeout: relocatedField(
-    "http with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-  ),
-  retry: relocatedField(
-    "http with.retry is not supported; set retry on the node, or runtime.retry as a graph default",
-  ),
-});
-
-const DemoHttpMethodSchema = z.union([
-  z.literal("GET"),
-  z.literal("POST"),
-  z.literal("PUT"),
-  z.literal("PATCH"),
-  z.literal("DELETE"),
-]);
+  once: z
+    .boolean()
+    .optional()
+    .describe("Send at most once per run (idempotent across checkpoint replays)"),
+}).strict();
 
 export const ToolRequireSchema = z.object({
   bin: z.string().min(1).describe("Binary that must be on PATH"),
@@ -676,182 +689,10 @@ export const OnMissingToolSchema = z
   .default("fail")
   .describe("fail (default) throws; skip records a TOOL_NOT_FOUND issue and continues");
 
-const DemoExpectSchema = z
-  .object({ status: z.array(z.number().int()).min(1) })
-  .optional()
-  .describe("HTTP statuses that count as success (default: any status below 400)");
-
-/**
- * What a `demo` result shows about its objective (ADR-0019 §3). `ok` is derived from
- * it: true for `passed` and `inconclusive`, false for `failed` and `not_captured`.
- * Captures without assertions (every mode today) can only be `failed`,
- * `inconclusive` or `not_captured`.
- */
-export const DemoStatusSchema = z.enum(["passed", "failed", "inconclusive", "not_captured"]);
-
-/** One check in a `steps` flow. `hidden` also holds on a blank page, so it can't prove anything alone. */
-const DemoStepCheckSchema = z.union([
-  z.object({ text: z.string().min(1).describe("This text is visible on the page") }).strict(),
-  z.object({ visible: z.string().min(1).describe("An element matching this selector is visible") }).strict(),
-  z.object({ url: z.string().min(1).describe("The page URL matches this glob") }).strict(),
-  z.object({ hidden: z.string().min(1).describe("No element matching this selector is visible") }).strict(),
-]);
-
-/** One step of a `steps` flow: exactly one verb. Steps never run code in the page (ADR-0019 §2). */
-export const DemoStepSchema = z.union([
-  z.object({ goto: z.string().min(1) }).strict(),
-  z.object({ click: z.string().min(1) }).strict(),
-  z.object({ fill: z.object({ selector: z.string().min(1), value: z.string() }).strict() }).strict(),
-  z.object({ press: z.string().min(1) }).strict(),
-  z.object({ wait: z.string().min(1).describe("CSS selector or a duration") }).strict(),
-  z.object({ screenshot: z.string().min(1).describe("Name of a screenshot to save") }).strict(),
-  z.object({ expect: DemoStepCheckSchema }).strict(),
-]);
-
-/**
- * Best-effort artifact capture. Exactly one of `http`, `screenshot`, `file`,
- * `video`, `simulator`, or `steps` must be set. `ok` is false when the capture failed or
- * when what it recorded is a failure (an unexpected HTTP status). Such results
- * return `{ ok: false }` unless `strict: true`.
- */
-export const DemoWithSchema = BaseWithSchema.extend({
-  strict: z
-    .boolean()
-    .optional()
-    .describe("Fail the node instead of returning ok:false on capture failure. With an `objective`, fail unless the status is passed"),
-  label: z.string().optional().describe("Optional human-readable label for the artifact"),
-  objective: z
-    .string()
-    .min(1)
-    .optional()
-    .describe("The claim this capture is evidence for. Only `steps` with a positive assertion can reach `passed`"),
-  target: z
-    .object({
-      web: z
-        .object({
-          url: z.string().min(1).describe("Where the flow starts"),
-          viewport: z
-            .object({
-              width: z.number().int().positive(),
-              height: z.number().int().positive(),
-            })
-            .optional(),
-          expect: DemoExpectSchema,
-          timeout: DurationSchema.optional().describe("Limit for the whole flow (default 2m)"),
-          stepTimeout: DurationSchema.optional().describe("Limit for each step (default 30s)"),
-        })
-        .strict(),
-    })
-    .strict()
-    .optional()
-    .describe("What `steps` run against"),
-  steps: z
-    .array(DemoStepSchema)
-    .min(1)
-    .optional()
-    .describe("Scripted flow. Always recorded, and always ends with a screenshot"),
-  expect: z
-    .object({
-      noConsoleErrors: z.boolean().optional().describe("No console error or uncaught page error during the flow"),
-    })
-    .strict()
-    .optional()
-    .describe("Checks over the whole `steps` flow"),
-  http: z
-    .object({
-      method: DemoHttpMethodSchema.default("GET"),
-      url: z.string(),
-      headers: z.record(z.string()).optional(),
-      body: z.unknown().optional(),
-      expect: DemoExpectSchema,
-      timeout: DurationSchema.optional().describe("Give up after this long (default 30s)"),
-    })
-    .optional(),
-  screenshot: z
-    .object({
-      url: z.string(),
-      waitFor: z
-        .union([z.string(), DurationSchema])
-        .optional()
-        .describe("CSS selector or a duration to wait before capture"),
-      video: z.boolean().optional(),
-      expect: DemoExpectSchema,
-      viewport: z
-        .object({
-          width: z.number().int().positive(),
-          height: z.number().int().positive(),
-        })
-        .optional(),
-      timeout: DurationSchema.optional(),
-    })
-    .optional(),
-  video: z
-    .object({
-      url: z.string(),
-      duration: DurationSchema.optional().describe("How long to keep recording after `waitFor` (default 5s)"),
-      expect: DemoExpectSchema,
-      waitFor: z
-        .union([z.string(), DurationSchema])
-        .optional()
-        .describe("CSS selector or a duration to wait before `duration` starts. The recording includes the page load and this wait"),
-      viewport: z
-        .object({
-          width: z.number().int().positive(),
-          height: z.number().int().positive(),
-        })
-        .optional(),
-      timeout: DurationSchema.optional(),
-      scroll: z.boolean().optional().describe("Slow-scroll the page during recording"),
-    })
-    .optional(),
-  simulator: z
-    .object({
-      platform: z.union([z.literal("ios"), z.literal("android")]),
-      device: z.string().optional().describe("iOS: simulator name or UDID. Android: adb serial (e.g. emulator-5554) of a running device"),
-      app: z.string().optional().describe("Bundle id / package to launch"),
-      deepLink: z.string().optional(),
-      capture: z.union([z.literal("video"), z.literal("screenshot")]).optional().default("video"),
-      duration: DurationSchema.optional().describe("Recording length (default 10s)"),
-      settle: DurationSchema.optional().describe(
-        "Longest wait for the screen to change and hold still after a launch or deep link (default 30s)",
-      ),
-    })
-    .optional(),
-  file: z
-    .object({
-      path: z.string(),
-    })
-    .optional(),
-}).superRefine((val, ctx) => {
-  const modes = [val.http, val.screenshot, val.file, val.video, val.simulator, val.steps].filter((m) => m != null);
-  if (val.steps && !val.target) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: steps needs a target", path: ["target"] });
-  }
-  if (val.target && !val.steps) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: target needs steps", path: ["steps"] });
-  }
-  if (val.expect && !val.steps) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "demo: expect needs steps", path: ["expect"] });
-  }
-  if (modes.length === 0) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "demo: set exactly one of http, screenshot, file, video, simulator, or steps",
-      path: [],
-    });
-  } else if (modes.length > 1) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "demo: set only one of http, screenshot, file, video, simulator, or steps",
-      path: [],
-    });
-  }
-});
-
 // function node (formerly "code") — legacy programmatic escape hatch
 export const FunctionWithSchema = BaseWithSchema.extend({
   fn: z.string().describe("Registered function name"),
-  input: z.record(z.string()).optional(),
+  input: relocatedField(NODE_INPUT_MOVED),
 });
 
 // memory node — read/write scoped durable memory (requires runtime.memory)
@@ -894,9 +735,6 @@ export const MemoryWithSchema = BaseWithSchema.extend({
   }
 });
 
-/** @deprecated Use FunctionWithSchema */
-export const CodeWithSchema = FunctionWithSchema;
-
 // shell node — run a program with argv (no shell), or a fixed command line through the OS shell with `shell: true`
 export const ShellWithSchema = BaseWithSchema.extend({
   command: z
@@ -910,14 +748,11 @@ export const ShellWithSchema = BaseWithSchema.extend({
   cwd: z.string().optional(),
   env: z.record(z.string()).optional(),
   inheritEnv: z.array(z.string().min(1)).optional().describe("Host environment variable names to pass to the child, in addition to the default allowlist (PATH, HOME, TMPDIR, TEMP, TMP, LANG, LC_ALL, and Windows SystemRoot/WINDIR)"),
-  input: z.record(z.unknown()).optional().describe("Rendered, passed via FLOWGRAPH_INPUT env + stdin JSON"),
-  timeout: relocatedField(
-    "shell with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-  ),
+  input: relocatedField(NODE_INPUT_MOVED),
   expect: z.object({ exitCode: z.array(z.number()).optional() }).optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
-}).superRefine((v, ctx) => {
+}).strict().superRefine((v, ctx) => {
   if (v.command.includes("{{")) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -943,29 +778,8 @@ export const ShellWithSchema = BaseWithSchema.extend({
   }
 });
 
-// service node — start/stop long-running background processes
-export const ServiceReadySchema = z.union([
-  // port may be a number or a `{{ }}` template string (coerced at run time)
-  z.object({ port: z.union([z.number().int().positive(), z.string().min(1)]) }),
-  z.object({
-    url: z.string(),
-    status: z.array(z.number()).optional(),
-  }),
-  z.object({ log: z.string() }).describe("Regex matched against combined stdout+stderr"),
-]);
-
-// port node — allocate free TCP port(s) at run time
-export const PortWithSchema = BaseWithSchema.extend({
-  count: z.number().int().positive().optional().default(1),
-  preferred: z
-    .union([z.number().int().positive(), z.array(z.number().int().positive())])
-    .optional()
-    .describe("Preferred port(s); falls back to an OS-assigned port when taken"),
-  host: z.string().optional().describe("Bind host for the probe (default 127.0.0.1)"),
-});
-
 // ---------------------------------------------------------------------------
-// Artifacts + generative media nodes (image / video / model3d)
+// Artifacts
 // ---------------------------------------------------------------------------
 
 export const ArtifactRoleSchema = z.enum(["image", "video", "model3d", "audio", "document", "file"]);
@@ -1004,127 +818,6 @@ export const ArtifactSchema = z.object({
     .optional(),
 });
 
-/** Reference input(s): a template resolving to an Artifact, a file path, or a URL. */
-const MediaInputRefSchema = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
-
-const MediaCommonWithSchema = BaseWithSchema.extend({
-  model: z.string().min(1).optional().describe("Media model override; top-level node model takes precedence"),
-  prompt: z.string().optional(),
-  negativePrompt: z.string().optional(),
-  input: MediaInputRefSchema.optional().describe(
-    "Reference input(s): a template resolving to an Artifact, a workspace path, or a URL",
-  ),
-  seed: z.number().int().optional(),
-  variant: z
-    .union([z.string(), z.number()])
-    .optional()
-    .describe(
-      "Templated cache-buster. Part of the job fingerprint but never sent to the vendor: change it (for example `{{ state.check.round }}`) to force a new job for an otherwise identical request. Unset, null or empty keeps the previous fingerprint.",
-    ),
-  params: z.record(z.unknown()).optional().describe("Vendor passthrough options"),
-  timeout: relocatedField(
-    "media with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-  ),
-});
-
-// image node
-export const ImageWithSchema = MediaCommonWithSchema.extend({
-  prompt: z.string().min(1, "image: prompt is required"),
-  count: z.number().int().min(1).max(10).optional().default(1),
-  size: z.string().optional().describe('Pixel size such as "1024x1024"'),
-  aspectRatio: z.string().optional().describe('Aspect ratio such as "16:9"'),
-  quality: z.string().optional(),
-});
-
-// video node
-export const VideoWithSchema = MediaCommonWithSchema.extend({
-  count: z.number().int().min(1).max(4).optional().default(1),
-  duration: z.number().positive().optional().describe("Clip length in seconds"),
-  aspectRatio: z.string().optional(),
-  resolution: z.string().optional().describe('e.g. "720p"'),
-}).superRefine((v, ctx) => {
-  if (!v.prompt?.trim() && v.input === undefined) {
-    ctx.addIssue({ code: "custom", path: ["prompt"], message: "video: set prompt, input, or both" });
-  }
-});
-
-export const Model3dFormatSchema = z.enum(["glb", "gltf", "fbx", "obj", "usdz", "stl", "3mf"]);
-
-// model3d node
-export const Model3dWithSchema = MediaCommonWithSchema.extend({
-  mode: z
-    .enum(["text", "image", "multiview"])
-    .optional()
-    .describe("Defaults from the inputs: no input = text, one = image, several = multiview"),
-  format: Model3dFormatSchema.optional().default("glb"),
-  texture: z.boolean().optional(),
-  quality: z.string().optional(),
-  count: z.number().int().min(1).max(4).optional().default(1),
-}).superRefine((v, ctx) => {
-  if (!v.prompt?.trim() && v.input === undefined) {
-    ctx.addIssue({ code: "custom", path: ["prompt"], message: "model3d: set prompt, input, or both" });
-  }
-});
-
-export const AudioKindSchema = z.enum(["speech", "sfx", "music"]);
-
-// audio node — speech (text to voice), sound effects, music
-export const AudioWithSchema = MediaCommonWithSchema.extend({
-  kind: AudioKindSchema.describe("speech = voice reading `text`; sfx = sound effect from `prompt`; music = song/score from `prompt` (and optional `text` lyrics)"),
-  text: z.string().optional().describe("speech: the script to speak; music: optional lyrics"),
-  voice: z.string().optional().describe("speech: voice id or name (vendor-specific)"),
-  language: z.string().optional().describe('e.g. "en"'),
-  duration: z.number().positive().optional().describe("Target length in seconds (sfx, music)"),
-  instrumental: z.boolean().optional().describe("music: no vocals"),
-  format: z.enum(["mp3", "wav", "ogg", "flac", "opus"]).optional(),
-  count: z.number().int().min(1).max(4).optional().default(1),
-}).superRefine((v, ctx) => {
-  if (v.kind === "speech" && !v.text?.trim()) {
-    ctx.addIssue({ code: "custom", path: ["text"], message: "audio: kind speech requires text" });
-  }
-  if (v.kind === "sfx" && !v.prompt?.trim()) {
-    ctx.addIssue({ code: "custom", path: ["prompt"], message: "audio: kind sfx requires prompt" });
-  }
-  if (v.kind === "music" && !v.prompt?.trim() && !v.text?.trim()) {
-    ctx.addIssue({ code: "custom", path: ["prompt"], message: "audio: kind music requires prompt or text (lyrics)" });
-  }
-});
-
-export const ServiceWithSchema = BaseWithSchema.extend({
-  name: z.string().min(1).describe("Stable service id within a run/thread"),
-  action: z
-    .union([
-      z.literal("start"),
-      z.literal("stop"),
-      z.literal("restart"),
-      z.literal("status"),
-    ])
-    .optional()
-    .default("start"),
-  command: z.string().optional().describe("Required for start/restart"),
-  args: z.array(z.string()).optional().describe("Argv; when set, runs without a shell"),
-  cwd: z.string().optional(),
-  env: z.record(z.string()).optional(),
-  ready: ServiceReadySchema.optional().describe("Readiness probe before the node completes"),
-  readyTimeout: DurationSchema.optional().describe("Default 30s"),
-  readyInterval: DurationSchema.optional().describe("Default 300ms"),
-  stopSignal: z.string().optional().describe("Default SIGTERM"),
-  stopTimeout: DurationSchema.optional().describe("Default 5s before SIGKILL"),
-  keepAlive: z
-    .boolean()
-    .optional()
-    .describe("When true, skip auto-stop at run end regardless of runtime.services.terminateOnEnd"),
-}).superRefine((val, ctx) => {
-  const action = val.action ?? "start";
-  if ((action === "start" || action === "restart") && !val.command?.trim()) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "service: command is required when action is start or restart",
-      path: ["command"],
-    });
-  }
-});
-
 export const FailWithSchema = z.object({
   reason: z.string().regex(/\S/, "A failure reason is required")
     .describe("Failure reason; templates render against the node's state and input."),
@@ -1145,15 +838,12 @@ export const ScriptWithSchema = BaseWithSchema.extend({
     .optional()
     .describe("Self-contained Node.js ESM source with a default-export function; mutually exclusive with file."),
   file: z.string().trim().min(1).optional().describe("Self-contained ESM source file, relative to the declaring graph; mutually exclusive with code."),
-  input: z.record(z.unknown()).optional().describe("Structured input, with templates rendered recursively and value types preserved"),
+  input: relocatedField(NODE_INPUT_MOVED),
   env: z.record(z.string()).optional().describe("Environment variables available to the child process"),
-  timeout: relocatedField(
-    "script with.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-  ),
   permissions: ScriptPermissionsSchema.optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
-}).superRefine((value, ctx) => {
+}).strict().superRefine((value, ctx) => {
   if ((value.code !== undefined) === (value.file !== undefined)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["code"], message: "script: provide exactly one of code or file" });
   }
@@ -1180,7 +870,21 @@ export const SubgraphWithSchema = BaseWithSchema.extend({
     })
     .optional()
     .describe("Explicit projection between parent and child channels"),
+}).superRefine((value, ctx) => {
+  if (value.stateMap?.out !== undefined && value.output !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["output"],
+      message:
+        "subgraph: set stateMap.out or output, not both. stateMap.out names each parent channel to write; output projects the whole child result (to / map, or none)",
+    });
+  }
 });
+
+/** Names a template already binds, so a map item cannot take them. */
+const MAP_RESERVED_BINDINGS: ReadonlySet<string> = new Set([
+  "index", "state", "input", "config", "run", "secret", "secrets", "issues", "memory", "result",
+]);
 
 // map node
 export const MapWithSchema = z.object({
@@ -1190,29 +894,22 @@ export const MapWithSchema = z.object({
     maxBytes: z.number().int().positive().max(64 * 1024 * 1024).optional(),
   })]).optional().describe("Reuse completed item results across loop rounds; opt in only for deterministic item work"),
   over: z.string().describe("Expression evaluating to an array"),
-  as: z.string().default("item"),
+  as: z
+    .string()
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "as must be an identifier, such as item or task")
+    .refine((name) => !MAP_RESERVED_BINDINGS.has(name), {
+      message: `as cannot be ${[...MAP_RESERVED_BINDINGS].join(", ")}: those names are already bound in templates (index is the item's position)`,
+    })
+    .default("item")
+    .describe("Name the current item is bound to in the node body: {{ <as> }}. {{ index }} is its position."),
   concurrency: z.number().int().positive().optional().default(5),
   node: z
     .lazy((): typeof MapBodyNodeSchema => MapBodyNodeSchema)
     .describe("The node run once per item: a node spec whose id is optional"),
   collect: OutputMappingSchema.optional(),
-});
-
-// worktree node — git worktree add/remove/status against runtime.workspace
-export const WorktreeWithSchema = z.object({
-  action: z.union([z.literal("add"), z.literal("remove"), z.literal("status")]).default("add"),
-  /** Branch to create/checkout (templates ok). Required for action: add. */
-  branch: z.string().optional(),
-  /** Worktree directory (absolute or workspace-relative; templates ok). */
-  path: z.string().optional(),
-  /** Git repo root. Defaults to runtime.workspace. */
-  repo: z.string().optional(),
-  /**
-   * `action: add` only. When the branch already exists, reset it to HEAD
-   * (`git worktree add -B`). Default false: fail instead of moving the branch.
-   */
-  reset: z.boolean().optional(),
-  output: OutputMappingSchema.optional(),
+  output: relocatedField(
+    "map with.output is not supported: write the collected results with with.collect (to / map), or set output on the node body (with.node.with.output) to project each item",
+  ),
 });
 
 /** A hitl route target: a node id, or `{ to, description }`. */
@@ -1279,84 +976,9 @@ export const HitlWithSchema = BaseWithSchema.extend({
   maxResumeAttempts: z.number().int().positive().optional(),
 });
 
-// workshop node — facilitated agenda session (one-shot HITL; client owns the conversation)
-export const WorkshopAgendaItemSchema = z.union([
-  z.string(),
-  z.object({
-    id: z.string().optional(),
-    title: z.string(),
-    description: z.string().optional(),
-  }),
-]);
-
-export const WorkshopVoiceSchema = z.object({
-  /** Voice provider key: xai | openai */
-  provider: z.string().optional(),
-  model: z.string().optional(),
-  voice: z.string().optional(),
-});
-
-export const WorkshopLimitsSchema = z.object({
-  maxMinutes: z.number().positive().optional(),
-  maxTurns: z.number().int().positive().optional(),
-});
-
-export const WorkshopWithSchema = BaseWithSchema.extend({
-  /** Interrupt reason / opening recap shown to the human. */
-  message: z.string().optional(),
-  /**
-   * Re-prompt budget for answers that fail validation (schema / decision / choice).
-   * The interrupt is re-issued with `validationError` until this many answers were
-   * rejected; then the run fails but the interrupt stays pending. Default 3.
-   */
-  maxResumeAttempts: z.number().int().positive().optional(),
-  /** Agenda items the facilitator must cover. Strings or { id, title, description }. */
-  agenda: z.array(WorkshopAgendaItemSchema).optional(),
-  /** JSON Schema (draft-07) for the structured output the session must produce. */
-  schema: ContractSchemaSchema.optional(),
-  /** Form presentation hints for the fallback form; not part of the schema. */
-  ui: FormUiSchema.optional(),
-  /** Primed research / packet from a prior prepare node (string or object). */
-  context: z.union([z.string(), z.record(z.unknown())]).optional(),
-  /** System prompt for the facilitator (voice or text). */
-  facilitator: z.string().optional(),
-  voice: WorkshopVoiceSchema.optional(),
-  /** Optional git diff at interrupt time (same shape as hitl review). */
-  diff: z
-    .object({
-      cwd: z.string().optional(),
-      base: z.string().optional(),
-      paths: z.array(z.string()).optional(),
-      before: z.string().optional(),
-      after: z.string().optional(),
-    })
-    .optional(),
-  artifacts: z.array(z.string()).optional(),
-  limits: WorkshopLimitsSchema.optional(),
-  /** Headless / no-mic fallback: form | text | json. Default form. */
-  fallback: z.union([z.literal("form"), z.literal("text"), z.literal("json")]).optional().default("form"),
-  /**
-   * Accept an unfinished output when the session ends early (`endedReason` of
-   * human_ended, timeout or skipped). The node then writes `complete: false`, so
-   * later nodes can route on it. Property types are still checked. Default false.
-   */
-  allowPartial: z.boolean().optional(),
-  /**
-   * A session that ends `completed` must have covered every agenda item (`coverage[id]`
-   * truthy). Early ends (`allowPartial`) are exempt. Default false.
-   */
-  requireCoverage: z.boolean().optional(),
-  /**
-   * Keep the transcript in the node result (`keep`, default) or drop it (`omit`) so long
-   * sessions do not bloat checkpointed state.
-   */
-  transcript: z.union([z.literal("keep"), z.literal("omit")]).optional(),
-});
-
 // wait node — deadline / until / signal / webhook (inbound HTTP resume)
 export const WaitWithSchema = BaseWithSchema.extend({
   deadline: DurationSchema.optional().describe("In-process sleep. Not durable across a restart."),
-  duration: relocatedField("wait with.duration is not supported; rename it to deadline"),
   until: z.string().optional(),
   signal: z.string().optional().describe("Resume only when the payload names this signal"),
   timeout: DurationSchema.optional(),
@@ -1367,7 +989,7 @@ export const WaitWithSchema = BaseWithSchema.extend({
       z.object({ schema: ContractSchemaSchema.optional() }),
     ])
     .optional(),
-});
+}).strict();
 
 // mcp node — deterministic MCP tool/resource call
 export const McpWithSchema = BaseWithSchema.extend({
@@ -1417,14 +1039,6 @@ export const McpServerSchema = z.union([
   }),
 ]);
 
-// webhook node — outbound HTTP notification only (inbound waits live on `wait`)
-export const WebhookWithSchema = BaseWithSchema.extend({
-  url: z.string(),
-  method: z.string().optional(),
-  headers: z.record(z.string()).optional(),
-  body: z.unknown().optional(),
-});
-
 // ---------------------------------------------------------------------------
 // Placement (`runsOn`) — see docs/adr/0020-node-placement.md
 // ---------------------------------------------------------------------------
@@ -1447,9 +1061,6 @@ export const RunsOnObjectSchema = z
       .enum(["error", "local"])
       .optional()
       .describe("`local` runs the node here when no worker matches (default: error)"),
-    wait: relocatedField(
-      "runsOn.wait is not supported; queueing for a matching worker is not available. Remove wait, or make a matching worker available now.",
-    ),
   })
   .strict();
 
@@ -1468,11 +1079,12 @@ export interface NormalizedRunsOn {
 /** Canonical form of `runsOn`: object shape, labels deduped in order, `fallback` defaulted. */
 export function normalizeRunsOn(value: RunsOn): NormalizedRunsOn {
   if (Array.isArray(value)) return { labels: [...new Set(value)], fallback: "error" };
+  const wait = (value as { wait?: unknown }).wait;
   return {
     labels: [...new Set(value.labels)],
     ...(value.target !== undefined ? { target: value.target } : {}),
     fallback: value.fallback ?? "error",
-    ...(value.wait !== undefined ? { wait: value.wait } : {}),
+    ...(typeof wait === "string" ? { wait } : {}),
   };
 }
 
@@ -1524,7 +1136,12 @@ export const NodeSpecSchema = z.object({
     .describe(
       "Inline embedded subgraph spec (bundling output); mutually exclusive with `uses`",
     ),
-  input: z.record(z.string()).optional(),
+  input: z
+    .unknown()
+    .optional()
+    .describe(
+      "The node's input: any value. {{ }} templates render at every depth and the node reads the result as {{ input }}. A skill or subgraph needs an object, whose keys are its inputs.",
+    ),
   /**
    * Per-node workspace override (absolute or graph-relative; templates ok).
    * Defaults to `runtime.workspace` then the graph directory.
@@ -1650,19 +1267,14 @@ export const ConfigSchema = z.object({
     .object({
       provider: z.string().optional(),
       model: z.string().optional(),
-      retry: relocatedField(
-        "config.defaults.retry is not supported; set retry on the node, or runtime.retry as a graph default",
-      ),
-      timeout: relocatedField(
-        "config.defaults.timeout is not supported; set timeout on the node, or runtime.timeoutDefault as a graph default",
-      ),
     })
+    .strict()
     .optional(),
   vars: z.record(z.unknown()).optional(),
 });
 
 // ---------------------------------------------------------------------------
-// Providers block (LLM backends for intelligent nodes)
+// Providers block (LLM backends for agent and model-router nodes)
 // ---------------------------------------------------------------------------
 
 export const LangChainVendorSchema = z.enum([
@@ -1733,33 +1345,60 @@ export const DeepAgentsProviderConfigSchema = z.object({
 });
 
 /**
- * Dedicated media-generation backend (Tripo, Meshy, Grok Imagine, ...).
- *
- * LLM vendors that also generate media (`langchain` with vendor `openai` or
- * `xai`) do NOT need one of these: a `media` node can name the existing
- * `langchain` entry and reuses its credentials. Use `kind: media` for
- * backends that have no LLM side, or to pin different credentials/models.
- *
- * `vendor` is a free string so third-party packages can register their own
- * (via `imports[].providers` / the media vendor registry).
+ * Third-party or custom provider plugin loaded via `imports[].providers` or registered
+ * in the host. `options` are validated by the plugin adapter at compile time.
  */
-export const MediaProviderConfigSchema = z.object({
-  kind: z.literal("media"),
-  vendor: z.string().min(1),
+export const PluginProviderConfigSchema = z.object({
+  kind: z.literal("plugin"),
+  /** Registered provider plugin name; defaults to the key under `providers:`. */
+  plugin: z.string().min(1).optional(),
   model: z.string().optional(),
-  baseUrl: z.string().optional(),
   apiKeyEnv: z.string().optional(),
   options: z.record(z.unknown()).optional(),
 });
 
-export const ProviderConfigSchema = z.discriminatedUnion("kind", [
+export const CoreProviderConfigSchema = z.discriminatedUnion("kind", [
   LangChainProviderConfigSchema,
   ClaudeProviderConfigSchema,
   CursorProviderConfigSchema,
   CliProviderConfigSchema,
   DeepAgentsProviderConfigSchema,
-  MediaProviderConfigSchema,
+  PluginProviderConfigSchema,
 ]);
+
+const extensionProviderKindSchemas = new Map<string, z.ZodTypeAny>();
+
+/** Register a provider config schema for a non-core provider kind (e.g. `kind: media`). */
+export function registerProviderKindSchema(kind: string, schema: z.ZodTypeAny): void {
+  extensionProviderKindSchemas.set(kind, schema);
+}
+
+/** Unregister a provider config schema (primarily for tests). */
+export function unregisterProviderKindSchema(kind: string): void {
+  extensionProviderKindSchemas.delete(kind);
+}
+
+export const ProviderConfigSchema: z.ZodType<ProviderConfig, z.ZodTypeDef, unknown> = z
+  .unknown()
+  .superRefine((val, ctx) => {
+    if (val != null && typeof val === "object" && !Array.isArray(val)) {
+      const kind = (val as { kind?: unknown }).kind;
+      if (typeof kind === "string") {
+        const ext = extensionProviderKindSchemas.get(kind);
+        if (ext) {
+          const parsed = ext.safeParse(val);
+          if (!parsed.success) {
+            for (const issue of parsed.error.issues) ctx.addIssue(issue);
+          }
+          return;
+        }
+      }
+    }
+    const parsed = CoreProviderConfigSchema.safeParse(val);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) ctx.addIssue(issue);
+    }
+  }) as unknown as z.ZodType<ProviderConfig, z.ZodTypeDef, unknown>;
 
 export const ProvidersSchema = z.record(ProviderConfigSchema);
 
@@ -1775,18 +1414,6 @@ export const CheckpointBackendSchema = z.enum(["memory", "sqlite", "postgres"], 
   errorMap: (issue, ctx) =>
     issue.code === "invalid_enum_value"
       ? { message: `must be one of memory | sqlite | postgres (got "${String(issue.received)}")` }
-      : { message: ctx.defaultError },
-});
-
-/**
- * Long-term store backends. `memory` is process-local and ephemeral; `none` disables
- * `ctx.store`. `sqlite` / `postgres` are reserved for the durable store and fail at
- * compile time until a store instance is injected — there is no silent in-memory fallback.
- */
-export const StoreBackendSchema = z.enum(["memory", "none", "sqlite", "postgres"], {
-  errorMap: (issue, ctx) =>
-    issue.code === "invalid_enum_value"
-      ? { message: `must be one of memory | none | sqlite | postgres (got "${String(issue.received)}")` }
       : { message: ctx.defaultError },
 });
 
@@ -1884,20 +1511,12 @@ export const RuntimeSchema = z.object({
       enabled: z.boolean().optional().default(true),
       backend: CheckpointBackendSchema.optional().default("memory"),
       path: z.string().optional(),
-      namespace: relocatedField(
-        "runtime.checkpoint.namespace is not supported; checkpoints are already kept per thread. Remove it.",
-      ),
       /** Bound checkpoint history. Omitted means the default retention policy. */
       retention: CheckpointRetentionSchema.optional(),
     })
+    .strict()
     .optional(),
-  store: z
-    .object({
-      enabled: z.boolean().optional().default(true),
-      backend: StoreBackendSchema.optional().default("memory"),
-    })
-    .optional(),
-  /** Scoped durable memory (see RuntimeMemorySchema). Mutually exclusive with `store`. */
+  /** Scoped durable memory (see RuntimeMemorySchema). */
   memory: RuntimeMemorySchema.optional(),
   /** Embedded HTTP ingress for `wait` nodes with `webhook: true`. */
   webhookServer: z
@@ -1943,9 +1562,6 @@ export const RuntimeSchema = z.object({
     .optional(),
   hitl: z
     .object({
-      onInterrupt: relocatedField(
-        "runtime.hitl.onInterrupt is not a graph setting; the host decides how interrupts are answered (CLI --on-interrupt, or onInterrupt in run options). Remove it.",
-      ),
       breakpoints: z
         .object({
           before: z.array(z.string()).optional(),
@@ -1953,6 +1569,7 @@ export const RuntimeSchema = z.object({
         })
         .optional(),
     })
+    .strict()
     .optional(),
   retry: RetrySchema.optional(),
   timeoutDefault: DurationSchema.optional(),
@@ -1970,9 +1587,6 @@ export const RuntimeSchema = z.object({
   context: RuntimeContextSchema.optional(),
   secrets: z
     .object({
-      provider: relocatedField(
-        "runtime.secrets.provider is not supported; list the names the graph reads under the top-level secrets: and let the host supply their values.",
-      ),
       redact: z
         .object({
           patterns: z.array(z.string()).optional(),
@@ -1980,10 +1594,8 @@ export const RuntimeSchema = z.object({
         })
         .optional(),
     })
+    .strict()
     .optional(),
-  observability: relocatedField(
-    "runtime.observability is not a graph setting; configure logging and OpenTelemetry in the host (FLOWGRAPH_LOG_LEVEL, event sinks). Remove it.",
-  ),
   hooks: z
     .array(
       z
@@ -2020,48 +1632,68 @@ export const RuntimeSchema = z.object({
         }),
     )
     .optional(),
-});
-
-// ---------------------------------------------------------------------------
-// Local tools (opt-in filesystem, etc.)
-// ---------------------------------------------------------------------------
-
-export const FsOperationSchema = z.enum(["read", "list", "write", "edit", "delete"]);
-
-export const LocalToolsFsSchema = z.object({
-  workspaceRoot: z.string().optional().default("."),
-  operations: z.array(FsOperationSchema).optional(),
-});
-
-export const LocalToolsSchema = z.object({
-  fs: LocalToolsFsSchema.optional(),
-});
+}).strict();
 
 // ---------------------------------------------------------------------------
 // Run `inputs` schema (pre-start parameters — not HITL)
 // ---------------------------------------------------------------------------
 
-export const InputFieldTypeSchema = z.enum([
-  "string",
-  "text",
-  "number",
-  "boolean",
-  "select",
-  "json",
-]);
-
-export const InputFieldSchema = z.object({
-  key: z.string().min(1),
-  label: z.string().optional(),
-  type: InputFieldTypeSchema.optional().default("string"),
-  required: z.boolean().optional(),
-  default: z.unknown().optional(),
-  description: z.string().optional(),
-  options: z.array(z.string()).optional(),
+export const InputFieldTypeSchema = z.enum(["string", "number", "boolean", "select", "json"], {
+  errorMap: (issue, ctx) =>
+    ctx.data === "text"
+      ? { message: "input type text was removed; use type: string with ui: { widget: textarea }" }
+      : issue.code === "invalid_enum_value"
+        ? { message: "expected one of string | number | boolean | select | json" }
+        : { message: ctx.defaultError },
 });
+
+/**
+ * One declared run parameter, and the whole contract for it: its `type`, whether it is
+ * `required`, its `default`, and (for `json`) an optional draft-07 `schema`. Presentation
+ * hints live apart, under `ui`. A declared key is also a state channel the value is seeded into.
+ */
+export const InputFieldSchema = z
+  .object({
+    key: z.string().min(1),
+    type: InputFieldTypeSchema.optional().default("string"),
+    required: z.boolean().optional(),
+    default: z.unknown().optional(),
+    description: z.string().optional(),
+    options: z.array(z.string()).optional(),
+    schema: DataSchemaSchema.optional().describe("JSON Schema (draft-07) the value must match; only for type: json"),
+    ui: FormFieldHintSchema.optional().describe("Presentation hints for forms (label, placeholder, help, widget); not part of the contract"),
+    label: relocatedField("input label moved to ui.label"),
+  })
+  .strict()
+  .superRefine((field, ctx) => {
+    if (field.schema !== undefined && field.type !== "json") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schema"], message: "schema is only allowed on type: json inputs" });
+    }
+  });
+
+/**
+ * A value a graph returns to its caller: the child channel `key`, optionally with its own
+ * contract. Declared on a subgraph file, it is checked when the subgraph returns and is the
+ * only part of the child the parent can read.
+ */
+export const OutputFieldSchema = z
+  .object({
+    key: z.string().min(1).describe("Channel of this graph that holds the value"),
+    type: ChannelTypeSchema.optional(),
+    schema: DataSchemaSchema.optional().describe("JSON Schema (draft-07) the value must match"),
+    required: z.boolean().optional().describe("Default true: the graph must have produced a value (not null) for this key"),
+    description: z.string().optional(),
+  })
+  .strict()
+  .superRefine((field, ctx) => {
+    if (!field.schema) return;
+    const conflict = channelTypeConflict({ type: field.type, schema: field.schema });
+    if (conflict) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schema"], message: conflict });
+  });
 
 export type InputField = z.infer<typeof InputFieldSchema>;
 export type InputFieldType = z.infer<typeof InputFieldTypeSchema>;
+export type OutputField = z.infer<typeof OutputFieldSchema>;
 
 // ---------------------------------------------------------------------------
 // Declared secrets
@@ -2087,7 +1719,7 @@ export const SecretsSchema = z
 // Root Graph spec
 // ---------------------------------------------------------------------------
 
-export const GraphSpecSchema = z.object({
+export const GraphSpecObjectSchema = z.object({
   apiVersion: VersionSchema,
   kind: z.literal("Graph"),
   metadata: MetadataSchema,
@@ -2099,7 +1731,6 @@ export const GraphSpecSchema = z.object({
   triggers: z.array(TriggerSchema).optional(),
   imports: z.array(ImportSpecSchema).optional(),
   mcpServers: z.record(McpServerSchema).optional(),
-  localTools: LocalToolsSchema.optional(),
   providers: ProvidersSchema.optional(),
   config: ConfigSchema.optional(),
   state: StateSchema.optional(),
@@ -2108,16 +1739,65 @@ export const GraphSpecSchema = z.object({
    * Distinct from mid-run HITL interrupts.
    */
   inputs: z.array(InputFieldSchema).optional(),
-  /** Default run input seeded when a run starts (desktop Start inspector / CLI may override). */
-  input: z.record(z.unknown()).optional(),
+  /**
+   * What this graph returns to a caller. Checked when the graph runs as a subgraph, and then the only
+   * channels the parent can read. A top-level run does not check it.
+   */
+  outputs: z.array(OutputFieldSchema).optional(),
+  input: relocatedField(
+    "top-level input was removed; give the matching inputs entry a default (and declare the key there if it is not an input yet)",
+  ),
   nodes: z.array(NodeSpecSchema),
   edges: z.array(EdgeSpecSchema),
   /** Host environment variables this graph may read (see SecretsSchema). */
   secrets: SecretsSchema.optional(),
   runtime: RuntimeSchema.optional(),
-}).strict();
+});
 
-export type GraphSpec = Omit<z.infer<typeof GraphSpecSchema>, "nodes"> & {
+const coreGraphKeys = new Set(Object.keys(GraphSpecObjectSchema.shape));
+const graphExtensionSchemas = new Map<string, z.ZodTypeAny>();
+
+/** Register a top-level graph extension schema (e.g. `localTools` from `@flowgraph/tools-fs`). */
+export function registerGraphExtensionSchema(key: string, schema: z.ZodTypeAny): void {
+  graphExtensionSchemas.set(key, schema);
+}
+
+/** Unregister a top-level graph extension schema (primarily for tests). */
+export function unregisterGraphExtensionSchema(key: string): void {
+  graphExtensionSchemas.delete(key);
+}
+
+/** Known top-level graph keys (core + registered extensions), for typo suggestions. */
+export function graphSpecKnownKeys(): string[] {
+  return [...coreGraphKeys, ...graphExtensionSchemas.keys()];
+}
+
+export const GraphSpecSchema = GraphSpecObjectSchema.passthrough().superRefine((val, ctx) => {
+  const unknown: string[] = [];
+  for (const key of Object.keys(val)) {
+    if (coreGraphKeys.has(key)) continue;
+    const ext = graphExtensionSchemas.get(key);
+    if (!ext) {
+      unknown.push(key);
+      continue;
+    }
+    const parsed = ext.safeParse(val[key]);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) {
+        ctx.addIssue({ ...issue, path: [key, ...issue.path] });
+      }
+    }
+  }
+  if (unknown.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.unrecognized_keys,
+      keys: unknown,
+      path: [],
+    });
+  }
+});
+
+export type GraphSpec = Omit<z.infer<typeof GraphSpecObjectSchema>, "nodes"> & {
   nodes: NodeSpec[];
 };
 
@@ -2127,20 +1807,14 @@ export type NodeSpec = Omit<z.infer<typeof NodeSpecSchema>, "spec"> & {
   spec?: GraphSpec;
 };
 
-export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
+export type ProviderConfig = z.infer<typeof CoreProviderConfigSchema>;
 export type LangChainProviderConfig = z.infer<typeof LangChainProviderConfigSchema>;
 export type ClaudeProviderConfig = z.infer<typeof ClaudeProviderConfigSchema>;
 export type CursorProviderConfig = z.infer<typeof CursorProviderConfigSchema>;
 export type CliProviderConfig = z.infer<typeof CliProviderConfigSchema>;
 export type DeepAgentsProviderConfig = z.infer<typeof DeepAgentsProviderConfigSchema>;
-export type MediaProviderConfig = z.infer<typeof MediaProviderConfigSchema>;
+export type PluginProviderConfig = z.infer<typeof PluginProviderConfigSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
-export type DemoStatus = z.infer<typeof DemoStatusSchema>;
-export type DemoStep = z.infer<typeof DemoStepSchema>;
-export type ImageWith = z.infer<typeof ImageWithSchema>;
-export type VideoWith = z.infer<typeof VideoWithSchema>;
-export type Model3dWith = z.infer<typeof Model3dWithSchema>;
-export type AudioWith = z.infer<typeof AudioWithSchema>;
 export type CliVendor = z.infer<typeof CliVendorSchema>;
 export type LangChainVendor = z.infer<typeof LangChainVendorSchema>;
 

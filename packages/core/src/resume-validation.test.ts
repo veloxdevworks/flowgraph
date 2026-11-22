@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { MemorySaver } from "@langchain/langgraph";
 import { compileGraph } from "./compiler.js";
 import type { GraphSpec } from "@flowgraph/spec";
 import { interruptUntilValid } from "./runtime/resume-validation.js";
@@ -24,12 +23,6 @@ function single(node: Record<string, unknown>): GraphSpec {
     runtime: { checkpoint: { enabled: true, backend: "memory" } },
   } as unknown as GraphSpec;
 }
-
-const workshop = (extra: Record<string, unknown> = {}) =>
-  single({
-    type: "workshop",
-    with: { message: "Workshop", agenda: ["scope"], schema: titleSchema, output: { to: "out" }, ...extra },
-  });
 
 const form = (extra: Record<string, unknown> = {}) =>
   single({
@@ -67,17 +60,6 @@ describe("interruptUntilValid (unit)", () => {
 });
 
 describe("re-prompt on invalid resume", () => {
-  it("workshop: bad then good resume succeeds", async () => {
-    const g = await compileGraph(workshop(), {});
-    expect((await g.run({ threadId: "rv-ws-1", onInterrupt: "fail" })).status).toBe("interrupted");
-    const bad = await g.resume({ threadId: "rv-ws-1", resume: { output: { title: 7 } }, onInterrupt: "fail" });
-    expect(bad.status).toBe("interrupted");
-    expect(bad.interrupts?.[0]?.validationError).toMatch(/title/);
-    const good = await g.resume({ threadId: "rv-ws-1", resume: { output: { title: "SSO" } }, onInterrupt: "fail" });
-    expect(good.status).toBe("completed");
-    expect((good.state["out"] as { output: { title: string } }).output.title).toBe("SSO");
-  });
-
   it("hitl form: bad then good resume succeeds", async () => {
     const g = await compileGraph(form(), {});
     await g.run({ threadId: "rv-form-1", onInterrupt: "fail" });
@@ -87,36 +69,6 @@ describe("re-prompt on invalid resume", () => {
     const good = await g.resume({ threadId: "rv-form-1", resume: { title: "Epic" }, onInterrupt: "fail" });
     expect(good.status).toBe("completed");
     expect((good.state["out"] as { title: string }).title).toBe("Epic");
-  });
-
-  it("workshop: exhausting maxResumeAttempts fails cleanly; thread stays inspectable and resumable", async () => {
-    const checkpointer = new MemorySaver();
-    const g = await compileGraph(workshop({ maxResumeAttempts: 2 }), { checkpointer });
-    await g.run({ threadId: "rv-ws-2", onInterrupt: "fail" });
-    const a1 = await g.resume({ threadId: "rv-ws-2", resume: { output: {} }, onInterrupt: "fail" });
-    expect(a1.status).toBe("interrupted");
-    expect(a1.interrupts?.[0]).toMatchObject({ attempt: 1, maxAttempts: 2 });
-
-    const a2 = await g.resume({ threadId: "rv-ws-2", resume: { output: { title: 1 } }, onInterrupt: "fail" });
-    expect(a2.status).toBe("error");
-    expect(a2.error?.name).toBe("ResumeAttemptsExhaustedError");
-    expect(a2.error?.message).toMatch(/node "gate" rejected 2 of 2 allowed resume answers/);
-    expect(a2.error?.message).toMatch(/still pending/);
-    expect(a2.interrupts?.[0]?.exhausted).toBe(true);
-
-    // Inspectable: the interrupt is still pending on the node.
-    const snap = await g.getState("rv-ws-2");
-    expect(snap?.next).toEqual(["gate"]);
-    expect(snap?.interrupts[0]).toMatchObject({ kind: "workshop", exhausted: true, attempt: 2 });
-
-    // A later valid resume works, even from a freshly compiled graph (process restart).
-    const g2 = await compileGraph(workshop({ maxResumeAttempts: 2 }), { checkpointer });
-    const ok = await g2.resume({ threadId: "rv-ws-2", resume: { output: { title: "Late" } }, onInterrupt: "fail" });
-    expect(ok.status).toBe("completed");
-    expect((ok.state["out"] as { output: { title: string } }).output.title).toBe("Late");
-    const after = await g2.getState("rv-ws-2");
-    expect(after?.next).toEqual([]);
-    expect(after?.interrupts).toEqual([]);
   });
 
   it("hitl review: exhausted on an invalid decision, then a valid decision completes", async () => {
@@ -167,7 +119,7 @@ describe("re-prompt on invalid resume", () => {
               type: "hitl",
               with: {
                 mode: "form",
-                message: "Name item {{ item.it }}",
+                message: "Name item {{ it }}",
                 schema: titleSchema,
                 maxResumeAttempts: 2,
                 output: { to: "itemResult" },

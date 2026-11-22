@@ -10,9 +10,16 @@ import {
   mockProvider,
 } from "@flowgraph/core";
 import type { GraphSpec } from "@flowgraph/spec";
-// Registers the media vendors (xai, openai, tripo, meshy, elevenlabs) so `image`/`video`/`model3d`/`audio`
-// nodes can resolve providers declared in the graph.
+// Registers the media vendors and moved product node packages so trusted runs
+// can use media, workshop, demo, service, port, worktree, and localTools;
+// untrusted uploads remain restricted by the default-deny upload policy.
 import "@flowgraph/media";
+import "@flowgraph/node-demo";
+import "@flowgraph/node-port";
+import "@flowgraph/node-service";
+import "@flowgraph/node-workshop";
+import "@flowgraph/node-worktree";
+import "@flowgraph/tools-fs";
 import { ServerRequestError } from "./errors.js";
 
 /** Refuse providers an untrusted author may not configure (checked again when the graph runs). */
@@ -37,6 +44,12 @@ export async function buildServerProviders(
   const built = new Set<string>();
 
   for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
+    if ((cfg as { kind?: string }).kind === "media") {
+      // Built by compileGraph (media providers are not agent providers), but
+      // an untrusted author's endpoint settings are still refused here.
+      if (opts.untrusted) assertUntrustedProvider(name, cfg as Record<string, unknown>);
+      continue;
+    }
     switch (cfg.kind) {
       case "langchain": {
         if (opts.untrusted) assertUntrustedProvider(name, cfg);
@@ -44,10 +57,15 @@ export async function buildServerProviders(
         built.add(name);
         break;
       }
-      case "media": {
-        // Built by compileGraph (media providers are not agent providers), but
-        // an untrusted author's endpoint settings are still refused here.
-        if (opts.untrusted) assertUntrustedProvider(name, cfg);
+      case "plugin": {
+        if (opts.untrusted) {
+          throw new ServerRequestError(
+            403,
+            "PROVIDER_PLUGIN_BLOCKED",
+            `Provider "${name}": kind: plugin is not allowed for untrusted graph uploads.`,
+          );
+        }
+        // Resolved and options-validated per compile by compileGraph against server-registered plugins.
         break;
       }
       case "cli":

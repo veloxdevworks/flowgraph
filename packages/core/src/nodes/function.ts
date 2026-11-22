@@ -6,7 +6,6 @@
 
 import { z } from "zod";
 import { FunctionWithSchema } from "@flowgraph/spec";
-import { renderDeep } from "@flowgraph/expr";
 import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
 import { applyOutput } from "./output.js";
@@ -33,12 +32,12 @@ export const functionNode = defineNode<Config>({
   type: "function",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: {},
+  capabilities: { hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: {},
+      capabilities: { hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         assertFunctionAllowed(nodePolicyOf(ctx), config.fn, `function node "${ctx.nodeId}"`);
@@ -57,11 +56,8 @@ export const functionNode = defineNode<Config>({
           run: ctx.meta,
         };
 
-        // The handler receives the node's `input` (or, as a tool, the model's
-        // arguments). `with.input`, when set, replaces it and can read it as `{{ input.* }}`.
-        const input = config.input
-          ? (renderDeep(config.input, scope) as Record<string, unknown>)
-          : scope.input;
+        // The handler receives the node's `input` (or, as a tool, the model's arguments).
+        const input = scope.input;
 
         const result = await fn(input, ctx);
 

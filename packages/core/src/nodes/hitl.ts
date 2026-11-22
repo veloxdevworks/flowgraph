@@ -44,12 +44,12 @@ export const hitlNode = defineNode<Config>({
   type: "hitl",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true, routing: true },
+  capabilities: { interruptible: true, routing: true, hostAccess: false },
 
   build(_ctx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     return {
       contract: {},
-      capabilities: { interruptible: true, routing: true },
+      capabilities: { interruptible: true, routing: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const scope = {

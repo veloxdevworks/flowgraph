@@ -87,7 +87,7 @@ import type {
   MediaRequest,
   MediaVendor,
   MediaVendorOptions,
-} from "@flowgraph/core";
+} from "../runtime/types.js";
 import { VendorHttpError, joinUrl, requestJson, resolveApiKey } from "../http.js";
 
 const VENDOR = "meshy";

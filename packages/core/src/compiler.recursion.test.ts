@@ -23,9 +23,8 @@ describe("runtime.recursionLimit", () => {
           type: "function",
           with: {
             fn: "inc",
-            input: { n: "{{ state.n }}" },
             output: { to: "n" },
-          },
+          }, input: { n: "{{ state.n }}" },
         },
       ],
       edges: [

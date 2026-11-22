@@ -23,7 +23,7 @@ function codeGraph(extra: Partial<GraphSpec> = {}): GraphSpec {
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "hooks-graph" },
-    state: { channels: { flag: { type: "boolean" }, ok: { type: "boolean" } } },
+    state: { channels: { flag: { type: "boolean" }, ok: { type: "object" } } },
     nodes: [
       { id: "step", type: "function", with: { fn: "setFlag", output: { to: "flag" } } },
     ],
@@ -65,7 +65,7 @@ describe("hooks — node lifecycle", () => {
       id: "step",
       type: "function",
       input: { name: "original" },
-      with: { fn: "echoName", input: { name: "{{ input.name }}" }, output: { to: "name" } },
+      with: { fn: "echoName", output: { to: "name" } },
     };
     const hook: Hook = {
       phase: "node:before",

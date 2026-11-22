@@ -1,6 +1,6 @@
-# 08 — Providers (Intelligent-Node Backends)
+# 08 — Providers (Agent-Node Backends)
 
-An **intelligent** node delegates its agent loop to a **provider**. flowgraph defines a **pluggable provider interface** first, then ships adapters as optional packages so you install only the backends your graphs reference. v1 targets three: **Claude Agent SDK**, **Cursor SDK**, and a generic **LangChain ChatModel** adapter (LangChain is also built into `@flowgraph/core` for convenience).
+An **agent** node delegates its agent loop to a **provider**. flowgraph defines a **pluggable provider interface** first, then ships adapters as optional packages so you install only the backends your graphs reference. v1 targets three: **Claude Agent SDK**, **Cursor SDK**, and a generic **LangChain ChatModel** adapter (LangChain is also built into `@flowgraph/core` for convenience).
 
 ## 1. Why an abstraction
 
@@ -84,7 +84,7 @@ mcpServers:
 Two consumption modes share one client (`@flowgraph/mcp`):
 
 1. **Deterministic** — `type: mcp` nodes call a specific tool or read a resource with arguments mapped from state.
-2. **Agentic** — `{ mcp: atlassian }` under `intelligent.with.tools` expands the server's tools at run time and routes invocations through `ctx.invokeTool` (hooks, HITL, events).
+2. **Agentic** — `{ mcp: atlassian }` under `agent.with.tools` expands the server's tools at run time and routes invocations through `ctx.invokeTool` (hooks, HITL, events).
 
 ```yaml
 - id: triage
@@ -157,7 +157,7 @@ providers:
 - `kind: media` is for backends with no LLM side, or to pin separate credentials. Fields: `vendor`, `model`, `baseUrl`, `apiKeyEnv`, `options`. The key is read at call time through the run's secret provider (`env`/`dotenv`).
 - A bare vendor name also works (`provider: xai` on a node) using that vendor's default key env var.
 - A node without `provider:` uses `config.defaults.provider` when that provider can do the modality, otherwise the only provider that can, otherwise fails listing the candidates.
-- **Third-party vendors:** a plugin loaded through `imports[].providers` calls `registerMediaVendor({ vendor, modalities, create })` (or `registerMediaProvider`) from `@flowgraph/core`; `kind: media` entries then name the vendor. A `MediaProvider` implements `start` / `poll` / `fetch` / `cancel` and persists outputs through the supplied `saveOutput`.
+- **Third-party vendors:** a plugin loaded through `imports[].providers` calls `registerMediaVendor({ vendor, modalities, create })` (or `registerMediaProvider`) from `@flowgraph/media` (preview package; registered by default in `@flowgraph/cli`); `kind: media` entries then name the vendor. A `MediaProvider` implements `start` / `poll` / `fetch` / `cancel` and persists outputs through the supplied `saveOutput`.
 **Reference vendors (`@flowgraph/media`)**, loaded automatically by the CLI and server. Written from each vendor's official docs (2026-11-05); **not yet exercised against the live APIs**. Model ids and prices move quickly, so check the vendor docs. Media model precedence is top-level node `model:`, then `with.model`, then the provider's `model`; the node overrides are passed through to the vendor.
 
 | Vendor id | Use via | Serves | Key env (default) | Default model(s) | Notes |
@@ -213,14 +213,13 @@ Wraps `@anthropic-ai/claude-agent-sdk` (`query({ prompt, options })`). Maps:
   provider: claude
   model: claude-sonnet-4.5
   with:
-    claude:                         # provider-namespaced escape hatch
-      permissionMode: acceptEdits
-      cwd: "{{ run.workspace }}"
     tools:
       - builtin: [Read, Edit, Bash, Grep]
       - skill: run-tests
     prompt: "Implement: {{ state.task }}"
 ```
+
+Provider-specific settings (such as `permissionMode` and `cwd`) live in the top-level `providers:` entry rather than inside `with:` on individual nodes:
 
 ```yaml
 providers:
@@ -245,20 +244,25 @@ providers:
     apiKeyEnv: CURSOR_API_KEY   # optional override; must be listed in secrets:
 ```
 
-Wraps `@cursor/sdk` (`Agent.create`/`prompt`/`stream`). Maps the same `AgentRequest` onto the Cursor agent loop, exposing skills/nodes as `local.customTools` and streaming run messages into flowgraph events. Supports Cursor's local vs. cloud runtime selection via `providers.cursor.runtime` or `with.cursor.runtime`. Auth via `CURSOR_API_KEY` (or `apiKeyEnv`), surfaced to preflight.
+Wraps `@cursor/sdk` (`Agent.create`/`prompt`/`stream`). Maps the same `AgentRequest` onto the Cursor agent loop, exposing skills/nodes as `local.customTools` and streaming run messages into flowgraph events. Supports Cursor's local vs. cloud runtime selection via `providers.cursor.runtime` (declare separate provider entries if different nodes need `local` vs. `cloud`). Auth via `CURSOR_API_KEY` (or `apiKeyEnv`), surfaced to preflight.
 
 Local runs always set `local.trust: true` (same idea as Cursor CLI `--trust`): flowgraph has already chosen the workspace, and there is no TTY to answer a trust prompt. That is not `--force` / `--yolo` (auto-allow shell).
 
 **Governance note:** Custom tools (skills/nodes/functions) route through flowgraph `checkToolCall`/`reportToolResult`. Native Cursor builtin tools do not support per-call `canUseTool`; `validate()` warns when combining `tools.builtin` with `permission: ask` or `agent:beforeToolCall` hooks — use `provider: claude` or `@flowgraph/tools-fs` for fine-grained file-tool gating.
 
 ```yaml
-- id: refactor
-  type: agent
-  provider: cursor
-  with:
-    cursor: { runtime: cloud }
-    tools: [{ skill: search-codebase }, { node: open-pr }]
-    prompt: "Refactor {{ state.module }} to remove the deprecated API."
+providers:
+  cursor-cloud:
+    kind: cursor
+    runtime: cloud
+
+nodes:
+  - id: refactor
+    type: agent
+    provider: cursor-cloud
+    with:
+      tools: [{ skill: search-codebase }, { node: open-pr }]
+      prompt: "Refactor {{ state.module }} to remove the deprecated API."
 ```
 
 ## 5. Adapter: LangChain (built into `@flowgraph/core`)
@@ -268,23 +272,31 @@ The "works with any model" baseline. Wraps a LangChain `ChatModel` (`@langchain/
 Install a LangChain vendor package for your model (e.g. `pnpm add @langchain/openai`) and set the matching API key env var. The adapter itself ships with `@flowgraph/core` — no separate flowgraph provider package required.
 
 ```yaml
-- id: classify
-  type: agent
-  provider: langchain
-  model: gpt-4o            # or anthropic, etc., per configured ChatModel
-  with:
-    langchain: { temperature: 0 }
-    schema: { type: object, properties: { label: { type: string } }, required: [label] }
-    prompt: "Classify: {{ state.text }}"
+providers:
+  classifier:
+    kind: langchain
+    vendor: openai
+    model: gpt-4o
+    options: { temperature: 0 }
+
+nodes:
+  - id: classify
+    type: agent
+    provider: classifier
+    with:
+      schema: { type: object, properties: { label: { type: string } }, required: [label] }
+      prompt: "Classify: {{ state.text }}"
 ```
 
 ## 6. Selection, defaults, and validation
 
-- Model choice is the node `model`, then the provider's own model, then `config.defaults.model` only when the node uses `config.defaults.provider`. `config.defaults.model` without `config.defaults.provider` is ignored, and validate warns about it. A default model does not replace another provider's model. Retry and timeout are not part of `config.defaults`: use `runtime.retry` / `runtime.timeoutDefault`, or set `retry` / `timeout` on the node.
+- Provider and model come only from the node's top-level `provider` / `model` fields plus `config.defaults`. Model choice is the node `model`, then the provider's own model, then `config.defaults.model` only when the node uses `config.defaults.provider`. `config.defaults.model` without `config.defaults.provider` is ignored, and validate warns about it. A default model does not replace another provider's model. Retry and timeout are not part of `config.defaults`: use `runtime.retry` / `runtime.timeoutDefault`, or set `retry` / `timeout` on the node.
 - On `flowgraph run`, the CLI reads `providers:` from the graph YAML, constructs LangChain adapters from the built-in core provider, or lazy-loads `@flowgraph/provider-claude` / `@flowgraph/provider-cursor` by `kind`, and passes them to `compileGraph({ providers })`. Missing vendor packages or API keys fail fast with install/env hints.
 - `validate()` runs at compile time and during `flowgraph validate`: unknown model (when the provider lists known ids), builtin tools unsupported by the provider, or other options the provider cannot honor ⇒ diagnostics before any model call. Compile errors stop compilation; compile warnings are logged, listed on `compiled.diagnostics`, and included in every run result's `issues`. Offline, `flowgraph validate` checks LangChain entries in `providers:` (known model from `model`, builtin tools) and calls `validate()` on providers registered in the process, without loading vendor packages or calling the network. A node `model` override and `with.maxTokens` are forwarded by the LangChain adapter; providers that cannot honor an option must report it from `validate()` instead of ignoring it.
 
-## 7. Registering a custom provider
+## 7. Registering a custom provider (`kind: plugin`)
+
+To supply a pre-built adapter programmatically, pass it to `compileGraph(spec, { providers: [gemini] })`:
 
 ```ts
 import { defineProvider } from "@flowgraph/core";
@@ -298,7 +310,45 @@ export const gemini = defineProvider({
 });
 ```
 
-Register via `compileGraph(spec, { providers: [gemini] })` or publish as `@scope/flowgraph-provider-gemini` and `imports: [{ providers: "..." }]`. This keeps the intelligent-node ecosystem open ([Vision §differentiator](./00-vision.md#2-the-idea)).
+To expose a configurable third-party provider that graphs configure via `providers.<name>` with `kind: plugin`, export a `ProviderPlugin` with `defineProviderPlugin` and import it via `imports[].providers` (or register it with `registerProviderPlugin`):
+
+```ts
+import { defineProviderPlugin } from "@flowgraph/core";
+import { z } from "zod";
+
+export default defineProviderPlugin({
+  name: "acme/gemini",
+  optionsSchema: z.object({
+    temperature: z.number().min(0).max(2).optional(),
+    region: z.string().default("us-central1"),
+  }).strict(),
+  create(options, ctx) {
+    return {
+      name: ctx.name,
+      capabilities: { toolCalling: true, structuredOutput: true, streaming: true, mcp: false },
+      async run(req, runCtx) { /* call Gemini with validated options and ctx.apiKey */ },
+    };
+  },
+});
+```
+
+```yaml
+imports:
+  - providers: ./providers/gemini.mjs
+
+secrets: [GEMINI_API_KEY]
+
+providers:
+  gemini:
+    kind: plugin
+    plugin: acme/gemini
+    model: gemini-2.5-pro
+    apiKeyEnv: GEMINI_API_KEY
+    options:
+      temperature: 0.2
+```
+
+The compiler validates `options` against the plugin's `optionsSchema` / `validateOptions` before calling `create()`, failing with `PROVIDER_OPTIONS_INVALID` on invalid options or `PROVIDER_PLUGIN_NOT_FOUND` when no matching plugin is registered. Imported providers are scoped to the compiled graph rather than mutating the global provider registry. This keeps the agent-node ecosystem open ([Vision §differentiator](./00-vision.md#2-the-idea)).
 
 ## 8. Environment variables (quick reference)
 

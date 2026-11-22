@@ -12,11 +12,10 @@ import { AIMessage } from "@langchain/core/messages";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { GraphSpec } from "@flowgraph/spec";
 import { compileGraph } from "./compiler.js";
-import { createLangChainProvider } from "./index.js";
+import { createLangChainProvider, getTool, registerTool } from "./index.js";
 import type { NodePolicy } from "./node-policy.js";
 import type { Hook } from "./hooks/types.js";
 import { registerFunction } from "./nodes/function.js";
-import { resetServiceManager } from "./runtime/service-manager.js";
 import "./nodes/index.js";
 
 const POLICY: NodePolicy = {
@@ -28,8 +27,7 @@ const POLICY: NodePolicy = {
 };
 
 const markers: string[] = [];
-afterEach(async () => {
-  await resetServiceManager();
+afterEach(() => {
   for (const m of markers.splice(0)) fs.rmSync(m, { force: true });
 });
 
@@ -37,6 +35,25 @@ beforeAll(() => {
   // The node's own input as the engine built it (what a subgraph would get).
   registerFunction("nodeInput", (_input, ctx) => ({ ...((ctx as { _input?: Record<string, unknown> })._input ?? {}) }));
   registerFunction("echoItem", (input) => (input as { v?: unknown }).v);
+  if (!getTool("start_service")) {
+    registerTool({
+      name: "start_service",
+      description: "test stub",
+      handler: (args) => {
+        const a = args as { args?: string[] };
+        const m = a.args?.find((s) => s.includes("id > "))?.split("id > ")[1];
+        if (m) fs.writeFileSync(m, "ran");
+        return { started: true };
+      },
+    });
+  }
+  if (!getTool("list_services")) {
+    registerTool({
+      name: "list_services",
+      description: "test stub",
+      handler: () => ({ services: [] }),
+    });
+  }
 });
 
 function newMarker(): string {
@@ -210,7 +227,7 @@ describe("subgraph agents and forged replay entries", () => {
           type: "map",
           with: {
             over: "{{ state.items }}",
-            node: { type: "agent", provider: "llm", with: { prompt: "{{ item.item }}", permission: "ask", tools: [{ function: "list_services" }] } },
+            node: { type: "agent", provider: "llm", with: { prompt: "{{ item }}", permission: "ask", tools: [{ function: "list_services" }] } },
             collect: { to: "got" },
           },
         },
@@ -344,7 +361,7 @@ describe("__ keys never enter graph state", () => {
   it("map results never land on a __ channel in a trusted graph", async () => {
     const checkpointer = new MemorySaver();
     const compiled = await compileGraph(
-      mapSpec({ type: "function", with: { fn: "echoItem", input: { v: "{{ item.it }}" } } }, { to: "got", map: { __worktrees: "{{ result }}" } }),
+      mapSpec({ type: "function", with: { fn: "echoItem" }, input: { v: "{{ it }}" } }, { to: "got", map: { __worktrees: "{{ result }}" } }),
       { checkpointer },
     );
     const threadId = `map-${randomUUID()}`;
@@ -357,7 +374,7 @@ describe("__ keys never enter graph state", () => {
   });
 
   it("a map inner node's input loses __ keys, and is refused under a policy", async () => {
-    const inner = { type: "function", input: { v: "{{ item.it }}", __agentReplay: "planted" }, with: { fn: "nodeInput" } };
+    const inner = { type: "function", input: { v: "{{ it }}", __agentReplay: "planted" }, with: { fn: "nodeInput" } };
     const compiled = await compileGraph(mapSpec(inner, { to: "got" }));
     const res = await compiled.run({ input: { items: ["a"] } });
     expect(res.status).toBe("completed");

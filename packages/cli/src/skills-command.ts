@@ -97,7 +97,7 @@ export function buildSkillsCommand(): Command {
               name: s!.frontMatter.name,
               version: s!.frontMatter.version,
               description: s!.frontMatter.description,
-              kind_of: s!.frontMatter.kind_of,
+              kindOf: s!.frontMatter.kindOf,
               inputs: Object.keys(s!.frontMatter.inputs ?? {}),
               outputs: Object.keys(s!.frontMatter.outputs ?? {}),
               path: s!.path,
@@ -111,7 +111,7 @@ export function buildSkillsCommand(): Command {
         for (const s of skills) {
           const fm = s!.frontMatter;
           const io = `${Object.keys(fm.inputs ?? {}).length} in / ${Object.keys(fm.outputs ?? {}).length} out`;
-          console.log(`  ${pc.cyan(fm.name)}  ${pc.dim(`v${fm.version ?? "?"}`)}  [${fm.kind_of}]  ${pc.dim(io)}`);
+          console.log(`  ${pc.cyan(fm.name)}  ${pc.dim(`v${fm.version ?? "?"}`)}  [${fm.kindOf}]  ${pc.dim(io)}`);
           if (fm.description) console.log(`    ${pc.dim(fm.description.trim().split("\n")[0])}`);
         }
         console.log(pc.dim(`\n${skills.length} skill(s) found`));

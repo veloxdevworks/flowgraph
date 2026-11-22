@@ -1,6 +1,6 @@
 # 04 — Skills
 
-A **skill** is a portable, contract-bearing, environment-aware unit of capability. It is the reusable building block that makes flowgraph graphs composable across projects and teams. Skills are referenced by `skill` nodes ([03 §2](./03-node-types.md#2-skill--invoke-a-declared-skill)) and exposed as tools to `agent` nodes ([03 §1](./03-node-types.md#1-intelligent--agent-node-hub--spoke)).
+A **skill** is a portable, contract-bearing, environment-aware unit of capability. It is the reusable building block that makes flowgraph graphs composable across projects and teams. Skills are referenced by `skill` nodes ([03 §2](./03-node-types.md#2-skill--invoke-a-declared-skill)) and exposed as tools to `agent` nodes ([03 §1](./03-node-types.md#1-agent--llm-agent-node-hub--spoke)).
 
 Skills deliberately mirror the familiar **`SKILL.md` = YAML front-matter + Markdown body** format (as used by the Claude Agent SDK and Cursor skills), so existing skill authors feel at home and so an agent can read a skill's body as instructions.
 
@@ -10,12 +10,11 @@ Skills deliberately mirror the familiar **`SKILL.md` = YAML front-matter + Markd
 skills/
 └── create-jira-bug/
     ├── SKILL.md            # required — front-matter (contract + env) + body (instructions)
-    ├── handler.ts          # optional — executable handler (kind: executable)
-    ├── schema.input.json   # optional — externalized input schema ($ref-able)
+    ├── handler.ts          # optional — executable handler (kindOf: executable)
     └── assets/             # optional — templates, prompts, fixtures
 ```
 
-A skill can also be a **single `SKILL.md`** with everything inline. Directory form is for skills with code/assets.
+A skill can also be a **single `SKILL.md`** with everything inline (for `kindOf: command`). Directory form is for skills with code/assets.
 
 ## 2. `SKILL.md` front-matter
 
@@ -31,7 +30,7 @@ description: >
   Create a Jira bug ticket from a summary and return its key/url.
 labels: { domain: jira }
 
-kind_of: executable            # executable | command  (see §3)
+kindOf: executable              # executable | command  (see §3)
 
 # --- the contract: each input / output is a JSON Schema (draft-07) ---
 inputs:
@@ -52,28 +51,19 @@ env:
       secret: true              # redacted everywhere; never checkpointed
   bin:                          # executables that must be on PATH
     - { name: git, optional: true }
-  network: true                 # requires outbound network
   node: ">=20"                  # optional engine constraint
-  packages:                     # optional npm deps the handler needs (for executable kind)
-    - "@atlassian/jira-client@^8"
 
 # --- execution config for this skill kind ---
-handler: ./handler.ts           # for kind_of: executable
-# command: ["python", "create.py"]   # for kind_of: command
+handler: ./handler.ts           # for kindOf: executable
+# command: ["python", "create.py"]   # for kindOf: command
 
-timeout: 60s
-sideEffecting: true             # affects retry/replay safety
-permissions:                    # optional declared capability surface (informational + enforced where possible)
-  - network:jira
+timeout: 60s                    # enforced at runtime (SKILL_TIMEOUT)
 ---
 
 # Create Jira Bug
 
 When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 `{{ inputs.summary }}`. Return the issue key and URL.
-
-> The Markdown body is human documentation **and** the instruction text passed
-> to the model when this skill is used as an agent tool.
 ````
 
 ### Field reference
@@ -82,68 +72,78 @@ When invoked, create a Jira **bug** in `{{ inputs.project }}` with the given
 |---|---|
 | `name` | Skill identifier (unique within its package/namespace). |
 | `version` | Semver of the skill; enables pinning when published. |
-| `kind_of` | How the skill executes — see §3. |
-| `inputs` / `outputs` | The **contract**: a map of name → JSON Schema (draft-07), the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as hitl forms and agent output. Each input value is checked against its schema before the skill runs. An input's `required: true` means the caller must pass it (default `false`); a `required: [a, b]` list keeps its JSON Schema meaning for an object-typed input. |
+| `description` | Human-readable summary; also used as the tool description when exposed to an `agent` node. |
+| `kindOf` | How the skill executes — `executable` or `command` (see §3). |
+| `inputs` / `outputs` | The **contract**: a map of name → JSON Schema (draft-07), the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as hitl forms and agent output. Each input value is checked against its schema before the skill runs, and declared `outputs` are checked against the return value after it runs (`SKILL_OUTPUT_INVALID`). An input's `required: true` means the caller must pass it (default `false`); a `required: [a, b]` list keeps its JSON Schema meaning for an object-typed input. |
 | `env.vars` | Required env vars; `secret: true` ⇒ resolved via SecretProvider + redacted. A `command` skill's process receives the default host allowlist (`PATH`, `HOME`, temp and locale variables), its `env.vars`, and `FLOWGRAPH_INPUT`; a `secret: true` var reaches it only when the graph lists the name under top-level `secrets:`. |
 | `env.bin` | Required executables on PATH (with `optional`). `name` is one executable name — letters, digits, `.`, `_`, `+` or `-` — not a path or a shell command. Preflight looks it up with `which` / `where` and no shell. |
-| `env.network` | Whether outbound network is needed (preflight can fail in offline CI). |
-| `env.node` / `env.packages` | Engine + npm deps for executable skills. |
-| `handler` / `command` | Execution target per `kind_of`. |
-| `sideEffecting` | If true, the runtime treats retries/replays carefully (idempotency). |
-| `permissions` | Declared capability surface (informational; enforced where the runtime can). |
+| `env.node` | Optional Node.js version constraint (e.g. `>=20`) checked during preflight. |
+| `handler` / `command` | Execution target per `kindOf`. `handler` paths must stay inside the skill directory. |
+| `timeout` | Duration string (e.g. `30s`, `2m`) enforced at runtime. Aborts the handler's `ctx.signal` / kills the command child and fails with `SKILL_TIMEOUT`. |
 
 ## 3. Skill kinds
 
-| `kind_of` | Executes by | Use for |
+| `kindOf` | Executes by | Use for |
 |---|---|---|
-| `executable` | Calling a TS `handler(input, ctx)` exported from `handler.ts` | Most reusable logic; full typing & ctx (secrets, http, logger) |
-| `command` | Spawning a process (`command:`), passing input as JSON on stdin/env, parsing stdout | Wrapping existing CLIs/scripts in any language |
+| `executable` | Calling a JS/TS default-exported `handler(input, ctx)` from `handler` | Reusable logic with direct access to `NodeRunContext` (`emit`, `signal`, `workspace`, `config`, `meta`) |
+| `command` | Spawning a process (`command:`), writing JSON-encoded input to **stdin** and setting `FLOWGRAPH_INPUT`, and parsing stdout as JSON (or falling back to raw text) | Wrapping existing CLIs/scripts in any language |
 
-`agent` and `composite` are reserved: a skill that declares either fails to load (`SKILL_SCHEMA_ERROR`: `kind_of "agent" is not supported`). For judgment tasks, use an `agent` node with the skill's instructions as its prompt; for multi-step bundles, use a subgraph.
+`agent` and `composite` are reserved: a skill that declares either fails to load (`SKILL_SCHEMA_ERROR`: `kindOf "agent" is not supported`). For judgment tasks, use an `agent` node; for multi-step bundles, use a subgraph.
 
 ### `executable` handler signature
 
+An executable skill module exports a default function (or named `handler`) taking the validated `input` object and the node's `NodeRunContext`:
+
 ```ts
-import type { SkillHandler } from "@flowgraph/skills";
+import type { NodeRunContext } from "@flowgraph/core";
 
-const handler: SkillHandler<
-  { project: string; summary: string; priority: "low" | "medium" | "high" },
-  { key: string; url: string }
-> = async (input, ctx) => {
-  const token = await ctx.secrets.get("JIRA_TOKEN");        // never logged
-  const base  = ctx.env.get("JIRA_BASE_URL");
-  const res = await ctx.http.post(`${base}/rest/api/3/issue`, {
-    headers: { Authorization: `Bearer ${token}` },
-    json: { /* ...build payload from input... */ },
+export default async function handler(
+  input: { project: string; summary: string; priority?: "low" | "medium" | "high" },
+  ctx: NodeRunContext,
+): Promise<{ key: string; url: string }> {
+  const base = process.env["JIRA_BASE_URL"] ?? "";
+  const token = process.env["JIRA_TOKEN"] ?? "";
+  const res = await fetch(`${base}/rest/api/3/issue`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fields: { project: { key: input.project }, summary: input.summary },
+    }),
+    signal: ctx.signal,
   });
-  ctx.logger.info("created jira issue", { key: res.body.key });
-  return { key: res.body.key, url: `${base}/browse/${res.body.key}` };
-};
-
-export default handler;
+  const body = (await res.json()) as { key: string };
+  ctx.emit("custom.jira.created", { key: body.key });
+  return { key: body.key, url: `${base}/browse/${body.key}` };
+}
 ```
 
-`ctx` provides: `secrets`, `env`, `http` (instrumented + redacted), `logger`, `emit` (custom events), `signal` (abort), `workspace` (scratch dir), and `interrupt()` (request HITL). It is the **only** way side-effects reach the outside world, which is what makes them observable/redactable.
+`ctx` is the runtime `NodeRunContext` providing `emit`, `signal` (aborted on skill or node timeout), `workspace`, `config`, `meta`, `store`, and `memory`.
+
+### `command` skill input & output
+
+For `kindOf: command`, the runtime spawns `command[0]` with `command.slice(1)` (no OS shell), writes the JSON-serialized input object to the child's **stdin** (closing stdin after writing), and also sets the `FLOWGRAPH_INPUT` environment variable to the same JSON string. Standard output is parsed as JSON when valid (or returned as trimmed text otherwise), then validated against `outputs` if declared.
+
+On Unix, the command runs in its own process group (`detached: true`), so a terminal `Ctrl-C` (`SIGINT`) does not reach it directly. When a run is cancelled or the skill times out, Flowgraph stops the process group (`SIGTERM`, then `SIGKILL` after the stop grace period) so child and grandchild processes exit cleanly.
 
 ## 4. Contracts & validation
 
-Each entry under `inputs` / `outputs` is a JSON Schema (draft-07) — the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as node `schema:` blocks. They are checked at two points:
+Each entry under `inputs` / `outputs` is a JSON Schema (draft-07) — the same [data contract](./05-state-and-data.md#data-contracts-json-schema) dialect as node `schema:` blocks. They are checked at three points:
 
 1. **Load time** — every declaration must be a valid contract schema. An unknown keyword, an unknown `format`, `type: any` or a boolean `required` nested inside a schema fails the skill with `SKILL_SCHEMA_ERROR`.
-2. **Runtime (pre)** — before the skill runs, a missing `required: true` input is an error, and each input that is present is validated against its schema; invalid input ⇒ node error (no side effects).
-
-`outputs` describe the result for readers, editors and agent tools; the return value is not validated against them.
-
-A skill's declared `outputs` are its documented promise to the graph; keep them accurate, since agent tools and editors read them.
+2. **Runtime (pre)** — before the skill runs, a missing `required: true` input is an error, and each input that is present is validated against its schema; invalid input fails before any side effects run.
+3. **Runtime (post)** — when `outputs` is declared, the return value must be an object containing every declared output key and each value must match its JSON Schema; mismatches fail with `SKILL_OUTPUT_INVALID`.
 
 ## 5. Preflight & environment checks
 
 Because skills declare `env`, flowgraph can answer **"is this environment set up to run this node?"** before (and independently of) execution.
 
-- `flowgraph skills doctor` / `flowgraph validate --preflight` walks every referenced skill and checks: required env vars present, secret vars resolvable, `bin` on PATH (one executable name, looked up with `which` / `where` and no shell), `node` engine satisfied, network availability (if required), and `packages` installed (for executable skills).
+- `flowgraph skills doctor` / `flowgraph validate --preflight` walks every referenced skill and checks: required env vars present, secret vars resolvable, `bin` on PATH (one executable name, looked up with `which` / `where` and no shell), and `node` engine satisfied.
 - Results are reported as a table; missing **required** deps are errors, missing **optional** deps are warnings.
-- Preflight runs automatically at compile time (cheap checks) and is **deep-checked at run start** so a graph fails fast — *before* doing partial work — if the environment can't satisfy a downstream skill.
-- The check is also exposed programmatically (`checkSkillEnv(skill, ctx) => Diagnostics`) so the future GUI can show green/red readiness per node.
+- Preflight runs automatically before a skill executes so a run fails fast if the environment can't satisfy it.
+- The check is also exposed programmatically (`preflightSkill(skill) => PreflightResult`) so hosts and UIs can show readiness per node.
 
 Example output:
 
@@ -154,7 +154,6 @@ create-jira-bug      JIRA_BASE_URL ✓             ok
                      JIRA_EMAIL    ✓
                      JIRA_TOKEN    ✓ (secret)
 post-to-slack        SLACK_TOKEN   ✗ missing      ERROR
-                     network       ✓
 run-tests            git           ✓
                      node >=20     ✓ (v22.3.0)    ok
 
@@ -178,23 +177,23 @@ A **skill pack** package layout:
 └── create-jira-bug/SKILL.md
 ```
 
-This gives us a path to a community skill ecosystem without inventing a new registry (npm is the registry).
+This gives a path to a community skill ecosystem without inventing a new registry (npm is the registry).
 
 ## 7. Skills as agent tools
 
-When a skill is listed under an `agent` node's `with.tools`, flowgraph wraps it as a provider tool:
+When a skill is listed under an `agent` node's `with.tools` (for example `{ skill: create-jira-bug }`), flowgraph loads the skill and builds its provider `ToolSpec` from the skill's front matter:
 
-- The tool's **name/description** come from the skill's `name`/`description`.
-- The tool's **input schema** is the skill's `inputs` contract (so the model calls it with valid args).
-- Invocation runs the skill through the normal runtime (events/traces/contract validation), and the result is returned to the agent.
-- `sideEffecting` skills can require `permission: ask`, turning a tool call into a HITL approval.
+- The tool's **name** and **description** come from the skill's `name` and `description`.
+- The tool's **input schema** is a JSON Schema `object` built from the skill's `inputs` contract (with `required` populated from inputs marked `required: true`), so the model calls it with valid arguments.
+- Invocation runs the skill through the normal runtime (`runSkill`: preflight, input validation, `timeout`, output validation, and events) and returns the result to the agent.
+- Gate specific skill tool calls with `permission: ask` or `runtime.hooks` on `agent:beforeToolCall`.
 
 This is the hub-and-spoke pattern in practice: the agent is the hub, skills/nodes are the spokes, and the contract + preflight keep those calls safe.
 
 ## 8. Authoring guidelines
 
-- Keep a skill **single-purpose** and **idempotent** where possible; declare `sideEffecting: true` honestly.
-- Declare **every** env dependency — this is what makes preflight trustworthy.
-- Prefer **typed `outputs`** over free-form text so downstream nodes/routers can rely on structure.
-- Write the Markdown body as if instructing a capable teammate; when the skill is an agent tool it *is* the instruction.
+- Keep a skill **single-purpose** and **idempotent** where possible.
+- Declare **every** env dependency (`env.vars`, `env.bin`, `env.node`) — this is what makes preflight trustworthy.
+- Declare `inputs` and `outputs` schemas so callers, agent tools, and runtime validation enforce the contract.
+- Set `timeout` on skills that perform network or subprocess work so stalled calls fail promptly with `SKILL_TIMEOUT`.
 - Version skills; treat the contract (`inputs`/`outputs`) as a public API — breaking changes bump the major.

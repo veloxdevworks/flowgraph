@@ -27,8 +27,8 @@ nodes:
         type: function
         with:
           fn: stampPackage
-          input:
-            pkg: "{{ item.pkg }}"
+        input:
+          pkg: "{{ pkg }}"
       collect: { to: results }
 
   - id: review-changes

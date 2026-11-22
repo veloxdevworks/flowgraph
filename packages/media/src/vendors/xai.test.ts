@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Artifact } from "@flowgraph/spec";
-import type { MediaCallContext, MediaInput, MediaOutput, MediaRequest } from "@flowgraph/core";
+import type { MediaCallContext, MediaInput, MediaOutput, MediaRequest } from "../runtime/types.js";
 import { VendorHttpError } from "../http.js";
 import { xaiVendor } from "./xai.js";
 

@@ -1,5 +1,5 @@
 import type { ZodIssue } from "zod";
-import { GraphSpecSchema, NodeSpecSchema, type Diagnostic } from "./schema.js";
+import { NodeSpecSchema, graphSpecKnownKeys, type Diagnostic } from "./schema.js";
 
 /** Levenshtein edit distance between two strings. */
 export function editDistance(a: string, b: string): number {
@@ -74,7 +74,7 @@ export function diagnosticsFromZodIssues(issues: readonly ZodIssue[], data: unkn
   for (const issue of issues) {
     const scope = issue.code === "unrecognized_keys" ? scopeFor(issue.path, data) : undefined;
     if (issue.code === "unrecognized_keys" && scope) {
-      const known = Object.keys(scope.kind === "node" ? NodeSpecSchema.shape : GraphSpecSchema.shape);
+      const known = scope.kind === "node" ? Object.keys(NodeSpecSchema.shape) : graphSpecKnownKeys();
       const where =
         scope.kind === "node"
           ? `on node "${scope.id}"`

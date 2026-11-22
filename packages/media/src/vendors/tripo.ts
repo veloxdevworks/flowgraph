@@ -66,7 +66,7 @@ import type {
   MediaRequest,
   MediaVendor,
   MediaVendorOptions,
-} from "@flowgraph/core";
+} from "../runtime/types.js";
 import { joinUrl, requestJson, resolveApiKey, VendorHttpError } from "../http.js";
 
 type Artifact = Awaited<ReturnType<MediaCallContext["saveOutput"]>>;

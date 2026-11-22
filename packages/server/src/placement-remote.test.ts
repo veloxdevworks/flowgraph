@@ -82,7 +82,7 @@ nodes:
           start: { type: number }
           bumped: { type: object }
       nodes:
-        - { id: inc, type: function, with: { fn: prInc, input: { n: "{{ state.start }}" }, output: { to: bumped } } }
+        - { id: inc, type: function, input: { n: "{{ state.start }}" }, with: { fn: prInc, output: { to: bumped } } }
       edges: [ { from: START, to: inc }, { from: inc, to: END } ]
     with:
       stateMap:
@@ -103,8 +103,8 @@ nodes:
   - id: inc
     type: function
     runsOn: [app:test]
-    input: { x: "{{ state.seed }}" }
-    with: { fn: prInc, input: { n: "{{ input.x }}" }, output: { to: bumped } }
+    input: { n: "{{ state.seed }}" }
+    with: { fn: prInc, output: { to: bumped } }
 edges: [ { from: START, to: inc }, { from: inc, to: END } ]
 `);
 

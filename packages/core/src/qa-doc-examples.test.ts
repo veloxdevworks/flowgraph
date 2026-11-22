@@ -25,7 +25,7 @@ it("validates the documented script, form and HTTP transcript node examples", ()
           : [],
     )
     .filter((node): node is Record<string, unknown> => !!node && typeof node === "object");
-  for (const id of ["greet", "intake", "http-transcript-tool"]) {
+  for (const id of ["greet", "intake"]) {
     const node = nodes.find(
       (node) => node.id === id && (id !== "greet" || node.type === "script"),
     )!;

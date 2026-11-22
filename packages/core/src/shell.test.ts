@@ -8,7 +8,8 @@ import { ShellWithSchema } from "@flowgraph/spec";
 import type { GraphSpec } from "@flowgraph/spec";
 import { normalizeShellText } from "./nodes/shell.js";
 
-function shellSpec(nodeWith: Record<string, unknown>, node: Record<string, unknown> = {}): GraphSpec {
+function shellSpec(config: Record<string, unknown>, node: Record<string, unknown> = {}): GraphSpec {
+  const { input, ...nodeWith } = config;
   return {
     metadata: { name: "shell-test" },
     state: {
@@ -22,6 +23,7 @@ function shellSpec(nodeWith: Record<string, unknown>, node: Record<string, unkno
       {
         id: "run",
         type: "shell",
+        ...(input !== undefined ? { input } : {}),
         ...node,
         with: nodeWith,
       },
@@ -45,7 +47,7 @@ describe("ShellWithSchema", () => {
     expect(ShellWithSchema.safeParse({ command: "echo" }).success).toBe(true);
     const timed = ShellWithSchema.safeParse({ command: "echo", args: ["hi"], timeout: "5s" });
     expect(timed.success).toBe(false);
-    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("shell with.timeout is not supported");
+    if (!timed.success) expect(timed.error.issues[0]?.message).toContain("timeout");
     expect(ShellWithSchema.safeParse({ command: "echo hi | wc -c", shell: true }).success).toBe(true);
   });
 
@@ -275,13 +277,13 @@ describe("shell node", () => {
       shellSpec({
         command: "node",
         args: ["-e", "process.stdout.write(JSON.stringify({a:1}))"],
-        output: { map: { text: "{{ result.json.a }}" } },
+        output: { map: { out: "{{ result.json }}" } },
       }),
       {},
     );
     const r = await compiled.run({ input: {} });
     expect(r.status).toBe("completed");
-    expect(r.state["text"]).toBe(1);
+    expect(r.state["out"]).toEqual({ a: 1 });
   });
 
   it("times out long-running commands", async () => {

@@ -226,7 +226,7 @@ describe("graph inputs", () => {
         { key: "count", type: "string" },
         { key: "on", type: "boolean", default: "yes" },
         { key: "tier", type: "select", options: ["a", "b"], default: "c" },
-        { key: "data", type: "json", default: "{not json" },
+        { key: "data", type: "json", schema: { type: "array" }, default: { a: 1 } },
         { key: "title", default: 3 },
       ],
     });
@@ -256,7 +256,7 @@ describe("graph inputs", () => {
         { key: "on", type: "boolean", default: false },
         { key: "data", type: "json", default: { a: 1 } },
         { key: "raw", type: "json", default: "[1, 2]" },
-        { key: "note", type: "text", default: "hi" },
+        { key: "note", type: "string", default: "hi", ui: { widget: "textarea" } },
         { key: "plain" },
       ],
     });
@@ -412,8 +412,8 @@ describe("script code is not linted as a template", () => {
   });
 
   it("still checks templates in the script's other fields", () => {
-    const spec = graph([{ id: "s", type: "script", with: { code: jsx, input: { x: "{{ state. }}" } } }]);
-    expect(errors(validateSpec(spec))).toContainEqual(expect.objectContaining({ code: "EXPR_PARSE_ERROR", path: "nodes.s.with.input.x" }));
+    const spec = graph([{ id: "s", type: "script", with: { code: jsx }, input: { x: "{{ state. }}" } }]);
+    expect(errors(validateSpec(spec))).toContainEqual(expect.objectContaining({ code: "EXPR_PARSE_ERROR", path: "nodes.s.input.x" }));
   });
 
   it("still checks script code in a map body, which the map renders with the item", () => {
@@ -453,14 +453,14 @@ describe("loadGraph and subgraph files", () => {
     const root = await write({
       "plugin.mjs": "export default {};\n",
       "parent.graph.yaml": `${yamlHead}metadata: { name: parent }\nimports:\n  - { nodes: ./plugin.mjs }\nnodes:\n  - { id: call, type: subgraph, uses: ./child.graph.yaml }\nedges:\n  - { from: START, to: call }\n  - { from: call, to: END }\n`,
-      "child.graph.yaml": `${yamlHead}metadata: { name: child }\nnodes:\n  - { id: p, type: acme-widget }\nedges:\n  - { from: START, to: p }\n  - { from: p, to: END }\n`,
+      "child.graph.yaml": `${yamlHead}metadata: { name: child }\nnodes:\n  - { id: p, type: acme/widget }\nedges:\n  - { from: START, to: p }\n  - { from: p, to: END }\n`,
     });
     const { diagnostics } = await loadGraph(path.join(root, "parent.graph.yaml"));
     expect(errors(diagnostics)).toEqual([]);
     expect(diagnostics).toContainEqual(expect.objectContaining({ severity: "warning", code: "PLUGIN_TYPE_UNRESOLVED", path: "nodes.p.type" }));
   });
 
-  it("normalises deprecated type aliases inside inline subgraph specs", async () => {
+  it("rejects removed pre-v1 type aliases inside inline subgraph specs", async () => {
     const root = await write({
       "g.graph.yaml": [
         `${yamlHead}metadata: { name: g }`,
@@ -482,10 +482,9 @@ describe("loadGraph and subgraph files", () => {
         "",
       ].join("\n"),
     });
-    const { spec, diagnostics } = await loadGraph(path.join(root, "g.graph.yaml"));
-    expect(diagnostics).toEqual([]);
-    expect(spec!.nodes[0]!.spec!.nodes[0]!.type).toBe("function");
-    expect(validateSpec(spec!).filter((d) => d.code === "UNKNOWN_NODE_TYPE")).toEqual([]);
+    const { spec } = await loadGraph(path.join(root, "g.graph.yaml"));
+    expect(spec!.nodes[0]!.spec!.nodes[0]!.type).toBe("code");
+    expect(validateSpec(spec!).filter((d) => d.code === "UNKNOWN_NODE_TYPE")).toHaveLength(1);
   });
 
   it("names an unknown type inside an inline spec when another field fails to parse", async () => {

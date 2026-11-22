@@ -8,28 +8,46 @@ const base = { name: "s", handler: "./handler.js" };
 
 describe("skill kinds", () => {
   it("accepts executable and command", () => {
-    expect(SkillFrontMatterSchema.safeParse({ ...base, kind_of: "executable" }).success).toBe(true);
-    expect(SkillFrontMatterSchema.safeParse({ name: "s", kind_of: "command", command: ["echo"] }).success).toBe(true);
+    expect(SkillFrontMatterSchema.safeParse({ ...base, kindOf: "executable" }).success).toBe(true);
+    expect(SkillFrontMatterSchema.safeParse({ name: "s", kindOf: "command", command: ["echo"] }).success).toBe(true);
   });
 
   it.each(["agent", "composite"])("rejects %s until it can run", (kind) => {
-    const r = SkillFrontMatterSchema.safeParse({ ...base, kind_of: kind });
+    const r = SkillFrontMatterSchema.safeParse({ ...base, kindOf: kind });
     expect(r.success).toBe(false);
-    expect(r.error?.issues[0]?.message).toBe(`kind_of "${kind}" is not supported; use "executable" or "command"`);
+    expect(r.error?.issues[0]?.message).toBe(`kindOf "${kind}" is not supported; use "executable" or "command"`);
   });
 
   it("fails at load time with a diagnostic", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-skill-kind-"));
     try {
-      await fs.writeFile(path.join(dir, "SKILL.md"), "---\nname: s\nkind_of: agent\n---\nbody\n");
+      await fs.writeFile(path.join(dir, "SKILL.md"), "---\nname: s\nkindOf: agent\n---\nbody\n");
       const { skill, diagnostics } = await loadSkill(dir);
       expect(skill).toBeNull();
       expect(diagnostics).toEqual([
-        expect.objectContaining({ code: "SKILL_SCHEMA_ERROR", path: "kind_of", message: expect.stringContaining('kind_of "agent" is not supported;') }),
+        expect.objectContaining({ code: "SKILL_SCHEMA_ERROR", path: "kindOf", message: expect.stringContaining('kindOf "agent" is not supported;') }),
       ]);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("validates timeout as a duration and omits removed unread fields", () => {
+    expect(SkillFrontMatterSchema.safeParse({ ...base, timeout: "5s" }).success).toBe(true);
+    expect(SkillFrontMatterSchema.safeParse({ ...base, timeout: "forever" }).success).toBe(false);
+    const parsed = SkillFrontMatterSchema.parse({
+      ...base,
+      sideEffecting: true,
+      permissions: ["fs:read"],
+      provider: "claude",
+      env: { network: true, packages: ["jq"], bin: [{ name: "git", minVersion: "2.0" }] },
+    });
+    expect("sideEffecting" in parsed).toBe(false);
+    expect("permissions" in parsed).toBe(false);
+    expect("provider" in parsed).toBe(false);
+    expect("network" in (parsed.env ?? {})).toBe(false);
+    expect("packages" in (parsed.env ?? {})).toBe(false);
+    expect("minVersion" in (parsed.env?.bin?.[0] ?? {})).toBe(false);
   });
 });
 

@@ -3,6 +3,7 @@ import { mkdtemp, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileGraph, type GraphSpec } from "@flowgraph/core";
+import "./index.js";
 import { openaiVendor } from "./vendors/openai.js";
 const dirs: string[] = [];
 afterEach(async () => {

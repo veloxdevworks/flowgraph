@@ -16,12 +16,18 @@
 
 import * as path from "node:path";
 import { z } from "zod";
-import { SubgraphWithSchema, type GraphSpec } from "@flowgraph/spec";
+import {
+  compileChannelContract,
+  ContractSchemaError,
+  SubgraphWithSchema,
+  type GraphSpec,
+  type InputField,
+  type OutputField,
+} from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
-import { defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
+import { defineNode, registry, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { BaseStore } from "@langchain/langgraph";
 import { graphProviderList } from "../providers/registry.js";
-import { mediaProviderList } from "../media/registry.js";
 import { MEMORY_RUNTIME, type MemoryRuntime } from "../memory/runtime.js";
 import type { NodeRunContext } from "../context.js";
 import { assertSubgraphFileAllowed, isReservedChannel, nodePolicyOf, withoutReservedKeys } from "../node-policy.js";
@@ -29,6 +35,7 @@ import { childRunConfig } from "../providers/replay-cache.js";
 import type { EventBus, FlowgraphEvent } from "../events.js";
 import { ONCE_CHANNEL } from "../runtime/state-annotation.js";
 import { ensureDeclaredOutputChannels } from "../runtime/validate-graph.js";
+import { InputValidationError, resolveAndValidateInput } from "../inputs.js";
 import { subgraphHostOptions } from "../runtime/subgraph-host-context.js";
 import { applyOutput, isOutputNone } from "./output.js";
 import {
@@ -42,7 +49,7 @@ const configSchema = SubgraphWithSchema;
 type Config = z.infer<typeof configSchema>;
 
 type NodeCtx = NodeRunContext & {
-  _input?: Record<string, unknown>;
+  _input?: unknown;
   _lgConfig?: import("@langchain/langgraph").LangGraphRunnableConfig;
 };
 
@@ -54,6 +61,10 @@ interface ChildSpecInfo {
   channels: string[];
   /** Reducer/type of each child channel, including auto-declared targets. */
   channelDefs: Record<string, ChannelMergeDef>;
+  /** The child's declared run parameters: its call contract for what goes in. */
+  inputs: InputField[];
+  /** The child's declared results: its call contract for what comes back. Empty when it declares none. */
+  outputs: OutputField[];
 }
 
 interface EmbeddedChild extends Omit<ChildSpecInfo, "spec" | "cwd"> {
@@ -76,7 +87,7 @@ export const subgraphNode = defineNode<Config>({
   type: "subgraph",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, hostAccess: false },
 
   build(buildCtx: BuildContext, nodeSpec: Record<string, unknown>, config: Config): CompiledNode {
     const uses = String(nodeSpec["uses"] ?? "");
@@ -88,7 +99,7 @@ export const subgraphNode = defineNode<Config>({
 
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, hostAccess: false },
 
       async run(state: Record<string, unknown>, ctx: NodeRunContext): Promise<NodeResult> {
         const nodeCtx = ctx as NodeCtx;
@@ -100,7 +111,7 @@ export const subgraphNode = defineNode<Config>({
 
         // Placed on a worker (ADR-0020): the child is not compiled here. Only its spec and channel
         // definitions are needed; seeding and merge-back below are the in-process ones.
-        let child: Pick<ChildSpecInfo, "channels" | "channelDefs">;
+        let child: Pick<ChildSpecInfo, "channels" | "channelDefs" | "inputs" | "outputs">;
         let embedded: EmbeddedChild | undefined;
         let remoteSpec: GraphSpec | undefined;
         if (remote) {
@@ -115,14 +126,25 @@ export const subgraphNode = defineNode<Config>({
         }
 
         const nodeInput = nodeCtx._input ?? {};
+        if (typeof nodeInput !== "object" || Array.isArray(nodeInput)) {
+          throw subgraphError(
+            "SUBGRAPH_INPUT_INVALID",
+            `subgraph "${label}": input must be an object whose keys are the child's inputs (got ${Array.isArray(nodeInput) ? "an array" : typeof nodeInput})`,
+          );
+        }
         const parentChannels = (ctx.config.channels ?? {}) as Record<string, ChannelMergeDef>;
-        const { input: childInput, seeds } = projectSubgraphInput({
+        const projected = projectSubgraphInput({
           stateMapIn: config.stateMap?.in,
           parentState: state,
-          nodeInput,
+          nodeInput: nodeInput as Record<string, unknown>,
           childChannels: child.channels,
-          resolve: (ref) => resolveRef(ref, state, nodeInput, ctx),
+          resolve: (ref) => resolveRef(ref, state, nodeInput as Record<string, unknown>, ctx),
         });
+        const { seeds } = projected;
+        const childInput = checkChildInput(label, child, projected.input, [
+          ...Object.keys(config.stateMap?.in ?? {}),
+          ...Object.keys(nodeInput),
+        ]);
 
         ctx.emit("node.output", { subgraph: label, input: Object.keys(childInput) });
 
@@ -133,7 +155,7 @@ export const subgraphNode = defineNode<Config>({
         const childState = remote
           ? await remote.execute({ ctx, spec: remoteSpec!, input: withoutReservedKeys(childInput) })
           : await embedded!.invoke(withoutReservedKeys(childInput), childRunConfig(lgConfig, ctx.nodeId));
-        const clean = stripSubgraphState(childState);
+        const clean = exposedChildState(label, child.outputs, stripSubgraphState(childState));
         // Only what flows back into the parent is fetched from the worker (artifact records in it).
         const flowBack = async (update: Record<string, unknown>): Promise<Record<string, unknown>> =>
           remote ? remote.stageOut(ctx, update) : update;
@@ -230,7 +252,14 @@ async function loadChildSpec(
       ...(def.reducer ? { reducer: def.reducer } : {}),
     };
   }
-  return { spec, cwd, channels: Object.keys(channelDefs), channelDefs };
+  return {
+    spec,
+    cwd,
+    channels: Object.keys(channelDefs),
+    channelDefs,
+    inputs: Array.isArray(spec.inputs) ? spec.inputs : [],
+    outputs: Array.isArray(spec.outputs) ? spec.outputs : [],
+  };
 }
 
 /** The child as a worker receives it: `uses:` children (and theirs) inlined as `spec:`. */
@@ -256,7 +285,7 @@ async function loadChild(
   ctx: NodeRunContext,
 ): Promise<EmbeddedChild> {
   const { compileGraphForEmbedding, resolveGraphWorkspace } = await import("../compiler.js");
-  const { spec, cwd, channels, channelDefs } = await loadChildSpec(uses, inlineSpec, parentNodeId, ctx);
+  const { spec, cwd, channels, channelDefs, inputs, outputs } = await loadChildSpec(uses, inlineSpec, parentNodeId, ctx);
 
   const forwardSink = (event: FlowgraphEvent) => {
     parentEvents.emit(event.type, event.data, {
@@ -265,8 +294,15 @@ async function loadChild(
     });
   };
 
+  const hostOpts = subgraphHostOptions(ctx);
+  const extraContext: Record<symbol, unknown> = {};
+  const ctxSymbols = ctx as unknown as Record<symbol, unknown>;
+  for (const sym of (hostOpts.registry ?? registry).subgraphContextSymbols()) {
+    if (sym in ctxSymbols) extraContext[sym] = ctxSymbols[sym];
+  }
+
   const { compiledLg } = await compileGraphForEmbedding(spec, {
-    ...subgraphHostOptions(ctx),
+    ...hostOpts,
     cwd,
     workspace: resolveGraphWorkspace(spec, ctx.workspace),
     sinks: [forwardSink],
@@ -274,7 +310,7 @@ async function loadChild(
     ...(nodePolicyOf(ctx) ? { nodePolicy: nodePolicyOf(ctx)! } : {}),
     // The parent's own providers, so the child answers with the same ones.
     providers: graphProviderList(ctx),
-    mediaProviders: mediaProviderList(ctx),
+    extraContext,
     ...(parentMemoryRuntime(ctx) ? { memory: parentMemoryRuntime(ctx)! } : { memory: "ephemeral" as const }),
   });
 
@@ -288,18 +324,16 @@ async function loadChild(
     },
     channels,
     channelDefs,
+    inputs,
+    outputs,
   };
 }
 
 /**
  * The child shares the parent's long-term store (one store per run tree), so memory
- * written by a subgraph is visible to the parent and vice versa. A child that opts out
- * (`runtime.store.enabled: false` or `backend: none`) gets no store; otherwise the child's
- * own `runtime.store.backend` is ignored — the host decides the backend, not the child.
+ * written by a subgraph is visible to the parent and vice versa.
  */
-function childStore(spec: GraphSpec, ctx: NodeRunContext): BaseStore | "none" {
-  const childRuntime = spec.runtime?.store;
-  if (childRuntime?.enabled === false || childRuntime?.backend === "none") return "none";
+function childStore(_spec: GraphSpec, ctx: NodeRunContext): BaseStore | "none" {
   return ctx.store ?? "none";
 }
 
@@ -324,6 +358,78 @@ function stripSubgraphState(state: Record<string, unknown>): Record<string, unkn
     out[k] = v;
   }
   return out;
+}
+
+function subgraphError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code, retryable: false });
+}
+
+/**
+ * The call boundary, inbound: what the parent hands the child is checked against the child's
+ * declared `inputs` (defaults applied, required and type checks) and against its channels, so a
+ * key the child does not declare is an error instead of being dropped. A same-name parent channel
+ * that is copied in implicitly and holds `null` means "no value yet" and is not checked.
+ */
+function checkChildInput(
+  label: string,
+  child: Pick<ChildSpecInfo, "channels" | "inputs">,
+  input: Record<string, unknown>,
+  explicitKeys: readonly string[],
+): Record<string, unknown> {
+  const explicit = new Set(explicitKeys);
+  const checked: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value == null && !explicit.has(key)) continue;
+    checked[key] = value;
+  }
+  try {
+    return { ...input, ...resolveAndValidateInput(child.inputs, withoutReservedKeys(checked), new Set(child.channels)) };
+  } catch (err) {
+    if (!(err instanceof InputValidationError)) throw err;
+    throw new InputValidationError(
+      err.issues.map((issue) => `subgraph "${label}": ${issue}`),
+      err.errors,
+    );
+  }
+}
+
+/**
+ * The call boundary, outbound: each declared output must be present (unless `required: false`)
+ * and match its contract, and only declared outputs go back to the parent. A child that declares
+ * none returns its whole state.
+ */
+function exposedChildState(
+  label: string,
+  outputs: readonly OutputField[],
+  state: Record<string, unknown>,
+): Record<string, unknown> {
+  if (outputs.length === 0) return state;
+  const exposed: Record<string, unknown> = {};
+  const problems: string[] = [];
+  for (const field of outputs) {
+    const value = state[field.key];
+    if (value === undefined || value === null) {
+      if (field.required !== false) problems.push(`output "${field.key}" was not produced`);
+      if (value !== undefined) exposed[field.key] = value;
+      continue;
+    }
+    let check;
+    try {
+      check = compileChannelContract({ type: field.type, schema: field.schema });
+    } catch (err) {
+      if (err instanceof ContractSchemaError) {
+        throw subgraphError("SUBGRAPH_OUTPUT_INVALID", `subgraph "${label}": output "${field.key}": invalid schema: ${err.message}`);
+      }
+      throw err;
+    }
+    const problem = check?.(value);
+    if (problem) problems.push(`output "${field.key}" does not match its contract: ${problem}`);
+    exposed[field.key] = value;
+  }
+  if (problems.length > 0) {
+    throw subgraphError("SUBGRAPH_OUTPUT_INVALID", `subgraph "${label}": ${problems.join("; ")}`);
+  }
+  return exposed;
 }
 
 function resolveRef(

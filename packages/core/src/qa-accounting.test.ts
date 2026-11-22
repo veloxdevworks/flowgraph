@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { AIMessage, AIMessageChunk } from "@langchain/core/messages";
 import { MemorySaver } from "@langchain/langgraph";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
@@ -82,28 +80,6 @@ it("emits actual model chunks when streaming is requested and charges the call o
   expect(result).toMatchObject({ status: "completed", usage: { totalTokens: 5, calls: 1 } });
   expect(tokens).toEqual([{ text: "hel" }, { text: "lo" }]); expect(usage).toHaveLength(1);
   expect(model.invoke).not.toHaveBeenCalled();
-});
-
-it("rejects an unaffordable known media estimate before purchasing", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "fg-budget-media-")); dirs.push(dir);
-  const start = vi.fn(async () => ({ id: "job", done: [], costUSD: 0.02 }));
-  const g = await compileGraph(spec([{ id: "image", type: "image", provider: "media-qa", with: { prompt: "cat" } }], { budget: { maxUSD: 0.01, onExceed: "fail" } }), { cwd: dir, mediaProviders: [{ name: "media-qa", vendor: "qa", modalities: ["image"], estimateCostUSD: () => 0.02, start }] });
-  expect(await g.run()).toMatchObject({ status: "error", usage: { costUSD: 0, calls: 0 } }); expect(start).not.toHaveBeenCalled();
-});
-
-it("emits synchronous media completion with cost and includes it in run totals", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "fg-cost-media-")); dirs.push(dir);
-  const g = await compileGraph(spec([{ id: "image", type: "image", provider: "media-qa", with: { prompt: "cat" } }]), { cwd: dir, mediaProviders: [{ name: "media-qa", vendor: "qa", modalities: ["image"], start: async () => ({ id: "job", done: [], costUSD: 0.02 }) }] });
-  const events: unknown[] = []; g.events.subscribe(event => { if (event.type === "custom.media.job") events.push(event.data); });
-  expect(await g.run()).toMatchObject({ status: "completed", usage: { costUSD: 0.02, calls: 1 } });
-  expect(events).toContainEqual(expect.objectContaining({ phase: "done", costUSD: 0.02 }));
-});
-
-it("serializes unknown-cost media admission under a hard cap, bounding fanout overshoot", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "fg-cost-fanout-")); dirs.push(dir);
-  const start = vi.fn(async () => ({ id: "job", done: [], costUSD: 0.02 }));
-  const g = await compileGraph(spec([{ id: "image", type: "image", provider: "media-qa", with: { prompt: "cat", count: 4 } }], { budget: { maxUSD: 0.01, onExceed: "fail" } }), { cwd: dir, mediaProviders: [{ name: "media-qa", vendor: "qa", modalities: ["image"], maxPerJob: { image: 1 }, start }] });
-  expect(await g.run()).toMatchObject({ status: "error", usage: { costUSD: 0.02, calls: 1 } }); expect(start).toHaveBeenCalledTimes(1);
 });
 
 it("reports a timed-out in-flight call as pending, then records its eventual usage", async () => {
@@ -209,16 +185,6 @@ it("can reconcile an ambiguous failure and resume a hard-budget thread without d
   await expect(resolveThreadUsage(saver, "resolve", id, { totalTokens: 3, costUSD: 0.002 })).resolves.toBeDefined();
   expect(await g.resume({ threadId: "resolve", resume: true })).toMatchObject({ status: "completed", usage: { totalTokens: 7, calls: 2, unknownCalls: 0 } });
 });
-
-it.each([false, null, { approved: false }])("does not purchase after a denied budget interrupt (%j)", async answer => {
-  const dir = await mkdtemp(join(tmpdir(), "fg-budget-deny-")); dirs.push(dir);
-  const start = vi.fn(async () => ({ id: "job", done: [], costUSD: 0.02 }));
-  const g = await compileGraph(spec([{ id: "image", type: "image", provider: "media-qa", with: { prompt: "cat" } }], { budget: { maxUSD: 0.01, onExceed: "interrupt" } }), { cwd: dir, mediaProviders: [{ name: "media-qa", vendor: "qa", modalities: ["image"], estimateCostUSD: () => 0.02, start }] });
-  expect((await g.run({ threadId: "denied" })).status).toBe("interrupted");
-  expect(await g.resume({ threadId: "denied", resume: answer })).toMatchObject({ status: "error", error: { code: "BUDGET_DENIED" }, usage: { calls: 0 } });
-  expect(start).not.toHaveBeenCalled();
-});
-
 
 it("does not charge a late response twice after the pending receipt was explicitly reconciled", async () => {
   const { inspectThreadUsage, resolveThreadUsage } = await import("./usage/ledger.js");

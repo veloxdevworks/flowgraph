@@ -15,6 +15,7 @@ import {
   hostIsAllowListed,
   isReservedChannel,
   registeredToolNamesOf,
+  registry,
   reservedInputRefs,
   reservedStateMapRefs,
   reservedTemplateRefs,
@@ -94,6 +95,7 @@ const REASON = "uploaded graphs from untrusted authors";
 /** The core policy the server compiles untrusted graphs with (no host allow list). */
 export const UNTRUSTED_NODE_POLICY: NodePolicy = {
   blockedTypes: UNTRUSTED_BLOCKED_NODE_TYPES,
+  requireSafeNodeTypes: true,
   blockSubgraphFiles: true,
   blockSecrets: true,
   outboundHttp: { publicOnly: true },
@@ -216,13 +218,15 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
   walkNodes(spec, (node, path) => {
     const n = node as Record<string, unknown>;
     const type = String(n.type ?? "");
-    if (UNTRUSTED_BLOCKED_NODE_TYPES.includes(type)) {
+    if (UNTRUSTED_BLOCKED_NODE_TYPES.includes(type) || !registry.isUntrustedSafe(type)) {
       add(
         "UPLOAD_NODE_TYPE_BLOCKED",
         path,
         type === "port"
           ? `node type "port" reveals which ports are free on the server`
-          : `node type "${type}" runs host commands or processes`,
+          : UNTRUSTED_BLOCKED_NODE_TYPES.includes(type)
+            ? `node type "${type}" runs host commands or processes`
+            : `node type "${type}" is not marked safe for untrusted graphs`,
       );
     }
     if (type === "subgraph" && typeof n.uses === "string" && n.uses) {
@@ -274,9 +278,13 @@ export function checkUntrustedUpload(raw: string, spec: GraphSpec, opts: Untrust
     if (w.requires !== undefined) {
       add("UPLOAD_HOST_PROBE_BLOCKED", `${path}.with.requires`, "requires checks which programs are installed on the server");
     }
-    if ((type === "http" || type === "webhook") && typeof w.url === "string") {
+    if (type === "http" && typeof w.url === "string") {
       const why = literalUrlProblem(w.url, opts.allowHosts);
       if (why) add("UPLOAD_HTTP_TARGET_BLOCKED", `${path}.with.url`, why);
+    }
+    if (type === "image" || type === "video" || type === "model3d" || type === "audio") {
+      if (w.input !== undefined) checkMediaInputPaths(w.input, `${path}.with.input`, add);
+      if (w.inputs !== undefined) checkMediaInputPaths(w.inputs, `${path}.with.inputs`, add);
     }
     const diff = w.diff as Record<string, unknown> | undefined;
     const diffNode = type === "workshop" ? "workshop" : type === "hitl" && w.mode === "review" ? "review" : undefined;
@@ -300,7 +308,7 @@ function checkGraphLevel(
   if (graph.mcpServers && Object.keys(graph.mcpServers).length > 0) {
     add("UPLOAD_MCP_BLOCKED", `${where}mcpServers`, "mcpServers connect to servers or start processes on the host");
   }
-  if (graph.localTools !== undefined) {
+  if ((graph as { localTools?: unknown }).localTools !== undefined) {
     add("UPLOAD_LOCAL_TOOLS_BLOCKED", `${where}localTools`, "localTools run tool code on the server");
   }
   const defaultProvider = graph.config?.defaults?.provider;
@@ -377,8 +385,47 @@ function checkGraphLevel(
   }
 }
 
+/** Reject absolute, home-relative (`~`), and `..` path traversal references in media node inputs. */
+function isUnsafeHostPath(raw: string): boolean {
+  const s = raw.trim();
+  if (!s || s.includes("{{")) return false;
+  if (/^https?:\/\//i.test(s) || /^data:/i.test(s)) return false;
+  if (/^file:\/\//i.test(s)) return true;
+  if (s.startsWith("/") || s.startsWith("\\") || s.startsWith("~") || /^[A-Za-z]:[\\/]/.test(s)) return true;
+  return /(?:^|[\\/])\.\.(?:[\\/]|$)/.test(s);
+}
+
+function checkMediaInputPaths(
+  value: unknown,
+  at: string,
+  add: (code: UploadViolationCode, path: string, message: string) => void,
+): void {
+  if (typeof value === "string") {
+    if (isUnsafeHostPath(value)) {
+      add("UPLOAD_HOST_PATH_BLOCKED", at, `media input path "${value}" escapes the run workspace`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => checkMediaInputPaths(item, `${at}[${i}]`, add));
+    return;
+  }
+  if (value && typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    if (typeof o.path === "string" && isUnsafeHostPath(o.path)) {
+      add("UPLOAD_HOST_PATH_BLOCKED", `${at}.path`, `media input path "${o.path}" escapes the run workspace`);
+    }
+    if (o.artifact !== undefined) {
+      checkMediaInputPaths(o.artifact, `${at}.artifact`, add);
+    }
+    if (o.artifacts !== undefined) {
+      checkMediaInputPaths(o.artifacts, `${at}.artifacts`, add);
+    }
+  }
+}
+
 /**
- * Why a literal http / webhook URL is refused at upload, or undefined. URLs
+ * Why a literal http URL is refused at upload, or undefined. URLs
  * with templates are checked only when the request is made.
  */
 function literalUrlProblem(raw: string, allowHosts: readonly string[] | undefined): string | undefined {

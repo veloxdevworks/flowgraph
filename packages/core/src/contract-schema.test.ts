@@ -78,18 +78,6 @@ describe("one contract validator", () => {
     expect(() => parseWebhookPayload(answer, schema, "w")).toThrow(`wait node "w": does not match schema: ${message}`);
   });
 
-  it.each(BAD)("workshop output rejects %j", async (answer, message) => {
-    const g = await compileGraph(
-      single({ type: "workshop", with: { message: "W", agenda: ["scope"], schema, output: { to: "out" } } }),
-      {},
-    );
-    const threadId = `cs-ws-${message.length}`;
-    await g.run({ threadId, onInterrupt: "fail" });
-    const r = await g.resume({ threadId, resume: { output: answer }, onInterrupt: "fail" });
-    expect(r.status).toBe("interrupted");
-    expect(r.interrupts?.[0]?.validationError).toBe(`workshop node "gate" output: does not match schema: ${message}`);
-  });
-
   it("accepts a conforming answer and passes `ui` hints through on the interrupt", async () => {
     const ui = { order: ["decision"], fields: { decision: { label: "Decision", widget: "radio" } } };
     const g = await compileGraph(
@@ -141,7 +129,7 @@ describe("skill inputs", () => {
     try {
       await fs.writeFile(
         path.join(dir, "SKILL.md"),
-        "---\nname: s\nkind_of: executable\nhandler: ./handler.mjs\ninputs:\n  count:\n    type: integer\n    minimum: 1\n    required: true\n  tags:\n    type: array\n    items: { type: string }\n---\n",
+        "---\nname: s\nkindOf: executable\nhandler: ./handler.mjs\ninputs:\n  count:\n    type: integer\n    minimum: 1\n    required: true\n  tags:\n    type: array\n    items: { type: string }\n---\n",
       );
       await fs.writeFile(path.join(dir, "handler.mjs"), "export default (input) => ({ got: input });\n");
       const { skill } = await loadSkill(dir);

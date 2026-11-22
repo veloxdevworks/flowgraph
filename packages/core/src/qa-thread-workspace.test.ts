@@ -1,12 +1,11 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { MemorySaver } from "@langchain/langgraph";
 import { GraphSpecSchema, type GraphSpec } from "@flowgraph/spec";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileGraph } from "./compiler.js";
 import { readThreadWorkspace } from "./runtime/thread-workspace.js";
-import type { MediaProvider } from "./media/types.js";
 import { WORKSPACE_CHANNEL, WORKSPACE_NODES_CHANNEL } from "./runtime/state-annotation.js";
 
 const dirs: string[] = [];
@@ -52,37 +51,6 @@ const effect = {
     args: ["-e", "require('node:fs').appendFileSync('effects.txt', 'once\\n')"],
   },
 };
-
-it("reuses an uncertain paid media journal after recompiling from a different cwd", async () => {
-  const f = await fixture();
-  const start = vi.fn(async () => {
-    throw new Error("vendor response lost after submission");
-  });
-  const media: MediaProvider = { name: "paid", vendor: "paid", modalities: ["image"], start };
-  const spec = graph([
-    { id: "image", type: "image", provider: "paid", with: { prompt: "poster" } },
-  ]);
-  const first = await (
-    await compileGraph(spec, {
-      cwd: f.original,
-      graphPath: f.graphPath,
-      checkpointer: f.saver,
-      mediaProviders: [media],
-    })
-  ).run({ threadId: "paid" });
-  expect(first.status).toBe("error");
-  expect(await readThreadWorkspace(f.saver, "paid")).toBe(f.original);
-  const resumed = await (
-    await compileGraph(spec, {
-      cwd: f.other,
-      graphPath: f.graphPath,
-      checkpointer: f.saver,
-      mediaProviders: [media],
-    })
-  ).resume({ threadId: "paid", resume: true });
-  expect(resumed).toMatchObject({ status: "error", error: { code: "MEDIA_SUBMISSION_UNCERTAIN" } });
-  expect(start).toHaveBeenCalledTimes(1);
-});
 
 it("continues shell effects in the pinned cwd and keeps embedded workspace overrides", async () => {
   const f = await fixture();
@@ -162,80 +130,6 @@ it("requires an explicit original workspace for legacy checkpoints and pins the 
   });
   expect((await confirmed.resume({ threadId: "legacy", resume: true })).status).toBe("completed");
   expect(await readThreadWorkspace(f.saver, "legacy")).toBe(f.original);
-});
-
-it("awaits the saved binding before entering a paid provider", async () => {
-  const f = await fixture();
-  let blocked!: () => void, release!: () => void;
-  const atWrite = new Promise<void>((resolve) => {
-    blocked = resolve;
-  });
-  const hold = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const put = f.saver.put.bind(f.saver);
-  let held = false;
-  f.saver.put = async (...args) => {
-    if (!held && args[1].channel_values[WORKSPACE_CHANNEL]) {
-      held = true;
-      blocked();
-      await hold;
-    }
-    return put(...args);
-  };
-  const start = vi.fn(async () => {
-    expect(await readThreadWorkspace(f.saver, "barrier")).toBe(f.original);
-    return { id: "done", done: [], costUSD: 0 };
-  });
-  const media: MediaProvider = { name: "paid", vendor: "paid", modalities: ["image"], start };
-  const spec = graph([
-    { id: "image", type: "image", provider: "paid", with: { prompt: "poster" } },
-  ]);
-  const running = (
-    await compileGraph(spec, {
-      cwd: f.original,
-      graphPath: f.graphPath,
-      checkpointer: f.saver,
-      mediaProviders: [media],
-    })
-  ).run({ threadId: "barrier" });
-  await atWrite;
-  expect(start).not.toHaveBeenCalled();
-  release();
-  expect((await running).status).toBe("completed");
-  expect(start).toHaveBeenCalledTimes(1);
-});
-
-it("refuses workspace edits in a file-based child before submitting media again", async () => {
-  const f = await fixture();
-  const childPath = join(f.graphPath, "..", "child.graph.yaml");
-  const media: MediaProvider = {
-    name: "paid",
-    vendor: "paid",
-    modalities: ["image"],
-    start: vi.fn(async () => {
-      throw new Error("response lost");
-    }),
-  };
-  const child = graph(
-    [{ id: "image", type: "image", provider: "paid", with: { prompt: "poster" } }],
-    { runtime: { workspace: "first" } },
-  );
-  await mkdir(join(f.original, "first"));
-  await writeFile(childPath, JSON.stringify(child));
-  const spec = graph([{ id: "child", type: "subgraph", uses: "./child.graph.yaml" }]);
-  const options = { graphPath: f.graphPath, checkpointer: f.saver, mediaProviders: [media] };
-  expect(
-    (await (await compileGraph(spec, { ...options, cwd: f.original })).run({ threadId: "child" }))
-      .status,
-  ).toBe("error");
-  child.runtime = { workspace: "other" };
-  await writeFile(childPath, JSON.stringify(child));
-  const resumed = await compileGraph(spec, { ...options, cwd: f.other });
-  await expect(resumed.resume({ threadId: "child", resume: true })).rejects.toMatchObject({
-    code: "THREAD_WORKSPACE_MISMATCH",
-  });
-  expect(media.start).toHaveBeenCalledTimes(1);
 });
 
 it("protects the original root during changed-cwd historical replay and keeps branch discovery consistent", async () => {

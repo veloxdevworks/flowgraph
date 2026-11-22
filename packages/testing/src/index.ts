@@ -98,8 +98,8 @@ export async function runGraphFile(
     throw new Error(`Failed to load graph: ${diagnostics.map((d) => d.message).join("; ")}`);
   }
   const cwd = opts.cwd ?? path.dirname(path.resolve(filePath));
-  await loadGraphImports(spec, { cwd });
-  const lintDiags = validateSpec(spec);
+  const imported = await loadGraphImports(spec, { cwd });
+  const lintDiags = validateSpec(spec, { registry: imported.registry });
   const errors = lintDiags.filter((d) => d.severity === "error");
   if (errors.length > 0) {
     throw new Error(`Graph has errors: ${errors.map((e) => e.message).join("; ")}`);

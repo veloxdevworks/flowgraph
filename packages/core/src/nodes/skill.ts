@@ -35,8 +35,13 @@ export const skillNode = defineNode<Config>({
           throw new Error(`skill node "${String(nodeSpec["id"])}": ${String(err)}`);
         }
 
-        const nodeInput = (runCtx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {};
-        const result = await runSkill(skill, nodeInput, runCtx);
+        const nodeInput = (runCtx as NodeRunContext & { _input?: unknown })._input ?? {};
+        if (typeof nodeInput !== "object" || Array.isArray(nodeInput)) {
+          throw new Error(
+            `skill node "${String(nodeSpec["id"])}": input must be an object whose keys are the skill's inputs (got ${Array.isArray(nodeInput) ? "an array" : typeof nodeInput})`,
+          );
+        }
+        const result = await runSkill(skill, nodeInput as Record<string, unknown>, runCtx);
 
         const scope = { state, input: nodeInput, config: runCtx.config, run: runCtx.meta };
         return {

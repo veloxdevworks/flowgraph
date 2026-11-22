@@ -1,15 +1,11 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
-import * as fs from "node:fs";
+import { describe, it, expect } from "vitest";
 import * as os from "node:os";
-import * as path from "node:path";
 import type { GraphSpec } from "@flowgraph/spec";
-import { compileGraph, hydrateDurableRuntime, maybeTerminateServices } from "./compiler.js";
+import { compileGraph } from "./compiler.js";
 import { NODE_POLICY, NodePolicyError, assertNodeSpecAllowed, registeredToolNamesOf, type NodePolicy } from "./node-policy.js";
-import { getTool, registerTool } from "./providers/registry.js";
+import { registerTool } from "./providers/registry.js";
 import { normalizeTools } from "./providers/tools.js";
 import { registerFunction } from "./nodes/function.js";
-import { resetServiceManager, statusService } from "./runtime/service-manager.js";
 import { hitlNode } from "./nodes/hitl.js";
 import type { NodeRunContext } from "./context.js";
 import "./nodes/index.js";
@@ -31,7 +27,7 @@ function graph(nodes: unknown[]): GraphSpec {
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name: "tool-policy-graph" },
-    state: { channels: { out: { type: "object" } } },
+    state: { channels: { out: { type: "any" } } },
     nodes,
     edges,
   } as unknown as GraphSpec;
@@ -59,34 +55,16 @@ async function codeOf(p: Promise<unknown> | (() => unknown)): Promise<string | u
   }
 }
 
-const agent = (tools: unknown[]) => ({ id: "a", type: "agent", with: { provider: "mock", prompt: "hi", tools } });
+const agent = (tools: unknown[]) => ({ id: "a", type: "agent", provider: "mock", with: { prompt: "hi", tools } });
 
 describe("node policy: agent tools, functions and host programs", () => {
-  const marker = path.join(os.tmpdir(), `fg-svc-policy-${process.pid}`);
-  afterEach(async () => {
-    fs.rmSync(marker, { force: true });
-    await resetServiceManager().catch(() => undefined);
-  });
-
-  it("start_service, restart_service and stop_service obey a policy that blocks service nodes", async () => {
-    const args = { name: "x", command: "sh", args: ["-c", `id > ${marker}`], keepAlive: true };
-    expect(await codeOf(Promise.resolve().then(() => getTool("start_service")!.handler(args, ctxWith(UNTRUSTED))))).toBe("NODE_TYPE_BLOCKED");
-    expect(await codeOf(Promise.resolve().then(() => getTool("restart_service")!.handler(args, ctxWith(UNTRUSTED))))).toBe("NODE_TYPE_BLOCKED");
-    expect(await codeOf(Promise.resolve().then(() => getTool("stop_service")!.handler({ name: "x" }, ctxWith(UNTRUSTED))))).toBe("NODE_TYPE_BLOCKED");
-    // Even a policy that allow-lists the tool by name keeps the service-node gate.
-    const listed: NodePolicy = { ...UNTRUSTED, allowedTools: ["start_service"] };
-    expect(await codeOf(Promise.resolve().then(() => getTool("start_service")!.handler(args, ctxWith(listed))))).toBe("NODE_TYPE_BLOCKED");
-    await new Promise((r) => setTimeout(r, 200));
-    expect(fs.existsSync(marker)).toBe(false);
-  });
-
   it("refuses agent function tools outside allowedTools at compile, including map inner agents", async () => {
     await expect(codeOf(compileGraph(graph([agent([{ function: "start_service" }])]), { checkpointer: "none", nodePolicy: UNTRUSTED }))).resolves.toBe("TOOL_BLOCKED");
     await expect(codeOf(compileGraph(graph([agent([{ builtin: ["Bash"] }])]), { checkpointer: "none", nodePolicy: UNTRUSTED }))).resolves.toBe("TOOL_BLOCKED");
     const map = {
       id: "m",
       type: "map",
-      with: { over: "{{ state.items }}", as: "x", node: { type: "agent", with: { provider: "mock", prompt: "p", tools: [{ function: "start_service" }] } }, collect: { to: "out" } },
+      with: { over: "{{ state.items }}", as: "x", node: { type: "agent", provider: "mock", with: { prompt: "p", tools: [{ function: "start_service" }] } }, collect: { to: "out" } },
     };
     await expect(codeOf(compileGraph(graph([map]), { checkpointer: "none", nodePolicy: UNTRUSTED }))).resolves.toBe("TOOL_BLOCKED");
     // Allowed tools still compile.
@@ -119,12 +97,6 @@ describe("node policy: agent tools, functions and host programs", () => {
     expect(ran).toBe(1);
   });
 
-  it("refuses a workshop git diff under blockHostExec but allows before/after diffs", async () => {
-    const ws = (diff: unknown) => ({ id: "w", type: "workshop", with: { agenda: ["ok?"], diff, output: { to: "out" } } });
-    await expect(codeOf(compileGraph(graph([ws({ cwd: "/" })]), { checkpointer: "none", nodePolicy: UNTRUSTED }))).resolves.toBe("HOST_EXEC_BLOCKED");
-    await expect(compileGraph(graph([ws({ before: "a", after: "b" })]), { checkpointer: "none", nodePolicy: UNTRUSTED })).resolves.toBeDefined();
-  });
-
   it("refuses reserved state channels in run input, with or without a policy", async () => {
     const gate = { id: "g", type: "hitl", with: { mode: "approve", message: "ok?", output: { to: "out" } } };
     for (const nodePolicy of [UNTRUSTED, undefined]) {
@@ -152,40 +124,6 @@ describe("node policy: agent tools, functions and host programs", () => {
     await expect(compileGraph(withRuntime({ services: { rehydrateOnResume: true } }), { checkpointer: "memory" })).resolves.toBeDefined();
   });
 
-  it("does not restart services recorded in state under a policy that blocks them", async () => {
-    const spec = { ...graph([{ id: "g", type: "hitl", with: { mode: "approve", message: "ok?" } }]), runtime: { services: { rehydrateOnResume: true } } } as GraphSpec;
-    const intents = { pwn: { name: "pwn", command: "sh", args: ["-c", `id > ${marker}`], keepAlive: true } };
-    const snap = { values: { __services: intents } };
-    const executeInvoke = async () => {
-      throw new Error("not used");
-    };
-    await hydrateDurableRuntime(snap, "hydrate-blocked", spec, { executeInvoke, nodePolicy: UNTRUSTED, rehydrateWebhooks: false });
-    await new Promise((r) => setTimeout(r, 300));
-    expect(fs.existsSync(marker)).toBe(false);
-    expect(statusService("hydrate-blocked", "pwn").status).toBe("not_found");
-    expect(intents.pwn).toMatchObject({ needsRestart: true, rehydrateError: expect.stringMatching(/not allowed here/) });
-  });
-
-  it("skips worktree cleanup from state under a policy that blocks worktrees", async () => {
-    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "fg-wt-policy-"));
-    const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { stdio: "ignore" });
-    git("init", "-q");
-    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
-    const wt = path.join(repo, "..", `${path.basename(repo)}-wt`);
-    git("worktree", "add", "-q", "--detach", wt);
-    const spec = { ...graph([{ id: "g", type: "hitl", with: { mode: "approve", message: "ok?" } }]), runtime: { worktrees: { cleanupOnEnd: true } } } as GraphSpec;
-    const state = { __worktrees: [{ path: wt, repo }] };
-    try {
-      await maybeTerminateServices(spec, "wt-blocked", state, UNTRUSTED);
-      expect(fs.existsSync(wt)).toBe(true);
-      await maybeTerminateServices(spec, "wt-allowed", state);
-      expect(fs.existsSync(wt)).toBe(false);
-    } finally {
-      fs.rmSync(wt, { recursive: true, force: true });
-      fs.rmSync(repo, { recursive: true, force: true });
-    }
-  });
-
   it("refuses a review-mode hitl git diff under blockHostExec, and skips the workspace diff for a plain review", async () => {
     const review = (diff?: unknown) => ({ id: "r", type: "hitl", with: { mode: "review", message: "look", ...(diff ? { diff } : {}), output: { to: "out" } } });
     await expect(codeOf(compileGraph(graph([review({ cwd: "/", base: "HEAD" })]), { checkpointer: "memory", nodePolicy: UNTRUSTED }))).resolves.toBe("HOST_EXEC_BLOCKED");
@@ -199,6 +137,13 @@ describe("node policy: agent tools, functions and host programs", () => {
     const r = await plain.run({ threadId: "review-plain" });
     expect(r.status).toBe("interrupted");
     expect(JSON.stringify(r.interrupts)).not.toMatch(/diffStat|patch/);
+  });
+
+  it("implies blockHostExec when requireSafeNodeTypes is set", async () => {
+    const safeOnly = { requireSafeNodeTypes: true };
+    const review = { id: "r", type: "hitl", with: { mode: "review", message: "look", diff: { cwd: "/" }, output: { to: "out" } } };
+    await expect(codeOf(compileGraph(graph([review]), { checkpointer: "memory", nodePolicy: safeOnly }))).resolves.toBe("HOST_EXEC_BLOCKED");
+    expect(await codeOf(() => assertNodeSpecAllowed(safeOnly, review, "inner"))).toBe("HOST_EXEC_BLOCKED");
   });
 
   it("lists the registered tools an agent tool list refers to", () => {

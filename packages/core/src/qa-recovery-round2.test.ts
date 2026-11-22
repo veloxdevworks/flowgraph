@@ -1,13 +1,6 @@
-import { afterEach, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
+import { expect, it } from "vitest";
 import { UsageLedger, emptyUsage } from "./usage/ledger.js";
-import { createFileJournal, listMediaJournals, resolveMediaSubmission } from "./media/journal.js";
 import { pendingStep, resolveThreadReplay } from "./providers/replay-persistence.js";
-const dirs:string[]=[];
-afterEach(async()=>{for(const dir of dirs.splice(0)) await rm(dir,{recursive:true,force:true});});
 it("PLAT-366: identical usage recovery is idempotent; a conflicting amount is refused",async()=>{
   let record:any;
   const saver={readThreadUsage:()=>record,writeThreadUsage:(_t:string,r:any)=>{record=r;}};
@@ -31,17 +24,4 @@ it.each([{notApplied:true} as const,{result:{stdout:"done",stderr:"",exitCode:0}
   await resolveThreadReplay(saver,"t","task","slot",step.id,resolution);
   await resolveThreadReplay(saver,"t","task","slot",step.id,resolution);
   await expect(resolveThreadReplay(saver,"t","task","slot",step.id,{result:{stdout:"different",stderr:"",exitCode:0}})).rejects.toMatchObject({code:"REPLAY_RESOLUTION_CONFLICT"});
-});
-it("PLAT-365/366: discovers media identities and persists idempotent resolution across journal reopen",async()=>{
-  const workspace=await mkdtemp(join(tmpdir(),"fg-recovery-"));dirs.push(workspace);
-  const options={workspace,scope:"t",nodeId:"fan[2]",fingerprint:"0123456789abcdef"};
-  const journal=createFileJournal(options);
-  await journal.write({version:1,state:"intent",provider:"vendor",submittedAt:"now",submissionId:"s",handle:{id:"s"}});
-  expect(await listMediaJournals(workspace,"t")).toMatchObject([{nodeId:"fan[2]",fingerprint:options.fingerprint,submissionId:"s"}]);
-  await resolveMediaSubmission(journal,"s",{notSubmitted:true});
-  await resolveMediaSubmission(createFileJournal(options),"s",{notSubmitted:true});
-  await expect(resolveMediaSubmission(journal,"s",{handle:{id:"job"}})).rejects.toMatchObject({code:"MEDIA_RESOLUTION_CONFLICT"});
-  expect(await journal.read()).toBeUndefined();
-  await journal.write({version:1,state:"intent",provider:"vendor",submittedAt:"later",submissionId:"new-submission",handle:{id:"new-submission"}});
-  await expect(resolveMediaSubmission(journal,"s",{notSubmitted:true})).rejects.toMatchObject({code:"MEDIA_SUBMISSION_CHANGED"});
 });

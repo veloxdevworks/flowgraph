@@ -5,8 +5,7 @@ import {
   contractSchemaProblem,
   validateJsonSchema,
 } from "./validate-json-schema.js";
-import { checkWorkshopOutput } from "./workshop-output.js";
-import { ChannelSchema, HitlWithSchema, WaitWithSchema, WorkshopWithSchema, AgentWithSchema } from "./schema.js";
+import { ChannelSchema, HitlWithSchema, WaitWithSchema, AgentWithSchema } from "./schema.js";
 
 const schema = {
   type: "object",
@@ -188,12 +187,10 @@ describe("contract schema dialect", () => {
 describe("schemas in node config", () => {
   it("rejects an invalid contract schema at validation time", () => {
     expect(AgentWithSchema.safeParse({ prompt: "p", schema: { type: "object" } }).success).toBe(true);
-    expect(WorkshopWithSchema.safeParse({ schema: { type: "object" } }).success).toBe(true);
     expect(WaitWithSchema.safeParse({ webhook: { schema: { required: ["a"] } } }).success).toBe(true);
     const hitl = HitlWithSchema.safeParse({ mode: "form", message: "m", schema: { type: "object", widget: "x" } });
     expect(hitl.success).toBe(false);
     expect(JSON.stringify(hitl.error?.issues)).toContain("invalid JSON Schema: unknown keyword");
-    expect(WorkshopWithSchema.safeParse({ schema: { type: "any" } }).success).toBe(false);
     expect(WaitWithSchema.safeParse({ webhook: { schema: { required: true } } }).success).toBe(false);
     expect(AgentWithSchema.safeParse({ prompt: "p", schema: { type: "object", properties: { a: { tpye: "string" } } } }).success).toBe(false);
   });
@@ -238,10 +235,10 @@ describe("schemas in node config", () => {
     expect(HitlWithSchema.safeParse({ mode: "form", message: "m", ui: { fields: { a: { widget: "slider" } } } }).success).toBe(false);
   });
 
-  it("channel items / properties use the same dialect", () => {
-    expect(ChannelSchema.safeParse({ type: "array", items: { type: "integer" } }).success).toBe(true);
-    expect(ChannelSchema.safeParse({ type: "object", properties: { a: { type: "any" } } }).success).toBe(false);
-    expect(ChannelSchema.safeParse({ type: "object", properties: { a: { type: "string", required: true } } }).success).toBe(false);
+  it("a channel schema uses the same dialect", () => {
+    expect(ChannelSchema.safeParse({ type: "array", schema: { type: "array", items: { type: "integer" } } }).success).toBe(true);
+    expect(ChannelSchema.safeParse({ type: "object", schema: { type: "object", properties: { a: { type: "any" } } } }).success).toBe(false);
+    expect(ChannelSchema.safeParse({ type: "object", schema: { type: "object", properties: { a: { type: "string", required: true } } } }).success).toBe(false);
   });
 });
 
@@ -251,7 +248,7 @@ describe("hosts without runtime code generation", () => {
     vi.resetModules();
   });
 
-  it("leave the schema check to the engine but still apply coverage", async () => {
+  it("reports contractValidationAvailable() as false", async () => {
     vi.resetModules();
     vi.stubGlobal(
       "Function",
@@ -259,16 +256,7 @@ describe("hosts without runtime code generation", () => {
         throw new EvalError("code generation from strings disallowed");
       },
     );
-    const mod = await import("./workshop-output.js");
     const v = await import("./validate-json-schema.js");
     expect(v.contractValidationAvailable()).toBe(false);
-    expect(mod.checkWorkshopOutput({}, { schema })).toEqual({ complete: true, unverified: true });
-    expect(
-      mod.checkWorkshopOutput({}, { schema, requireCoverage: true, agenda: [{ id: "a" }], coverage: {} }),
-    ).toEqual({ complete: false, error: "workshop output: agenda item(s) not covered: a", unverified: true });
-  });
-
-  it("are not assumed elsewhere", () => {
-    expect(checkWorkshopOutput({}, { schema }).error).toContain("must have required property 'decision'");
   });
 });

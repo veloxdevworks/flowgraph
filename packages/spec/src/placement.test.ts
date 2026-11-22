@@ -21,14 +21,12 @@ describe("runsOn schema", () => {
     expect(r.success).toBe(true);
   });
 
-  it("rejects runsOn.wait and names that queueing is not available", () => {
+  it("rejects runsOn.wait as an unknown key", () => {
     const r = NodeSpecSchema.safeParse(
       node({ runsOn: { labels: ["gpu:nvidia"], wait: "30m" } }),
     );
     expect(r.success).toBe(false);
-    const issue = r.error?.issues.find((i) => i.path.join(".").endsWith("wait"));
-    expect(issue?.message).toContain("runsOn.wait is not supported");
-    expect(issue?.message).toContain("matching worker");
+    expect(r.error?.issues.some((i) => i.code === "unrecognized_keys" && i.keys.includes("wait"))).toBe(true);
   });
 
   it("is optional", () => {
@@ -111,12 +109,11 @@ describe("normalizeRunsOn", () => {
     expect(normalizeRunsOn({ labels: ["b:x", "b:x", "a:y"] }).labels).toEqual(["b:x", "a:y"]);
   });
 
-  it("defaults fallback and keeps target and wait", () => {
-    expect(normalizeRunsOn({ labels: ["gpu:nvidia"], target: "t", wait: "5m" })).toEqual({
+  it("defaults fallback and keeps target", () => {
+    expect(normalizeRunsOn({ labels: ["gpu:nvidia"], target: "t" })).toEqual({
       labels: ["gpu:nvidia"],
       target: "t",
       fallback: "error",
-      wait: "5m",
     });
     expect(normalizeRunsOn({ labels: ["a:b"], fallback: "local" }).fallback).toBe("local");
   });

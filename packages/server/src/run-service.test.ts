@@ -1,8 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerFunction } from "@flowgraph/core";
+import { createHttpServer } from "./http/app.js";
 import { RunService } from "./run-service.js";
 import type { ServerConfig } from "./types.js";
 
@@ -18,9 +20,9 @@ state:
 nodes:
   - id: echo
     type: function
+    input: { text: "{{ state.text }}" }
     with:
       fn: serverEcho
-      input: { text: "{{ state.text }}" }
       output: { to: out }
 edges:
   - { from: START, to: echo }
@@ -211,7 +213,7 @@ state:
   channels:
     out: { type: string }
 nodes:
-  - { id: n, type: function, with: { fn: storeIso, input: { who: ${name} }, output: { to: out } } }
+  - { id: n, type: function, input: { who: ${name} }, with: { fn: storeIso, output: { to: out } } }
 edges:
   - { from: START, to: n }
   - { from: n, to: END }
@@ -334,5 +336,72 @@ runtime:
     expect(runs.some((r) => r.threadId === threadId && r.label === "Listed")).toBe(true);
     const detail = await service.getRun(threadId);
     expect(detail?.yaml).toContain("hosted-complete");
+  });
+
+  it("maps undeclared run inputs (InputValidationError) to HTTP 400 with INPUT_INVALID", async () => {
+    const graphWithInputs = `
+apiVersion: flowgraph/v1
+kind: Graph
+metadata:
+  name: declared-inputs
+inputs:
+  - { key: topic, type: string, required: true }
+state:
+  channels:
+    out: { type: string }
+nodes:
+  - id: echo
+    type: function
+    input: { text: "{{ input.topic }}" }
+    with:
+      fn: serverEcho
+      output: { to: out }
+edges:
+  - { from: START, to: echo }
+  - { from: echo, to: END }
+`;
+
+    await expect(
+      service.startRun({
+        threadId: "bad-input-svc",
+        yaml: graphWithInputs,
+        input: { topic: "ok", extra: "nope" },
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "INPUT_INVALID",
+      message: expect.stringMatching(/extra/i),
+    });
+
+    const config: ServerConfig = {
+      host: "127.0.0.1",
+      port: 0,
+      graphStoreDir: dir,
+      eventBufferSize: 50,
+      authDisabled: true,
+    };
+    const httpService = new RunService(config);
+    await httpService.init();
+    const httpServer = createHttpServer(httpService, config);
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const port = (httpServer.address() as AddressInfo).port;
+      const res = await fetch(`http://127.0.0.1:${port}/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          threadId: "bad-input-http",
+          yaml: graphWithInputs,
+          input: { topic: "ok", undeclaredKey: 123 },
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code?: string; error?: string };
+      expect(body.code).toBe("INPUT_INVALID");
+      expect(body.error).toMatch(/undeclaredKey/i);
+    } finally {
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      await httpService.close();
+    }
   });
 });

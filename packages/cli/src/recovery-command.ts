@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { resolve } from "node:path";
-import { inspectThreadUsage, inspectThreadReplay, listMediaJournals } from "@flowgraph/core";
+import { inspectThreadUsage, inspectThreadReplay } from "@flowgraph/core";
+import { listMediaJournals } from "@flowgraph/media";
 import { openThreadDatabase, inspectClaim, type ThreadDatabaseOptions } from "./thread-command.js";
 
 export function buildRecoveryCommand(): Command {

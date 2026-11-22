@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { NodeRunContext } from "../context.js";
 import { nodePolicyOf, NodePolicyError } from "../node-policy.js";
 import { guardedFetch } from "../outbound-http.js";
-import { probeImageSize, toPosix } from "../media/artifacts.js";
+import { probeImageSize, toPosix } from "../runtime/artifacts.js";
 import { DEFAULT_IMAGE_TOKENS, type ImageAttachment } from "./types.js";
 
 export const MAX_AGENT_IMAGES = 16;

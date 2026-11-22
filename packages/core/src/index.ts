@@ -3,13 +3,13 @@
 export {
   loadGraph,
   validateSpec,
-  normalizeNodeTypeAliases,
   envExpansionCollisionDiagnostics,
   NODE_BODY_ENV_EXPANSION,
 } from "./loader.js";
+export type { ValidateSpecOptions } from "./loader.js";
 export { hostSupportDiagnostics, type HostSupportOptions } from "./runtime/host-support.js";
 export { loadGraphImports, readGraphImportAliases, withUnresolvedImports } from "./runtime/load-imports.js";
-export type { LoadGraphImportsOptions, LoadGraphImportsResult } from "./runtime/load-imports.js";
+export type { LoadGraphImportsOptions, LoadGraphImportsResult, GraphImportAliases } from "./runtime/load-imports.js";
 export {
   collectNodeWriteChannels,
   ensureDeclaredOutputChannels,
@@ -31,6 +31,7 @@ export {
 export type { HitlRoute, HitlOutcomes } from "./nodes/hitl-routes.js";
 export { applyOutput, isOutputNone, keepsRawOutput, OUTPUTS_CHANNEL } from "./runtime/apply-output.js";
 export {
+  decodeCliInput,
   resolveAndValidateInput,
   resolveGraphInput,
   isInputValidationError,
@@ -144,9 +145,10 @@ export {
   SERVICES_CHANNEL,
   WORKTREES_CHANNEL,
   ISSUES_CHANNEL,
+  ChannelWriteError,
   RESERVED_STATE_CHANNELS,
 } from "./runtime/state-annotation.js";
-export { ReplayMismatchError, ReplayStore, replayNodeKey, runScopeOf, type RunScope } from "./providers/replay-cache.js";
+export { ReplayMismatchError, ReplayStore, replayNodeKey, runScopeOf, runSignalOf, isGraphInterrupt, type RunScope } from "./providers/replay-cache.js";
 export { parseDuration, sleep } from "./runtime/duration.js";
 export { runWithPolicy, isTimeoutError } from "./runtime/retry.js";
 export type { RetryConfig } from "./runtime/retry.js";
@@ -167,28 +169,24 @@ export type {
   WebhookResumeFn,
 } from "./runtime/webhook-server.js";
 
-export {
-  startService,
-  stopService,
-  restartService,
-  statusService,
-  terminateThreadServices,
-  resetServiceManager,
-  listThreadServices,
-  threadIdOf,
-} from "./runtime/service-manager.js";
+export { registry, NodeRegistry, defineNode, describeNodeTypes } from "./registry.js";
 export type {
-  ServiceReady,
-  ServiceStartSpec,
-  ServiceInfo,
-  ServiceStatusValue,
-} from "./runtime/service-manager.js";
-
-export { findFreePorts } from "./runtime/port.js";
-export type { FindFreePortsOptions } from "./runtime/port.js";
-
-export { registry, defineNode, describeNodeTypes } from "./registry.js";
-export type { NodeFactory, CompiledNode, NodeResult, NodeContract, NodeCapabilities, ReducerFn, NodeUiMeta, NodeTypeDescriptor } from "./registry.js";
+  NodeFactory,
+  RegisterNodeOptions,
+  RegisterReducerOptions,
+  CompiledNode,
+  BuildContext,
+  NodeResult,
+  NodeContract,
+  NodeCapabilities,
+  ReducerFn,
+  NodeUiMeta,
+  NodeTypeDescriptor,
+  RunEndHookContext,
+  HydrateHookContext,
+  CompileContextHookInput,
+  RunLifecycleHooks,
+} from "./registry.js";
 export { registerFunction } from "./nodes/function.js";
 export { registerFunction as registerFn } from "./nodes/function.js";
 export { runScriptSandboxed } from "./nodes/script.js";
@@ -217,6 +215,9 @@ export {
   UndeclaredSecretError,
   assertSecretDeclared,
   declaredSecretsOf,
+  secretScope,
+  undeclaredSecretMessage,
+  undeclaredBaseUrlKeyMessage,
 } from "./runtime/secret-scope.js";
 export {
   providerSecretDiagnostics,
@@ -265,10 +266,18 @@ export type {
 // Provider abstraction for agent nodes
 export {
   defineProvider,
+  defineProviderPlugin,
+  isProviderPlugin,
   registerProvider,
   getProvider,
   hasProvider,
   listProviders,
+  registerProviderPlugin,
+  unregisterProviderPlugin,
+  getProviderPlugin,
+  listProviderPlugins,
+  validatePluginProviderOptions,
+  createPluginProvider,
   providerFor,
   providerNamesFor,
   graphProviderList,
@@ -284,6 +293,9 @@ export {
   apiKeyEnvForProviderKind,
   hasApiKey,
   normalizeTools,
+  expandSkillTools,
+  skillToolSpec,
+  skillInputsSchema,
   mergeTools,
   checkToolCall,
   reportToolResult,
@@ -293,6 +305,9 @@ export { effectiveModel, modelRequest } from "./providers/model-choice.js";
 export type { ModelSource } from "./providers/model-choice.js";
 export type {
   ProviderAdapter,
+  ProviderPlugin,
+  ProviderPluginContext,
+  PluginOptionsValidationResult,
   ProviderValidateNode,
   ProviderCapabilities,
   ProviderRunContext,
@@ -307,9 +322,11 @@ export type {
   TokenUsage,
   ToolFunctionDef,
   GraphProviders,
+  SkillToolRef,
   ToolRef,
   ToolWiring,
   ToolExecutor,
+  NormalizedTools,
   GovernanceCtx,
   CliVendor,
   CliProviderOptions,
@@ -339,8 +356,6 @@ export {
   functionNode,
   codeNode,
   shellNode,
-  serviceNode,
-  portNode,
   scriptNode,
   waitNode,
   skillNode,
@@ -350,20 +365,52 @@ export {
   mapNode,
   mcpNode,
   hitlNode,
-  workshopNode,
-  webhookNode,
-  demoNode,
-  worktreeNode,
 } from "./nodes/index.js";
 
+// Shared node & runtime helpers for node packages
 export {
-  demoManifestPath,
-  appendDemoManifestEntry,
-  readDemoManifest,
-  demoManifestKey,
-} from "./nodes/demo-manifest.js";
-export type { DemoManifestEntry, DemoKind, DemoExtraArtifact } from "./nodes/demo-manifest.js";
-export type { DemoResult } from "./nodes/demo.js";
+  performHttpRequest,
+  redactHeaders,
+  redactUrlSecrets,
+  redactSensitiveFields,
+  maskResponseForEvent,
+  type PerformHttpRequestOptions,
+  type PerformHttpRequestResult,
+} from "./nodes/http-request.js";
+export {
+  resolveGateArtifacts,
+  captureFailuresNotice,
+  resolveSelection,
+  normalizeArtifactPath,
+  type GateArtifacts,
+  type GateCaptureFailure,
+  type HitlSelect,
+  type SelectionOpts,
+} from "./nodes/hitl-artifacts.js";
+export { collectGitDiff } from "./runtime/git-diff.js";
+export { assertContractSchema } from "./runtime/json-schema.js";
+export { enforceBudget } from "./nodes/agent.js";
+export { DEFAULT_INHERITED_ENV, pickHostEnv } from "./runtime/child-env.js";
+export { normalizeShellText } from "./nodes/shell.js";
+export { runScopedKey, sanitizeRunKey } from "./runtime/run-key.js";
+export {
+  createOutputWriter,
+  describeArtifactFile,
+  artifactDir,
+  extensionForMime,
+  mimeForExtension,
+  roleForMime,
+  probeImageSize,
+  toPosix,
+  safeSegment,
+  redactUrl,
+  artifactsExist,
+  readArtifactBytes,
+  MAX_ARTIFACT_BYTES,
+  type ArtifactOutputInput,
+  type OutputWriterOptions,
+} from "./runtime/artifacts.js";
+
 export type { RunIssue, RunIssueSeverity, IssueInput } from "./runtime/run-issues.js";
 export {
   appendRunIssue,
@@ -407,44 +454,13 @@ export type {
 } from "./context/index.js";
 export { isNonRetryable } from "./runtime/retry.js";
 
-// ── Generative media (image / video / model3d) — ADR-0017 ──────────────────
-export {
-  registerMediaVendor,
-  registerMediaProvider,
-  getMediaVendor,
-  listMediaVendors,
-  deriveMediaProviders,
-  mediaProviderFor,
-  mediaProvidersFor,
-  GRAPH_MEDIA_PROVIDERS,
-} from "./media/registry.js";
-export { runMediaJob } from "./media/run-job.js";
-export { createFileJournal, listMediaJournals, fingerprintRequest, resolveMediaSubmission } from "./media/journal.js";
-export { createOutputWriter, describeArtifactFile, artifactDir, extensionForMime, mimeForExtension, probeImageSize } from "./media/artifacts.js";
-export { resolveMediaInputs } from "./media/inputs.js";
-export { imageNode, videoNode, model3dNode, audioNode } from "./nodes/media.js";
-export type {
-  MediaModality,
-  MediaInput,
-  MediaRequest,
-  MediaOutput,
-  MediaCallContext,
-  MediaProvider,
-  MediaVendor,
-  MediaVendorOptions,
-  JobHandle,
-  JobStatus,
-  JobState,
-} from "./media/types.js";
-
 // Node placement (ADR-0020)
 export * from "./placement/index.js";
 export { CORE_VERSION } from "./version.js";
 export { CORE_BUILTIN_NODE_TYPES } from "./nodes/index.js";
 
-export { UsageLedger, inspectThreadUsage, resolveThreadUsage, type RunUsage, type UsageRecord, type UsageReceipt, type UnresolvedUsageReceipt, type UsageCheckpointStore, type MeteredCallOptions } from "./usage/ledger.js";
+export { UsageLedger, usageLedgerOf, withUsageLedger, inspectThreadUsage, resolveThreadUsage, type RunUsage, type UsageRecord, type UsageReceipt, type UnresolvedUsageReceipt, type UsageCheckpointStore, type MeteredCallOptions } from "./usage/ledger.js";
 
-export {MediaSubmissionRejectedError} from "./media/types.js";
 export {inspectThreadReplay,resolveThreadReplay} from "./providers/replay-persistence.js";
 export type {ReplayCheckpointStore} from "./providers/replay-persistence.js";
 

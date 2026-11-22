@@ -8,7 +8,7 @@
 
 import { z } from "zod";
 import { MapWithSchema } from "@flowgraph/spec";
-import { renderDeep } from "@flowgraph/expr";
+import { evalGuard, guardExpression, renderDeep } from "@flowgraph/expr";
 import type { OutputMapping } from "@flowgraph/spec";
 import { registry, defineNode, type CompiledNode, type BuildContext, type NodeResult } from "../registry.js";
 import type { NodeRunContext } from "../context.js";
@@ -23,12 +23,12 @@ export const mapNode = defineNode<Config>({
   type: "map",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configSchema: configSchema as any,
-  capabilities: { interruptible: true },
+  capabilities: { interruptible: true, hostAccess: false },
 
   build(): CompiledNode {
     return {
       contract: {},
-      capabilities: { interruptible: true },
+      capabilities: { interruptible: true, hostAccess: false },
       async run(): Promise<NodeResult> {
         throw new Error("map node was not expanded at compile time (internal error).");
       },
@@ -65,12 +65,14 @@ export async function runMapItem(
   const parentInput = (ctx as NodeRunContext & { _input?: Record<string, unknown> })._input ?? {};
   const baseScope = { state, input: parentInput, config: ctx.config, run: ctx.meta };
   const as = config.as;
-  const itemScope = { ...baseScope, item: { [as]: task.item } };
+  // The item is bound directly as `{{ <as> }}`; `{{ index }}` is its position in `over`.
+  const itemScope = { ...baseScope, [as]: task.item, index: task.index };
   const innerSpec = config.node as Record<string, unknown>;
   const innerType = String(innerSpec["type"] ?? "");
-  assertNodeTypeAllowed(nodePolicyOf(ctx), innerType, `map node "${mapId}" inner node`);
+  const effectiveRegistry = buildCtx.registry ?? registry;
+  assertNodeTypeAllowed(nodePolicyOf(ctx), innerType, `map node "${mapId}" inner node`, effectiveRegistry);
   assertNodeSpecAllowed(nodePolicyOf(ctx), innerSpec, `map node "${mapId}" inner node`);
-  const factory = registry.get(innerType);
+  const factory = effectiveRegistry.get(innerType);
   if (!factory) {
     throw new Error(`map node "${mapId}": inner node type "${innerType}" is not registered.`);
   }
@@ -88,8 +90,15 @@ export async function runMapItem(
   const { output: _parsedOutput, ...parsedWith } = parsed.data as Record<string, unknown>;
   const renderedWith = renderDeep(requestWith, itemScope) as Record<string, unknown>;
   const renderedInput = withoutReservedKeys(
-    innerSpec["input"] ? (renderDeep(innerSpec["input"], itemScope) as Record<string, unknown>) : {},
-  );
+    innerSpec["input"] !== undefined ? renderDeep(innerSpec["input"], itemScope) : {},
+  ) as Record<string, unknown>;
+  // An item whose body `when` is false is skipped: it contributes nothing to the collected results.
+  if (typeof innerSpec["when"] === "string" && innerSpec["when"].trim()) {
+    if (!evalGuard(guardExpression(innerSpec["when"]), { ...itemScope, input: renderedInput })) {
+      ctx.emit("node.skipped", { nodeId: `${mapId}[${task.index}]`, mapId, index: task.index });
+      return undefined;
+    }
+  }
   const renderedSpec = { ...innerSpec, id: ctx.nodeId, with: { ...parsedWith, ...renderedWith } };
   assertNodeSpecAllowed(nodePolicyOf(ctx), renderedSpec, `map node "${mapId}" rendered inner node`);
   const mergedConfig = { ...parsedWith, ...(inertTemplates(renderedWith) as Record<string, unknown>) };
@@ -195,7 +204,8 @@ function collectMapUpdate(
   nodeId: string,
   baseScope: Record<string, unknown>,
 ): Record<string, unknown> {
-  const ordered = [...bag].sort((a, b) => a.i - b.i).map((x) => x.v);
+  // `undefined` is a skipped item (its body `when` was false): nothing was collected for it.
+  const ordered = [...bag].sort((a, b) => a.i - b.i).filter((x) => x.v !== undefined).map((x) => x.v);
   if (
     config.collect != null &&
     typeof config.collect === "object" &&

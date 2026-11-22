@@ -6,7 +6,7 @@ version: 0.1.0
 description: >
   Convert a piece of text (e.g. a title) into a URL-safe slug.
 
-kind_of: executable
+kindOf: executable
 handler: ./handler.js
 
 inputs:
@@ -24,7 +24,6 @@ outputs:
     type: string
     description: The URL-safe slug
 
-sideEffecting: false
 timeout: 5s
 ---
 

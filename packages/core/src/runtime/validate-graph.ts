@@ -2,10 +2,10 @@
  * Offline graph lint helpers used by validateSpec.
  */
 
-import { findMergeableRouters, hookVerbMessage, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
+import { findMergeableRouters, hookVerbMessage, inputFieldChannel, inputValueProblem, normalizeRunsOn, type MergeSpec } from "@flowgraph/spec";
 import type { GraphSpec, Diagnostic, NodeSpec } from "@flowgraph/spec";
-import { registry } from "../registry.js";
-import { templateRootRefs } from "../node-policy.js";
+import { registry, type NodeRegistry } from "../registry.js";
+import { isReservedChannel, templateRootRefs } from "../node-policy.js";
 import { childChannelRefsInMapping, stateMapOutEntries } from "../nodes/subgraph-merge.js";
 import { isOutputNone, keepsRawOutput, OUTPUTS_CHANNEL } from "./apply-output.js";
 import { fanInLastWriteDiagnostics } from "./fan-in-warning.js";
@@ -126,11 +126,11 @@ export function graphEdges(spec: GraphSpec): Array<{ from: string; to: string; l
   return [...new Map(edges.map((edge) => [`${edge.from}:${edge.to}:${edge.label ?? ""}`, edge])).values()];
 }
 
-export function topologyDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function topologyDiagnostics(spec: GraphSpec, reg: NodeRegistry = registry): Diagnostic[] {
   const byId = nodesById(spec);
   const nodes = recordNodes(spec.nodes);
   const ids = new Set(["START", "END", ...nodes.map((n) => n.id)]);
-  const diagnostics = reachabilityDiagnostics(spec, byId);
+  const diagnostics = reachabilityDiagnostics(spec, byId, reg);
   for (const node of nodes) {
     for (const target of [...nodeRouteTargets(spec, node.id, byId), ...nodeToolTargets(spec, node.id)]) {
       if (!ids.has(target)) diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_REF", message: `Node "${node.id}" references unknown target "${target}"`, path: `nodes.${node.id}` });
@@ -189,12 +189,12 @@ function reachableFromStart(linked: Neighbours): Set<string> {
 }
 
 /** A later duplicate is visited here, so its own type can still reach END. */
-function reachingEnd(spec: GraphSpec, linked: Neighbours): Set<string> {
+function reachingEnd(spec: GraphSpec, linked: Neighbours, reg: NodeRegistry = registry): Set<string> {
   const canReach = new Set<string>();
   const queue: string[] = [];
   for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
     if (node == null) continue;
-    if (registry.get(node.type)?.capabilities?.terminal || (linked.outgoing.get(node.id) ?? []).includes("END")) {
+    if (reg.get(node.type)?.capabilities?.terminal || (linked.outgoing.get(node.id) ?? []).includes("END")) {
       queue.push(node.id);
     }
   }
@@ -215,15 +215,15 @@ export function nodesReachableFromStart(spec: GraphSpec, byId = nodesById(spec))
 }
 
 /** Nodes that can eventually reach END. */
-export function nodesThatReachEnd(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
-  return reachingEnd(spec, neighbours(spec, byId));
+export function nodesThatReachEnd(spec: GraphSpec, byId = nodesById(spec), reg: NodeRegistry = registry): Set<string> {
+  return reachingEnd(spec, neighbours(spec, byId), reg);
 }
 
-export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec)): Diagnostic[] {
+export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec), reg: NodeRegistry = registry): Diagnostic[] {
   const linked = neighbours(spec, byId);
   const diagnostics: Diagnostic[] = [];
   const fromStart = reachableFromStart(linked);
-  const toEnd = reachingEnd(spec, linked);
+  const toEnd = reachingEnd(spec, linked, reg);
   const nodes = recordNodes(spec.nodes);
   const tools = new Set(nodes.flatMap((node) => nodeToolTargets(spec, node.id)));
 
@@ -248,7 +248,7 @@ export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec))
   return diagnostics;
 }
 
-export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function channelReducerDiagnostics(spec: GraphSpec, reg: NodeRegistry = registry): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const channels = spec.state?.channels ?? {};
 
@@ -288,7 +288,7 @@ export function channelReducerDiagnostics(spec: GraphSpec): Diagnostic[] {
 
     if (typeof reducer === "string" && reducer.startsWith("custom:")) {
       const reducerName = reducer.slice("custom:".length);
-      if (!registry.getReducer(reducerName)) {
+      if (!reg.getReducer(reducerName)) {
         diagnostics.push({
           severity: "error",
           code: "UNREGISTERED_REDUCER",
@@ -400,6 +400,13 @@ export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {
   const existing = { ...(spec.state?.channels ?? {}) };
   let changed = false;
 
+  // A declared input is seeded into the channel of the same name.
+  for (const field of Array.isArray(spec.inputs) ? spec.inputs : []) {
+    if (!field || typeof field.key !== "string" || field.key in existing) continue;
+    existing[field.key] = inputFieldChannel(field);
+    changed = true;
+  }
+
   for (const node of recordNodes(spec.nodes)) {
     for (const name of collectNodeWriteChannels(node)) {
       if (name in existing) continue;
@@ -430,7 +437,10 @@ export function ensureDeclaredOutputChannels(spec: GraphSpec): GraphSpec {
  */
 export function undeclaredOutputChannelDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
-  const declared = new Set(Object.keys(spec.state?.channels ?? {}));
+  const declared = new Set([
+    ...Object.keys(spec.state?.channels ?? {}),
+    ...(Array.isArray(spec.inputs) ? spec.inputs : []).flatMap((field) => (typeof field?.key === "string" ? [field.key] : [])),
+  ]);
 
   const pushIfUndeclared = (nodeId: string, channel: string, path: string) => {
     if (declared.has(channel)) return;
@@ -617,6 +627,10 @@ export interface SubgraphOutputSite {
   inline?: GraphSpec | undefined;
   /** Parent channel → child channel or expression. Absent when `stateMap.out` is omitted. */
   out?: Record<string, string> | undefined;
+  /** Child keys set by `stateMap.in`. */
+  inKeys: string[];
+  /** Child keys set by the node's `input` object. Absent when `input` is not a literal object. */
+  inputKeys?: string[] | undefined;
 }
 
 /** Every subgraph node, including map inners and nested inline specs. */
@@ -658,21 +672,46 @@ function siteFor(node: NodeSpec, path: string, graph: GraphSpec): SubgraphOutput
     ...(uses ? { uses } : {}),
     ...(node.spec ? { inline: node.spec } : {}),
     ...(stateMapOutEntries(node.with) ? { out: stateMapOutEntries(node.with) } : {}),
+    inKeys: stateMapInKeys(node.with),
+    ...(literalInputKeys(node) ? { inputKeys: literalInputKeys(node) } : {}),
   };
+}
+
+function stateMapInKeys(config: unknown): string[] {
+  const map = isRecord(config) && isRecord(config["stateMap"]) ? config["stateMap"]["in"] : undefined;
+  return isRecord(map) ? Object.keys(map) : [];
+}
+
+function literalInputKeys(node: NodeSpec): string[] | undefined {
+  const input = (node as { input?: unknown }).input;
+  if (input === undefined) return [];
+  return isRecord(input) ? Object.keys(input) : undefined;
 }
 
 /** Channels a child graph can produce: declared channels plus node write targets. */
 export function knownChildChannels(child: GraphSpec): Set<string> {
   const names = new Set(Object.keys(child.state?.channels ?? {}));
-  for (const node of child.nodes ?? []) {
+  for (const field of Array.isArray(child.inputs) ? child.inputs : []) {
+    if (typeof field?.key === "string") names.add(field.key);
+  }
+  for (const node of recordNodes(child.nodes)) {
     for (const channel of collectNodeWriteChannels(node)) names.add(channel);
   }
   return names;
 }
 
+/** The child channels a parent can read: the declared `outputs` when there are any, else every channel. */
+export function exposedChildChannels(child: GraphSpec): Set<string> {
+  const outputs = Array.isArray(child.outputs) ? child.outputs : [];
+  return outputs.length > 0
+    ? new Set(outputs.flatMap((field) => (typeof field?.key === "string" ? [field.key] : [])))
+    : knownChildChannels(child);
+}
+
 export function unknownSubgraphOutputDiagnostics(site: SubgraphOutputSite, child: GraphSpec): Diagnostic[] {
   if (!site.out) return [];
-  const known = knownChildChannels(child);
+  const known = exposedChildChannels(child);
+  const declared = Array.isArray(child.outputs) && child.outputs.length > 0;
   const diagnostics: Diagnostic[] = [];
   for (const [parentChannel, expr] of Object.entries(site.out)) {
     for (const ref of childChannelRefsInMapping(expr)) {
@@ -682,7 +721,9 @@ export function unknownSubgraphOutputDiagnostics(site: SubgraphOutputSite, child
         code: "SUBGRAPH_OUTPUT_UNKNOWN",
         message:
           `Node "${site.id}" stateMap.out writes parent channel "${parentChannel}" from "${expr.trim()}", ` +
-          `but "${ref}" is not a channel of the child graph.`,
+          (declared
+            ? `but "${ref}" is not one of the child graph's declared outputs (${[...known].join(", ")}).`
+            : `but "${ref}" is not a channel of the child graph.`),
         path: site.path,
       });
     }
@@ -691,14 +732,52 @@ export function unknownSubgraphOutputDiagnostics(site: SubgraphOutputSite, child
 }
 
 /**
+ * The call boundary, checked statically: a key the call sets that the child does not declare,
+ * and a required child input that nothing in the call or the parent supplies. A same-name parent
+ * channel is copied in implicitly, so it counts as supplied.
+ */
+export function subgraphInputDiagnostics(site: SubgraphOutputSite, child: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const accepted = knownChildChannels(child);
+  const base = site.path.replace(/\.with\.stateMap\.out$/, "");
+  const explicit = [...site.inKeys, ...(site.inputKeys ?? [])];
+  for (const key of explicit) {
+    if (accepted.has(key) || isReservedChannel(key)) continue;
+    diagnostics.push({
+      severity: "error",
+      code: "SUBGRAPH_INPUT_UNKNOWN",
+      message: `Node "${site.id}" passes "${key}" to the child graph, which declares no input or channel named "${key}".`,
+      path: base,
+    });
+  }
+  if (site.inputKeys === undefined) return diagnostics;
+  const supplied = new Set([
+    ...explicit,
+    ...Object.keys(ensureDeclaredOutputChannels(site.graph).state?.channels ?? {}),
+  ]);
+  for (const field of Array.isArray(child.inputs) ? child.inputs : []) {
+    if (!field?.required || field.default !== undefined || supplied.has(field.key)) continue;
+    diagnostics.push({
+      severity: "error",
+      code: "SUBGRAPH_INPUT_MISSING",
+      message: `Node "${site.id}" does not supply the child graph's required input "${field.key}". Pass it with input or stateMap.in.`,
+      path: base,
+    });
+  }
+  return diagnostics;
+}
+
+/**
  * Flag `stateMap.out` values that name a child channel the inline child does
- * not have. File subgraphs are checked by `loadGraph`, which can read the child.
+ * not have, and calls that break its declared inputs. File subgraphs are checked
+ * by `loadGraph`, which can read the child.
  */
 export function subgraphOutputMappingDiagnostics(spec: GraphSpec): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   for (const site of subgraphOutputSites(spec)) {
-    if (!site.out || !site.inline) continue;
-    diagnostics.push(...unknownSubgraphOutputDiagnostics(site, site.inline));
+    if (!site.inline) continue;
+    if (site.out) diagnostics.push(...unknownSubgraphOutputDiagnostics(site, site.inline));
+    diagnostics.push(...subgraphInputDiagnostics(site, site.inline));
   }
   return diagnostics;
 }
@@ -836,41 +915,6 @@ export function hitlRouterMergeDiagnostics(spec: GraphSpec): Diagnostic[] {
   }));
 }
 
-/**
- * A `demo` node that proves something can't be an agent tool (ADR-0019 §9): a tool call writes
- * no `state.outputs`, and an agent choosing its own assertions would make `passed` meaningless.
- */
-export function provesObjective(node: { type?: unknown; with?: unknown } | undefined): boolean {
-  if (node?.type !== "demo") return false;
-  const w = (node.with ?? {}) as Record<string, unknown>;
-  return w["objective"] != null || w["steps"] != null;
-}
-
-export function demoToolExposureDiagnostics(spec: GraphSpec): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-  const check = (node: NodeSpec, path: string): void => {
-    const w = (node.with ?? {}) as { tools?: unknown; node?: NodeSpec };
-    if (Array.isArray(w.tools)) {
-      for (const tool of w.tools as Array<{ node?: unknown }>) {
-        const target = (Array.isArray(spec.nodes) ? spec.nodes : []).find((n) => n != null && n.id === tool?.node);
-        if (!provesObjective(target)) continue;
-        diagnostics.push({
-          severity: "error",
-          code: "DEMO_OBJECTIVE_AS_TOOL",
-          message: `Node "${node.id ?? "map item"}" exposes demo node "${target!.id}" as a tool, but a demo node with an objective or steps can't be an agent tool`,
-          path: `${path}.with.tools`,
-        });
-      }
-    }
-    if (w.node) check(w.node, `${path}.with.node`);
-  };
-  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
-    if (!isRecord(node)) continue;
-    check(node as NodeSpec, `nodes.${String(node.id)}`);
-  }
-  return diagnostics;
-}
-
 // ---------------------------------------------------------------------------
 // Placement (`runsOn`) — ADR-0020
 // ---------------------------------------------------------------------------
@@ -938,6 +982,16 @@ function wrappedNodeDiagnostics(node: NodeSpec, path: string): Diagnostic[] {
     }
   }
   const input = (node as { input?: unknown }).input;
+  if (input !== undefined && typeof input !== "string" && !isRecord(input)) {
+    out.push({
+      severity: "error",
+      code: "PLACEMENT_INPUT_NOT_OBJECT",
+      message:
+        `Placed node "${node.id}" has an input that is not an object. Its input becomes channels of the child graph on the worker, ` +
+        `so it must be an object of named values.`,
+      path: `${path}.input`,
+    });
+  }
   if (input && typeof input === "object" && !Array.isArray(input) && Object.prototype.hasOwnProperty.call(input, node.id)) {
     out.push({
       severity: "error",
@@ -1395,13 +1449,13 @@ function lintableGraph(spec: GraphSpec): boolean {
  * nested graph (inline subgraph `spec`); the top level gets them, and the lints
  * that walk the whole tree, from {@link graphLintDiagnostics}.
  */
-export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function graphBodyLintDiagnostics(spec: GraphSpec, reg: NodeRegistry = registry): Diagnostic[] {
   if (!lintableGraph(spec)) return [];
   return [
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
-    ...topologyDiagnostics(spec),
-    ...channelReducerDiagnostics(spec),
+    ...topologyDiagnostics(spec, reg),
+    ...channelReducerDiagnostics(spec, reg),
     ...undeclaredOutputChannelDiagnostics(spec),
     ...nodeChannelNameCollisionDiagnostics(spec),
     ...fanInLastWriteDiagnostics(spec),
@@ -1411,6 +1465,7 @@ export function graphBodyLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...routerNoDefaultDiagnostics(spec),
     ...defaultModelDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
+    ...mapItemBindingDiagnostics(spec),
   ];
 }
 
@@ -1543,6 +1598,8 @@ export interface GraphStructureOptions {
    * those from `graphLintDiagnostics`).
    */
   lints?: boolean;
+  /** Registry to look up node types and custom reducers against (defaults to global base registry). */
+  registry?: NodeRegistry;
 }
 
 /**
@@ -1565,7 +1622,7 @@ export function graphStructureDiagnostics(spec: GraphSpec, options: GraphStructu
   const shape = graphShapeDiagnostics(spec);
   if (shape.length) return shape;
   const out: Diagnostic[] = [];
-  graphStructure(spec, "", out, options.lints === true, false);
+  graphStructure(spec, "", out, options.lints === true, false, options.registry ?? registry);
   return out;
 }
 
@@ -1588,7 +1645,7 @@ function edgeTargets(edge: GraphSpec["edges"][number]): string[] {
   return edge.branch.map((entry) => entry.to);
 }
 
-function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean): void {
+function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean, reg: NodeRegistry): void {
   const push = (...items: Diagnostic[]) => out.push(...(prefix ? items.map((d) => nested(d, prefix)) : items));
   // A map schema has already reported this value. The lint does not report it again.
   const shape = (code: string, path: string, message: string) => {
@@ -1697,11 +1754,11 @@ function graphStructure(spec: GraphSpec, prefix: string, out: Diagnostic[], lint
     }
   }
 
-  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out, lints, schemaChecked);
+  for (const node of nodes) nodeStructure(node, `nodes.${node.id}`, `Node "${node.id}"`, prefix, out, lints, schemaChecked, reg);
 
   if (lints) {
-    push(...inputFieldDiagnostics(spec), ...triggerDiagnostics(spec));
-    if (prefix) push(...graphBodyLintDiagnostics(spec));
+    push(...inputFieldDiagnostics(spec), ...outputFieldDiagnostics(spec), ...triggerDiagnostics(spec));
+    if (prefix) push(...graphBodyLintDiagnostics(spec, reg));
   }
 }
 
@@ -1730,11 +1787,21 @@ function graphStructureChecksHook(value: unknown, issuePath: ReadonlyArray<Prope
 }
 
 /** Type registration and `with` shape for one node, then the graphs nested in it. */
-function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean): void {
+function nodeStructure(node: NodeSpec, path: string, label: string, prefix: string, out: Diagnostic[], lints: boolean, schemaChecked: boolean, reg: NodeRegistry): void {
   const push = (d: Diagnostic) => out.push(prefix ? nested(d, prefix) : d);
-  const factory = registry.get(node.type);
+  if (lints) for (const d of secretScopeDiagnostics(node, path, label)) push(d);
+  const factory = reg.get(node.type);
   if (!factory) {
-    push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
+    if (node.type === "webhook") {
+      push({
+        severity: "error",
+        code: "WEBHOOK_NODE_REMOVED",
+        message: `${label} uses removed type "webhook". Use type "http" with once: true (and method: POST), or run "flowgraph migrate" to rewrite this graph.`,
+        path: `${path}.type`,
+      });
+    } else {
+      push({ severity: "error", code: "UNKNOWN_NODE_TYPE", message: `${label} has unregistered type "${node.type}"`, path: `${path}.type` });
+    }
   } else {
     const configResult = factory.configSchema.safeParse(node.with ?? {});
     if (!configResult.success) {
@@ -1761,40 +1828,100 @@ function nodeStructure(node: NodeSpec, path: string, label: string, prefix: stri
     if (isRecord(body) && typeof body.type === "string") {
       const id = typeof body.id === "string" ? body.id : undefined;
       // MapWithSchema has already parsed this body, including a subgraph spec.
-      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out, lints, true);
+      nodeStructure(body as unknown as NodeSpec, `${path}.with.node`, `Map "${node.id}" body${id ? ` "${id}"` : ""}`, prefix, out, lints, true, reg);
     }
   }
   if (node.type === "subgraph" && isRecord(node.spec)) {
-    if (Array.isArray(node.spec.nodes)) graphStructure(node.spec, `${prefix}${path}.spec.`, out, lints, schemaChecked);
+    if (Array.isArray(node.spec.nodes)) graphStructure(node.spec, `${prefix}${path}.spec.`, out, lints, schemaChecked, reg);
     else if (!schemaChecked) push({ severity: "error", code: "SCHEMA_ERROR", path: `${path}.spec.nodes`, message: "Expected array" });
   }
 }
 
-function inputDefaultProblem(field: NonNullable<GraphSpec["inputs"]>[number]): string | undefined {
-  const value = field.default;
-  if (value === undefined || value === null) return undefined;
-  switch (field.type ?? "string") {
-    case "string":
-    case "text":
-      return typeof value === "string" ? undefined : "must be a string";
-    case "number":
-      return typeof value === "number" && Number.isFinite(value) ? undefined : "must be a number";
-    case "boolean":
-      return typeof value === "boolean" ? undefined : "must be true or false";
-    case "select":
-      if (typeof value !== "string") return "must be a string";
-      return !field.options?.length || field.options.includes(value) ? undefined : `must be one of: ${field.options.join(", ")}`;
-    case "json":
-      if (typeof value !== "string") return undefined;
-      try {
-        JSON.parse(value);
-        return undefined;
-      } catch {
-        return "is a string, so it must be JSON text; write the value itself in YAML instead";
-      }
-    default:
-      return undefined;
+const SECRET_SCOPE_ROOT: ReadonlySet<string> = new Set(["secret"]);
+
+/**
+ * A node's `input` and its `when` guard render without `secret` in scope (a map body's too), so
+ * `{{ secret.X }}` there is null or false at run time. Secrets are read in `with`, where the node
+ * that uses them is the one holding the value.
+ */
+function secretScopeDiagnostics(node: NodeSpec, path: string, label: string): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  const found: Array<{ at: string; text: string }> = [];
+  withTemplates((node as { input?: unknown }).input, "input", found);
+  const when = (node as { when?: unknown }).when;
+  if (typeof when === "string") found.push({ at: "when", text: when.includes("{{") ? when : `{{ ${when} }}` });
+  for (const { at, text } of found) {
+    for (const ref of new Set(templateRootRefs(text, SECRET_SCOPE_ROOT))) {
+      out.push({
+        severity: "error",
+        code: "SECRET_OUT_OF_SCOPE",
+        path: `${path}.${at}`,
+        message: `${label} reads "${ref}" in ${at.replace(/[.[].*$/, "")}, which has no secret scope and would render empty. Read the secret in the node's with instead.`,
+      });
+    }
   }
+  return out;
+}
+
+function inputDefaultProblem(field: NonNullable<GraphSpec["inputs"]>[number]): string | undefined {
+  if (field.default === undefined) return undefined;
+  const problem = inputValueProblem(field, field.default);
+  if (!problem) return undefined;
+  return problem.replace(/^expected a (\w+)$/, "must be a $1");
+}
+
+const MAP_ITEM_ROOT: ReadonlySet<string> = new Set(["item"]);
+
+/**
+ * A map binds each item as `{{ <as> }}`. Bodies written for the earlier `{{ item.<as> }}` form
+ * would render empty (an unknown root is null), so they are reported.
+ */
+export function mapItemBindingDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const node of recordNodes(spec.nodes)) {
+    if (node.type !== "map" || !isRecord(node.with)) continue;
+    const body = node.with["node"];
+    if (!isRecord(body)) continue;
+    const as = typeof node.with["as"] === "string" ? node.with["as"] : "item";
+    const found: Array<{ at: string; text: string }> = [];
+    for (const [key, value] of Object.entries(body)) {
+      if (key === "spec") continue;
+      withTemplates(value, key, found);
+    }
+    const old = (path: string): boolean => path === `item.${as}` || path.startsWith(`item.${as}.`) || path.startsWith(`item.${as}[`) || path.startsWith(`item[${JSON.stringify(as)}]`);
+    for (const { at, text } of found) {
+      for (const ref of templateRootRefs(text, MAP_ITEM_ROOT)) {
+        if (!old(ref)) continue;
+        diagnostics.push({
+          severity: "error",
+          code: "MAP_ITEM_REF_REMOVED",
+          message: `Map "${node.id}" reads "${ref}" in ${at}, but the item is bound as {{ ${as} }} directly. Write ${as}${ref.slice(ref.startsWith(`item.${as}`) ? `item.${as}`.length : `item[${JSON.stringify(as)}]`.length)}.`,
+          path: `nodes.${node.id}.with.node.${at}`,
+        });
+      }
+    }
+  }
+  return diagnostics;
+}
+
+/** Graph `outputs`: unique keys, each naming a channel the graph has. */
+export function outputFieldDiagnostics(spec: GraphSpec): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  if (!Array.isArray(spec.outputs)) return diagnostics;
+  const channels = knownChildChannels(spec);
+  const seen = new Set<string>();
+  for (const [index, field] of spec.outputs.entries()) {
+    if (!field || typeof field.key !== "string") continue;
+    const path = `outputs[${index}]`;
+    if (seen.has(field.key)) {
+      diagnostics.push({ severity: "error", code: "DUPLICATE_OUTPUT_KEY", path: `${path}.key`, message: `Output "${field.key}" is declared more than once` });
+    }
+    seen.add(field.key);
+    if (!channels.has(field.key)) {
+      diagnostics.push({ severity: "error", code: "OUTPUT_CHANNEL_UNKNOWN", path: `${path}.key`, message: `Output "${field.key}" is not a channel of this graph; declare it in state.channels or write it from a node` });
+    }
+  }
+  return diagnostics;
 }
 
 /** Graph `inputs`: unique keys, options for each select, and defaults of the declared type. */
@@ -1852,17 +1979,16 @@ export function triggerDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
-export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
+export function graphLintDiagnostics(spec: GraphSpec, reg: NodeRegistry = registry): Diagnostic[] {
   if (!lintableGraph(spec)) return [];
   return [
     ...defaultModelDiagnostics(spec),
     ...hitlRouteDiagnostics(spec),
     ...hitlSelectDiagnostics(spec),
     ...hitlRouterMergeDiagnostics(spec),
-    ...topologyDiagnostics(spec),
+    ...topologyDiagnostics(spec, reg),
     ...staticGraphDiagnostics(spec),
-    ...demoToolExposureDiagnostics(spec),
-    ...channelReducerDiagnostics(spec),
+    ...channelReducerDiagnostics(spec, reg),
     ...undeclaredOutputChannelDiagnostics(spec),
     ...nodeChannelNameCollisionDiagnostics(spec),
     ...fanInLastWriteDiagnostics(spec),
@@ -1872,6 +1998,7 @@ export function graphLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     ...routerNoDefaultDiagnostics(spec),
     ...subgraphRefDiagnostics(spec),
     ...subgraphOutputMappingDiagnostics(spec),
+    ...mapItemBindingDiagnostics(spec),
     ...placementDiagnostics(spec),
     ...placementAdjacentHopDiagnostics(spec),
     ...memoryLintDiagnostics(spec),

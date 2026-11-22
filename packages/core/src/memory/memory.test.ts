@@ -97,7 +97,7 @@ function fnGraph(name: string, fn: string, runtime: Record<string, unknown> = { 
     apiVersion: "flowgraph/v1",
     kind: "Graph",
     metadata: { name },
-    state: { channels: { out: { type: "object" } } },
+    state: { channels: { out: { type: "any" } } },
     nodes: [{ id: "n", type: "function", with: { fn, output: { to: "out" } } }],
     edges: [
       { from: "START", to: "n" },
@@ -142,10 +142,10 @@ describe("ctx.memory exposure", () => {
     expect((await b.run({ threadId: "e2" })).state["out"]).toMatchObject({ hasMemory: true });
   });
 
-  it("runtime.store plus runtime.memory is rejected", async () => {
-    await expect(
-      compileGraph(fnGraph("g", "mtExpose", { memory: {}, store: { backend: "sqlite" } }), { checkpointer: "memory", memory: "ephemeral" }),
-    ).rejects.toThrow(/MEMORY_STORE_AND_MEMORY/);
+  it("runtime.store is rejected by GraphSpecSchema", async () => {
+    const { GraphSpecSchema } = await import("@flowgraph/spec");
+    const parsed = GraphSpecSchema.safeParse(fnGraph("g", "mtExpose", { store: { backend: "sqlite" } }));
+    expect(parsed.success).toBe(false);
   });
 });
 
@@ -182,6 +182,7 @@ describe("ctx.memory semantics through a graph", () => {
     const spec = fnGraph("h", "mtExpose", {
       memory: { subject: { type: "customer", key: "{{ input.email }}", hash: true } },
     });
+    spec.inputs = [{ key: "email", type: "string" }];
     const r = await run(spec, be, "h1", { email: "Pat@Example.com" });
     const subject = (r.state["out"] as { scope: { subject: { key: string } } }).scope.subject;
     expect(subject.key).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -266,17 +267,7 @@ describe("memory validation", () => {
     );
   });
 
-  it("flags a store backend that does not match the checkpointer", () => {
-    expect(codes(fnGraph("v", "mtExpose", { checkpoint: { backend: "sqlite" }, store: { backend: "postgres" } }))).toContain(
-      "error:MEMORY_BACKEND_UNAVAILABLE",
-    );
-    expect(codes(fnGraph("v", "mtExpose", { checkpoint: { backend: "sqlite" }, store: { backend: "sqlite" } }))).not.toContain(
-      "error:MEMORY_BACKEND_UNAVAILABLE",
-    );
-  });
-
-  it("flags store + memory, ephemeral memory, and limits over the hard cap", () => {
-    expect(codes(fnGraph("v", "mtExpose", { memory: {}, store: { backend: "sqlite" } }))).toContain("error:MEMORY_STORE_AND_MEMORY");
+  it("flags ephemeral memory and limits over the hard cap", () => {
     expect(codes(fnGraph("v", "mtExpose", { memory: { backend: "memory" } }))).toContain("warning:MEMORY_BACKEND_EPHEMERAL");
     expect(codes(fnGraph("v", "mtExpose", { memory: { limits: { itemBytes: 1_000_000 } } }))).toContain("error:MEMORY_LIMIT_EXCEEDS_CAP");
   });

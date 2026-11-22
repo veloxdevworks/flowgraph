@@ -7,7 +7,7 @@ A node is a unit of work. Every node resolves through the **Node Registry** ([Ar
 Regardless of type, every node:
 
 - has a unique `id`, optional `name`/`description`, and optional `notes` (freeform markdown for authors; ignored by the engine);
-- may declare an `input` mapping (state → node input object) and a `when` guard;
+- may declare an `input` (any value; `{{ … }}` templates render at every depth) as its one input path, and a `when` guard;
 - **auto-saves its result to `state.outputs.<nodeId>`** unless `with.output` is `none` (see [02 §8](./02-graph-spec.md#8-input--output-mapping)); optional `output.to` / `output.map` are projections for shared/typed channels, written alongside the raw result unless `raw: false`; each run replaces the node's previous `state.outputs.<nodeId>`;
 - may set `retry`, `timeout`, and `on.error` behavior;
 - is wrapped by the runtime middleware (events, hooks, OTel, retry/timeout — see [01 §4](./01-architecture.md#4-runtime-composition));
@@ -190,9 +190,9 @@ Runs a **skill**: a portable, contract-bearing unit defined by a `SKILL.md` file
 
 - `uses` resolves to a skill (by alias from `imports`, relative path, or package).
 - The skill's declared **input contract** is validated against the provided `input`.
-- The skill's declared **output contract** is validated against what it returns and mapped via `output`.
+- The skill's declared **output contract** (`outputs`) is validated against what it returns (failing with `SKILL_OUTPUT_INVALID` on mismatch) and mapped via `output`.
 - If the skill's `env` requirements are unmet, compilation/preflight fails with a precise "missing `JIRA_TOKEN`" / "requires `git` on PATH" message ([04 §Preflight](./04-skills.md#5-preflight--environment-checks)).
-- Skills may themselves be **executable** (a TS handler), **command-based** (run a CLI), or **agent-backed** (delegate to an intelligent provider) — see [04 §Skill kinds](./04-skills.md#3-skill-kinds).
+- Skills are either **executable** (a TS/JS handler) or **command-based** (spawn a CLI) — see [04 §Skill kinds](./04-skills.md#3-skill-kinds).
 
 ---
 
@@ -235,9 +235,9 @@ Model-based routing:
 ```yaml
 - id: classify-intent
   type: router
+  provider: claude
   with:
     mode: model
-    provider: claude
     input: "{{ state.userMessage }}"
     instruction: "Pick the route that best matches the user's intent."
     routes:
@@ -262,7 +262,7 @@ Model-based routing:
 
 ---
 
-## 4. `http` / `webhook` / `mcp` — network & integration I/O
+## 4. `http` / `mcp` — network & integration I/O
 
 Deterministic network and integration nodes.
 
@@ -314,23 +314,24 @@ See `examples/mcp/` for a runnable walkthrough.
       map: { prs: "{{ result.body }}" }   # parse JSON by default; result.body/status/headers
 ```
 
-The `node.output` event and the debug log show the request URL with credentials and sensitive query parameters masked. In the event, request headers that are sensitive or listed in `runtime.secrets.redact.headers` show as `[REDACTED]`, and so do response headers that are sensitive, listed there, or auth/token-like by name (`Set-Cookie`, `X-Auth-Token`, `X-Session-Id`, …). The event's response body also masks those headers' values and each `Set-Cookie`'s `name=value` and credential-like bare value (the same cookie rule as `webhook`). This masking applies to the event only: `result.headers`, the response body and the node's output keep the real values, so a later node can forward a session cookie, for example `Cookie: "{{ split(state.login.headers['set-cookie'], ';')[0] }}"`.
+The `node.output` event and the debug log show the request URL with credentials and sensitive query parameters masked. In the event, request headers that are sensitive or listed in `runtime.secrets.redact.headers` show as `[REDACTED]`, and so do response headers that are sensitive, listed there, or auth/token-like by name (`Set-Cookie`, `X-Auth-Token`, `X-Session-Id`, …). The event's response body also masks those headers' values and each `Set-Cookie`'s `name=value` and credential-like bare value (described below). This masking applies to the event only: `result.headers`, the response body and the node's output keep the real values, so a later node can forward a session cookie, for example `Cookie: "{{ split(state.login.headers['set-cookie'], ';')[0] }}"`.
 
-`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.timeout` on `http`, `webhook`, `shell`, `script`, and media is rejected, with an error that names the node `timeout`. `http`, `webhook`, `shell`, `script`, `skill`, `mcp`, and `service` stop when that timeout aborts. An `mcp` node passes that abort signal into `callTool` / `readResource`, and the hub cancels the client request so a retry does not overlap it. Media uses the node `timeout` or `runtime.timeoutDefault` as the job deadline (otherwise the per-type default), keeps the vendor job on a node timeout so a retry can re-attach, and still cancels it when the run itself is cancelled. `demo` keeps its own capture timing. Shell and script with neither a node `timeout` nor `runtime.timeoutDefault` are unbounded.
+`retry` and `timeout` belong on the node (or as graph defaults in `runtime.retry` / `runtime.timeoutDefault`). `with.timeout` on `http`, `shell`, `script`, and media is rejected, with an error that names the node `timeout`. `http`, `shell`, `script`, `skill`, `mcp`, and `service` stop when that timeout aborts. An `mcp` node passes that abort signal into `callTool` / `readResource`, and the hub cancels the client request so a retry does not overlap it. Media uses the node `timeout` or `runtime.timeoutDefault` as the job deadline (otherwise the per-type default), keeps the vendor job on a node timeout so a retry can re-attach, and still cancels it when the run itself is cancelled. `demo` keeps its own capture timing. Shell and script with neither a node `timeout` nor `runtime.timeoutDefault` are unbounded.
 
-### `webhook` — outbound HTTP notification
+### Outbound notifications (`http` with `once: true`)
 
 ```yaml
 - id: notify-slack
-  type: webhook
+  type: http
   with:
     url: "https://hooks.example.com/notify"
     method: POST
+    once: true
     body: { event: "started", runId: "{{ run.runId }}" }
     output: { to: notifyResult }
 ```
 
-Outbound only — POSTs to a configured URL (idempotent via `ctx.once`). A `{{ secret.X }}` in a webhook needs `X` in the graph's top-level `secrets:`, as in `http`. Like `http`, `{{ secret.X }}` values and sensitive request headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted wherever they appear in the result and events. Sensitive response headers such as `Set-Cookie` show as `[REDACTED]` in `result.headers`, and their values are redacted elsewhere too. For each `Set-Cookie`, the cookie's `name=value` is redacted as well. Its bare value is redacted on its own only when it is at least 16 characters, or at least 8 under a credential-like cookie name. A name is credential-like when one of its words, split on `-`, `_`, `.` and case changes, is `sess`, `session`, `sid`, `token`, `auth`, `jwt`, `secret`, `key`, `csrf`, `xsrf`, `login`, `remember` or `refresh`, or one of the compounds `sessionid`, `sessid`, `phpsessid`, `jsessionid`, `csrftoken` and `apikey`: `session_id`, `auth-token`, `XSRF-TOKEN`, `refreshToken`, `PHPSESSID` and `csrftoken` qualify, `monkey` and `Access-Mode` do not. A body that echoes only a session token is masked, while values such as `default` from `theme=default` or `true` from `consent=true` stay readable elsewhere in the run. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well; a listed header shows as `[REDACTED]` in `result.headers`, the same as a built-in one. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
+Setting `once: true` on an `http` node makes the outbound request idempotent across checkpoint replay via `ctx.once`. A `{{ secret.X }}` in an `http` node needs `X` in the graph's top-level `secrets:`. When `once: true` is set, sensitive response headers such as `Set-Cookie` show as `[REDACTED]` in `result.headers`, and their values are redacted elsewhere too. For each `Set-Cookie`, the cookie's `name=value` is redacted as well. Its bare value is redacted on its own only when it is at least 16 characters, or at least 8 under a credential-like cookie name. A name is credential-like when one of its words, split on `-`, `_`, `.` and case changes, is `sess`, `session`, `sid`, `token`, `auth`, `jwt`, `secret`, `key`, `csrf`, `xsrf`, `login`, `remember` or `refresh`, or one of the compounds `sessionid`, `sessid`, `phpsessid`, `jsessionid`, `csrftoken` and `apikey`: `session_id`, `auth-token`, `XSRF-TOKEN`, `refreshToken`, `PHPSESSID` and `csrftoken` qualify, `monkey` and `Access-Mode` do not. A body that echoes only a session token is masked, while values such as `default` from `theme=default` or `true` from `consent=true` stay readable elsewhere in the run. Only these well-known names are recognized: add any custom token header (for example `X-Service-Token`) to `runtime.secrets.redact.headers` so its value is redacted as well; a listed header shows as `[REDACTED]` in `result.headers`, the same as a built-in one. For **inbound** waits (pause until an external system POSTs a payload), use `wait` with `webhook: true` (see §9).
 
 ---
 
@@ -353,6 +354,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 # Argv mode (default)
 - id: greet
   type: shell
+  input: { name: "{{ state.name }}" }
   with:
     command: echo
     args: ["Hello, {{ input.name }}!"]
@@ -381,7 +383,7 @@ Each argument is one argv value. Whole-argument templates preserve their value u
 
 `json` is set when `stdout` parses as JSON.
 
-**Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kind_of: command` handlers. An explicit `with.input` is rendered and sent instead. When neither is set, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
+**Input:** the node's `input` (or, when the node is exposed as a tool, the model's tool arguments) is JSON-stringified into the `FLOWGRAPH_INPUT` env var and also written to the child's stdin — same convention as skill `kindOf: command` handlers. `input` accepts any value and is rendered at every depth. `with.input` was removed from `shell`; use the node's `input:`. When the node has no `input`, `FLOWGRAPH_INPUT` is not set and stdin is left empty.
 
 **Environment:** shell children receive a small default allowlist from the host: `PATH`, `HOME`, `TMPDIR` (plus `TEMP`/`TMP` on Windows), `LANG`, `LC_ALL`, and on Windows `SystemRoot`/`WINDIR`. `USER` and `SHELL` are not included. Pass other host variables by name with `with.inheritEnv: [CI]`, or set explicit `with.env` values such as `TOKEN: "{{ secret.MY_TOKEN }}"` (with `MY_TOKEN` in the graph's top-level `secrets:`). Explicit `env` values override inherited names. Shell and script secret templates follow the host's secret policy; the rest of the host environment is not inherited.
 
@@ -552,9 +554,9 @@ Legacy escape hatch for programmatic embedders — prefer [`shell`](#5-shell--ru
 ```yaml
 - id: dedupe-findings
   type: function
+  input: { findings: "{{ state.findings }}" }
   with:
     fn: "dedupeFindings"          # resolved from the registered function table
-    input: { findings: "{{ state.findings }}" }
     output: { to: findings }
 ```
 
@@ -568,12 +570,7 @@ registerFunction("dedupeFindings", (input, ctx) => {
 });
 ```
 
-The handler's first argument is the node's `input` (rendered), or the model's tool arguments when the node is exposed as a tool. `with.input`, when set, replaces it and can read it through `{{ input.* }}`. These two declarations pass the same object:
-
-```yaml
-- { id: a, type: function, input: { findings: "{{ state.findings }}" }, with: { fn: dedupeFindings } }
-- { id: b, type: function, with: { fn: dedupeFindings, input: { findings: "{{ state.findings }}" } } }
-```
+The handler's first argument is the node's `input` (rendered at every depth, any value), or the model's tool arguments when the node is exposed as a tool. `with.input` was removed: set `input:` on the node. `flowgraph migrate` moves it.
 
 For substantial reusable logic, prefer a **skill** (portable, contract + env declared) over a `function` node.
 
@@ -587,7 +584,7 @@ The script **must** `export default` an async (or sync) function:
 
 ```js
 export default async function (input, ctx) {
-  // input  — rendered with.input object; when omitted, the node's input (or the model's tool arguments)
+  // input  — the node's rendered input (or the model's tool arguments)
   // ctx    — { nodeId, runId, threadId }
   return { greeting: `Hello, ${input.name}!` };
 }
@@ -597,13 +594,13 @@ export default async function (input, ctx) {
 - id: greet
   type: script
   timeout: 30s
+  input:
+    name: "{{ state.name }}"
   with:
     code: |
       export default async function (input) {
         return { greeting: `Hello, ${input.name}!` };
       }
-    input:
-      name: "{{ state.name }}"
     # Optional: widen the sandbox (denied by default)
     # permissions:
     #   fsRead: ["/path/to/data"]
@@ -617,7 +614,7 @@ export default async function (input, ctx) {
 
 ### How it runs
 
-`with.code` is never rendered as a template, so `{{` in source (JSX `style={{ color: "red" }}`, an object literal in a template string) is code and `flowgraph validate` does not parse it as an expression. Pass run data through `with.input`, which is rendered. Inside a `map` body the map renders the body's `with` with the item, code included, so there `{{` in code is still checked; use `with.file` for such source.
+`with.code` is never rendered as a template, so `{{` in source (JSX `style={{ color: "red" }}`, an object literal in a template string) is code and `flowgraph validate` does not parse it as an expression. Pass run data through the node's `input`, which is rendered. Inside a `map` body the map renders the body's `with` with the item, code included, so there `{{` in code is still checked; use `with.file` for such source.
 
 Choose exactly one of `with.code` or `with.file`. A file path is static and resolves
 relative to the graph file declaring the node, independently of `runtime.workspace`.
@@ -626,18 +623,18 @@ The file must contain the same default-export function as inline code:
 ```yaml
 - id: summarize
   type: script
+  input:
+    report:
+      title: "{{ state.title }}"
+      findings: "{{ state.findings }}"
+    options: { compact: true, limit: 10 }
   with:
     file: ./scripts/summarize.mjs
-    input:
-      report:
-        title: "{{ state.title }}"
-        findings: "{{ state.findings }}"
-      options: { compact: true, limit: 10 }
 ```
 
-When a script is exposed as a node tool, omitting `with.input` passes the model's tool arguments directly. An explicit `with.input` object can select or transform those arguments with `{{ input.qty }}`.
+When a script is exposed as a node tool, the model's tool arguments are its input and the node's own `input:` is not used.
 
-`with.input` accepts nested objects, arrays, numbers, booleans and null. Templates
+The node's `input` accepts nested objects, arrays, strings, numbers, booleans and null. Templates
 render recursively: a whole-value expression preserves its result's type, while
 embedded text remains a string. Missing or empty source files name the node and
 resolved path in the error. Hosts can set `NodePolicy.blockScriptFiles` to refuse
@@ -706,7 +703,9 @@ Provide **exactly one** of:
 
 The child graph runs with its own channels. `stateMap.in` seeds the child (omit it and channels that share a name are copied in). `stateMap.out` writes back: **keys are parent channels, values are child channels** or `{{ }}` expressions. Omit `stateMap.out` and channels that share a name merge. Either way the **parent's reducer** combines the write — an `append` channel receives only the items the child added, and a `merge` channel receives only the keys the child changed. Child-only channels and the child's `outputs` bag stay in the child unless `stateMap.out` names them.
 
-`output: none` writes nothing. `output.to` / `output.map` (with no `stateMap.out`) is the ordinary node projection of the whole child state.
+`output: none` writes nothing. `output.to` / `output.map` is the ordinary node projection of the whole child state. `output` and `stateMap.out` are alternatives: a node that sets both is rejected when the graph loads.
+
+**The call interface.** A subgraph file declares what it takes and returns with top-level `inputs:` and `outputs:` ([02 §2b](./02-graph-spec.md#2b-inputs-run-parameters), [§2c](./02-graph-spec.md#2c-outputs-what-a-subgraph-file-returns)). The parent's `input:` and `stateMap.in` are validated against the child's `inputs` when it is called (defaults, required, types; a key the child does not declare is an error, not a silent drop), and when the child declares `outputs` only those channels come back, each checked against its contract (`SUBGRAPH_OUTPUT_INVALID`). The node's `input:` must be an object. See [05 — Subgraph call boundary](./05-state-and-data.md#subgraph-call-boundary).
 
 A delta is applied only when the parent channel being written is the same channel that seeded the child. `in: { draft: "{{ state.input }}" }` and `out: { result: draft }` still copies `draft` into `result` when the child does not change it. Message channels keep edits to an existing id. A missing id becomes a removal only when the **child** channel uses the messages reducer (the child already applied that removal). A child channel that is `array`, `append`, or undeclared and returns only its reply does not wipe the parent thread; an explicit `RemoveMessage` in that reply is still applied. A second removal of an id that is already gone is ignored, so two parallel subgraphs can remove the same id. When one sibling removes an id and another edits it, writes apply in node-id order and the later sibling wins: an edit after a removal appends the message again, and a removal after an edit deletes it.
 
@@ -718,7 +717,7 @@ Child events are nested under the parent's span. The parent must use checkpointi
 
 On resume, the parent `subgraph` node re-executes from the top (recomputing `stateMap.in`). Side effects reached before a nested interrupt should use `ctx.once()` so they do not re-fire on replay (same pattern as top-level HITL nodes).
 
-`flowgraph validate` warns when an `out` key is not a declared parent channel (`UNDECLARED_OUTPUT_CHANNEL`; compile declares it as `type: any`) and errors when an `out` value names a child channel that does not exist (`SUBGRAPH_OUTPUT_UNKNOWN`). An inline `spec` is validated like a top-level graph, and so is a `uses:` file when the graph is loaded ([02 §11](./02-graph-spec.md#11-validation--diagnostics)).
+`flowgraph validate` warns when an `out` key is not a declared parent channel (`UNDECLARED_OUTPUT_CHANNEL`; compile declares it as `type: any`) and errors when an `out` value names a child channel that does not exist, or is not one of the child's declared `outputs` (`SUBGRAPH_OUTPUT_UNKNOWN`). It also errors when the parent passes a key the child does not declare (`SUBGRAPH_INPUT_UNKNOWN`) and when a required child input is neither passed nor defaulted (`SUBGRAPH_INPUT_MISSING`). An inline `spec` is validated like a top-level graph, and so is a `uses:` file when the graph is loaded ([02 §11](./02-graph-spec.md#11-validation--diagnostics)).
 
 ---
 
@@ -732,22 +731,24 @@ Each entry into a map has a separate collection round, in input order. Looping b
 
 An inner `output.map` always collects one object containing exactly its declared keys per item: `{value: "{{ result }}"}` produces `[{value: ...}, ...]`. Adding another key preserves that shape; the internal `outputs` wrapper is omitted. Inner `output.to` alone still collects the bare result. These item projections do not write separate parent channels; `collect` chooses the parent destination.
 
-The map renders the inner node's `with` and `input` once per item, with `state`, `input`, `config`, `run` and `item` in scope. Item data is never rendered a second time: an item whose text contains `{{ ... }}` reaches the inner node as that literal text, so it cannot evaluate expressions or read secrets. Map bodies have no `secret` scope.
+The map renders the inner node's `with` and `input` once per item, with `state`, `input`, `config`, `run`, the item and its `index` in scope. The item is bound directly under the name `as` (default `item`), so `as: task` is read as `{{ task }}` or `{{ task.title }}`, and `{{ index }}` is its zero-based position in `over`. The old `{{ item.<as> }}` form (`item.task`) is gone: with `as: task` it now reads a field called `task` on a non-existent `item`, and `flowgraph validate` reports `MAP_ITEM_REF_REMOVED`; `flowgraph migrate` rewrites it. `as` must be an identifier and cannot be a name templates already bind (`index`, `state`, `input`, `config`, `run`, `secret`, `secrets`, `issues`, `memory`, `result`). Item data is never rendered a second time: an item whose text contains `{{ ... }}` reaches the inner node as that literal text, so it cannot evaluate expressions or read secrets. Map bodies have no `secret` scope.
 
 ```yaml
 - id: implement-all
   type: map
   with:
     over: "{{ state.tasks }}"       # array
-    as: task                        # each item bound as {{ item.task }}
+    as: task                        # each item bound as {{ task }}; {{ index }} is its position
     concurrency: 3                  # max parallel
     node:                           # the per-item node (any type, incl. subgraph)
       type: subgraph
       uses: implement-task
-      input: { task: "{{ item.task }}" }
+      input: { task: "{{ task }}", position: "{{ index }}" }
     collect:
       to: results                   # results array written via append reducer
 ```
+
+An inner `when` is honoured per item, with the item and `index` in scope: an item whose `when` is false is skipped (a `node.skipped` event is emitted) and contributes nothing to the collected results. The map's own `with.output` is rejected rather than silently ignored; write the collected results with `with.collect`, or project each item with the inner node's own `with.output`.
 
 `with.node` is a node spec with the same fields as a graph node, except that `id` is optional (each item runs as `<map>[<index>]`). `flowgraph validate` and `compileGraph` check it like any node: an unknown key, a missing `type`, an unregistered type, or a `with` that does not match the body type's schema (for example a `shell` body without `command`) is an error before the run starts. A body's inline subgraph `spec` is validated like a top-level graph.
 
@@ -1450,39 +1451,41 @@ OpenAI image dimensions are checked offline and again after rendering, before in
 
 ---
 
-## 9. Built-in node summary
+## 9. Node type summary
+
+Core built-in node types live in `@flowgraph/core`. Product node packages are separately versioned **preview** packages registered by default in `@flowgraph/cli` (import them directly for programmatic runs).
 
 | `type` | Purpose | Capabilities | Package |
 |---|---|---|---|
-| `agent` | Agent loop w/ tools (hub & spoke) | streaming, interruptible, side-effecting | core (+ provider pkg) |
-| `skill` | Run a declared skill | varies by skill | core (+ `@flowgraph/skills`) |
-| `router` | Choose next node(s) | routing | core |
-| `http` | Outbound HTTP | side-effecting | core |
-| `demo` | Best-effort artifact capture (HTTP / screenshot / video / simulator / file) | side-effecting | core (+ optional `playwright`; simulators need Xcode/adb) |
-| `mcp` | MCP tool/resource call | side-effecting | core (+ `@flowgraph/mcp` at runtime) |
-| `webhook` | Outbound HTTP notify | side-effecting | core |
-| `shell` | Run a local program, or a shell command line with `shell: true` | side-effecting | core |
-| `service` | Start/stop long-running background processes | side-effecting | core |
-| `port` | Allocate free TCP port(s) at run time | — | core |
-| `script` | Sandboxed inline Node.js (ESM) | side-effecting | core |
-| `function` | Registered TS function (legacy) | varies | core |
-| `fail` | End the run as failed with a rendered reason (`FLOW_FAILED`) | terminal | core |
-| `subgraph` | Nested / embed a child graph | composite | core |
-| `map` | Fan-out over a collection | composite, parallel | core |
-| `hitl` | Human approve / question / choice gate | interruptible | core |
-| `wait` | Delay / condition / signal / inbound webhook gate | interruptible | core |
-| `workshop` | Facilitated agenda session (human answers per item) | interruptible | core |
-| `worktree` | Add / remove / list isolated git worktrees | side-effecting | core |
-| `image` | Generate / edit images | side-effecting | core (+ a media provider) |
-| `video` | Generate video clips | side-effecting | core (+ a media provider) |
-| `model3d` | Generate 3D assets (GLB, FBX, …) | side-effecting | core (+ a media provider) |
-| `audio` | Generate speech, sound effects, music | side-effecting | core (+ a media provider) |
+| `agent` | Agent loop w/ tools (hub & spoke) | streaming, interruptible, side-effecting | `@flowgraph/core` (+ provider pkg) |
+| `skill` | Run a declared skill | varies by skill | `@flowgraph/core` (+ `@flowgraph/skills`) |
+| `router` | Choose next node(s) | routing | `@flowgraph/core` |
+| `http` | Outbound HTTP (and idempotent notifications with `once: true`) | side-effecting | `@flowgraph/core` |
+| `mcp` | MCP tool/resource call | side-effecting | `@flowgraph/core` (+ `@flowgraph/mcp` at runtime) |
+| `shell` | Run a local program, or a shell command line with `shell: true` | side-effecting | `@flowgraph/core` |
+| `script` | Sandboxed inline Node.js (ESM) | side-effecting | `@flowgraph/core` |
+| `function` | Registered TS function | varies | `@flowgraph/core` |
+| `fail` | End the run as failed with a rendered reason (`FLOW_FAILED`) | terminal | `@flowgraph/core` |
+| `subgraph` | Nested / embed a child graph | composite | `@flowgraph/core` |
+| `map` | Fan-out over a collection | composite, parallel | `@flowgraph/core` |
+| `hitl` | Human approve / question / choice gate | interruptible | `@flowgraph/core` |
+| `wait` | Delay / condition / signal / inbound webhook gate | interruptible | `@flowgraph/core` |
+| `memory` | Persistent thread/org memory | side-effecting | `@flowgraph/core` |
+| `demo` | Best-effort artifact capture (HTTP / screenshot / video / simulator / file) | side-effecting | `@flowgraph/node-demo` (preview; optional `playwright`) |
+| `service` | Start/stop long-running background processes | side-effecting | `@flowgraph/node-service` (preview) |
+| `port` | Allocate free TCP port(s) at run time | — | `@flowgraph/node-port` (preview) |
+| `workshop` | Facilitated agenda session (human answers per item) | interruptible | `@flowgraph/node-workshop` (preview) |
+| `worktree` | Add / remove / list isolated git worktrees | side-effecting | `@flowgraph/node-worktree` (preview) |
+| `image` | Generate / edit images | side-effecting | `@flowgraph/media` (preview) |
+| `video` | Generate video clips | side-effecting | `@flowgraph/media` (preview) |
+| `model3d` | Generate 3D assets (GLB, FBX, …) | side-effecting | `@flowgraph/media` (preview) |
+| `audio` | Generate speech, sound effects, music | side-effecting | `@flowgraph/media` (preview) |
 
 ---
 
 ## 10. Custom node types (plugins)
 
-Third parties extend the registry by publishing a node plugin package and importing it (`imports[].nodes`). A plugin exports `NodeFactory`s:
+Third parties extend a graph's per-compile registry by publishing a node plugin package and importing it (`imports[].nodes`). Plugin node types **must be namespaced** (`<namespace>:<name>`, `<namespace>/<name>`, or `@<scope>/<pkg>:<name>`). An unnamespaced plugin type fails with `PLUGIN_TYPE_INVALID`, and colliding with a built-in type or another plugin fails with `PLUGIN_TYPE_COLLISION`. Imported plugins and reducers are isolated to the graph compilation that imported them rather than mutating the process-wide registry. A plugin exports `NodeFactory`s:
 
 ```ts
 // @acme/flowgraph-nodes-aws
@@ -1490,27 +1493,26 @@ import { defineNode } from "@flowgraph/core";
 import { z } from "zod";
 
 export const s3Put = defineNode({
-  type: "aws.s3.put",
+  type: "aws:s3-put",
   configSchema: z.object({
     bucket: z.string(),
     key: z.string(),
     body: z.string(),
   }),
   capabilities: { sideEffecting: true },
-  build(ctx, config) {
+  build(_ctx, _nodeSpec, config) {
     return {
       contract: { inputs: {/*...*/}, outputs: {/*...*/} },
+      capabilities: { sideEffecting: true },
       async run(state, runCtx) {
-        const body = runCtx.render(config.body);          // evaluate {{ }} against state
-        await runCtx.secrets.with("AWS_ACCESS_KEY_ID", /* ... */);
-        // ... do the put ...
+        // ... perform the upload using config, state and runCtx ...
         return { update: { /* ... */ } };
       },
     };
   },
 });
 
-export default [s3Put];   // registered when the package is imported
+export default [s3Put];   // registered in the per-compile registry when imported
 ```
 
 Custom nodes get the full runtime treatment (events, hooks, tracing, retries) automatically. They should declare accurate `capabilities` (especially `sideEffecting`) so replay/retry stays safe. Where a node depends on environment/tools, prefer expressing those as a **skill** or documenting them so preflight can warn.

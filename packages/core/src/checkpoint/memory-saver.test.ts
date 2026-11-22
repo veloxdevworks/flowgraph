@@ -126,14 +126,14 @@ describe("FlowgraphMemorySaver retention", () => {
 function interruptSpec(): GraphSpec {
   return {
     metadata: { name: "retain-hitl" },
-    state: { channels: { tag: { type: "string" } } },
+    state: { channels: { tag: { type: "number" } } },
     nodes: [
       { id: "gate", type: "wait", with: { signal: "go" } },
-      { id: "a", type: "function", with: { fn: "retTag", input: { n: "1" }, output: { to: "tag" } } },
-      { id: "b", type: "function", with: { fn: "retTag", input: { n: "2" }, output: { to: "tag" } } },
-      { id: "c", type: "function", with: { fn: "retTag", input: { n: "3" }, output: { to: "tag" } } },
-      { id: "d", type: "function", with: { fn: "retTag", input: { n: "4" }, output: { to: "tag" } } },
-      { id: "e", type: "function", with: { fn: "retTag", input: { n: "5" }, output: { to: "tag" } } },
+      { id: "a", type: "function", with: { fn: "retTag", output: { to: "tag" } }, input: { n: "1" } },
+      { id: "b", type: "function", with: { fn: "retTag", output: { to: "tag" } }, input: { n: "2" } },
+      { id: "c", type: "function", with: { fn: "retTag", output: { to: "tag" } }, input: { n: "3" } },
+      { id: "d", type: "function", with: { fn: "retTag", output: { to: "tag" } }, input: { n: "4" } },
+      { id: "e", type: "function", with: { fn: "retTag", output: { to: "tag" } }, input: { n: "5" } },
     ],
     edges: [
       { from: "START", to: "gate" },

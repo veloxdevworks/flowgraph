@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { GraphSpec } from "@flowgraph/spec";
+import type { LocalTools } from "@flowgraph/tools-fs";
 import { lazyOptionalImport } from "./optional-deps.js";
 
 const loadToolsFs = lazyOptionalImport<typeof import("@flowgraph/tools-fs")>(
@@ -38,7 +39,7 @@ export async function registerLocalTools(
   opts: { workspace?: string } = {},
 ): Promise<LocalToolsRegistration> {
   const warnings: string[] = [];
-  const fsCfg = spec.localTools?.fs;
+  const fsCfg = (spec as { localTools?: LocalTools }).localTools?.fs;
   if (!fsCfg) return { warnings };
 
   const toolsFs = await loadToolsFs();

@@ -27,8 +27,6 @@ nodes:
     type: agent
     provider: cursor
     with:
-      cursor:
-        runtime: local
       system: You are a concise coding assistant working in the local workspace.
       prompt: >
         Summarize what this example graph does in one sentence.

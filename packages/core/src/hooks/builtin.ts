@@ -4,18 +4,12 @@
  *   - `defaultGuardrailHooks` — overridable defaults (redaction) installed at low priority.
  */
 
-import { canonicalHookEvent, hookEventFires, hookVerbAllowed, hookVerbMessage, HOOK_EVENTS, HOOK_EVENT_ALIASES } from "@flowgraph/spec";
+import { hookEventFires, hookVerbAllowed, hookVerbMessage, HOOK_EVENTS } from "@flowgraph/spec";
 import type { GraphSpec } from "@flowgraph/spec";
 import { createRedactor, DEFAULT_REDACT_PATTERNS } from "../secrets.js";
 import type { Hook, HookDirective, HookPhase, HookWhere } from "./types.js";
 
-/** Legacy hook event names accepted from YAML and rewritten to an event that runs. */
-const HOOK_PHASE_ALIASES: Readonly<Record<string, HookPhase>> = HOOK_EVENT_ALIASES;
-
-export const KNOWN_PHASES: ReadonlySet<string> = new Set<string>([
-  ...HOOK_EVENTS,
-  ...Object.keys(HOOK_PHASE_ALIASES),
-]);
+export const KNOWN_PHASES: ReadonlySet<string> = new Set<string>(HOOK_EVENTS);
 
 export function knownHookDirective(verb: string, on?: string): boolean {
   if (on && hookEventFires(on)) return hookVerbAllowed(on, verb);
@@ -62,7 +56,7 @@ export function hooksFromSpec(spec: GraphSpec): Hook[] {
   for (const entry of entries) {
     if (!KNOWN_PHASES.has(entry.on)) throw Object.assign(new Error(`Unknown hook event "${entry.on}".`), {code:"HOOK_PHASE_UNKNOWN",retryable:false});
     if (!knownHookDirective(entry.do, entry.on)) throw Object.assign(new Error(`Hook directive "${entry.do}" is not valid for ${entry.on}. ${hookVerbMessage(entry.on)}`),{code:"HOOK_DIRECTIVE_UNKNOWN",retryable:false});
-    const phase = (HOOK_PHASE_ALIASES[entry.on] ?? canonicalHookEvent(entry.on)) as HookPhase;
+    const phase = entry.on as HookPhase;
     const where = entry.where as HookWhere | undefined;
     const resolve = directiveFor(entry.do, entry.reason, redactor);
     hooks.push({

@@ -67,6 +67,12 @@ describe("published Graph JSON Schema", () => {
     const graphProps = schema.definitions.GraphSpec!.properties;
     expect(Object.keys(graphProps.config!.properties!.defaults!.properties!)).toEqual(["provider", "model"]);
     expect(graphProps.runtime!.properties).not.toHaveProperty("observability");
+    expect(graphProps).not.toHaveProperty("input");
+    const channelProps = (graphProps.state!.properties!.channels as { additionalProperties: { properties: Record<string, unknown> } }).additionalProperties.properties;
+    expect(channelProps).not.toHaveProperty("items");
+    expect(channelProps).not.toHaveProperty("properties");
+    const inputFieldProps = (graphProps.inputs as { items: { properties: Record<string, unknown> } }).items.properties;
+    expect(inputFieldProps).not.toHaveProperty("label");
     // The canonical node-level retry and timeout stay.
     expect(schema.definitions.NodeSpec!.properties).toHaveProperty("retry");
     expect(schema.definitions.NodeSpec!.properties).toHaveProperty("timeout");

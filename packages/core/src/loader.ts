@@ -5,7 +5,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { GraphSpecSchema, HOOK_EVENT_ALIASES, diagnosticsFromZodIssues, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
+import { GraphSpecSchema, diagnosticsFromZodIssues, isNamespacedPluginType, type GraphSpec, type Diagnostic } from "@flowgraph/spec";
 import {
   envExpansionCollisionDiagnostics,
 } from "./runtime/env-expansion-lint.js";
@@ -16,14 +16,14 @@ import {
   graphHasPlacement,
   placementNestedMessage,
   subgraphOutputSites,
+  subgraphInputDiagnostics,
   unknownSubgraphOutputDiagnostics,
 } from "./runtime/validate-graph.js";
 import { walkNodes } from "./discover-skills.js";
 import { withUnresolvedImports } from "./runtime/load-imports.js";
-import { registry } from "./registry.js";
+import { registry, type NodeRegistry } from "./registry.js";
 import { setGraphFile, subgraphAliases } from "./runtime/graph-files.js";
 import "./nodes/index.js";
-import { getMediaVendor } from "./media/registry.js";
 import { offlineProviderValidations, providerConfigDiagnostics } from "./providers/diagnostics.js";
 import { secretReferenceDiagnostics } from "./runtime/secret-declarations.js";
 import { expandGraphEnv, recordGraphEnvExpansion, unexpandedEnvDiagnostics, type GraphEnvExpansion } from "./runtime/config-env.js";
@@ -42,15 +42,24 @@ function rawNodeTypeDiagnostics(parsed: unknown): Diagnostic[] {
   const graph = (value: unknown, prefix = ""): void => {
     if (!value || typeof value !== "object") return;
     const raw = value as { nodes?: unknown; imports?: Array<{ nodes?: unknown }> };
-    // Plugin types are not known until imports are loaded. Do not incorrectly
-    // label a plugin type as unknown while reporting an unrelated schema error.
-    if (Array.isArray(raw.imports) && raw.imports.some((imp) => imp && typeof imp.nodes === "string")) return;
+    const hasNodesImport =
+      Array.isArray(raw.imports) && raw.imports.some((imp) => imp && typeof imp.nodes === "string");
     if (!Array.isArray(raw.nodes)) return;
     const node = (value: unknown, base: string): void => {
       if (!value || typeof value !== "object") return;
       const rawNode = value as { id?: unknown; type?: unknown; with?: { node?: unknown }; spec?: unknown };
       if (typeof rawNode.type === "string" && !registry.has(rawNode.type)) {
-        diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_TYPE", path: `${base}.type`, message: `Node "${String(rawNode.id)}" has unregistered type "${rawNode.type}"` });
+        if (rawNode.type === "webhook") {
+          diagnostics.push({
+            severity: "error",
+            code: "WEBHOOK_NODE_REMOVED",
+            path: `${base}.type`,
+            message: `Node "${String(rawNode.id)}" uses removed type "webhook". Use type "http" with once: true (and method: POST), or run "flowgraph migrate" to rewrite this graph.`,
+          });
+        } else if (!(hasNodesImport && isNamespacedPluginType(rawNode.type))) {
+          // Plugin types are namespaced and loaded later; bare unknown types stay errors.
+          diagnostics.push({ severity: "error", code: "UNKNOWN_NODE_TYPE", path: `${base}.type`, message: `Node "${String(rawNode.id)}" has unregistered type "${rawNode.type}"` });
+        }
       }
       if (rawNode.type === "map") node(rawNode.with?.node, `${base}.with.node`);
       if (rawNode.type === "subgraph") graph(rawNode.spec, `${base}.spec.`);
@@ -103,7 +112,6 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
   try {
     parsed = parseYaml(raw);
     expansion = expandGraphEnv(parsed);
-    parsed = normalizeNodeTypeAliases(parsed);
   }
   catch (err) {
     return { spec: null, diagnostics: [{ severity: "error", code: "YAML_PARSE_ERROR", message: `YAML parse error: ${String(err)}` }, ...envCollisionDiags] };
@@ -148,6 +156,7 @@ async function readGraph(resolved: string, seen: Set<string>, cache: Map<string,
     diagnostics.push(...inFile(child.diagnostics, childPath));
     if (!child.spec) { fatal = true; continue; }
     if (site.out) diagnostics.push(...unknownSubgraphOutputDiagnostics(site, child.spec));
+    diagnostics.push(...subgraphInputDiagnostics(site, child.spec));
     if (graphHasPlacement(child.spec) || filePlacement.has(child.spec)) {
       filePlacement.add(spec);
       diagnostics.push(site.placed
@@ -177,62 +186,9 @@ function isGraphFileRef(ref: string): boolean {
   return ref.endsWith(".yaml") || ref.endsWith(".yml") || ref.startsWith(".") || ref.includes("/") || ref.includes("\\");
 }
 
-/** Deprecated YAML node type → canonical type. */
-const NODE_TYPE_ALIASES: Readonly<Record<string, string>> = {
-  code: "function",
-  intelligent: "agent",
-};
-
-/**
- * Rewrite deprecated `type: code` / `type: intelligent` and hook events listed
- * in `HOOK_EVENT_ALIASES`, in the graph, in map bodies and in inline subgraph
- * `spec` blocks at any depth.
- * Exported for tests and for UI-side YAML parsers that want the same mapping.
- */
-export function normalizeNodeTypeAliases(parsed: unknown): unknown {
-  if (!parsed || typeof parsed !== "object") return parsed;
-  const root = parsed as Record<string, unknown>;
-
-  const rewriteNode = (node: unknown): unknown => {
-    if (!node || typeof node !== "object") return node;
-    const n = { ...(node as Record<string, unknown>) };
-    if (typeof n.type === "string" && NODE_TYPE_ALIASES[n.type]) {
-      n.type = NODE_TYPE_ALIASES[n.type];
-    }
-    // map nodes nest an inner node under with.node
-    if (n.with && typeof n.with === "object") {
-      const w = { ...(n.with as Record<string, unknown>) };
-      if (w.node && typeof w.node === "object") {
-        w.node = rewriteNode(w.node);
-      }
-      n.with = w;
-    }
-    // Inline subgraphs are whole graphs, with their own nodes and hooks.
-    if (n.spec && typeof n.spec === "object") n.spec = normalizeNodeTypeAliases({ ...(n.spec as Record<string, unknown>) });
-    return n;
-  };
-
-  if (Array.isArray(root.nodes)) {
-    root.nodes = root.nodes.map(rewriteNode);
-  }
-
-  const runtime = root.runtime;
-  if (runtime && typeof runtime === "object") {
-    const rt = { ...(runtime as Record<string, unknown>) };
-    if (Array.isArray(rt.hooks)) {
-      rt.hooks = rt.hooks.map((hook) => {
-        if (!hook || typeof hook !== "object") return hook;
-        const h = { ...(hook as Record<string, unknown>) };
-        if (typeof h.on === "string" && HOOK_EVENT_ALIASES[h.on]) {
-          h.on = HOOK_EVENT_ALIASES[h.on];
-        }
-        return h;
-      });
-    }
-    root.runtime = rt;
-  }
-
-  return root;
+export interface ValidateSpecOptions {
+  /** Optional node/reducer registry (for example the registry returned by `loadGraphImports`). */
+  registry?: NodeRegistry;
 }
 
 /**
@@ -240,36 +196,22 @@ export function normalizeNodeTypeAliases(parsed: unknown): unknown {
  * bodies and its inline subgraph `spec` blocks at any depth (see
  * `graphStructureDiagnostics`); `loadGraph` applies it to `uses` files.
  */
-export function validateSpec(spec: GraphSpec): Diagnostic[] {
-  const diagnostics: Diagnostic[] = graphStructureDiagnostics(spec, { lints: true });
+export function validateSpec(spec: GraphSpec, opts: ValidateSpecOptions = {}): Diagnostic[] {
+  const reg = opts.registry ?? registry;
+  const diagnostics: Diagnostic[] = graphStructureDiagnostics(spec, { lints: true, registry: reg });
   // The remaining passes walk every place a nested graph is used, without a depth limit.
   if (diagnostics.some((d) => GRAPH_SHAPE_CODES.has(d.code))) return diagnostics;
 
   if (spec.runtime?.budget?.maxUSD !== undefined) walkNodes(spec, node => {
     const provider = typeof node.provider === "string" ? node.provider : spec.config?.defaults?.provider;
-    const modelNode = ["agent", "intelligent"].includes(String(node.type)) || node.type === "router" && (node.with as { mode?: string } | undefined)?.mode === "model";
+    const modelNode = String(node.type) === "agent" || (node.type === "router" && (node.with as { mode?: string } | undefined)?.mode === "model");
     if (modelNode && (!provider || provider === "langchain" || spec.providers?.[provider]?.kind === "langchain")) {
       diagnostics.push({ severity: "warning", code: "BUDGET_USD_UNPRICED", path: `nodes.${node.id}`,
         message: "LangChain reports tokens without model pricing; maxUSD cannot cap those calls. Use maxTokens or a provider that reports costUSD." });
     }
   });
-  diagnostics.push(...graphLintDiagnostics(spec));
-  walkNodes(spec, node => {
-    if (!["image", "video", "audio", "model3d"].includes(String(node.type))) return;
-    const name = node.provider ?? spec.config?.defaults?.provider;
-    const cfg = typeof name === "string" ? spec.providers?.[name] : undefined;
-    const vendor = getMediaVendor(cfg && "vendor" in cfg ? cfg.vendor : String(name ?? ""));
-    if (!vendor) return;
-    const w = node.with as Record<string, unknown> ?? {};
-    // Dynamic requests are checked after rendering, before submission.
-    if (JSON.stringify([w.model, w.size, w.params]).includes("{{")) return;
-    try {
-      vendor.create({ name: String(name), ...(cfg?.kind === "media" ? { model: cfg.model, options: cfg.options } : {}) }).validateRequest?.({
-        modality: node.type as import("./media/types.js").MediaModality, model: typeof node.model === "string" ? node.model : typeof w.model === "string" ? w.model : undefined,
-        inputs: [], count: 1, params: w.params as Record<string, unknown> ?? {}, ...(typeof w.size === "string" ? { size: w.size } : {}),
-      });
-    } catch (err) { diagnostics.push({ severity: "error", code: "MEDIA_REQUEST_INVALID", path: `nodes.${node.id}.with`, message: `Media node "${node.id}": ${String(err)}` }); }
-  });
+  diagnostics.push(...graphLintDiagnostics(spec, reg));
+  diagnostics.push(...reg.runValidators(spec));
 
   diagnostics.push(...providerConfigDiagnostics(spec, offlineProviderValidations(spec)));
   diagnostics.push(...secretReferenceDiagnostics(spec), ...unexpandedEnvDiagnostics(spec));

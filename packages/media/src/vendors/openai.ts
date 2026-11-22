@@ -63,7 +63,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { JobHandle, MediaCallContext, MediaOutput, MediaProvider, MediaRequest, MediaVendor, MediaVendorOptions } from "@flowgraph/core";
+import type { JobHandle, MediaCallContext, MediaOutput, MediaProvider, MediaRequest, MediaVendor, MediaVendorOptions } from "../runtime/types.js";
 import { VendorHttpError, base64ToBytes, joinUrl, requestJson, resolveApiKey } from "../http.js";
 
 const VENDOR = "openai";

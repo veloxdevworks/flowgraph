@@ -28,8 +28,6 @@ nodes:
     type: agent
     provider: claude
     with:
-      claude:
-        cwd: "./workspace"
       system: >
         You are a coding assistant. Use Read and Edit to inspect and update files
         inside the workspace only.

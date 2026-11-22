@@ -76,7 +76,7 @@ version: 0.1.0
 description: >
   Greet someone by name — a minimal skill for flowgraph quickstarts.
 
-kind_of: executable
+kindOf: executable
 handler: ./handler.js
 
 inputs:
@@ -90,7 +90,6 @@ outputs:
     type: string
     description: Greeting message
 
-sideEffecting: false
 timeout: 5s
 ---
 
@@ -285,8 +284,6 @@ const TEMPLATES: Record<string, (name: string) => ScaffoldResult> = {
   minimal,
   http,
   agent,
-  /** @deprecated Use "agent" */
-  intelligent: agent,
 };
 
 export function listTemplates(): string[] {

@@ -10,6 +10,7 @@
 import { literalCallbackExpr, evalExpr, parseExpr, scanTemplate, type Expr } from "@flowgraph/expr";
 import type { NodeRunContext } from "./context.js";
 import type { OutboundHttpPolicy } from "./outbound-http.js";
+import { registry, type NodeRegistry } from "./registry.js";
 
 /** Key of the policy on the run context (copied into every node context). */
 export const NODE_POLICY = Symbol.for("flowgraph.nodePolicy");
@@ -17,6 +18,14 @@ export const NODE_POLICY = Symbol.for("flowgraph.nodePolicy");
 export interface NodePolicy {
   /** Node types that may not be built or run (map inners and agent skill tools included). */
   blockedTypes?: readonly string[] | undefined;
+  /**
+   * Allowlist mode: allow only registered node types explicitly marked
+   * `capabilities.hostAccess === false`. Any other type (including newly
+   * registered plugins or packages) is refused with NODE_TYPE_BLOCKED.
+   * Also implies `blockHostExec` so node features such as workshop or hitl
+   * review git diffs cannot execute host programs.
+   */
+  requireSafeNodeTypes?: boolean | undefined;
   /** Refuse subgraph `uses` references, which load graph files from the host's disk. Inline `spec` is allowed. */
   blockSubgraphFiles?: boolean | undefined;
   /** Make `{{ secret.X }}` in http / webhook templates fail instead of reading the host environment. */
@@ -101,9 +110,22 @@ function suffix(policy: NodePolicy): string {
 }
 
 /** Throws NODE_TYPE_BLOCKED when the policy blocks `type`. `where` names the node for the message. */
-export function assertNodeTypeAllowed(policy: NodePolicy | undefined, type: string, where: string): void {
-  if (!policy?.blockedTypes?.includes(type)) return;
-  throw new NodePolicyError("NODE_TYPE_BLOCKED", `${where}: node type "${type}" is not allowed here${suffix(policy)}`);
+export function assertNodeTypeAllowed(
+  policy: NodePolicy | undefined,
+  type: string,
+  where: string,
+  reg: NodeRegistry = registry,
+): void {
+  if (!policy) return;
+  if (policy.blockedTypes?.includes(type)) {
+    throw new NodePolicyError("NODE_TYPE_BLOCKED", `${where}: node type "${type}" is not allowed here${suffix(policy)}`);
+  }
+  if (policy.requireSafeNodeTypes && !reg.isUntrustedSafe(type)) {
+    throw new NodePolicyError(
+      "NODE_TYPE_BLOCKED",
+      `${where}: node type "${type}" is not marked safe for untrusted graphs${suffix(policy)}`,
+    );
+  }
 }
 
 /** Throws SUBGRAPH_FILE_BLOCKED when the policy refuses file-based subgraphs. */
@@ -166,7 +188,7 @@ export function assertFunctionAllowed(policy: NodePolicy | undefined, name: stri
 
 /** Throws HOST_EXEC_BLOCKED when the policy refuses running a host program for `what`. */
 export function assertHostExecAllowed(policy: NodePolicy | undefined, what: string, where: string): void {
-  if (!policy?.blockHostExec) return;
+  if (!policy?.blockHostExec && !policy?.requireSafeNodeTypes) return;
   throw new NodePolicyError("HOST_EXEC_BLOCKED", `${where}: ${what} runs a program on the host, which is not allowed here${suffix(policy)}`);
 }
 
@@ -630,11 +652,14 @@ export function reservedStateMapRefs(node: { with?: unknown }): string[] {
  * result goes through this, for trusted graphs too: `__` names are the
  * engine's, and nothing outside the engine may put a value there.
  */
-export function withoutReservedKeys<T extends Record<string, unknown>>(value: T): T {
+export function withoutReservedKeys<T>(value: T): T {
+  // A node's input can be any value; only an object has keys to drop.
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
   let out: Record<string, unknown> | undefined;
-  for (const k of Object.keys(value)) {
+  for (const k of Object.keys(record)) {
     if (!isReservedChannel(k)) continue;
-    out ??= { ...value };
+    out ??= { ...record };
     delete out[k];
   }
   return (out ?? value) as T;
@@ -648,7 +673,8 @@ export function withoutReservedKeys<T extends Record<string, unknown>>(value: T)
  */
 export function reservedInputRefs(node: { input?: unknown }): string[] {
   const input = node.input;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  if (Array.isArray(input) || typeof input === "string") return refersToReserved(input) ? ["input"] : [];
+  if (!input || typeof input !== "object") return [];
   const out: string[] = [];
   for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
     if (isReservedChannel(key.trim()) || refersToReserved(value)) out.push(`input.${key}`);
@@ -704,7 +730,7 @@ export function assertNoReservedChannels(policy: NodePolicy | undefined, channel
  */
 export function hostExecAllowed(policy: NodePolicy | undefined, nodeType?: string): boolean {
   if (!policy) return true;
-  if (policy.blockHostExec) return false;
+  if (policy.blockHostExec || policy.requireSafeNodeTypes) return false;
   return !(nodeType && policy.blockedTypes?.includes(nodeType));
 }
 

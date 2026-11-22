@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkWorkshopOutput } from "@flowgraph/spec";
+import { checkWorkshopOutput } from "@flowgraph/node-workshop/contract";
 import { WorkshopController } from "./controller.js";
 import { TextFacilitator, type FacilitatorModel } from "./text-facilitator.js";
 import type { WorkshopContract } from "./types.js";

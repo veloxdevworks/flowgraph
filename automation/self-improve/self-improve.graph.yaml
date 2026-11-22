@@ -44,22 +44,22 @@ nodes:
     type: function
     with:
       fn: checkPaused
-      input: {}
       output: { to: pausedCheck }
+    input: {}
 
   - id: check-runtime
     type: function
     with:
       fn: checkRuntime
-      input: {}
       output: { to: runtime }
+    input: {}
 
   - id: load-context
     type: function
     with:
       fn: loadContext
-      input: {}
       output: { to: ctx }
+    input: {}
 
   - id: research-and-plan
     type: agent
@@ -98,8 +98,6 @@ nodes:
     type: agent
     provider: coder
     with:
-      cursor:
-        runtime: local
       system: >
         You implement a single small improvement in the flowgraph repo. Follow GUARDRAILS.md rules
         embedded in the plan context. Do not edit automation/self-improve/** or protected paths.
@@ -124,29 +122,27 @@ nodes:
     type: function
     with:
       fn: runQualityGate
-      input:
-        docsOnly: "{{ state.plan.docsOnly }}"
       output: { to: gate }
+    input:
+      docsOnly: "{{ state.plan.docsOnly }}"
 
   - id: increment-attempts
     type: function
     with:
       fn: incrementAttempts
-      input:
-        attempts: "{{ state.attempts }}"
-        feedback: "{{ state.approval.feedback }}"
-        gateOutput: "{{ state.gate.output }}"
       output:
         map:
           attempts: "{{ result.attempts }}"
           implementFeedback: "{{ result.implementFeedback }}"
+    input:
+      attempts: "{{ state.attempts }}"
+      feedback: "{{ state.approval.feedback }}"
+      gateOutput: "{{ state.gate.output }}"
 
   - id: review
     type: agent
     provider: coder
     with:
-      cursor:
-        runtime: local
       system: >
         You review a proposed change set for the flowgraph repo against the plan and guardrails.
         Approve only if the diff is small, on-strategy, and quality gates passed.
@@ -175,32 +171,32 @@ nodes:
     type: function
     with:
       fn: openPr
-      input:
-        plan: "{{ state.plan }}"
-        gate: "{{ state.gate }}"
       output: { to: pr }
+    input:
+      plan: "{{ state.plan }}"
+      gate: "{{ state.gate }}"
 
   - id: finalize-failure
     type: function
     with:
       fn: finalizeFailure
-      input:
-        reason: "max attempts exhausted"
-        branch: "{{ state.pr.branch }}"
       output: { to: failure }
+    input:
+      reason: "max attempts exhausted"
+      branch: "{{ state.pr.branch }}"
 
   - id: record-outcome
     type: function
     with:
       fn: recordOutcome
-      input:
-        pausedCheck: "{{ state.pausedCheck }}"
-        runtime: "{{ state.runtime }}"
-        ctx: "{{ state.ctx }}"
-        plan: "{{ state.plan }}"
-        pr: "{{ state.pr }}"
-        failure: "{{ state.failure }}"
       output: { map: { outcome: "{{ result }}" } }
+    input:
+      pausedCheck: "{{ state.pausedCheck }}"
+      runtime: "{{ state.runtime }}"
+      ctx: "{{ state.ctx }}"
+      plan: "{{ state.plan }}"
+      pr: "{{ state.pr }}"
+      failure: "{{ state.failure }}"
 
 edges:
   - { from: START, to: check-paused }

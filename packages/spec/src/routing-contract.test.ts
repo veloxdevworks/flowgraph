@@ -70,7 +70,8 @@ describe("hook events and verbs", () => {
     expect(spec({ on: "node:error", do: "continue" }).success).toBe(true);
     expect(spec({ on: "node:error", do: "fail" }).success).toBe(true);
     expect(spec({ on: "agent:beforeToolCall", do: "allow" }).success).toBe(true);
-    expect(spec({ on: "intelligent:beforeToolCall", do: "deny" }).success).toBe(true);
+    expect(spec({ on: "intelligent:beforeToolCall", do: "deny" }).success).toBe(false);
+    expect(spec({ on: "intelligent:afterToolCall", do: "allow" }).success).toBe(false);
     const rejected = spec({ on: "intelligent:beforeStep", do: "allow" });
     expect(rejected.success).toBe(false);
     expect(rejected.error?.issues.some((issue) => issue.message === 'Unknown hook event "intelligent:beforeStep".')).toBe(true);
@@ -116,10 +117,10 @@ describe("on.error", () => {
 });
 
 describe("wait deadline", () => {
-  it("renames duration to deadline and keeps signal", () => {
+  it("accepts deadline and signal and rejects removed duration", () => {
     expect(WaitWithSchema.safeParse({ deadline: "1ms", signal: "ready" }).success).toBe(true);
     const renamed = WaitWithSchema.safeParse({ duration: "1ms" });
     expect(renamed.success).toBe(false);
-    expect(renamed.error?.issues.some((issue) => issue.message.includes("deadline"))).toBe(true);
+    expect(renamed.error?.issues.some((issue) => issue.code === "unrecognized_keys" && issue.keys.includes("duration"))).toBe(true);
   });
 });
