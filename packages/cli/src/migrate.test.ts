@@ -253,7 +253,7 @@ describe("migrateSpec", () => {
 
     const res = migrateSpec(raw);
     expect(res.changed).toBe(true);
-    const parsed = parse(res.output, { merge: true }) as {
+    const parsed = parse(res.output) as {
       nodes: Array<{
         id: string;
         type: string;
@@ -301,7 +301,7 @@ describe("migrateSpec", () => {
 
     const res = migrateSpec(raw);
     expect(res.changed).toBe(true);
-    const parsed = parse(res.output, { merge: true }) as {
+    const parsed = parse(res.output) as {
       nodes: Array<{ id: string; type: string; with: Record<string, unknown> }>;
     };
     expect(parsed.nodes[0]).toMatchObject({
@@ -316,7 +316,7 @@ describe("migrateSpec", () => {
     });
   });
 
-  it("honors method from YAML merge keys (<<: *w) instead of overwriting with POST", () => {
+  it("treats << as an ordinary key (matching the loader) and still adds method: POST", () => {
     const raw = [
       "apiVersion: flowgraph/v1",
       "kind: Graph",
@@ -330,6 +330,7 @@ describe("migrateSpec", () => {
       "    type: webhook",
       "    with:",
       "      <<: *w",
+      "      url: https://example.com/hook",
       "      timeout: 5s",
       "edges:",
       "  - from: START",
@@ -341,7 +342,7 @@ describe("migrateSpec", () => {
 
     const res = migrateSpec(raw);
     expect(res.changed).toBe(true);
-    const parsed = parse(res.output, { merge: true }) as {
+    const parsed = parse(res.output) as {
       nodes: Array<{ id: string; type: string; with: Record<string, unknown> }>;
     };
     expect(parsed.nodes[0]).toMatchObject({
@@ -349,11 +350,32 @@ describe("migrateSpec", () => {
       type: "http",
       with: {
         url: "https://example.com/hook",
-        method: "PUT",
+        method: "POST",
         timeout: "5s",
         once: true,
       },
     });
+  });
+
+  it("throws an error when a webhook with: is an unresolved YAML alias", () => {
+    const raw = [
+      "apiVersion: flowgraph/v1",
+      "kind: Graph",
+      "metadata:",
+      "  name: bad-alias-hook",
+      "nodes:",
+      "  - id: notify",
+      "    type: webhook",
+      "    with: *nope",
+      "edges:",
+      "  - from: START",
+      "    to: notify",
+      "  - from: notify",
+      "    to: END",
+      "",
+    ].join("\n");
+
+    expect(() => migrateSpec(raw)).toThrow(/unresolved YAML alias "\*nope"/);
   });
 
   it("recurses into aliased subgraph spec: *alias", () => {
@@ -391,7 +413,7 @@ describe("migrateSpec", () => {
 
     const res = migrateSpec(raw);
     expect(res.changed).toBe(true);
-    const parsed = parse(res.output, { merge: true }) as {
+    const parsed = parse(res.output) as {
       nodes: Array<{
         id: string;
         spec?: { nodes: Array<{ id: string; type: string; with: Record<string, unknown> }> };

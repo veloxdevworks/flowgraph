@@ -4,7 +4,7 @@
  * structural node rewrites are needed) so comments and formatting are kept.
  */
 
-import { isAlias, isMap, isPair, isScalar, isSeq, parseDocument, visit, type Document, type Node, type YAMLMap } from "yaml";
+import { isAlias, isMap, isSeq, parseDocument, visit, type Document, type Node, type YAMLMap } from "yaml";
 import { migrateDataContracts } from "./migrate-data-contracts.js";
 
 export interface MigrateResult {
@@ -42,30 +42,6 @@ function detachAnchorForWrite(doc: Document, targetNode: YAMLMap): void {
   if (!anchor) return;
 
   visit(doc, {
-    Map(_key, map) {
-      const mergeIndex = map.items.findIndex(
-        (pair) =>
-          isPair(pair) &&
-          isScalar(pair.key) &&
-          pair.key.value === "<<" &&
-          isAlias(pair.value) &&
-          pair.value.source === anchor,
-      );
-      if (mergeIndex < 0) return;
-      const cloned = cloneWithoutAnchors(targetNode);
-      const existingKeys = new Set(
-        map.items
-          .filter((p): p is typeof p => isPair(p) && isScalar(p.key))
-          .map((p) => String((p.key as { value: unknown }).value)),
-      );
-      const expanded = cloned.items.filter(
-        (p) => !isScalar(p.key) || !existingKeys.has(String(p.key.value)),
-      );
-      map.items.splice(mergeIndex, 1, ...expanded);
-    },
-  });
-
-  visit(doc, {
     Alias(_key, alias) {
       if (alias.source === anchor) {
         return cloneWithoutAnchors(targetNode);
@@ -76,10 +52,13 @@ function detachAnchorForWrite(doc: Document, targetNode: YAMLMap): void {
   delete targetNode.anchor;
 }
 
-function resolveWithMapForWrite(doc: Document, nodeMap: YAMLMap): YAMLMap {
+function resolveWithMapForWrite(doc: Document, nodeMap: YAMLMap, label: string): YAMLMap {
   const rawWith = nodeMap.get("with", true);
   if (isAlias(rawWith)) {
     const target = rawWith.resolve(doc);
+    if (target === undefined) {
+      throw new Error(`node "${label}": unresolved YAML alias "*${rawWith.source}" in with`);
+    }
     const cloned = isMap(target) ? cloneWithoutAnchors(target) : (doc.createNode({}) as YAMLMap);
     nodeMap.set("with", cloned);
     return cloned;
@@ -101,11 +80,6 @@ function resolveReadMap(doc: Document, value: unknown): YAMLMap | undefined {
   return isMap(value) ? value : undefined;
 }
 
-function resolvedMapView(doc: Document, map: YAMLMap): Record<string, unknown> {
-  const js = map.toJS(doc);
-  return js && typeof js === "object" && !Array.isArray(js) ? (js as Record<string, unknown>) : {};
-}
-
 function rewriteNode(
   doc: Document,
   nodeMap: YAMLMap,
@@ -119,15 +93,14 @@ function rewriteNode(
 
   const typeVal = nodeMap.get("type");
   if (typeVal === "webhook") {
+    const withMap = resolveWithMapForWrite(doc, nodeMap, label);
     nodeMap.set("type", "http");
-    const withMap = resolveWithMapForWrite(doc, nodeMap);
-    const resolved = resolvedMapView(doc, withMap);
     const added: string[] = [];
-    if (!withMap.has("method") && !Object.prototype.hasOwnProperty.call(resolved, "method")) {
+    if (!withMap.has("method")) {
       withMap.set("method", "POST");
       added.push("method: POST");
     }
-    if (!withMap.has("once") && !Object.prototype.hasOwnProperty.call(resolved, "once")) {
+    if (!withMap.has("once")) {
       withMap.set("once", true);
       added.push("once: true");
     }
@@ -159,12 +132,12 @@ function rewriteNode(
       const target = mapBodyNode.resolve(doc);
       if (isMap(target) && containsWebhook(doc, target)) {
         const cloned = cloneWithoutAnchors(target);
-        const writableWith = resolveWithMapForWrite(doc, nodeMap);
+        const writableWith = resolveWithMapForWrite(doc, nodeMap, label);
         writableWith.set("node", cloned);
         if (rewriteNode(doc, cloned, notes, `${label}.map`)) rewritten = true;
       }
     } else if (isMap(mapBodyNode) && containsWebhook(doc, mapBodyNode)) {
-      const writableWith = resolveWithMapForWrite(doc, nodeMap);
+      const writableWith = resolveWithMapForWrite(doc, nodeMap, label);
       const writableBody = writableWith.get("node", true);
       if (isMap(writableBody)) {
         detachAnchorForWrite(doc, writableBody);
@@ -178,12 +151,12 @@ function rewriteNode(
       const target = inlineGraph.resolve(doc);
       if (isMap(target) && containsWebhookContainer(doc, target)) {
         const cloned = cloneWithoutAnchors(target);
-        const writableWith = resolveWithMapForWrite(doc, nodeMap);
+        const writableWith = resolveWithMapForWrite(doc, nodeMap, label);
         writableWith.set("graph", cloned);
         if (rewriteContainer(doc, cloned, notes, `${label}.graph`)) rewritten = true;
       }
     } else if (isMap(inlineGraph) && containsWebhookContainer(doc, inlineGraph)) {
-      const writableWith = resolveWithMapForWrite(doc, nodeMap);
+      const writableWith = resolveWithMapForWrite(doc, nodeMap, label);
       const writableGraph = writableWith.get("graph", true);
       if (isMap(writableGraph)) {
         detachAnchorForWrite(doc, writableGraph);
@@ -274,7 +247,7 @@ export function migrateSpec(raw: string): MigrateResult {
   );
 
   // 3. type: webhook → type: http with once: true (and method: POST if absent)
-  const doc = parseDocument(output, { merge: true });
+  const doc = parseDocument(output);
   if (doc.errors.length === 0 && isMap(doc.contents)) {
     if (rewriteContainer(doc, doc.contents, notes)) {
       output = doc.toString();
