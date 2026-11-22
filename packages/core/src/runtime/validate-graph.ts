@@ -67,21 +67,6 @@ export function declaredRouteTargets(spec: GraphSpec, id: string, byId?: Map<str
   return routeTargetsOf((byId ?? nodesById(spec)).get(id));
 }
 
-function outgoingTargets(spec: GraphSpec, from: string, byId: Map<string, NodeSpec>): string[] {
-  const targets: string[] = routeTargetsFor(spec, from, byId);
-  for (const edge of spec.edges) {
-    if (!edgeFromIds(edge.from).includes(from)) continue;
-    if ("to" in edge) {
-      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      targets.push(...tos);
-    }
-    if ("branch" in edge) {
-      for (const b of edge.branch) targets.push(b.to);
-    }
-  }
-  return targets;
-}
-
 export function nodeToolTargets(spec: GraphSpec, id: string): string[] {
   const nodes = recordNodes(spec.nodes);
   const node = nodes.find((n) => n.id === id);
@@ -154,67 +139,91 @@ export function topologyDiagnostics(spec: GraphSpec): Diagnostic[] {
   return diagnostics;
 }
 
-function incomingSources(spec: GraphSpec, to: string, byId: Map<string, NodeSpec>): string[] {
-  const sources: string[] = [];
-  for (const node of byId.values()) {
-    if (routeTargetsFor(spec, node.id, byId).includes(to)) sources.push(node.id);
-  }
-  for (const edge of spec.edges) {
-    if ("to" in edge) {
-      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
-      if (tos.includes(to)) sources.push(...edgeFromIds(edge.from));
-    }
-    if ("branch" in edge) {
-      for (const b of edge.branch) {
-        if (b.to === to) sources.push(...edgeFromIds(edge.from));
-      }
-    }
-  }
-  return sources;
+type Neighbours = { outgoing: Map<string, string[]>; incoming: Map<string, string[]> };
+
+function addNeighbour(map: Map<string, string[]>, key: string, value: string): void {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
 }
 
-/** Nodes reachable from START by following edges (excluding END). */
-export function nodesReachableFromStart(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
-  const reachable = new Set<string>();
-  const queue = outgoingTargets(spec, "START", byId).filter((t) => t !== "END");
+/** Incoming and outgoing ids, from one pass over the nodes and one over the edges. */
+function neighbours(spec: GraphSpec, byId: Map<string, NodeSpec>): Neighbours {
+  const outgoing = new Map<string, string[]>();
+  const incoming = new Map<string, string[]>();
+  const link = (from: string, to: string) => {
+    addNeighbour(outgoing, from, to);
+    addNeighbour(incoming, to, from);
+  };
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (node == null) continue;
+    for (const to of routeTargetsFor(spec, node.id, byId)) link(node.id, to);
+  }
+  for (const edge of spec.edges) {
+    const sources = edgeFromIds(edge.from);
+    const targets: string[] = [];
+    if ("to" in edge) {
+      const tos = Array.isArray(edge.to) ? edge.to : [edge.to];
+      targets.push(...tos);
+    }
+    if ("branch" in edge) {
+      for (const branch of edge.branch) targets.push(branch.to);
+    }
+    for (const from of sources) for (const to of targets) link(from, to);
+  }
+  return { outgoing, incoming };
+}
 
+function reachableFromStart(linked: Neighbours): Set<string> {
+  const reachable = new Set<string>();
+  const queue = (linked.outgoing.get("START") ?? []).filter((target) => target !== "END");
   while (queue.length > 0) {
     const id = queue.shift()!;
     if (reachable.has(id)) continue;
     reachable.add(id);
-    for (const next of outgoingTargets(spec, id, byId)) {
+    for (const next of linked.outgoing.get(id) ?? []) {
       if (next !== "END" && !reachable.has(next)) queue.push(next);
     }
   }
   return reachable;
 }
 
-/** Nodes that can eventually reach END. */
-export function nodesThatReachEnd(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
+/** A later duplicate is visited here, so its own type can still reach END. */
+function reachingEnd(spec: GraphSpec, linked: Neighbours): Set<string> {
   const canReach = new Set<string>();
   const queue: string[] = [];
-
-  for (const node of byId.values()) {
-    if (registry.get(node.type)?.capabilities?.terminal || outgoingTargets(spec, node.id, byId).includes("END")) {
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (node == null) continue;
+    if (registry.get(node.type)?.capabilities?.terminal || (linked.outgoing.get(node.id) ?? []).includes("END")) {
       queue.push(node.id);
     }
   }
-
   while (queue.length > 0) {
     const id = queue.shift()!;
     if (canReach.has(id)) continue;
     canReach.add(id);
-    for (const pred of incomingSources(spec, id, byId)) {
+    for (const pred of linked.incoming.get(id) ?? []) {
       if (pred !== "START" && !canReach.has(pred)) queue.push(pred);
     }
   }
   return canReach;
 }
 
+/** Nodes reachable from START by following edges (excluding END). */
+export function nodesReachableFromStart(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
+  return reachableFromStart(neighbours(spec, byId));
+}
+
+/** Nodes that can eventually reach END. */
+export function nodesThatReachEnd(spec: GraphSpec, byId = nodesById(spec)): Set<string> {
+  return reachingEnd(spec, neighbours(spec, byId));
+}
+
 export function reachabilityDiagnostics(spec: GraphSpec, byId = nodesById(spec)): Diagnostic[] {
+  const linked = neighbours(spec, byId);
   const diagnostics: Diagnostic[] = [];
-  const fromStart = nodesReachableFromStart(spec, byId);
-  const toEnd = nodesThatReachEnd(spec, byId);
+  const fromStart = reachableFromStart(linked);
+  const toEnd = reachingEnd(spec, linked);
   const nodes = recordNodes(spec.nodes);
   const tools = new Set(nodes.flatMap((node) => nodeToolTargets(spec, node.id)));
 
