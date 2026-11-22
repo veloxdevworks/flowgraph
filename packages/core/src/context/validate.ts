@@ -149,21 +149,24 @@ export function contextLintDiagnostics(spec: GraphSpec): Diagnostic[] {
     budgetDiagnostics(defaults, 0, "runtime.context", out);
   }
 
-  const visit = (nodes: Array<Record<string, unknown>>, channels: Channels, path: string, inMap: boolean, graphDefaults: ContextConfigInput | undefined) => {
+  const visit = (nodes: unknown, channels: Channels, path: string, inMap: boolean, graphDefaults: ContextConfigInput | undefined) => {
+    if (!Array.isArray(nodes)) return;
     for (const node of nodes) {
-      const id = String(node["id"] ?? "?");
+      if (!node || typeof node !== "object") continue;
+      const record = node as Record<string, unknown>;
+      const id = String(record["id"] ?? "?");
       const here = `${path}.${id}`;
-      const type = String(node["type"] ?? "");
+      const type = String(record["type"] ?? "");
       if (type === "map") {
-        const inner = (node["with"] as { node?: Record<string, unknown> } | undefined)?.node;
+        const inner = (record["with"] as { node?: Record<string, unknown> } | undefined)?.node;
         if (inner && typeof inner === "object") visit([inner], channels, `${here}.map`, true, graphDefaults);
         continue;
       }
       if (type === "subgraph") {
-        const inline = node["spec"] as GraphSpec | undefined;
-        if (inline?.nodes) {
+        const inline = record["spec"] as GraphSpec | undefined;
+        if (inline && Array.isArray(inline.nodes)) {
           visit(
-            inline.nodes as unknown as Array<Record<string, unknown>>,
+            inline.nodes,
             (inline.state?.channels ?? {}) as Channels,
             `${here}.subgraph`,
             inMap,
@@ -173,7 +176,7 @@ export function contextLintDiagnostics(spec: GraphSpec): Diagnostic[] {
         continue;
       }
       if (type !== "agent") continue;
-      const w = (node["with"] ?? {}) as Record<string, unknown>;
+      const w = (record["with"] ?? {}) as Record<string, unknown>;
       const ctxCfg = w["context"] as ContextConfigInput | undefined;
       if (!ctxCfg && !graphDefaults) continue;
       const cpath = `${here}.with.context`;

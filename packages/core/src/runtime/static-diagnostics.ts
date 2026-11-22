@@ -87,7 +87,8 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
       }
     }
   };
-  for (const node of spec.nodes) {
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (!node || typeof node !== "object") continue;
     // Script source is never rendered, so `{{` there (JSX `style={{ … }}`) is code, not a template.
     // A map body is rendered with the item first, so its script code is still checked.
     if (node.type === "script" && node.with && typeof node.with === "object" && "code" in node.with) {
@@ -95,22 +96,31 @@ export function staticGraphDiagnostics(spec: GraphSpec): Diagnostic[] {
       templates(rest, `nodes.${node.id}.with`);
     } else templates(node.with, `nodes.${node.id}.with`);
     templates(node.input, `nodes.${node.id}.input`);
-    if (node.when) check(guardExpression(node.when), `nodes.${node.id}.when`);
-    const routes = (node.with as { routes?: Array<{ when?: string }> } | undefined)?.routes;
+    if (typeof node.when === "string") check(guardExpression(node.when), `nodes.${node.id}.when`);
+    const routes = (node.with as { routes?: Array<{ when?: unknown }> } | undefined)?.routes;
     if (node.type === "router" && Array.isArray(routes)) {
       routes.forEach((route, index) => {
-        if (route?.when) check(guardExpression(route.when), `nodes.${node.id}.with.routes[${index}].when`);
+        if (typeof route?.when === "string") check(guardExpression(route.when), `nodes.${node.id}.with.routes[${index}].when`);
       });
     }
-    if (node.spec) {
+    if (node.spec && typeof node.spec === "object") {
       for (const d of staticGraphDiagnostics(node.spec)) diagnostics.push({ ...d, path: d.path ? `nodes.${node.id}.spec.${d.path}` : `nodes.${node.id}.spec` });
     }
   }
-  for (const [index, edge] of spec.edges.entries())
-    if ("branch" in edge) {
-      for (const [branchIndex, branch] of edge.branch.entries())
-        if (branch.when)
-          check(guardExpression(branch.when), `edges[${index}].branch[${branchIndex}].when`);
+  for (const [index, edge] of (Array.isArray(spec.edges) ? spec.edges : []).entries())
+    if (edge && typeof edge === "object" && "branch" in edge && Array.isArray(edge.branch)) {
+      for (const [branchIndex, branch] of edge.branch.entries()) {
+        if (!branch || typeof branch !== "object") continue;
+        if (typeof branch.when === "string") check(guardExpression(branch.when), `edges[${index}].branch[${branchIndex}].when`);
+        else if (branch.when !== undefined) {
+          diagnostics.push({
+            severity: "error",
+            code: "SCHEMA_ERROR",
+            path: `edges[${index}].branch[${branchIndex}].when`,
+            message: "Expected string",
+          });
+        }
+      }
     }
   for (const [name, channel] of Object.entries(spec.state?.channels ?? {})) {
     const value = channel.default;

@@ -85,7 +85,7 @@ export async function workspaceDeclarations(
         declarations[`${at}.runtime`] = child.runtime.workspace;
       if (node.type === "map") {
         const inner = (node.with as { node?: Record<string, unknown> } | undefined)?.node;
-        if (inner) await visit(inner, `${at}.map`);
+        if (inner && typeof inner === "object") await visit(inner, `${at}.map`);
       }
       if (node.type !== "subgraph") return;
       if (child) {
@@ -104,8 +104,11 @@ export async function workspaceDeclarations(
         declarations[`${at}.runtime`] = loaded.spec.runtime.workspace;
       await visitGraph(loaded.spec, path.dirname(file), `${at}.subgraph`, new Set([...seen, file]));
     };
-    for (const node of graph.nodes)
+    if (!Array.isArray(graph.nodes)) return;
+    for (const node of graph.nodes) {
+      if (!node || typeof node !== "object") continue;
       await visit(node as unknown as Record<string, unknown>, `${prefix}.${node.id}`);
+    }
   };
   await visitGraph(spec, graphDir, "nodes", new Set());
   return Object.fromEntries(Object.entries(declarations).sort(([a], [b]) => a.localeCompare(b)));

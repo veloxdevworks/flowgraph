@@ -1477,7 +1477,8 @@ async function assembleCompiledLangGraph(
       retryable: false,
     });
   }
-  const policyEdges = spec.nodes.flatMap(node => recoveryTargets(spec, node, opts.hooks).map(to => ({ from: node.id, to })));
+  const policyNodes = (Array.isArray(spec.nodes) ? spec.nodes : []).filter((node) => node != null);
+  const policyEdges = policyNodes.flatMap((node) => recoveryTargets(spec, node, opts.hooks).map((to) => ({ from: node.id, to })));
   const invalidTopology = topologyDiagnostics({ ...spec, edges: [...spec.edges, ...policyEdges] }).filter((d) => d.severity === "error");
   if (invalidTopology.length) throw new Error(`Invalid graph: ${invalidTopology.map((d) => `${d.code}: ${d.message}`).join("; ")}`);
 

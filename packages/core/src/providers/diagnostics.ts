@@ -44,7 +44,8 @@ export function offlineProviderValidations(spec: GraphSpec): ProviderValidation[
       validate: langchainConfigDiagnostics,
     });
   }
-  for (const node of spec.nodes) {
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (!node || typeof node !== "object") continue;
     const name = providerNameOf(spec, node);
     if (!name || out.has(name) || spec.providers?.[name]) continue;
     const registered = getProvider(name);
@@ -67,8 +68,8 @@ export function providerConfigDiagnostics(
   const byName = new Map(providers.map((p) => [p.name, p]));
   const out: Diagnostic[] = [];
 
-  for (const node of spec.nodes) {
-    if (!isModelNode(node)) continue;
+  for (const node of Array.isArray(spec.nodes) ? spec.nodes : []) {
+    if (!node || typeof node !== "object" || !isModelNode(node)) continue;
     const name = providerNameOf(spec, node);
     const adapter = name ? byName.get(name) : undefined;
     const declared = name ? spec.providers?.[name] : undefined;
