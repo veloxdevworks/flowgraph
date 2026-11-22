@@ -58,12 +58,19 @@ function resolveBareImport(specifier: string, fromFile: string): string {
   return specifier;
 }
 
+const tsImportCache = new Map<string, { mtimeMs: number; mod: Record<string, unknown> }>();
+
 /**
  * Compile a TypeScript import module to ESM and load it.
  * Bare imports become absolute paths so the compiled file can live in
  * os.tmpdir() (graph examples may ship inside a read-only app bundle).
  */
 async function importTypeScriptModule(resolved: string): Promise<Record<string, unknown>> {
+  const stat = await fs.stat(resolved);
+  const cached = tsImportCache.get(resolved);
+  if (cached && cached.mtimeMs === stat.mtimeMs) {
+    return cached.mod;
+  }
   const built = await esbuild.build({
     entryPoints: [resolved],
     bundle: true,
@@ -107,9 +114,11 @@ async function importTypeScriptModule(resolved: string): Promise<Record<string, 
   // Delay cleanup: Vitest/Vite may still read the file after dynamic import
   // resolves, and some platforms lock the file until the module finishes linking.
   const imported = (await import(pathToFileURL(outPath).href)) as Record<string, unknown>;
-  setTimeout(() => {
+  tsImportCache.set(resolved, { mtimeMs: stat.mtimeMs, mod: imported });
+  const cleanup = setTimeout(() => {
     void fs.unlink(outPath).catch(() => undefined);
   }, 5_000);
+  cleanup.unref?.();
   return imported;
 }
 
@@ -253,17 +262,21 @@ export async function loadGraphImports(
       const entries = normalizeDefaultExport<ProviderAdapter | ProviderPlugin>(mod["default"]);
       for (const entry of entries) {
         if (isProviderPlugin(entry)) {
-          if (providerPlugins.has(entry.name)) {
+          const existing = providerPlugins.get(entry.name);
+          if (existing !== undefined) {
+            if (existing === entry) continue;
             throw Object.assign(
-              new Error(`Provider plugin "${entry.name}" is imported more than once.`),
+              new Error(`Provider plugin "${entry.name}" collides with an already-imported provider plugin.`),
               { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
             );
           }
           providerPlugins.set(entry.name, entry);
         } else {
-          if (providersByName.has(entry.name)) {
+          const existing = providersByName.get(entry.name);
+          if (existing !== undefined) {
+            if (existing === entry) continue;
             throw Object.assign(
-              new Error(`Provider "${entry.name}" is imported more than once.`),
+              new Error(`Provider "${entry.name}" collides with an already-imported provider.`),
               { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
             );
           }

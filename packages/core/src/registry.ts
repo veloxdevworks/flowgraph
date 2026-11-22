@@ -130,7 +130,9 @@ export class NodeRegistry {
   }
 
   register(factory: NodeFactory, opts: RegisterNodeOptions = {}): void {
-    if (this.has(factory.type)) {
+    const existing = this.get(factory.type);
+    if (existing !== undefined) {
+      if (existing === factory) return;
       const target = this.parent?.has(factory.type) ? "built-in or host node type" : "node type";
       throw registryError(
         "PLUGIN_TYPE_COLLISION",
@@ -160,7 +162,9 @@ export class NodeRegistry {
   }
 
   registerReducer(name: string, fn: ReducerFn): void {
-    if (this.hasReducer(name)) {
+    const existing = this.getReducer(name);
+    if (existing !== undefined) {
+      if (existing === fn) return;
       throw registryError(
         "PLUGIN_REDUCER_COLLISION",
         `Reducer "${name}" is already registered.`,

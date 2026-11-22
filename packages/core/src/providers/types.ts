@@ -200,10 +200,23 @@ export function defineProviderPlugin<Options = Record<string, unknown>>(
 }
 
 export function isProviderPlugin(value: unknown): value is ProviderPlugin {
-  return (
-    value != null &&
-    typeof value === "object" &&
-    typeof (value as { name?: unknown }).name === "string" &&
-    typeof (value as { create?: unknown }).create === "function"
-  );
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate["name"] !== "string" || candidate["name"].trim().length === 0) return false;
+  if (typeof candidate["create"] !== "function") return false;
+  if ("run" in candidate && candidate["run"] !== undefined) return false;
+  if (candidate["optionsSchema"] !== undefined) {
+    const schema = candidate["optionsSchema"];
+    if (
+      schema == null ||
+      typeof schema !== "object" ||
+      typeof (schema as { safeParse?: unknown }).safeParse !== "function"
+    ) {
+      return false;
+    }
+  }
+  if (candidate["validateOptions"] !== undefined && typeof candidate["validateOptions"] !== "function") {
+    return false;
+  }
+  return true;
 }

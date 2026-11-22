@@ -8,8 +8,10 @@ import { compileGraph } from "../compiler.js";
 import { registry } from "../registry.js";
 import { validateSpec } from "../loader.js";
 import {
+  defineProvider,
   defineProviderPlugin,
   getProvider,
+  isProviderPlugin,
   registerProviderPlugin,
   unregisterProviderPlugin,
 } from "../providers/index.js";
@@ -17,7 +19,7 @@ import {
 let fixtureDir = "";
 
 beforeAll(async () => {
-  fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), "flowgraph-ext2-"));
+  fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), "flowgraph-plugins-"));
 
   // Valid namespaced plugin A
   await fs.writeFile(
@@ -60,7 +62,7 @@ beforeAll(async () => {
 `,
   );
 
-  // Plugin colliding with built-in node type (must fail with PLUGIN_TYPE_COLLISION or PLUGIN_TYPE_INVALID)
+  // Plugin colliding with built-in node type (must fail with PLUGIN_TYPE_COLLISION)
   await fs.writeFile(
     path.join(fixtureDir, "plugin-builtin-collide.mjs"),
     `export default [{
@@ -81,11 +83,10 @@ beforeAll(async () => {
     `export default { mergeTags: (a, b) => b ?? a };\n`,
   );
 
-  // Provider plugin module
+  // Provider plugin module A
   await fs.writeFile(
     path.join(fixtureDir, "provider-plugin.mjs"),
     `export default {
-  __flowgraphProviderPlugin: true,
   name: "acme/custom-llm",
   optionsSchema: {
     safeParse(raw) {
@@ -107,6 +108,125 @@ beforeAll(async () => {
 };
 `,
   );
+
+  // Distinct provider plugin module claiming the same plugin name
+  await fs.writeFile(
+    path.join(fixtureDir, "provider-plugin-other.mjs"),
+    `export default {
+  name: "acme/custom-llm",
+  create(_options, ctx) {
+    return {
+      name: ctx.name,
+      capabilities: { streaming: false, toolCalling: false, structuredOutput: false },
+      async run(req) {
+        return { output: "other:" + req.prompt, stopReason: "done" };
+      },
+    };
+  },
+};
+`,
+  );
+
+  // File subgraphs for parent+child shared/colliding plugin tests
+  await fs.writeFile(
+    path.join(fixtureDir, "child-same-node.graph.yaml"),
+    `apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: child-same-node }
+imports:
+  - nodes: ./plugin-a.mjs
+state:
+  channels:
+    out: { type: string }
+nodes:
+  - { id: child-echo, type: acme/echo }
+edges:
+  - { from: START, to: child-echo }
+  - { from: child-echo, to: END }
+runtime:
+  checkpoint: { enabled: false }
+`,
+  );
+
+  await fs.writeFile(
+    path.join(fixtureDir, "child-other-node.graph.yaml"),
+    `apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: child-other-node }
+imports:
+  - nodes: ./plugin-b.mjs
+state:
+  channels:
+    out: { type: string }
+nodes:
+  - { id: child-echo, type: acme/echo }
+edges:
+  - { from: START, to: child-echo }
+  - { from: child-echo, to: END }
+runtime:
+  checkpoint: { enabled: false }
+`,
+  );
+
+  await fs.writeFile(
+    path.join(fixtureDir, "child-same-provider.graph.yaml"),
+    `apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: child-same-provider }
+imports:
+  - providers: ./provider-plugin.mjs
+providers:
+  custom:
+    kind: plugin
+    plugin: acme/custom-llm
+    options: { tag: child }
+state:
+  channels:
+    out: { type: string }
+nodes:
+  - id: a
+    type: agent
+    provider: custom
+    with:
+      prompt: hello
+      output: { to: out }
+edges:
+  - { from: START, to: a }
+  - { from: a, to: END }
+runtime:
+  checkpoint: { enabled: false }
+`,
+  );
+
+  await fs.writeFile(
+    path.join(fixtureDir, "child-other-provider.graph.yaml"),
+    `apiVersion: flowgraph/v1
+kind: Graph
+metadata: { name: child-other-provider }
+imports:
+  - providers: ./provider-plugin-other.mjs
+providers:
+  custom:
+    kind: plugin
+    plugin: acme/custom-llm
+    options: { tag: child }
+state:
+  channels:
+    out: { type: string }
+nodes:
+  - id: a
+    type: agent
+    provider: custom
+    with:
+      prompt: hello
+      output: { to: out }
+edges:
+  - { from: START, to: a }
+  - { from: a, to: END }
+runtime:
+  checkpoint: { enabled: false }
+`,
+  );
 });
 
 afterAll(async () => {
@@ -117,7 +237,7 @@ function baseSpec(overrides: Record<string, unknown>): GraphSpec {
   return {
     apiVersion: "flowgraph/v1",
     kind: "Graph",
-    metadata: { name: "ext2-test" },
+    metadata: { name: "plugin-isolation-test" },
     state: { channels: { out: { type: "string" } } },
     nodes: [{ id: "n", type: "acme/echo" }],
     edges: [
@@ -129,7 +249,7 @@ function baseSpec(overrides: Record<string, unknown>): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-describe("EXT-2: namespaced plugins, collision errors, per-compile registry and plugin providers", () => {
+describe("namespaced plugins, collision errors, per-compile registry and plugin providers", () => {
   it("isolates imported plugin node types per compile without mutating the global registry", async () => {
     const specA = baseSpec({ imports: [{ nodes: "./plugin-a.mjs" }] });
     const specB = baseSpec({ imports: [{ nodes: "./plugin-b.mjs" }] });
@@ -146,6 +266,102 @@ describe("EXT-2: namespaced plugins, collision errors, per-compile registry and 
     expect(resB.status).toBe("completed");
     expect(resA.state["out"]).toBe("from-a");
     expect(resB.state["out"]).toBe("from-b");
+  });
+
+  it("allows parent and file subgraph to import the same node plugin, but fails on different factories", async () => {
+    const sameSpec = baseSpec({
+      imports: [{ nodes: "./plugin-a.mjs" }],
+      nodes: [
+        { id: "parent-echo", type: "acme/echo" },
+        {
+          id: "sub",
+          type: "subgraph",
+          uses: "./child-same-node.graph.yaml",
+          with: { stateMap: { out: { out: "out" } } },
+        },
+      ],
+      edges: [
+        { from: "START", to: "parent-echo" },
+        { from: "parent-echo", to: "sub" },
+        { from: "sub", to: "END" },
+      ],
+    });
+    const sameRes = await (await compileGraph(sameSpec, { cwd: fixtureDir })).run();
+    expect(sameRes.status).toBe("completed");
+    expect(sameRes.state["out"]).toBe("from-a");
+
+    const collidingSpec = baseSpec({
+      imports: [{ nodes: "./plugin-a.mjs" }],
+      nodes: [
+        {
+          id: "sub",
+          type: "subgraph",
+          uses: "./child-other-node.graph.yaml",
+          with: { stateMap: { out: { out: "out" } } },
+        },
+      ],
+      edges: [
+        { from: "START", to: "sub" },
+        { from: "sub", to: "END" },
+      ],
+    });
+    const collidingRes = await (await compileGraph(collidingSpec, { cwd: fixtureDir })).run();
+    expect(collidingRes.status).toBe("error");
+    expect((collidingRes.error as Error & { code?: string })?.code).toBe("PLUGIN_TYPE_COLLISION");
+  });
+
+  it("allows parent and file subgraph to import the same provider plugin, but fails on different plugins", async () => {
+    const sameSpec = baseSpec({
+      imports: [{ providers: "./provider-plugin.mjs" }],
+      providers: {
+        custom: {
+          kind: "plugin",
+          plugin: "acme/custom-llm",
+          options: { tag: "parent" },
+        },
+      },
+      nodes: [
+        {
+          id: "sub",
+          type: "subgraph",
+          uses: "./child-same-provider.graph.yaml",
+          with: { stateMap: { out: { out: "out" } } },
+        },
+      ],
+      edges: [
+        { from: "START", to: "sub" },
+        { from: "sub", to: "END" },
+      ],
+    });
+    const sameRes = await (await compileGraph(sameSpec, { cwd: fixtureDir })).run();
+    expect(sameRes.status).toBe("completed");
+    expect(sameRes.state["out"]).toBe("child:hello");
+
+    const collidingSpec = baseSpec({
+      imports: [{ providers: "./provider-plugin.mjs" }],
+      providers: {
+        custom: {
+          kind: "plugin",
+          plugin: "acme/custom-llm",
+          options: { tag: "parent" },
+        },
+      },
+      nodes: [
+        {
+          id: "sub",
+          type: "subgraph",
+          uses: "./child-other-provider.graph.yaml",
+          with: { stateMap: { out: { out: "out" } } },
+        },
+      ],
+      edges: [
+        { from: "START", to: "sub" },
+        { from: "sub", to: "END" },
+      ],
+    });
+    const collidingRes = await (await compileGraph(collidingSpec, { cwd: fixtureDir })).run();
+    expect(collidingRes.status).toBe("error");
+    expect((collidingRes.error as Error & { code?: string })?.code).toBe("PLUGIN_PROVIDER_COLLISION");
   });
 
   it("rejects unnamespaced plugin node types with PLUGIN_TYPE_INVALID", async () => {
@@ -309,5 +525,33 @@ describe("EXT-2: namespaced plugins, collision errors, per-compile registry and 
     } finally {
       unregisterProviderPlugin("acme/offline-checked");
     }
+  });
+
+  it("isProviderPlugin rejects adapters, blank names, arrays, and invalid option validators", () => {
+    const valid = defineProviderPlugin({
+      name: "acme/valid",
+      optionsSchema: z.object({}),
+      validateOptions: () => [],
+      create: (_opts, ctx) => ({
+        name: ctx.name,
+        capabilities: { streaming: false, toolCalling: false, structuredOutput: false },
+        run: async () => ({ output: "ok", stopReason: "done" as const }),
+      }),
+    });
+    const adapter = defineProvider({
+      name: "acme/adapter",
+      capabilities: { streaming: false, toolCalling: false, structuredOutput: false },
+      run: async () => ({ output: "ok", stopReason: "done" as const }),
+    });
+
+    expect(isProviderPlugin(valid)).toBe(true);
+    expect(isProviderPlugin(adapter)).toBe(false);
+    expect(isProviderPlugin({ ...adapter, create: () => adapter })).toBe(false);
+    expect(isProviderPlugin({ name: "   ", create: () => adapter })).toBe(false);
+    expect(isProviderPlugin([])).toBe(false);
+    expect(isProviderPlugin({ name: "acme/bad-schema", optionsSchema: {}, create: () => adapter })).toBe(false);
+    expect(
+      isProviderPlugin({ name: "acme/bad-validator", validateOptions: "nope", create: () => adapter }),
+    ).toBe(false);
   });
 });

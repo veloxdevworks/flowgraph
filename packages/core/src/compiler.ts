@@ -1525,7 +1525,9 @@ async function assembleCompiledLangGraph(
   const compileProviderPlugins = new Map<string, ProviderPlugin>();
   for (const plugin of opts.providerPlugins ?? []) compileProviderPlugins.set(plugin.name, plugin);
   for (const [name, plugin] of imported.providerPlugins) {
-    if (compileProviderPlugins.has(name)) {
+    const existing = compileProviderPlugins.get(name);
+    if (existing !== undefined) {
+      if (existing === plugin) continue;
       throw Object.assign(
         new Error(`Provider plugin "${name}" collides with an already-provided plugin.`),
         { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
@@ -1555,7 +1557,16 @@ async function assembleCompiledLangGraph(
 
   const allCompileProviders = new Map<string, ProviderAdapter>();
   for (const p of opts.providers ?? []) allCompileProviders.set(p.name, p);
-  for (const p of imported.providers) allCompileProviders.set(p.name, p);
+  for (const p of imported.providers) {
+    const existing = allCompileProviders.get(p.name);
+    if (existing !== undefined && existing !== p) {
+      throw Object.assign(
+        new Error(`Provider "${p.name}" collides with an already-provided provider.`),
+        { code: "PLUGIN_PROVIDER_COLLISION", retryable: false },
+      );
+    }
+    allCompileProviders.set(p.name, p);
+  }
   for (const p of pluginProviders) allCompileProviders.set(p.name, p);
 
   const StateAnnotation = buildStateAnnotation(
