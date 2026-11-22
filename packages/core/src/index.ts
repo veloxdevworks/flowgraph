@@ -410,7 +410,6 @@ export { isNonRetryable } from "./runtime/retry.js";
 // ── Generative media (image / video / model3d) — ADR-0017 ──────────────────
 export {
   registerMediaVendor,
-  unregisterMediaVendor,
   registerMediaProvider,
   getMediaVendor,
   listMediaVendors,
