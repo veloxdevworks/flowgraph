@@ -8,8 +8,8 @@ export type {
   WorkshopResume,
   WorkshopResult,
   WorkshopOutputCheck,
-} from "@flowgraph/spec";
-export { checkWorkshopOutput, WORKSHOP_PARTIAL_END_REASONS } from "@flowgraph/spec";
+} from "@flowgraph/node-workshop/contract";
+export { checkWorkshopOutput, WORKSHOP_PARTIAL_END_REASONS } from "@flowgraph/node-workshop/contract";
 
 /** Rough realtime voice price, for client-side cost estimates only. */
 export const WORKSHOP_VOICE_USD_PER_MINUTE = 0.05;

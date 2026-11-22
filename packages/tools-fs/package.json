@@ -1,7 +1,7 @@
 {
   "name": "@flowgraph/tools-fs",
   "version": "0.1.0",
-  "description": "Sandboxed local filesystem tools for flowgraph intelligent nodes",
+  "description": "Preview: sandboxed local filesystem tools and localTools graph schema for flowgraph",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,13 +20,15 @@
     "clean": "rm -rf dist"
   },
   "peerDependencies": {
-    "@flowgraph/core": "workspace:*"
+    "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*"
   },
   "dependencies": {
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@flowgraph/core": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",

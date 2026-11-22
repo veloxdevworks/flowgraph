@@ -24,6 +24,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@flowgraph/node-workshop": "workspace:*",
     "@flowgraph/spec": "workspace:*"
   },
   "devDependencies": {

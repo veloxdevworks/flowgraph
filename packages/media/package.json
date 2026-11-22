@@ -1,7 +1,7 @@
 {
   "name": "@flowgraph/media",
   "version": "0.1.0",
-  "description": "Media vendor adapters (images, video, 3D, audio) for flowgraph image/video/model3d/audio nodes",
+  "description": "Preview: generative media nodes (`image`, `video`, `model3d`, `audio`), `kind: media` provider config, and vendor adapters for flowgraph",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -12,6 +12,10 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -22,9 +26,16 @@
   "peerDependencies": {
     "@flowgraph/core": "workspace:*"
   },
+  "dependencies": {
+    "@flowgraph/expr": "workspace:*",
+    "@flowgraph/spec": "workspace:*",
+    "zod": "^3.24.0"
+  },
   "devDependencies": {
     "@flowgraph/core": "workspace:*",
-    "@flowgraph/spec": "workspace:*",
+    "@flowgraph/node-demo": "workspace:*",
+    "@flowgraph/node-workshop": "workspace:*",
+    "@langchain/langgraph": "^1.4.7",
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",

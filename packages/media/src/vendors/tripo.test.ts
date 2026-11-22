@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { JobHandle, MediaCallContext, MediaInput, MediaOutput, MediaProvider, MediaRequest } from "@flowgraph/core";
+import type { JobHandle, MediaCallContext, MediaInput, MediaOutput, MediaProvider, MediaRequest } from "../runtime/types.js";
 import { VendorHttpError } from "../http.js";
 import { tripoVendor } from "./tripo.js";
 

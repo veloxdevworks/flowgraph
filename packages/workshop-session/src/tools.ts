@@ -1,4 +1,4 @@
-import { checkWorkshopOutput } from "@flowgraph/spec";
+import { checkWorkshopOutput } from "@flowgraph/node-workshop/contract";
 import { deepMerge, isPlainObject } from "./draft.js";
 import type { WorkshopContract } from "./types.js";
 

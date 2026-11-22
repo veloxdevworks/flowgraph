@@ -60,7 +60,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { MediaCallContext, MediaProvider, MediaRequest, MediaVendor, MediaVendorOptions } from "@flowgraph/core";
+import type { MediaCallContext, MediaProvider, MediaRequest, MediaVendor, MediaVendorOptions } from "../runtime/types.js";
 import { joinUrl, requestJson, resolveApiKey, VendorHttpError } from "../http.js";
 
 const VENDOR = "elevenlabs";
