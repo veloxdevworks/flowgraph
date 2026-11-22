@@ -1,3 +1,4 @@
+import "./product-nodes.js";
 import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";

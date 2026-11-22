@@ -300,7 +300,7 @@ function checkGraphLevel(
   if (graph.mcpServers && Object.keys(graph.mcpServers).length > 0) {
     add("UPLOAD_MCP_BLOCKED", `${where}mcpServers`, "mcpServers connect to servers or start processes on the host");
   }
-  if (graph.localTools !== undefined) {
+  if ((graph as { localTools?: unknown }).localTools !== undefined) {
     add("UPLOAD_LOCAL_TOOLS_BLOCKED", `${where}localTools`, "localTools run tool code on the server");
   }
   const defaultProvider = graph.config?.defaults?.provider;

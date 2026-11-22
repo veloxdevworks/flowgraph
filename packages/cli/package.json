@@ -24,8 +24,14 @@
     "@flowgraph/core": "workspace:*",
     "@flowgraph/expr": "workspace:*",
     "@flowgraph/media": "workspace:*",
+    "@flowgraph/node-demo": "workspace:*",
+    "@flowgraph/node-port": "workspace:*",
+    "@flowgraph/node-service": "workspace:*",
+    "@flowgraph/node-workshop": "workspace:*",
+    "@flowgraph/node-worktree": "workspace:*",
     "@flowgraph/skills": "workspace:*",
     "@flowgraph/spec": "workspace:*",
+    "@flowgraph/tools-fs": "workspace:*",
     "@flowgraph/workshop-session": "workspace:*",
     "commander": "^15.0.0",
     "picocolors": "^1.1.1",
@@ -33,17 +39,13 @@
   },
   "peerDependencies": {
     "@flowgraph/checkpoint-sqlite": "workspace:*",
-    "@flowgraph/checkpoint-postgres": "workspace:*",
-    "@flowgraph/tools-fs": "workspace:*"
+    "@flowgraph/checkpoint-postgres": "workspace:*"
   },
   "peerDependenciesMeta": {
     "@flowgraph/checkpoint-sqlite": {
       "optional": true
     },
     "@flowgraph/checkpoint-postgres": {
-      "optional": true
-    },
-    "@flowgraph/tools-fs": {
       "optional": true
     }
   },
@@ -53,7 +55,6 @@
     "@flowgraph/provider-claude": "workspace:*",
     "@flowgraph/provider-cursor": "workspace:*",
     "@flowgraph/provider-deepagents": "workspace:*",
-    "@flowgraph/tools-fs": "workspace:*",
     "@types/node": "^26.0.1",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",

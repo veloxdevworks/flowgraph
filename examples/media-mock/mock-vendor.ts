@@ -1,7 +1,7 @@
 /**
  * A media vendor plugin, as a third party would write one.
  *
- * It registers the vendor "mock-media" with @flowgraph/core. A graph then
+ * It registers the vendor "mock-media" with @flowgraph/media. A graph then
  * declares `providers: { art: { kind: media, vendor: mock-media } }` and its
  * `image` / `model3d` nodes use it. Nothing here calls a network: it draws a
  * tiny PNG and writes a one-triangle GLB, so the whole pipeline (providers,
@@ -20,7 +20,7 @@ import {
   type JobStatus,
   type MediaCallContext,
   type MediaRequest,
-} from "@flowgraph/core";
+} from "@flowgraph/media";
 
 function crc32(buf: Uint8Array): number {
   let c = ~0;

@@ -42,10 +42,16 @@
     }
   },
   "devDependencies": {
+    "@flowgraph/checkpoint-sqlite": "workspace:*",
+    "@flowgraph/node-demo": "workspace:*",
+    "@flowgraph/node-port": "workspace:*",
+    "@flowgraph/node-service": "workspace:*",
+    "@flowgraph/node-workshop": "workspace:*",
+    "@flowgraph/node-worktree": "workspace:*",
+    "@flowgraph/tools-fs": "workspace:*",
     "@types/node": "^26.0.1",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.9",
-    "@flowgraph/checkpoint-sqlite": "workspace:*"
+    "vitest": "^4.1.9"
   }
 }

@@ -1,9 +1,10 @@
 /**
- * `flowgraph migrate` — skeleton migrator that nudges older specs toward the
- * current `flowgraph/v1` contract. Operates on raw YAML text to preserve
- * comments and formatting; only well-understood, additive-safe rewrites are
- * applied. Extend with version-specific transforms as the contract evolves.
+ * `flowgraph migrate` — migrates older specs toward the current `flowgraph/v1`
+ * contract. Operates on raw YAML text (or comment-preserving YAML AST when
+ * structural node rewrites are needed) so comments and formatting are kept.
  */
+
+import { isMap, isSeq, parseDocument, YAMLMap } from "yaml";
 
 export interface MigrateResult {
   changed: boolean;
@@ -17,6 +18,52 @@ const CANONICAL_KINDS: Record<string, string> = {
   skill: "Skill",
   subgraph: "Subgraph",
 };
+
+function rewriteWebhookNodes(doc: ReturnType<typeof parseDocument>, container: YAMLMap, notes: string[]): boolean {
+  let rewritten = false;
+  const nodes = container.get("nodes", true);
+  if (!isSeq(nodes)) return false;
+
+  for (const item of nodes.items) {
+    if (!isMap(item)) continue;
+    const typeVal = item.get("type");
+    if (typeVal === "webhook") {
+      const id = String(item.get("id") ?? "<unnamed>");
+      item.set("type", "http");
+      const rawWith = item.get("with", true);
+      let withMap: YAMLMap;
+      if (isMap(rawWith)) {
+        withMap = rawWith;
+      } else {
+        withMap = doc.createNode({}) as YAMLMap;
+        item.set("with", withMap);
+      }
+      const added: string[] = [];
+      if (!withMap.has("method")) {
+        withMap.set("method", "POST");
+        added.push("method: POST");
+      }
+      if (!withMap.has("once")) {
+        withMap.set("once", true);
+        added.push("once: true");
+      }
+      notes.push(
+        `node "${id}": type "webhook" → "http"${added.length ? ` (added ${added.join(", ")})` : ""}`,
+      );
+      rewritten = true;
+    }
+
+    // Recurse into inline subgraph definitions if present.
+    const withMap = item.get("with", true);
+    if (isMap(withMap)) {
+      const inlineGraph = withMap.get("graph", true);
+      if (isMap(inlineGraph)) {
+        if (rewriteWebhookNodes(doc, inlineGraph, notes)) rewritten = true;
+      }
+    }
+  }
+  return rewritten;
+}
 
 export function migrateSpec(raw: string): MigrateResult {
   let output = raw;
@@ -43,6 +90,18 @@ export function migrateSpec(raw: string): MigrateResult {
       return `${prefix}${canonical}${trailing ?? ""}`;
     },
   );
+
+  // 3. type: webhook → type: http with once: true (and method: POST if absent)
+  try {
+    const doc = parseDocument(output);
+    if (doc.errors.length === 0 && isMap(doc.contents)) {
+      if (rewriteWebhookNodes(doc, doc.contents, notes)) {
+        output = doc.toString();
+      }
+    }
+  } catch {
+    // Leave unparseable YAML untouched; validator will report syntax errors.
+  }
 
   return { changed: output !== raw, output, notes };
 }

@@ -3,6 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
 import { runGraphFile } from "@flowgraph/testing";
+import "@flowgraph/media";
 import type { InterruptInfo } from "@flowgraph/core";
 
 const here = path.dirname(url.fileURLToPath(import.meta.url));

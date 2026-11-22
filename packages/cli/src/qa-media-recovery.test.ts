@@ -12,11 +12,11 @@ it("SIGKILL keeps the original workspace across cwd changes for resume and recov
   const bin = resolve(import.meta.dirname, "../dist/bin.js");
   const cli = (...args: string[]) =>
     spawnSync(process.execPath, [bin, ...args], { cwd: graphDir, encoding: "utf8", timeout: 20000 });
-  const core = pathToFileURL(resolve(import.meta.dirname, "../../core/dist/index.js")).href;
+  const media = pathToFileURL(resolve(import.meta.dirname, "../../media/dist/index.js")).href;
   try {
     writeFileSync(
       join(dir, "vendor.mjs"),
-      `import {registerMediaProvider} from ${JSON.stringify(core)}; import {appendFileSync,writeFileSync,existsSync} from 'node:fs'; registerMediaProvider({name:'test',vendor:'test',modalities:['image'],async start(){appendFileSync(new URL('./calls',import.meta.url),'call\\n');writeFileSync(new URL('./ready',import.meta.url),'yes');if(!existsSync(new URL('./finish',import.meta.url))) await new Promise(()=>{});return {id:'done',done:[],costUSD:0};}});export default [];`,
+      `import {registerMediaProvider} from ${JSON.stringify(media)}; import {appendFileSync,writeFileSync,existsSync} from 'node:fs'; registerMediaProvider({name:'test',vendor:'test',modalities:['image'],async start(){appendFileSync(new URL('./calls',import.meta.url),'call\\n');writeFileSync(new URL('./ready',import.meta.url),'yes');if(!existsSync(new URL('./finish',import.meta.url))) await new Promise(()=>{});return {id:'done',done:[],costUSD:0};}});export default [];`,
     );
     writeFileSync(
       graph,

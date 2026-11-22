@@ -1,3 +1,5 @@
+import "./product-nodes.js";
+export { registerDefaultProductNodes } from "./product-nodes.js";
 export { program } from "./commands.js";
 
 // Shared run-setup helpers (used by @flowgraph/tui and the CLI)

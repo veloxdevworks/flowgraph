@@ -37,17 +37,17 @@ export async function buildServerProviders(
   const built = new Set<string>();
 
   for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
+    if ((cfg as { kind?: string }).kind === "media") {
+      // Built by compileGraph (media providers are not agent providers), but
+      // an untrusted author's endpoint settings are still refused here.
+      if (opts.untrusted) assertUntrustedProvider(name, cfg as Record<string, unknown>);
+      continue;
+    }
     switch (cfg.kind) {
       case "langchain": {
         if (opts.untrusted) assertUntrustedProvider(name, cfg);
         providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd, secrets: spec.secrets }));
         built.add(name);
-        break;
-      }
-      case "media": {
-        // Built by compileGraph (media providers are not agent providers), but
-        // an untrusted author's endpoint settings are still refused here.
-        if (opts.untrusted) assertUntrustedProvider(name, cfg);
         break;
       }
       case "cli":

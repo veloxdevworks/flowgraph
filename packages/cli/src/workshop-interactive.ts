@@ -1,6 +1,6 @@
 import type { Interface as ReadlineInterface } from "node:readline";
 import type { InterruptInfo } from "@flowgraph/core";
-import type { WorkshopContract } from "@flowgraph/spec";
+import type { WorkshopContract } from "@flowgraph/node-workshop/contract";
 import type { FacilitatorModel, WorkshopController } from "@flowgraph/workshop-session";
 import { parseInterruptAnswer, formatInterruptPrompt } from "./interrupts.js";
 

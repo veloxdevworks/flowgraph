@@ -4,6 +4,13 @@ import * as http from "node:http";
 import * as path from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import "@flowgraph/media";
+import "@flowgraph/node-demo";
+import "@flowgraph/node-port";
+import "@flowgraph/node-service";
+import "@flowgraph/node-workshop";
+import "@flowgraph/node-worktree";
+import "@flowgraph/tools-fs";
 import { parseGraphYaml } from "./graph-source.js";
 import { checkUntrustedUpload, untrustedNodePolicy, UNTRUSTED_NODE_POLICY } from "./upload-policy.js";
 import { buildServerProviders } from "./providers.js";
@@ -35,8 +42,8 @@ describe("checkUntrustedUpload", () => {
     expect(codesOf(graph(`  - { id: a, type: hitl, with: { mode: approve, message: "ok?" } }`))).toEqual([]);
   });
 
-  it("blocks host-command node types, including map inners and inline subgraphs", () => {
-    for (const type of ["shell", "script", "service", "worktree"]) {
+  it("blocks host-command and moved product node types, including map inners and inline subgraphs", () => {
+    for (const type of ["shell", "script", "service", "worktree", "demo", "port"]) {
       const node =
         type === "shell"
           ? `  - { id: a, type: shell, with: { command: "id" } }`
@@ -44,8 +51,12 @@ describe("checkUntrustedUpload", () => {
             ? `  - { id: a, type: script, with: { language: js, code: "1" } }`
             : type === "service"
               ? `  - { id: a, type: service, with: { name: svc, command: "sleep 1" } }`
-              : `  - { id: a, type: worktree, with: { action: status, path: wt } }`;
-      expect(codesOf(graph(node))).toContain("UPLOAD_NODE_TYPE_BLOCKED nodes.a");
+              : type === "worktree"
+                ? `  - { id: a, type: worktree, with: { action: status, path: wt } }`
+                : type === "demo"
+                  ? `  - { id: a, type: demo, with: { file: { path: "out.txt" } } }`
+                  : `  - { id: a, type: port, with: { output: { to: out } } }`;
+      expect(codesOf(graph(node)), type).toContain("UPLOAD_NODE_TYPE_BLOCKED nodes.a");
     }
     const mapped = graph(`  - id: a
     type: map
@@ -139,7 +150,9 @@ describe("untrusted outbound targets and provider endpoints", () => {
     ]) {
       expect(codesOf(graph(httpNode(url))), url).toEqual(["UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url"]);
     }
-    expect(codesOf(graph(httpNode("http://10.0.0.5/hook", "webhook")))).toEqual(["UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url"]);
+    expect(codesOf(graph(`  - { id: a, type: http, with: { url: "http://10.0.0.5/hook", method: POST, once: true } }`))).toEqual([
+      "UPLOAD_HTTP_TARGET_BLOCKED nodes.a.with.url",
+    ]);
   });
 
   it("allows public and templated URLs, and allow-listed hosts but never metadata", () => {
