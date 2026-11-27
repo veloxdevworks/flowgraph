@@ -570,7 +570,7 @@ registerFunction("dedupeFindings", (input, ctx) => {
 });
 ```
 
-The handler's first argument is the node's `input` (rendered at every depth, any value), or the model's tool arguments when the node is exposed as a tool. `with.input` was removed: set `input:` on the node. `flowgraph migrate` moves it.
+The handler's first argument is the node's `input` (rendered at every depth, any value — except `input: null`, which reaches the handler as `{}`), or the model's tool arguments when the node is exposed as a tool. `with.input` was removed: set `input:` on the node. `flowgraph migrate` moves it.
 
 For substantial reusable logic, prefer a **skill** (portable, contract + env declared) over a `function` node.
 

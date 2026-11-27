@@ -70,7 +70,7 @@ Events form a **tree** via `scope.parentSpanId`: a run contains nodes; an `agent
 
 ### Nested subgraph events
 
-When a `subgraph` node embeds a child graph, the child's `node.*` / `skill.*` / `intelligent.*` / etc. events are **forwarded onto the parent run's EventBus** with:
+When a `subgraph` node embeds a child graph, the child's `node.*` / `skill.*` / `agent.*` / etc. events are **forwarded onto the parent run's EventBus** with:
 
 - `scope.nodeId` / `scope.nodeType` — the child's own node identity
 - `scope.parentSpanId` — the parent subgraph node's id
@@ -84,7 +84,7 @@ This lets UIs and OTel sinks visualize nested run scope without a separate subsc
 ### Programmatic stream
 
 ```ts
-for await (const ev of runGraph.stream(compiled, { input })) {
+for await (const ev of compiled.stream({ input })) {
   if (ev.type === "node.start") log(`▶ ${ev.scope.nodeId}`);
   if (ev.type === "agent.tool.call") log(`  ↳ tool ${ev.data.name}`);
   if (ev.type === "run.end") log(`✓ done in ${ev.data.durationMs}ms`);
@@ -95,14 +95,12 @@ for await (const ev of runGraph.stream(compiled, { input })) {
 
 ```ts
 const compiled = await compileGraph(spec, {
-  observability: {
-    sinks: [
-      consoleSink({ format: "pretty" }),
-      jsonlSink({ path: "run.jsonl" }),
-      otelSink(),                       // from @flowgraph/observability-otel
-      myWebhookSink("https://..."),     // custom
-    ],
-  },
+  sinks: [
+    consoleSink({ format: "pretty" }),
+    jsonlSink(process.stdout),
+    otelSink(),                       // from @flowgraph/observability-otel
+    myWebhookSink("https://..."),     // custom
+  ],
 });
 ```
 

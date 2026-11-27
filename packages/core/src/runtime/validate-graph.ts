@@ -909,8 +909,7 @@ export function hitlRouterMergeDiagnostics(spec: GraphSpec): Diagnostic[] {
     code: "HITL_ROUTER_MERGEABLE",
     message:
       `Router "${routerId}" only repeats the answer of hitl "${hitlId}" — ` +
-      `move its routes onto the gate (with.routes) and remove the router. ` +
-      `The desktop Builder does this with "Merge into HITL".`,
+      `move its routes onto the gate (with.routes) and remove the router.`,
     path: `nodes.${routerId}`,
   }));
 }
@@ -1071,7 +1070,7 @@ export function placementDiagnostics(spec: GraphSpec): Diagnostic[] {
           code: "PLACEMENT_NOT_ALLOWED",
           message:
             `Node "${node.id}" (type ${node.type}) cannot set runsOn. ` +
-            `Gates run on the coordinator; a gate inside a placed subgraph is forwarded to the coordinator's operator.`,
+            `Gates run on the coordinator; gates inside a placed subgraph are not forwarded.`,
           path: `${path}.runsOn`,
         });
       }

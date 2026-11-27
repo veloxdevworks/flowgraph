@@ -70,7 +70,7 @@ interface CompiledNode {
 }
 ```
 
-Built-in factories (`intelligent`, `skill`, `http`, `webhook`, `router`, `code`, `subgraph`, `map`, `wait`) are registered by `@flowgraph/core`. Users register custom factories programmatically or via plugin packages. See [03 — Node Types](./03-node-types.md).
+Built-in factories (`agent`, `skill`, `http`, `router`, `function`, `shell`, `script`, `fail`, `subgraph`, `map`, `hitl`, `wait`, `mcp`, `memory`) are registered by `@flowgraph/core`. Users register custom factories programmatically or via plugin packages. See [03 — Node Types](./03-node-types.md).
 
 ## 4. Runtime composition
 
@@ -152,10 +152,10 @@ testing ── (dev) ── all
 The CLI is a thin wrapper over a small, stable programmatic API in `@flowgraph/core`:
 
 ```ts
-import { loadGraph, compileGraph, runGraph } from "@flowgraph/core";
+import { loadGraph, compileGraph } from "@flowgraph/core";
 
 // 1. Load + validate (no side effects)
-const spec = await loadGraph("./triage.graph.yaml");
+const { spec } = await loadGraph("./triage.graph.yaml");
 
 // 2. Compile to a LangGraph StateGraph (resolves registry/providers/skills)
 const compiled = await compileGraph(spec, {
@@ -163,17 +163,17 @@ const compiled = await compileGraph(spec, {
   providers,                // optional: registered provider adapters
   checkpointer,             // optional: durability backend
   hooks,                    // optional: hook registrations
-  observability,            // optional: OTel exporter
+  sinks,                    // optional: event/OTel sinks
 });
 
 // 3. Run — invoke or stream events
-const result = await runGraph(compiled, {
+const result = await compiled.run({
   input: { issue: {/*...*/} },
   threadId: "issue-123",    // enables checkpoint/resume
   signal,                   // AbortSignal
 });
 
-for await (const event of runGraph.stream(compiled, { input })) {
+for await (const event of compiled.stream({ input })) {
   // structured lifecycle events (see docs/06)
 }
 ```

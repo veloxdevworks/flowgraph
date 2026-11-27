@@ -15,7 +15,7 @@ We are **not** building a new graph engine. LangGraph is the engine. flowgraph i
 | 00 | [Vision & Scope](./00-vision.md) | Why this exists, goals, non-goals, naming, success criteria |
 | 01 | [Architecture](./01-architecture.md) | Layered architecture, monorepo layout, package boundaries, data flow |
 | 02 | [Graph Specification](./02-graph-spec.md) | The YAML graph schema — the heart of the low-code layer |
-| 03 | [Node Types](./03-node-types.md) | `intelligent`, `skill`, `http`/`webhook`, `router`, `subgraph`, `code`, custom |
+| 03 | [Node Types](./03-node-types.md) | `agent`, `skill`, `http`, `router`, `subgraph`, `function`, `shell`, `script`, custom |
 | 04 | [Skills](./04-skills.md) | The `SKILL.md` format: front-matter, env deps, output contracts, preflight |
 | 05 | [State & Data Flow](./05-state-and-data.md) | State channels, reducers, the expression language, I/O mapping |
 | 06 | [Events & Hooks](./06-events-and-hooks.md) | Event taxonomy, the hook system, OpenTelemetry observability |

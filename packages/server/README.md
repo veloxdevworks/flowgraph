@@ -280,7 +280,7 @@ Child thread ids look like `{parentThreadId}/{nodeId}/{attempt}`. The slashes ar
 
 The **content store** is `<graph store dir>/.flowgraph/artifact-store/<sha256>`. On a multi-user (OIDC) server each principal gets its own directory, `artifact-store/p-<hash of principal id>/<sha256>`, so callers cannot probe or reference each other's blobs. Blobs are never evicted by the server; delete the directory to reclaim space. Uploads are not resumable.
 
-**Staged references.** When `POST /runs` input holds an `Artifact` record with `staged: true` and `path: "fg-staged:<sha256>/<basename>"`, the server copies the blob from the content store to `<workspace>/.flowgraph/artifacts/<childThreadId with unsafe characters as _>/staged/<sha256>/<basename>` before the run starts and rewrites the record: `path` becomes that workspace-relative path, `staged` is dropped, and `meta.thumbnail` (a path on the other machine) is removed. A `demo`-style output's legacy absolute `path` / `extra[].path` become absolute paths in this workspace. A sha the store lacks, or a malformed reference, refuses the start with 422 `ARTIFACT_NOT_STAGED`; no run or thread is left behind. The copy is a real copy (reflinked where the filesystem supports it), so a node that edits its input cannot damage the store.
+**Staged references.** When `POST /runs` input holds an `Artifact` record with `staged: true` and `path: "fg-staged:<sha256>/<basename>"`, the server copies the blob from the content store to `<workspace>/.flowgraph/artifacts/<childThreadId with unsafe characters as _>/staged/<sha256>/<basename>` before the run starts and rewrites the record: `path` becomes that workspace-relative path, `staged` is dropped, and `meta.thumbnail` (a path on the other machine) is removed. A `demo`-style output's legacy absolute `path` / `extra[].path` become absolute paths in this workspace. A sha the store lacks, or a malformed reference, refuses the start with 422 `ARTIFACT_NOT_STAGED`; no active run is left in memory (the thread metadata is marked `status: "error"`). The copy is a real copy (reflinked where the filesystem supports it), so a node that edits its input cannot damage the store.
 
 | Variable | Meaning |
 |---|---|
@@ -317,6 +317,8 @@ curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8080/runs/t1
 ```
 
 `POST /runs` accepts `dryRun: true` to compile with the mock provider only.
+
+If `POST /runs` is rejected with HTTP 400 before execution starts (for example, `INPUT_INVALID` or a compile failure after the thread id is claimed), the server still writes `status: "error"` to the thread's metadata, so the thread appears in `GET /runs` with `status: "error"`. Because `error` threads do not trigger `409 THREAD_EXISTS`, the owner can start a new run under the same `threadId`.
 
 ## Control-plane connect (ADR-0014)
 

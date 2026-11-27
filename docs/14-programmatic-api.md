@@ -130,7 +130,7 @@ const compiled = await compileGraph(spec, {
 });
 ```
 
-Hooks from the graph spec (`runtime.hooks`) are applied at compile time. Programmatic hook registration uses `createHookBus` — see [06 — Events & hooks](./06-events-and-hooks.md).
+Hooks from the graph spec (`runtime.hooks`) are applied at compile time. Pass programmatic hooks via `compileGraph(spec, { hooks: [...] })` — see [06 — Events & hooks](./06-events-and-hooks.md). Because a programmatic `node:error` hook chooses its target at run time, registering one with no `where` (or a `where` matching a barrier source) causes every barrier edge in the graph to fail compilation with `BARRIER_RECOVERY_SOURCE`; scope it with `where: { nodeId }` or `where: { nodeType }` to avoid matching barrier sources.
 
 ## MCP hub (programmatic)
 

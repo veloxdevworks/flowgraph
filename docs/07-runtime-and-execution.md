@@ -4,13 +4,12 @@ This doc covers what happens when a compiled graph runs: compilation handoff, ch
 
 ## 1. From compiled graph to run
 
-`compileGraph()` returns a `CompiledGraph` (a LangGraph `StateGraph.compile()` result plus flowgraph metadata). `runGraph()` executes it:
+`compileGraph()` returns a `CompiledGraph` (a LangGraph `StateGraph.compile()` result plus flowgraph metadata). Call `compiled.run()` to execute it:
 
 ```ts
-const result = await runGraph(compiled, {
+const result = await compiled.run({
   input: { issue },             // initial state, validated against `inputs:` (defaults applied, unknown keys rejected)
   threadId: "issue-123",        // checkpoint/resume key; omitted = a new thread for this run only
-  config: { /* per-run overrides */ },
   signal,                       // AbortSignal → run.aborted
   onInterrupt: "prompt",        // how this run answers interrupts (default "fail")
 });
@@ -19,7 +18,7 @@ const result = await runGraph(compiled, {
 
 **Run and thread ids.** A start without `threadId`, or with an empty or whitespace-only one (`run()`, `stream()`, `prepare({ mode: "start" })`) is a new run on a new thread: it gets a fresh `runId` and the thread `thread-<runId>`, so calling `run()` twice on one compiled graph never shares checkpointed state, issues or budget between the two calls. Its events carry that `runId`. Pass the same `threadId` to continue one thread across calls. Invocations on a caller-supplied thread, and `resume()` / `continueRun()` / `step()`, report the compiled graph's `runId` (`compiled.runId`).
 
-**Input.** Start input is resolved before anything runs: the graph's `input:` values, overlaid by the caller's, then the `inputs:` defaults, coercion and required checks ([02 §2b](./02-graph-spec.md#2b-inputs-run-parameters)). A bad input rejects with `InputValidationError` (code `INPUT_INVALID`). The CLI and the server use the same `resolveGraphInput()`.
+**Input.** Start input is resolved before anything runs: the caller's values, then `inputs:` defaults, type and required checks — values are never coerced ([02 §2b](./02-graph-spec.md#2b-inputs-run-parameters)). A bad input rejects with `InputValidationError` (code `INPUT_INVALID`). The CLI and the server use the same `resolveGraphInput()`.
 
 Under the hood flowgraph calls LangGraph's `invoke`/`stream` with `{ configurable: { thread_id } }`, wraps each node in the middleware stack, and translates LangGraph stream chunks into flowgraph events.
 
@@ -27,9 +26,9 @@ Under the hood flowgraph calls LangGraph's `invoke`/`stream` with `{ configurabl
 
 | Mode | API | Use |
 |---|---|---|
-| **invoke** | `runGraph(...)` → final result | CI jobs, scripts: run to completion (or first interrupt) |
-| **stream** | `runGraph.stream(...)` → async iterable of events | live UIs, CLI TTY rendering, progress |
-| **step** | `runGraph.step(...)` | advance one superstep (debugging, time-travel) |
+| **invoke** | `compiled.run(...)` → final result | CI jobs, scripts: run to completion (or first interrupt) |
+| **stream** | `compiled.stream(...)` → async iterable of events | live UIs, CLI TTY rendering, progress |
+| **step** | `compiled.step(...)` | advance one superstep (debugging, time-travel) |
 
 All three share the same compiled graph and emit the same events.
 
@@ -296,7 +295,7 @@ in-process objects to another machine.
 
 ## 7. Abortion & cancellation
 
-`runGraph({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written (so the run is resumable), and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this.
+`compiled.run({ signal })` wires an `AbortSignal` through nodes (`ctx.signal`), provider calls, and HTTP. On abort: in-flight side-effecting nodes get the signal, a checkpoint is written (so the run is resumable), and `run.aborted` is emitted. `Ctrl-C` in the CLI maps to this.
 
 A node `timeout` fails the attempt with `Node timed out`. The run fails unless a retry succeeds or `on.error` handles it. `http`, `webhook`, `shell`, `script`, `skill`, `mcp`, `service`, and `demo` receive that attempt's abort signal and stop. `image`, `video`, `audio`, and `model3d` receive it too, but a timeout leaves the vendor job running so a retry can re-attach; cancelling the run still cancels the job. There is no hidden 30s limit on `shell` or `script`, and those nodes do not take `with.timeout`.
 
@@ -369,7 +368,7 @@ runtime:
 ## 9. Run lifecycle (sequence)
 
 ```
-runGraph()
+compiled.run()
   ├─ emit run.start; open root OTel span
   ├─ deep preflight (skills env; fail fast)         [skill.preflight]
   ├─ load checkpoint if threadId exists             [checkpoint.load]
