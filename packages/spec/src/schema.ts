@@ -2,6 +2,8 @@ import { z } from "zod";
 import { contractSchemaProblem } from "./validate-json-schema.js";
 import { channelTypeConflict } from "./channel-contract.js";
 import { hookEventFires, hookVerbAllowed, hookVerbMessage } from "./hooks.js";
+import { keyedUnion, strictObject, unionBy } from "./strict.js";
+import { engineRangeProblem } from "./engine.js";
 
 // ---------------------------------------------------------------------------
 // Primitives & shared
@@ -21,7 +23,7 @@ export function isNamespacedPluginType(type: string): boolean {
   return PLUGIN_NODE_TYPE_PATTERN.test(type);
 }
 
-export const MetadataSchema = z.object({
+export const MetadataSchema = strictObject({
   name: z
     .string()
     .regex(/^[a-z][a-z0-9-]*$/, "name must be kebab-case")
@@ -35,14 +37,15 @@ export const MetadataSchema = z.object({
 // Graph-level triggers (host-interpreted start conditions)
 // ---------------------------------------------------------------------------
 
-const TriggerBaseSchema = z.object({
+const triggerBase = {
   /** Stable id within this graph (used by hosts for dedupe / disable). */
   id: z.string().min(1),
   /** When false, hosts ignore the trigger. Default true. */
   enabled: z.boolean().optional(),
-});
+};
 
-export const CronTriggerSchema = TriggerBaseSchema.extend({
+export const CronTriggerSchema = strictObject({
+  ...triggerBase,
   type: z.literal("cron"),
   /** Standard 5-field cron expression (minute hour day-of-month month day-of-week). */
   schedule: z.string().min(1),
@@ -50,17 +53,20 @@ export const CronTriggerSchema = TriggerBaseSchema.extend({
   timezone: z.string().optional(),
 });
 
-export const IntervalTriggerSchema = TriggerBaseSchema.extend({
+export const IntervalTriggerSchema = strictObject({
+  ...triggerBase,
   type: z.literal("interval"),
   every: z.number().positive(),
   unit: z.enum(["seconds", "minutes", "hours"]),
 });
 
-export const StartupTriggerSchema = TriggerBaseSchema.extend({
+export const StartupTriggerSchema = strictObject({
+  ...triggerBase,
   type: z.literal("startup"),
 });
 
-export const FlowCompleteTriggerSchema = TriggerBaseSchema.extend({
+export const FlowCompleteTriggerSchema = strictObject({
+  ...triggerBase,
   type: z.literal("flow-complete"),
   /** Target graph `metadata.name` (kebab-case). */
   graph: z
@@ -68,7 +74,8 @@ export const FlowCompleteTriggerSchema = TriggerBaseSchema.extend({
     .regex(/^[a-z][a-z0-9-]*$/, "graph must be kebab-case"),
 });
 
-export const FlowFailedTriggerSchema = TriggerBaseSchema.extend({
+export const FlowFailedTriggerSchema = strictObject({
+  ...triggerBase,
   type: z.literal("flow-failed"),
   /** Target graph `metadata.name` (kebab-case). */
   graph: z
@@ -76,7 +83,8 @@ export const FlowFailedTriggerSchema = TriggerBaseSchema.extend({
     .regex(/^[a-z][a-z0-9-]*$/, "graph must be kebab-case"),
 });
 
-export const WebhookTriggerSchema = TriggerBaseSchema.extend({
+export const WebhookTriggerSchema = strictObject({
+  ...triggerBase,
   type: z.literal("webhook"),
   /**
    * URL path segment under the host's trigger ingress (e.g. "/hooks/my-graph").
@@ -85,7 +93,8 @@ export const WebhookTriggerSchema = TriggerBaseSchema.extend({
   path: z.string().optional(),
 });
 
-export const FileWatchTriggerSchema = TriggerBaseSchema.extend({
+export const FileWatchTriggerSchema = strictObject({
+  ...triggerBase,
   type: z.literal("file-watch"),
   /** Absolute or workspace-relative file/directory path to watch. */
   path: z.string().min(1),
@@ -160,22 +169,18 @@ export type PropertyDef = {
  * How a form shows one field. Kept apart from the data schema, which only says what a
  * valid answer is.
  */
-export const FormFieldHintSchema = z
-  .object({
-    label: z.string().optional(),
-    placeholder: z.string().optional(),
-    help: z.string().optional(),
-    widget: z.enum(["text", "textarea", "password", "select", "radio", "checkbox"]).optional(),
-  })
-  .strict();
+export const FormFieldHintSchema = strictObject({
+  label: z.string().optional(),
+  placeholder: z.string().optional(),
+  help: z.string().optional(),
+  widget: z.enum(["text", "textarea", "password", "select", "radio", "checkbox"]).optional(),
+});
 
 /** Presentation hints for a form, keyed by top-level schema property; `order` lists fields first-to-last. */
-export const FormUiSchema = z
-  .object({
-    order: z.array(z.string()).optional(),
-    fields: z.record(FormFieldHintSchema).optional(),
-  })
-  .strict();
+export const FormUiSchema = strictObject({
+  order: z.array(z.string()).optional(),
+  fields: z.record(FormFieldHintSchema).optional(),
+});
 
 // ---------------------------------------------------------------------------
 // State / channels
@@ -220,7 +225,7 @@ export const BackoffSchema = z.union([
   z.literal("exponential"),
 ]);
 
-export const RetrySchema = z.object({
+export const RetrySchema = strictObject({
   maxAttempts: z.number().int().positive().optional().default(1),
   backoff: BackoffSchema.optional().default("exponential"),
   baseMs: z.number().positive().optional().default(500),
@@ -268,29 +273,28 @@ const DataSchemaSchema = z.record(z.unknown()).superRefine((schema, ctx) => {
   if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid JSON Schema: ${problem}` });
 });
 
-export const ChannelSchema = z
-  .object({
-    type: ChannelTypeSchema,
-    description: z.string().optional(),
-    default: z.unknown().optional(),
-    reducer: ReducerSchema.optional(),
-    schema: DataSchemaSchema.optional().describe(
-      "JSON Schema (draft-07) the channel's value must match after every write. `type` is shorthand for a schema with just that type.",
-    ),
-    items: relocatedField(
-      "channel items was removed; describe the contents with schema, e.g. schema: { type: array, items: { type: string } }",
-    ),
-    properties: relocatedField(
-      "channel properties was removed; describe the contents with schema, e.g. schema: { type: object, properties: { name: { type: string } } }",
-    ),
-  })
+export const ChannelSchema = strictObject({
+  type: ChannelTypeSchema,
+  description: z.string().optional(),
+  default: z.unknown().optional(),
+  reducer: ReducerSchema.optional(),
+  schema: DataSchemaSchema.optional().describe(
+    "JSON Schema (draft-07) the channel's value must match after every write. `type` is shorthand for a schema with just that type.",
+  ),
+  items: relocatedField(
+    "channel items was removed; describe the contents with schema, e.g. schema: { type: array, items: { type: string } }",
+  ),
+  properties: relocatedField(
+    "channel properties was removed; describe the contents with schema, e.g. schema: { type: object, properties: { name: { type: string } } }",
+  ),
+})
   .superRefine((channel, ctx) => {
     if (!channel.schema) return;
     const conflict = channelTypeConflict({ type: channel.type, schema: channel.schema });
     if (conflict) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schema"], message: conflict });
   });
 
-export const StateSchema = z.object({
+export const StateSchema = strictObject({
   channels: z.record(ChannelSchema),
 });
 // ---------------------------------------------------------------------------
@@ -306,7 +310,10 @@ export const StateSchema = z.object({
  * - `{ to }` and/or `{ map }` — projections, written alongside `state.outputs.<nodeId>`
  * - `raw: false` with `to` / `map` — write only the projections
  */
-export const OutputMappingObjectSchema = z.object({
+const noneKey = z.unknown().optional();
+relocatedFields.add(noneKey._def);
+
+export const OutputMappingObjectSchema = strictObject({
   /** Write the full result to this channel (in addition to `state.outputs.<nodeId>`). */
   to: z.string().optional(),
   /** Project fields from `result` into channels (in addition to `state.outputs.<nodeId>`). */
@@ -318,7 +325,7 @@ export const OutputMappingObjectSchema = z.object({
    */
   raw: z.boolean().optional(),
   /** Not supported: write `output: none`. Declared only so any `none` key is rejected with a clear message. */
-  none: z.undefined().optional(),
+  none: noneKey,
 });
 
 const OUTPUT_MAPPING_FORMS =
@@ -335,12 +342,18 @@ function outputMappingFormError(data: unknown): string | undefined {
   return 'the none key is not supported inside an output object; write output: none to write nothing.';
 }
 
-export const OutputMappingSchema = z
-  .union([z.literal("none"), OutputMappingObjectSchema], {
-    errorMap: (_issue, ctx) => ({ message: outputMappingFormError(ctx.data) ?? OUTPUT_MAPPING_FORMS }),
-  })
+const OutputNoneSchema = z.literal("none", { errorMap: () => ({ message: OUTPUT_MAPPING_FORMS }) });
+
+export const OutputMappingSchema = unionBy([OutputNoneSchema, OutputMappingObjectSchema], (data) =>
+  typeof data === "string" ? 0 : data !== null && typeof data === "object" && !Array.isArray(data) ? 1 : OUTPUT_MAPPING_FORMS,
+)
   .superRefine((value, ctx) => {
     if (typeof value !== "object") return;
+    const formError = outputMappingFormError(value);
+    if (formError) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: formError });
+      return;
+    }
     if (value.raw === false && value.to === undefined && value.map === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -360,6 +373,14 @@ export const BaseWithSchema = z.object({
   output: OutputMappingSchema.optional(),
 });
 
+/** A node's `with` block: `output` plus the node's own fields, with any other key rejected. */
+export function strictWith<T extends z.ZodRawShape>(fields: T) {
+  return strictObject({ ...BaseWithSchema.shape, ...fields });
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 export const MemoryScopeSchema = z.enum(["org", "project", "graph", "user", "subject"], {
   errorMap: (issue, ctx) =>
     issue.code === "invalid_enum_value"
@@ -372,72 +393,64 @@ export const MemoryScopeSchema = z.enum(["org", "project", "graph", "user", "sub
 /** Identifier usable as `{{ memory.<id> }}`. */
 const RecallIdSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "recall id must be an identifier ([A-Za-z_][A-Za-z0-9_]*)");
 
-export const SimilarSubjectsSchema = z
-  .object({
-    /** Subject type; defaults to runtime.memory.subject.type and must match it. */
-    type: z.string().optional(),
-    /** Exact match on item attrs (templates ok). */
-    match: z.record(z.unknown()).optional(),
-    /** More exact attr filters (e.g. outcome: resolved). */
-    where: z.record(z.unknown()).optional(),
-    /** Max subjects (default 5, max 50). */
-    limit: z.number().int().min(1).max(50).optional(),
-    /** Newest items per subject (default 2, max 10). */
-    perSubject: z.number().int().min(1).max(10).optional(),
-  })
-  .strict();
+export const SimilarSubjectsSchema = strictObject({
+  /** Subject type; defaults to runtime.memory.subject.type and must match it. */
+  type: z.string().optional(),
+  /** Exact match on item attrs (templates ok). */
+  match: z.record(z.unknown()).optional(),
+  /** More exact attr filters (e.g. outcome: resolved). */
+  where: z.record(z.unknown()).optional(),
+  /** Max subjects (default 5, max 50). */
+  limit: z.number().int().min(1).max(50).optional(),
+  /** Newest items per subject (default 2, max 10). */
+  perSubject: z.number().int().min(1).max(10).optional(),
+});
 
-export const MemoryRecallBlockSchema = z
-  .object({
-    id: RecallIdSchema,
-    /** Scopes to read (default: user > subject > graph > project > org). */
-    scopes: z.array(MemoryScopeSchema).min(1).optional(),
-    /** Key prefix (templates ok). */
-    prefix: z.string().optional(),
-    /** Exact attr filters (templates ok). */
-    attrs: z.record(z.unknown()).optional(),
-    /** Max items from this block before the node budget applies (default 20, max 200). */
-    limit: z.number().int().min(1).max(200).optional(),
-    /** Collapse the same key across scopes, narrowest wins (default true). */
-    dedupe: z.boolean().optional(),
-    /** Search other subjects of the same type in this project instead of this run's scopes. */
-    similarSubjects: SimilarSubjectsSchema.optional(),
-    /** fail (default): a backend error fails the node. skip: record a run issue and continue. */
-    onError: z.enum(["fail", "skip"]).optional(),
-  })
-  .strict()
+export const MemoryRecallBlockSchema = strictObject({
+  id: RecallIdSchema,
+  /** Scopes to read (default: user > subject > graph > project > org). */
+  scopes: z.array(MemoryScopeSchema).min(1).optional(),
+  /** Key prefix (templates ok). */
+  prefix: z.string().optional(),
+  /** Exact attr filters (templates ok). */
+  attrs: z.record(z.unknown()).optional(),
+  /** Max items from this block before the node budget applies (default 20, max 200). */
+  limit: z.number().int().min(1).max(200).optional(),
+  /** Collapse the same key across scopes, narrowest wins (default true). */
+  dedupe: z.boolean().optional(),
+  /** Search other subjects of the same type in this project instead of this run's scopes. */
+  similarSubjects: SimilarSubjectsSchema.optional(),
+  /** fail (default): a backend error fails the node. skip: record a run issue and continue. */
+  onError: z.enum(["fail", "skip"]).optional(),
+})
   .superRefine((b, ctx) => {
     if (b.similarSubjects && (b.scopes || b.dedupe !== undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a similarSubjects block cannot also set scopes or dedupe", path: ["scopes"] });
     }
   });
 
-export const AgentMemoryWritesSchema = z
-  .object({
-    /** Scopes the `remember` tool may write to; the model must name one. */
-    scopes: z.array(MemoryScopeSchema).min(1),
-    /** Max remember calls per run of this node (default 5, max 50). */
-    maxPerRun: z.number().int().min(1).max(50).optional(),
-    /** Prefix added to every key the model chooses (default "agent/"). */
-    keyPrefix: z.string().min(1).optional(),
-    /** Attrs added to every write (templates ok); they override the model's attrs. */
-    attrs: z.record(z.unknown()).optional(),
-    /** Per-item TTL for non-subject writes, e.g. 90d. */
-    ttl: DurationSchema.optional(),
-  })
-  .strict();
+export const AgentMemoryWritesSchema = strictObject({
+  /** Scopes the `remember` tool may write to; the model must name one. */
+  scopes: z.array(MemoryScopeSchema).min(1),
+  /** Max remember calls per run of this node (default 5, max 50). */
+  maxPerRun: z.number().int().min(1).max(50).optional(),
+  /** Prefix added to every key the model chooses (default "agent/"). */
+  keyPrefix: z.string().min(1).optional(),
+  /** Attrs added to every write (templates ok); they override the model's attrs. */
+  attrs: z.record(z.unknown()).optional(),
+  /** Per-item TTL for non-subject writes, e.g. 90d. */
+  ttl: DurationSchema.optional(),
+});
 
-export const AgentMemorySchema = z
-  .object({
-    /** Token budget for all recalled memory in this node (estimated bytes/4; default 1000, cap 4000). */
-    maxTokens: z.number().int().positive().optional(),
-    /** Max recalled items across all blocks (default 20, max 200). */
-    maxItems: z.number().int().min(1).max(200).optional(),
-    recall: z.array(MemoryRecallBlockSchema).optional(),
-    /** Enables the builtin `remember` tool. */
-    agentWrites: AgentMemoryWritesSchema.optional(),
-  })
-  .strict();
+export const AgentMemorySchema = strictObject({
+  /** Token budget for all recalled memory in this node (estimated bytes/4; default 1000, cap 4000). */
+  maxTokens: z.number().int().positive().optional(),
+  /** Max recalled items across all blocks (default 20, max 200). */
+  maxItems: z.number().int().min(1).max(200).optional(),
+  recall: z.array(MemoryRecallBlockSchema).optional(),
+  /** Enables the builtin `remember` tool. */
+  agentWrites: AgentMemoryWritesSchema.optional(),
+});
 
 /**
  * Context management for agent nodes: a token budget for everything sent to the
@@ -452,20 +465,18 @@ export const ContextStrategySchema = z.enum(["none", "last", "trim", "summarize"
       : { message: ctx.defaultError },
 });
 
-export const ContextSummarizeSchema = z
-  .object({
-    /** model (default): a model writes the summary; extract: a deterministic list of excerpts, no model call. */
-    mode: z.enum(["model", "extract"]).optional(),
-    /** Registered provider used to summarize older turns (default: the agent's own provider). */
-    provider: z.string().min(1).optional(),
-    /** Model for the summarizer, a cheap one is fine (default: the agent's own model when provider is unset). */
-    model: z.string().min(1).optional(),
-    /** Token cap for the running summary (default 500). */
-    maxTokens: z.number().int().positive().optional(),
-    /** Extra instructions for the summarizer. */
-    instructions: z.string().optional(),
-  })
-  .strict();
+export const ContextSummarizeSchema = strictObject({
+  /** model (default): a model writes the summary; extract: a deterministic list of excerpts, no model call. */
+  mode: z.enum(["model", "extract"]).optional(),
+  /** Registered provider used to summarize older turns (default: the agent's own provider). */
+  provider: z.string().min(1).optional(),
+  /** Model for the summarizer, a cheap one is fine (default: the agent's own model when provider is unset). */
+  model: z.string().min(1).optional(),
+  /** Token cap for the running summary (default 500). */
+  maxTokens: z.number().int().positive().optional(),
+  /** Extra instructions for the summarizer. */
+  instructions: z.string().optional(),
+});
 
 const contextPolicyFields = {
   /** Token budget for one model call (default 16000 when a context block is present). */
@@ -488,52 +499,57 @@ const contextPolicyFields = {
   onOverflow: z.enum(["error", "warn"]).optional(),
 };
 
-export const RuntimeContextSchema = z.object(contextPolicyFields).strict();
+export const RuntimeContextSchema = strictObject(contextPolicyFields);
 
-export const AgentContextSchema = z
-  .object({
-    ...contextPolicyFields,
-    /** A `type: messages` channel holding this agent's conversation across steps, loops and runs. */
-    history: z.string().min(1).optional(),
-    /** What is appended to history per run: the prompt and final reply (turns, default) or every tool turn too (all). */
-    record: z.enum(["turns", "all"]).optional(),
-    /** Remove messages that no longer fit (and store the running summary) in the history channel. Default true. */
-    compact: z.boolean().optional(),
-  })
-  .strict();
+export const AgentContextSchema = strictObject({
+  ...contextPolicyFields,
+  /** A `type: messages` channel holding this agent's conversation across steps, loops and runs. */
+  history: z.string().min(1).optional(),
+  /** What is appended to history per run: the prompt and final reply (turns, default) or every tool turn too (all). */
+  record: z.enum(["turns", "all"]).optional(),
+  /** Remove messages that no longer fit (and store the running summary) in the history channel. Default true. */
+  compact: z.boolean().optional(),
+});
 
 // agent node (formerly "intelligent")
-const AgentImageSourceSchema = z.union([
-  z.string().min(1),
-  z.object({
-    path: z.string().min(1).optional(),
-    url: z.string().min(1).optional(),
-    detail: z.enum(["auto", "low", "high"]).optional(),
-    estimatedTokens: z.number().int().positive().optional(),
-  }).passthrough().superRefine((value, ctx) => {
-    if ((value.path !== undefined) === (value.url !== undefined)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "An image requires exactly one of path or url" });
-    }
-  }),
-]);
+const AgentImageSourceSchema = unionBy(
+  [
+    z.string().min(1),
+    strictObject({
+      path: z.string().min(1).optional(),
+      url: z.string().min(1).optional(),
+      detail: z.enum(["auto", "low", "high"]).optional(),
+      estimatedTokens: z.number().int().positive().optional(),
+    }).superRefine((value, ctx) => {
+      if ((value.path !== undefined) === (value.url !== undefined)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "An image requires exactly one of path or url" });
+      }
+    }),
+  ],
+  (data) => (typeof data === "string" ? 0 : isRecord(data) ? 1 : "An image is a path or URL string, or { path | url }"),
+);
 
-export const AgentWithSchema = BaseWithSchema.extend({
+export const AgentWithSchema = strictWith({
   streaming: z.boolean().optional(),
   /** Reference to a reusable agent definition (AGENT.md), resolved at run time. */
   agent: z.string().optional(),
   system: z.string().optional(),
   prompt: z.string(),
-  images: z.union([AgentImageSourceSchema, z.array(AgentImageSourceSchema).max(16)]).optional()
+  images: unionBy([AgentImageSourceSchema, z.array(AgentImageSourceSchema).max(16)], (data) => (Array.isArray(data) ? 1 : 0)).optional()
     .describe("Image paths, URLs, data URLs or Artifact references; templates may resolve to a list."),
   tools: z
     .array(
-      z.union([
-        z.object({ skill: z.string() }),
-        z.object({ node: z.string() }),
-        z.object({ function: z.string() }),
-        z.object({ builtin: z.array(z.string()) }),
-        z.object({ mcp: z.string(), tools: z.array(z.string()).optional() }),
-      ]),
+      keyedUnion(
+        "A tool",
+        [
+          strictObject({ skill: z.string() }),
+          strictObject({ node: z.string() }),
+          strictObject({ function: z.string() }),
+          strictObject({ builtin: z.array(z.string()) }),
+          strictObject({ mcp: z.string(), tools: z.array(z.string()).optional() }),
+        ],
+        ["skill", "node", "function", "builtin", "mcp"],
+      ),
     )
     .optional(),
   schema: ContractSchemaSchema.optional(),
@@ -544,13 +560,13 @@ export const AgentWithSchema = BaseWithSchema.extend({
   memory: AgentMemorySchema.optional(),
   /** Context budget and history management (see AgentContextSchema). */
   context: AgentContextSchema.optional(),
-}).strict();
+});
 
 // skill node
-export const SkillWithSchema = BaseWithSchema;
+export const SkillWithSchema = strictWith({});
 
 // router node — routes are an ordered list so YAML order is the match order
-export const RouterRouteSchema = z.object({
+export const RouterRouteSchema = strictObject({
   name: z.string().min(1).optional(),
   when: z.string().optional(),
   default: z.boolean().optional(),
@@ -584,20 +600,29 @@ function oneDefault(
   }
 }
 
-export const RouterWithSchema = z
-  .object({
-    mode: z.union([z.literal("rules"), z.literal("model")]).default("rules"),
-    input: z.string().optional(),
-    instruction: z.string().optional(),
-    routes: z.array(RouterRouteSchema, {
-      invalid_type_error: "routes must be a list of - name: entries",
-      required_error: "routes must be a list of - name: entries",
-    }).min(1),
-    match: z.union([z.literal("firstMatch"), z.literal("allMatches")]).optional().default("firstMatch"),
-    output: OutputMappingSchema.optional(),
-  })
-  .strict()
+export const RouterWithSchema = strictObject({
+  mode: z.union([z.literal("rules"), z.literal("model")]).default("rules"),
+  input: z.string().optional(),
+  instruction: z.string().optional(),
+  routes: z.array(RouterRouteSchema, {
+    invalid_type_error: "routes must be a list of - name: entries",
+    required_error: "routes must be a list of - name: entries",
+  }).min(1),
+  match: z.union([z.literal("firstMatch"), z.literal("allMatches")]).optional().default("firstMatch"),
+  output: OutputMappingSchema.optional(),
+})
   .superRefine((value, ctx) => {
+    if (value.mode === "rules") {
+      for (const field of ["input", "instruction"] as const) {
+        if (value[field] !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [field],
+            message: `router mode: rules does not use ${field}; rules read state through each route's when. Remove it, or use mode: model.`,
+          });
+        }
+      }
+    }
     if (value.mode === "model" && value.match === "allMatches") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -656,7 +681,7 @@ export const RouterWithSchema = z
   });
 
 // http node
-export const HttpWithSchema = BaseWithSchema.extend({
+export const HttpWithSchema = strictWith({
   method: z
     .union([
       z.literal("GET"),
@@ -671,14 +696,22 @@ export const HttpWithSchema = BaseWithSchema.extend({
   headers: z.record(z.string()).optional(),
   query: z.record(z.unknown()).optional(),
   body: z.unknown().optional(),
-  expect: z.object({ status: z.array(z.number()) }).optional(),
+  expect: strictObject({ status: z.array(z.number()).min(1, "expect.status needs at least one status code") }).optional(),
   once: z
     .boolean()
     .optional()
     .describe("Send at most once per run (idempotent across checkpoint replays)"),
-}).strict();
+}).superRefine((value, ctx) => {
+  if ((value.method === "GET" || value.method === "HEAD") && value.body !== undefined && value.body !== null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["body"],
+      message: `http ${value.method} requests carry no body; remove body, or set method to POST, PUT, PATCH or DELETE`,
+    });
+  }
+});
 
-export const ToolRequireSchema = z.object({
+export const ToolRequireSchema = strictObject({
   bin: z.string().min(1).describe("Binary that must be on PATH"),
   version: z.string().optional().describe("Human-readable constraint, e.g. \">=1.22\""),
 });
@@ -690,7 +723,7 @@ export const OnMissingToolSchema = z
   .describe("fail (default) throws; skip records a TOOL_NOT_FOUND issue and continues");
 
 // function node (formerly "code") — legacy programmatic escape hatch
-export const FunctionWithSchema = BaseWithSchema.extend({
+export const FunctionWithSchema = strictWith({
   fn: z.string().describe("Registered function name"),
   input: relocatedField(NODE_INPUT_MOVED),
 });
@@ -698,7 +731,18 @@ export const FunctionWithSchema = BaseWithSchema.extend({
 // memory node — read/write scoped durable memory (requires runtime.memory)
 export const MemoryOpSchema = z.enum(["get", "search", "put", "patch", "increment", "append", "delete"]);
 
-export const MemoryWithSchema = BaseWithSchema.extend({
+/** The `with` fields each memory op reads, besides `op` and `output`. */
+const MEMORY_OP_FIELDS: Record<z.infer<typeof MemoryOpSchema>, readonly string[]> = {
+  get: ["key", "scope", "scopes", "required"],
+  search: ["prefix", "attrs", "limit", "scope", "scopes"],
+  put: ["key", "value", "scope", "attrs", "ttl", "ifVersion"],
+  patch: ["key", "value", "scope", "attrs", "ttl", "ifVersion"],
+  increment: ["key", "field", "by", "scope", "attrs", "ttl", "ifVersion"],
+  append: ["key", "value", "max", "scope", "attrs", "ttl", "ifVersion"],
+  delete: ["key", "scope", "ifVersion"],
+};
+
+export const MemoryWithSchema = strictWith({
   op: MemoryOpSchema,
   /**
    * Target scope for writes. Omitted: user (or graph when the run has no user),
@@ -726,6 +770,16 @@ export const MemoryWithSchema = BaseWithSchema.extend({
   /** get: fail the node when the key is absent. */
   required: z.boolean().optional(),
 }).superRefine((v, ctx) => {
+  const allowed = MEMORY_OP_FIELDS[v.op];
+  for (const field of Object.keys(v)) {
+    if (field === "op" || field === "output" || allowed.includes(field)) continue;
+    if ((v as Record<string, unknown>)[field] === undefined) continue;
+    ctx.addIssue({
+      code: "custom",
+      path: [field],
+      message: `op "${v.op}" does not use ${field}; it takes ${allowed.join(", ")}`,
+    });
+  }
   if (v.op !== "search" && !v.key) ctx.addIssue({ code: "custom", path: ["key"], message: `op "${v.op}" requires key` });
   if ((v.op === "put" || v.op === "patch" || v.op === "append") && v.value === undefined) {
     ctx.addIssue({ code: "custom", path: ["value"], message: `op "${v.op}" requires value` });
@@ -736,7 +790,7 @@ export const MemoryWithSchema = BaseWithSchema.extend({
 });
 
 // shell node — run a program with argv (no shell), or a fixed command line through the OS shell with `shell: true`
-export const ShellWithSchema = BaseWithSchema.extend({
+export const ShellWithSchema = strictWith({
   command: z
     .string()
     .describe("Program to run. With shell: true, a fixed shell command line. Never a template: pass run data in args, or in env with shell: true"),
@@ -749,10 +803,10 @@ export const ShellWithSchema = BaseWithSchema.extend({
   env: z.record(z.string()).optional(),
   inheritEnv: z.array(z.string().min(1)).optional().describe("Host environment variable names to pass to the child, in addition to the default allowlist (PATH, HOME, TMPDIR, TEMP, TMP, LANG, LC_ALL, and Windows SystemRoot/WINDIR)"),
   input: relocatedField(NODE_INPUT_MOVED),
-  expect: z.object({ exitCode: z.array(z.number()).optional() }).optional(),
+  expect: strictObject({ exitCode: z.array(z.number()).min(1, "expect.exitCode needs at least one exit code").optional() }).optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
-}).strict().superRefine((v, ctx) => {
+}).superRefine((v, ctx) => {
   if (v.command.includes("{{")) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -818,20 +872,20 @@ export const ArtifactSchema = z.object({
     .optional(),
 });
 
-export const FailWithSchema = z.object({
+export const FailWithSchema = strictObject({
   reason: z.string().regex(/\S/, "A failure reason is required")
     .describe("Failure reason; templates render against the node's state and input."),
 });
 
 // script node — sandboxed Node.js (ESM) source
-export const ScriptPermissionsSchema = z.object({
+export const ScriptPermissionsSchema = strictObject({
   fsRead: z.array(z.string()).optional().describe("Paths granted via --allow-fs-read"),
   fsWrite: z.array(z.string()).optional().describe("Paths granted via --allow-fs-write"),
   childProcess: z.boolean().optional().describe("When true, grants --allow-child-process"),
   workerThreads: z.boolean().optional().describe("When true, grants --allow-worker"),
 });
 
-export const ScriptWithSchema = BaseWithSchema.extend({
+export const ScriptWithSchema = strictWith({
   code: z
     .string()
     .regex(/\S/, "Script code must not be empty")
@@ -843,30 +897,32 @@ export const ScriptWithSchema = BaseWithSchema.extend({
   permissions: ScriptPermissionsSchema.optional(),
   requires: z.array(ToolRequireSchema).optional(),
   onMissingTool: OnMissingToolSchema,
-}).strict().superRefine((value, ctx) => {
+}).superRefine((value, ctx) => {
   if ((value.code !== undefined) === (value.file !== undefined)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["code"], message: "script: provide exactly one of code or file" });
   }
 });
 
 // subgraph node
-export const SubgraphWithSchema = BaseWithSchema.extend({
-  stateMap: z
-    .object({
-      /** Child channel ← parent channel name or `{{ }}` expression. */
-      in: z
-        .record(z.string())
-        .optional()
-        .describe("Child channel ← parent channel or {{ }} expression"),
-      /**
-       * Parent channel ← child channel name or `{{ }}` expression.
-       * Keys are parent channels (where the value is written). Values read the child.
-       * Omit to merge channels that share a name; the parent's reducer applies.
-       */
-      out: z
-        .record(z.string())
-        .optional()
-        .describe("Parent channel ← child channel or {{ }} expression"),
+export const SubgraphWithSchema = strictWith({
+  stateMap: strictObject({
+    /** Child channel ← parent channel name or `{{ }}` expression. */
+    in: z
+      .record(z.string())
+      .optional()
+      .describe("Child channel ← parent channel or {{ }} expression"),
+    /**
+     * Parent channel ← child channel name or `{{ }}` expression.
+     * Keys are parent channels (where the value is written). Values read the child.
+     * Omit to merge channels that share a name; the parent's reducer applies.
+     */
+    out: z
+      .record(z.string())
+      .optional()
+      .describe("Parent channel ← child channel or {{ }} expression"),
+  })
+    .refine((map) => map.in !== undefined || map.out !== undefined, {
+      message: "stateMap needs in or out; remove it to merge channels that share a name",
     })
     .optional()
     .describe("Explicit projection between parent and child channels"),
@@ -887,12 +943,12 @@ const MAP_RESERVED_BINDINGS: ReadonlySet<string> = new Set([
 ]);
 
 // map node
-export const MapWithSchema = z.object({
-  memoize: z.union([z.boolean(), z.object({
+export const MapWithSchema = strictObject({
+  memoize: unionBy([z.boolean(), strictObject({
     key: z.string().optional(), version: z.string().optional(),
     maxEntries: z.number().int().positive().max(10000).optional(),
     maxBytes: z.number().int().positive().max(64 * 1024 * 1024).optional(),
-  })]).optional().describe("Reuse completed item results across loop rounds; opt in only for deterministic item work"),
+  })], (data) => (typeof data === "boolean" ? 0 : isRecord(data) ? 1 : "memoize is true, false or { key, version, maxEntries, maxBytes }")).optional().describe("Reuse completed item results across loop rounds; opt in only for deterministic item work"),
   over: z.string().describe("Expression evaluating to an array"),
   as: z
     .string()
@@ -913,13 +969,13 @@ export const MapWithSchema = z.object({
 });
 
 /** A hitl route target: a node id, or `{ to, description }`. */
-export const HitlRouteSchema = z.union([
-  z.string(),
-  z.object({ to: z.string(), description: z.string().optional() }),
-]);
+export const HitlRouteSchema = unionBy(
+  [z.string(), strictObject({ to: z.string(), description: z.string().optional() })],
+  (data) => (typeof data === "string" ? 0 : isRecord(data) ? 1 : "A route is a node id, or { to, description }"),
+);
 
 // hitl node — human-in-the-loop gate (approve, question, choice, form, review)
-export const HitlWithSchema = BaseWithSchema.extend({
+export const HitlWithSchema = strictWith({
   mode: z
     .union([
       z.literal("approve"),
@@ -936,15 +992,13 @@ export const HitlWithSchema = BaseWithSchema.extend({
   /** Form presentation hints (labels, placeholders, widgets, field order); not part of the schema. */
   ui: FormUiSchema.optional(),
   /** `mode: review` — compute a git diff at interrupt time, or pass inline before/after. */
-  diff: z
-    .object({
-      cwd: z.string().optional(),
-      base: z.string().optional(),
-      paths: z.array(z.string()).optional(),
-      before: z.string().optional(),
-      after: z.string().optional(),
-    })
-    .optional(),
+  diff: strictObject({
+    cwd: z.string().optional(),
+    base: z.string().optional(),
+    paths: z.array(z.string()).optional(),
+    before: z.string().optional(),
+    after: z.string().optional(),
+  }).optional(),
   /**
    * `approve` / `choice` / `review` — files shown to the human. Each entry is a template that
    * may render to an Artifact, an array of Artifacts, a media node's whole output
@@ -974,33 +1028,94 @@ export const HitlWithSchema = BaseWithSchema.extend({
    * rejected; then the run fails but the interrupt stays pending. Default 3.
    */
   maxResumeAttempts: z.number().int().positive().optional(),
+}).superRefine((value, ctx) => {
+  const mode = value.mode;
+  const set = (field: keyof typeof value): boolean => value[field] !== undefined;
+  const refuse = (field: string, modes: string) =>
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [field],
+      message: `hitl mode: ${mode} does not use ${field}; it applies to mode: ${modes}`,
+    });
+  if (mode === "choice" && !(value.choices && value.choices.length > 0)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["choices"], message: "hitl mode: choice needs choices: a non-empty list of answers" });
+  }
+  if (mode === "approve" && set("choices") && set("schema")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["schema"],
+      message: "hitl mode: approve takes choices or schema, not both; use mode: choice for a closed list of answers, or mode: form for a structured answer",
+    });
+  }
+  if (set("choices") && mode !== "approve" && mode !== "choice") refuse("choices", "choice (or approve)");
+  if (set("schema") && mode !== "form" && mode !== "review" && !(mode === "approve" && !set("choices"))) refuse("schema", "form or review");
+  if (set("ui") && mode !== "form" && mode !== "review") refuse("ui", "form or review");
+  if (set("diff") && mode !== "review") refuse("diff", "review");
+  if (set("decision") && mode !== "review") refuse("decision", "review");
+  if (set("routes") && (mode === "question" || mode === "form")) refuse("routes", "approve, choice or review");
+  for (const field of ["artifacts", "select"] as const) {
+    if (set(field) && (mode === "question" || mode === "form")) refuse(field, "approve, choice or review");
+  }
 });
 
 // wait node — deadline / until / signal / webhook (inbound HTTP resume)
-export const WaitWithSchema = BaseWithSchema.extend({
+export const WaitWithSchema = strictWith({
   deadline: DurationSchema.optional().describe("In-process sleep. Not durable across a restart."),
-  until: z.string().optional(),
-  signal: z.string().optional().describe("Resume only when the payload names this signal"),
+  until: z.string().regex(/\S/, "until needs a condition").optional(),
+  signal: z.string().regex(/\S/, "signal needs a name").optional().describe("Resume only when the payload names this signal"),
   timeout: DurationSchema.optional(),
   /** When set, interrupt and listen for an inbound HTTP POST to resume. */
-  webhook: z
-    .union([
-      z.literal(true),
-      z.object({ schema: ContractSchemaSchema.optional() }),
-    ])
-    .optional(),
-}).strict();
+  webhook: unionBy(
+    [z.literal(true), strictObject({ schema: ContractSchemaSchema.optional() })],
+    (data) => (data === true ? 0 : isRecord(data) ? 1 : "webhook is true, or { schema }"),
+  ).optional(),
+}).superRefine((value, ctx) => {
+  const modes = (["deadline", "until", "signal", "webhook"] as const).filter((mode) => value[mode] !== undefined);
+  if (modes.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "wait needs one of deadline, until, signal or webhook",
+    });
+    return;
+  }
+  if (modes.length > 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `wait takes one of deadline, until, signal or webhook, not several (found ${modes.join(", ")})`,
+    });
+    return;
+  }
+  if (value.deadline !== undefined && value.timeout !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["timeout"],
+      message: "a deadline wait is itself the delay, so timeout does not apply; use timeout with until, signal or webhook",
+    });
+  }
+});
 
 // mcp node — deterministic MCP tool/resource call
-export const McpWithSchema = BaseWithSchema.extend({
+export const McpWithSchema = strictWith({
   server: z.string().describe("MCP server name from mcpServers"),
-  tool: z.string().optional().describe("Tool name to call"),
-  resource: z.string().optional().describe("Resource URI to read"),
+  tool: z.string().min(1).optional().describe("Tool name to call"),
+  resource: z.string().min(1).optional().describe("Resource URI to read"),
   arguments: z.record(z.unknown()).optional().describe("Tool arguments (supports {{ }} templates)"),
+}).superRefine((value, ctx) => {
+  if ((value.tool !== undefined) === (value.resource !== undefined)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [value.tool !== undefined ? "resource" : "tool"],
+      message: value.tool !== undefined
+        ? "mcp takes tool or resource, not both"
+        : "mcp needs tool (call a tool) or resource (read a resource)",
+    });
+  } else if (value.resource !== undefined && value.arguments !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["arguments"], message: "arguments belong to a tool call; a resource read takes none" });
+  }
 });
 
 // MCP server connection (top-level mcpServers block)
-export const McpAuthSchema = z.object({
+export const McpAuthSchema = strictObject({
   type: z
     .union([z.literal("none"), z.literal("header"), z.literal("oauth2")])
     .optional()
@@ -1023,15 +1138,15 @@ export const McpAuthSchema = z.object({
   tokenStoreKey: z.string().optional(),
 });
 
-export const McpServerSchema = z.union([
-  z.object({
+export const McpServerSchema = z.discriminatedUnion("transport", [
+  strictObject({
     transport: z.literal("stdio"),
     command: z.string(),
     args: z.array(z.string()).optional(),
     env: z.record(z.string()).optional(),
     auth: McpAuthSchema.optional(),
   }),
-  z.object({
+  strictObject({
     transport: z.literal("http"),
     url: z.string(),
     headers: z.record(z.string()).optional(),
@@ -1053,18 +1168,19 @@ export const PlacementLabelSchema = z
     "Invalid placement label: use namespace:value, e.g. os:windows or app:cc5",
   );
 
-export const RunsOnObjectSchema = z
-  .object({
-    labels: z.array(PlacementLabelSchema).min(1).describe("All of these labels must match"),
-    target: z.string().min(1).optional().describe("Pin to one named target from the topology"),
-    fallback: z
-      .enum(["error", "local"])
-      .optional()
-      .describe("`local` runs the node here when no worker matches (default: error)"),
-  })
-  .strict();
+export const RunsOnObjectSchema = strictObject({
+  labels: z.array(PlacementLabelSchema).min(1).describe("All of these labels must match"),
+  target: z.string().min(1).optional().describe("Pin to one named target from the topology"),
+  fallback: z
+    .enum(["error", "local"])
+    .optional()
+    .describe("`local` runs the node here when no worker matches (default: error)"),
+});
 
-export const RunsOnSchema = z.union([z.array(PlacementLabelSchema).min(1), RunsOnObjectSchema]);
+export const RunsOnSchema = unionBy(
+  [z.array(PlacementLabelSchema).min(1), RunsOnObjectSchema],
+  (data) => (Array.isArray(data) ? 0 : isRecord(data) ? 1 : "runsOn is a list of labels, or { labels, target, fallback }"),
+);
 
 /** `runsOn` as written: a label list, or the object form. */
 export type RunsOn = z.input<typeof RunsOnSchema>;
@@ -1092,7 +1208,7 @@ export function normalizeRunsOn(value: RunsOn): NormalizedRunsOn {
 // Node spec (generic — `with` is typed per-type after resolution)
 // ---------------------------------------------------------------------------
 
-export const NodeSpecSchema = z.object({
+export const NodeSpecSchema = strictObject({
   id: z
     .string()
     .regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/, "node id must start with a letter")
@@ -1114,10 +1230,14 @@ export const NodeSpecSchema = z.object({
    * (`tools: [{ node: "<id>" }]`). Passed to the LLM as the tool's parameter schema.
    * Values land on the invoked node as `ctx._input` / `{{ input.* }}`.
    */
-  toolInput: z
-    .record(z.unknown())
-    .optional()
-    .describe("JSON Schema for agent tool-call arguments when this node is used as a tool"),
+  toolInput: DataSchemaSchema.superRefine((schema, ctx) => {
+    const type = schema["type"];
+    if (type !== undefined && type !== "object") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["type"], message: "toolInput describes the arguments object, so its type must be object" });
+    }
+  }).optional().describe(
+    "JSON Schema (draft-07) for agent tool-call arguments when this node is used as a tool. The call's arguments are checked against it before the node runs.",
+  ),
   // top-level fields for common types
   provider: z.string().optional(),
   model: z.string().optional(),
@@ -1154,25 +1274,23 @@ export const NodeSpecSchema = z.object({
     "Run this node on a machine that has all these labels (ADR-0020). Not allowed on hitl, workshop or wait.",
   ),
   when: z.string().optional().describe("Guard expression — skip node if false"),
-  on: z
-    .object({
-      error: z
-        .union([
-          z.literal("fail"),
-          z.literal("continue"),
-          z.string({
-            errorMap: (_issue, ctx) => {
-              if (ctx.data === "ignore") {
-                return { message: "on.error ignore was removed; use continue" };
-              }
-              return { message: "on.error must be fail | continue | route:<node>" };
-            },
-          }).startsWith("route:"),
-        ])
-        .optional(),
-    })
-    .optional(),
-}).strict();
+  on: strictObject({
+    error: z
+      .union([
+        z.literal("fail"),
+        z.literal("continue"),
+        z.string({
+          errorMap: (_issue, ctx) => {
+            if (ctx.data === "ignore") {
+              return { message: "on.error ignore was removed; use continue" };
+            }
+            return { message: "on.error must be fail | continue | route:<node>" };
+          },
+        }).startsWith("route:"),
+      ])
+      .optional(),
+  }).optional(),
+});
 
 /**
  * A `map` body (`with.node`): the same fields as a graph node, but `id` is
@@ -1190,7 +1308,7 @@ export const MapBodyNodeSchema = NodeSpecSchema.extend({
 // Edge spec
 // ---------------------------------------------------------------------------
 
-export const BranchSchema = z.object({
+export const BranchSchema = strictObject({
   when: z.string().optional(),
   default: z.boolean().optional(),
   to: z.string().min(1),
@@ -1204,44 +1322,48 @@ const edgeFromSchema = z.union([
   "Source node id, or a list of node ids. A list is a barrier: to runs once, after every listed source finishes.",
 );
 
-export const EdgeSpecSchema = z.union([
-  // static edge. `from` as a list compiles to one multi-source barrier.
-  z.object({
-    from: edgeFromSchema,
-    to: z.union([z.string(), z.array(z.string())]),
-  }).superRefine((edge, ctx) => {
-    if (!Array.isArray(edge.from)) return;
-    const seen = new Set<string>();
-    edge.from.forEach((id, index) => {
-      if (seen.has(id)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Duplicate node id "${id}" in from`,
-          path: ["from", index],
-        });
-        return;
-      }
-      seen.add(id);
-    });
-  }),
-  // conditional edge — each entry is when or default, and fan-out uses to: [...]
-  z.object({
-    from: z.string(),
-    branch: z.array(BranchSchema).min(1),
-  }).superRefine((edge, ctx) => {
-    edge.branch.forEach((entry, index) => {
-      const problem = guardEntryProblem(entry);
-      if (problem) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["branch", index],
-          message: `A branch entry ${problem}`,
-        });
-      }
-    });
-    oneDefault(edge.branch, ctx, ["branch"], "A branch list");
-  }),
-]);
+export const EdgeSpecSchema = keyedUnion(
+  "An edge",
+  [
+    // static edge. `from` as a list compiles to one multi-source barrier.
+    strictObject({
+      from: edgeFromSchema,
+      to: z.union([z.string(), z.array(z.string())]),
+    }).superRefine((edge, ctx) => {
+      if (!Array.isArray(edge.from)) return;
+      const seen = new Set<string>();
+      edge.from.forEach((id, index) => {
+        if (seen.has(id)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Duplicate node id "${id}" in from`,
+            path: ["from", index],
+          });
+          return;
+        }
+        seen.add(id);
+      });
+    }),
+    // conditional edge — each entry is when or default, and fan-out uses to: [...]
+    strictObject({
+      from: z.string(),
+      branch: z.array(BranchSchema).min(1),
+    }).superRefine((edge, ctx) => {
+      edge.branch.forEach((entry, index) => {
+        const problem = guardEntryProblem(entry);
+        if (problem) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["branch", index],
+            message: `A branch entry ${problem}`,
+          });
+        }
+      });
+      oneDefault(edge.branch, ctx, ["branch"], "A branch list");
+    }),
+  ],
+  ["to", "branch"],
+);
 
 export type EdgeSpec = z.infer<typeof EdgeSpecSchema>;
 
@@ -1249,27 +1371,28 @@ export type EdgeSpec = z.infer<typeof EdgeSpecSchema>;
 // Import spec
 // ---------------------------------------------------------------------------
 
-export const ImportSpecSchema = z.union([
-  z.object({ skill: z.string(), as: z.string().optional() }),
-  z.object({ agent: z.string(), as: z.string().optional() }),
-  z.object({ subgraph: z.string(), as: z.string().optional() }),
-  z.object({ nodes: z.string() }),
-  z.object({ providers: z.string() }),
-  z.object({ reducers: z.string() }),
-]);
+export const ImportSpecSchema = keyedUnion(
+  "An import",
+  [
+    strictObject({ skill: z.string(), as: z.string().optional() }),
+    strictObject({ agent: z.string(), as: z.string().optional() }),
+    strictObject({ subgraph: z.string(), as: z.string().optional() }),
+    strictObject({ nodes: z.string() }),
+    strictObject({ providers: z.string() }),
+    strictObject({ reducers: z.string() }),
+  ],
+  ["skill", "agent", "subgraph", "nodes", "providers", "reducers"],
+);
 
 // ---------------------------------------------------------------------------
 // Config block
 // ---------------------------------------------------------------------------
 
-export const ConfigSchema = z.object({
-  defaults: z
-    .object({
-      provider: z.string().optional(),
-      model: z.string().optional(),
-    })
-    .strict()
-    .optional(),
+export const ConfigSchema = strictObject({
+  defaults: strictObject({
+    provider: z.string().optional(),
+    model: z.string().optional(),
+  }).optional(),
   vars: z.record(z.unknown()).optional(),
 });
 
@@ -1286,7 +1409,7 @@ export const LangChainVendorSchema = z.enum([
   "bedrock",
 ]);
 
-export const LangChainProviderConfigSchema = z.object({
+export const LangChainProviderConfigSchema = strictObject({
   kind: z.literal("langchain"),
   vendor: LangChainVendorSchema,
   model: z.string().optional(),
@@ -1304,7 +1427,7 @@ export const ClaudePermissionModeSchema = z.enum([
   "dontAsk",
 ]);
 
-export const ClaudeProviderConfigSchema = z.object({
+export const ClaudeProviderConfigSchema = strictObject({
   kind: z.literal("claude"),
   model: z.string().optional(),
   permissionMode: ClaudePermissionModeSchema.optional(),
@@ -1315,7 +1438,7 @@ export const ClaudeProviderConfigSchema = z.object({
 
 export const CursorRuntimeSchema = z.enum(["local", "cloud"]);
 
-export const CursorProviderConfigSchema = z.object({
+export const CursorProviderConfigSchema = strictObject({
   kind: z.literal("cursor"),
   model: z.string().optional(),
   runtime: CursorRuntimeSchema.optional(),
@@ -1326,7 +1449,7 @@ export const CursorProviderConfigSchema = z.object({
 export const CliVendorSchema = z.enum(["claude", "cursor", "codex", "grok"]);
 
 /** Local agent CLI (Claude Code, Cursor CLI, Codex, Grok Build) — no API key required. */
-export const CliProviderConfigSchema = z.object({
+export const CliProviderConfigSchema = strictObject({
   kind: z.literal("cli"),
   vendor: CliVendorSchema,
   model: z.string().optional(),
@@ -1336,7 +1459,7 @@ export const CliProviderConfigSchema = z.object({
   options: z.record(z.unknown()).optional(),
 });
 
-export const DeepAgentsProviderConfigSchema = z.object({
+export const DeepAgentsProviderConfigSchema = strictObject({
   kind: z.literal("deepagents"),
   /** Inherit ChatModel from this providers.* entry (default: graph defaults.provider). */
   modelProvider: z.string().optional(),
@@ -1348,7 +1471,7 @@ export const DeepAgentsProviderConfigSchema = z.object({
  * Third-party or custom provider plugin loaded via `imports[].providers` or registered
  * in the host. `options` are validated by the plugin adapter at compile time.
  */
-export const PluginProviderConfigSchema = z.object({
+export const PluginProviderConfigSchema = strictObject({
   kind: z.literal("plugin"),
   /** Registered provider plugin name; defaults to the key under `providers:`. */
   plugin: z.string().min(1).optional(),
@@ -1371,6 +1494,11 @@ const extensionProviderKindSchemas = new Map<string, z.ZodTypeAny>();
 /** Register a provider config schema for a non-core provider kind (e.g. `kind: media`). */
 export function registerProviderKindSchema(kind: string, schema: z.ZodTypeAny): void {
   extensionProviderKindSchemas.set(kind, schema);
+}
+
+/** Config schemas registered for non-core provider kinds, by kind. */
+export function registeredProviderKindSchemas(): ReadonlyMap<string, z.ZodTypeAny> {
+  return extensionProviderKindSchemas;
 }
 
 /** Unregister a provider config schema (primarily for tests). */
@@ -1436,40 +1564,32 @@ export const MemoryBackendSchema = z.enum(["checkpoint", "memory"], {
       : { message: ctx.defaultError },
 });
 
-export const RuntimeMemorySchema = z
-  .object({
-    backend: MemoryBackendSchema.optional().default("checkpoint"),
-    subject: z
-      .object({
-        /** Subject type, e.g. incident, build, ticket. */
-        type: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/, "must match ^[a-z][a-z0-9_-]{0,63}$"),
-        /** Template rendered at run start from input/run only. */
-        key: z.string().min(1),
-        required: z.boolean().optional().default(false),
-        /** Sliding TTL, refreshed on every write to the subject. */
-        ttl: DurationSchema.optional().default("180d"),
-        /** Store sha256 of the rendered key instead of the key. */
-        hash: z.boolean().optional().default(false),
-      })
-      .strict()
-      .optional(),
-    limits: z
-      .object({
-        itemBytes: z.number().int().positive().optional(),
-        itemsPerScope: z.number().int().positive().optional(),
-        bytesPerScope: z.number().int().positive().optional(),
-        subjectsPerType: z.number().int().positive().optional(),
-        onFull: z.enum(["evict-oldest", "reject"]).optional(),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict();
+export const RuntimeMemorySchema = strictObject({
+  backend: MemoryBackendSchema.optional().default("checkpoint"),
+  subject: strictObject({
+    /** Subject type, e.g. incident, build, ticket. */
+    type: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/, "must match ^[a-z][a-z0-9_-]{0,63}$"),
+    /** Template rendered at run start from input/run only. */
+    key: z.string().min(1),
+    required: z.boolean().optional().default(false),
+    /** Sliding TTL, refreshed on every write to the subject. */
+    ttl: DurationSchema.optional().default("180d"),
+    /** Store sha256 of the rendered key instead of the key. */
+    hash: z.boolean().optional().default(false),
+  }).optional(),
+  limits: strictObject({
+    itemBytes: z.number().int().positive().optional(),
+    itemsPerScope: z.number().int().positive().optional(),
+    bytesPerScope: z.number().int().positive().optional(),
+    subjectsPerType: z.number().int().positive().optional(),
+    onFull: z.enum(["evict-oldest", "reject"]).optional(),
+  }).optional(),
+});
 
-export const CheckpointRetentionSchema = z.union([
-  z.boolean(),
-  z
-    .object({
+export const CheckpointRetentionSchema = unionBy(
+  [
+    z.boolean(),
+    strictObject({
       /** Default true. `false` keeps every checkpoint and finished thread. */
       enabled: z.boolean().optional(),
       /** Newest checkpoints kept per thread namespace. Default 40. Minimum 1. */
@@ -1501,138 +1621,113 @@ export const CheckpointRetentionSchema = z.union([
       dedupeChannels: z.boolean().optional(),
       /** `auto` VACUUMs sqlite when free pages exceed live data. Default auto. */
       vacuum: z.enum(["auto", "always", "never"]).optional(),
-    })
-    .strict(),
-]);
+    }),
+  ],
+  (data) => (typeof data === "boolean" ? 0 : isRecord(data) ? 1 : "retention is true, false, or an object of retention limits"),
+);
 
-export const RuntimeSchema = z.object({
-  checkpoint: z
-    .object({
-      enabled: z.boolean().optional().default(true),
-      backend: CheckpointBackendSchema.optional().default("memory"),
-      path: z.string().optional(),
-      /** Bound checkpoint history. Omitted means the default retention policy. */
-      retention: CheckpointRetentionSchema.optional(),
-    })
-    .strict()
-    .optional(),
+export const RuntimeSchema = strictObject({
+  checkpoint: strictObject({
+    enabled: z.boolean().optional().default(true),
+    backend: CheckpointBackendSchema.optional().default("memory"),
+    path: z.string().optional(),
+    /** Bound checkpoint history. Omitted means the default retention policy. */
+    retention: CheckpointRetentionSchema.optional(),
+  }).optional(),
   /** Scoped durable memory (see RuntimeMemorySchema). */
   memory: RuntimeMemorySchema.optional(),
   /** Embedded HTTP ingress for `wait` nodes with `webhook: true`. */
-  webhookServer: z
-    .object({
-      /** Default 8878. Use 0 for an OS-assigned ephemeral port. */
-      port: z.number().int().nonnegative().optional(),
-      /** Default 127.0.0.1. */
-      host: z.string().optional(),
-      /**
-       * Shared secret for this graph's webhook routes. When set, inbound GET/POST
-       * must send `Authorization: Bearer <token>` or `X-Flowgraph-Token: <token>`.
-       */
-      token: z.string().optional(),
-    })
-    .optional(),
+  webhookServer: strictObject({
+    /** Default 8878. Use 0 for an OS-assigned ephemeral port. */
+    port: z.number().int().nonnegative().optional(),
+    /** Default 127.0.0.1. */
+    host: z.string().optional(),
+    /**
+     * Shared secret for this graph's webhook routes. When set, inbound GET/POST
+     * must send `Authorization: Bearer <token>` or `X-Flowgraph-Token: <token>`.
+     */
+    token: z.string().optional(),
+  }).optional(),
   /**
    * Background `service` node lifecycle.
    * When terminateOnEnd is true (default), non-keepAlive services are stopped
    * when a run reaches completed/error (not on HITL interrupt/pause).
    */
-  services: z
-    .object({
-      terminateOnEnd: z.boolean().optional().default(true),
-      /** Re-spawn persisted service intents after process restart. Default false. */
-      rehydrateOnResume: z.boolean().optional().default(false),
-    })
-    .optional(),
+  services: strictObject({
+    terminateOnEnd: z.boolean().optional().default(true),
+    /** Re-spawn persisted service intents after process restart. Default false. */
+    rehydrateOnResume: z.boolean().optional().default(false),
+  }).optional(),
   /**
    * Authoritative filesystem root for providers, localTools, and shell/worktree.
    * Absolute or graph-directory-relative. Falls back to the graph file directory / `--cwd`.
    */
   workspace: z.string().optional(),
-  worktrees: z
-    .object({
-      /** Remove worktrees created this run when the graph completes (not on HITL pause). */
-      cleanupOnEnd: z.boolean().optional().default(false),
-      /**
-       * Directory worktree paths must live under (absolute or workspace-relative).
-       * Defaults to runtime.workspace.
-       */
-      root: z.string().optional(),
-    })
-    .optional(),
-  hitl: z
-    .object({
-      breakpoints: z
-        .object({
-          before: z.array(z.string()).optional(),
-          after: z.array(z.string()).optional(),
-        })
-        .optional(),
-    })
-    .strict()
-    .optional(),
+  worktrees: strictObject({
+    /** Remove worktrees created this run when the graph completes (not on HITL pause). */
+    cleanupOnEnd: z.boolean().optional().default(false),
+    /**
+     * Directory worktree paths must live under (absolute or workspace-relative).
+     * Defaults to runtime.workspace.
+     */
+    root: z.string().optional(),
+  }).optional(),
+  hitl: strictObject({
+    breakpoints: strictObject({
+      before: z.array(z.string()).optional(),
+      after: z.array(z.string()).optional(),
+    }).optional(),
+  }).optional(),
   retry: RetrySchema.optional(),
   timeoutDefault: DurationSchema.optional(),
   concurrency: z.number().int().positive().optional(),
   /** Max LangGraph supersteps before abort (graph-level loops). Default: 25. */
   recursionLimit: z.number().int().positive().optional(),
-  budget: z
-    .object({
-      maxUSD: z.number().positive().optional(),
-      maxTokens: z.number().int().positive().optional(),
-      onExceed: z.union([z.literal("interrupt"), z.literal("fail"), z.literal("warn")]).optional(),
-    })
-    .optional(),
+  budget: strictObject({
+    maxUSD: z.number().positive().optional(),
+    maxTokens: z.number().int().positive().optional(),
+    onExceed: z.union([z.literal("interrupt"), z.literal("fail"), z.literal("warn")]).optional(),
+  }).optional(),
   /** Graph-wide defaults for every agent node's `with.context`. */
   context: RuntimeContextSchema.optional(),
-  secrets: z
-    .object({
-      redact: z
-        .object({
-          patterns: z.array(z.string()).optional(),
-          headers: z.array(z.string()).optional(),
-        })
-        .optional(),
-    })
-    .strict()
-    .optional(),
+  secrets: strictObject({
+    redact: strictObject({
+      patterns: z.array(z.string()).optional(),
+      headers: z.array(z.string()).optional(),
+    }).optional(),
+  }).optional(),
   hooks: z
     .array(
-      z
-        .object({
-          on: z.string(),
-          where: z
-            .object({
-              nodeId: z.string().optional(),
-              nodeType: z.string().optional(),
-              tool: z.string().optional(),
-              channel: z.string().optional(),
-            })
-            .strict()
-            .optional(),
-          do: z.string(),
-          reason: z.string().optional(),
-        })
-        .superRefine((hook, ctx) => {
-          if (!hookEventFires(hook.on)) {
-            ctx.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["on"],
-              message: `Unknown hook event "${hook.on}".`,
-            });
-            return;
-          }
-          if (!hookVerbAllowed(hook.on, hook.do)) {
-            ctx.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["do"],
-              message: `Hook directive "${hook.do}" is not valid for ${hook.on}. ${hookVerbMessage(hook.on)}`,
-            });
-          }
-        }),
+      strictObject({
+        on: z.string(),
+        where: strictObject({
+          nodeId: z.string().optional(),
+          nodeType: z.string().optional(),
+          tool: z.string().optional(),
+          channel: z.string().optional(),
+        }).optional(),
+        do: z.string(),
+        reason: z.string().optional(),
+      }).superRefine((hook, ctx) => {
+        if (!hookEventFires(hook.on)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["on"],
+            message: `Unknown hook event "${hook.on}".`,
+          });
+          return;
+        }
+        if (!hookVerbAllowed(hook.on, hook.do)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["do"],
+            message: `Hook directive "${hook.do}" is not valid for ${hook.on}. ${hookVerbMessage(hook.on)}`,
+          });
+        }
+      }),
     )
     .optional(),
-}).strict();
+});
 
 // ---------------------------------------------------------------------------
 // Run `inputs` schema (pre-start parameters — not HITL)
@@ -1652,19 +1747,17 @@ export const InputFieldTypeSchema = z.enum(["string", "number", "boolean", "sele
  * `required`, its `default`, and (for `json`) an optional draft-07 `schema`. Presentation
  * hints live apart, under `ui`. A declared key is also a state channel the value is seeded into.
  */
-export const InputFieldSchema = z
-  .object({
-    key: z.string().min(1),
-    type: InputFieldTypeSchema.optional().default("string"),
-    required: z.boolean().optional(),
-    default: z.unknown().optional(),
-    description: z.string().optional(),
-    options: z.array(z.string()).optional(),
-    schema: DataSchemaSchema.optional().describe("JSON Schema (draft-07) the value must match; only for type: json"),
-    ui: FormFieldHintSchema.optional().describe("Presentation hints for forms (label, placeholder, help, widget); not part of the contract"),
-    label: relocatedField("input label moved to ui.label"),
-  })
-  .strict()
+export const InputFieldSchema = strictObject({
+  key: z.string().min(1),
+  type: InputFieldTypeSchema.optional().default("string"),
+  required: z.boolean().optional(),
+  default: z.unknown().optional(),
+  description: z.string().optional(),
+  options: z.array(z.string()).optional(),
+  schema: DataSchemaSchema.optional().describe("JSON Schema (draft-07) the value must match; only for type: json"),
+  ui: FormFieldHintSchema.optional().describe("Presentation hints for forms (label, placeholder, help, widget); not part of the contract"),
+  label: relocatedField("input label moved to ui.label"),
+})
   .superRefine((field, ctx) => {
     if (field.schema !== undefined && field.type !== "json") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["schema"], message: "schema is only allowed on type: json inputs" });
@@ -1676,15 +1769,13 @@ export const InputFieldSchema = z
  * contract. Declared on a subgraph file, it is checked when the subgraph returns and is the
  * only part of the child the parent can read.
  */
-export const OutputFieldSchema = z
-  .object({
-    key: z.string().min(1).describe("Channel of this graph that holds the value"),
-    type: ChannelTypeSchema.optional(),
-    schema: DataSchemaSchema.optional().describe("JSON Schema (draft-07) the value must match"),
-    required: z.boolean().optional().describe("Default true: the graph must have produced a value (not null) for this key"),
-    description: z.string().optional(),
-  })
-  .strict()
+export const OutputFieldSchema = strictObject({
+  key: z.string().min(1).describe("Channel of this graph that holds the value"),
+  type: ChannelTypeSchema.optional(),
+  schema: DataSchemaSchema.optional().describe("JSON Schema (draft-07) the value must match"),
+  required: z.boolean().optional().describe("Default true: the graph must have produced a value (not null) for this key"),
+  description: z.string().optional(),
+})
   .superRefine((field, ctx) => {
     if (!field.schema) return;
     const conflict = channelTypeConflict({ type: field.type, schema: field.schema });
@@ -1719,10 +1810,38 @@ export const SecretsSchema = z
 // Root Graph spec
 // ---------------------------------------------------------------------------
 
+/** Namespaced key of an `extensions` entry: `<vendor>.<name>`, such as `acme.review`. */
+export const EXTENSION_KEY_PATTERN = /^[a-z][a-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9_-]*)+$/;
+
+/**
+ * Data a tool or host keeps in a graph file that the engine itself does not read. The only
+ * place in a graph where keys flowgraph does not define may live: every key is
+ * namespaced (`vendor.name`), and the value is yours.
+ */
+export const ExtensionsSchema = z.record(
+  z.string().regex(EXTENSION_KEY_PATTERN, "extension keys are namespaced as <vendor>.<name>, such as acme.review"),
+  z.unknown(),
+);
+
+export const GraphRequiresSchema = strictObject({
+  engine: z
+    .string()
+    .min(1)
+    .superRefine((range, ctx) => {
+      const problem = engineRangeProblem(range);
+      if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+    })
+    .describe("Semver range of the flowgraph engine this graph needs, such as >=0.2.0 <0.4.0"),
+});
+
 export const GraphSpecObjectSchema = z.object({
   apiVersion: VersionSchema,
   kind: z.literal("Graph"),
   metadata: MetadataSchema,
+  /** What this graph needs from the host that runs it. */
+  requires: GraphRequiresSchema.optional(),
+  /** The only place for data this schema does not define. Keys are namespaced `vendor.name`. */
+  extensions: ExtensionsSchema.optional(),
   /**
    * Host-interpreted auto-start conditions (cron, startup, flow-complete, …).
    * The engine does not schedule these. Flowgraph Desktop interprets them;
@@ -1765,6 +1884,11 @@ export function registerGraphExtensionSchema(key: string, schema: z.ZodTypeAny):
 /** Unregister a top-level graph extension schema (primarily for tests). */
 export function unregisterGraphExtensionSchema(key: string): void {
   graphExtensionSchemas.delete(key);
+}
+
+/** Schemas registered for top-level graph keys beyond the core ones, by key. */
+export function registeredGraphExtensionSchemas(): ReadonlyMap<string, z.ZodTypeAny> {
+  return graphExtensionSchemas;
 }
 
 /** Known top-level graph keys (core + registered extensions), for typo suggestions. */

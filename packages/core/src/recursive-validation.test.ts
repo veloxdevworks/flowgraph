@@ -109,7 +109,7 @@ describe("inline subgraph specs are validated like the top-level graph", () => {
       { on: "intelligent:beforeStep", do: "allow", path: "on", message: 'Unknown hook event "intelligent:beforeStep".' },
     ];
     for (const hook of cases) {
-      const found = hookReports(validateSpec(graph([mapOf(body(hook))])));
+      const found = hookReports(validateSpec(graph([mapOf(body({ on: hook.on, do: hook.do }))])));
       expect(found, `${hook.on} ${hook.do}`).toEqual([
         expect.objectContaining({
           path: `nodes.m.with.node.spec.runtime.hooks[0].${hook.path}`,
@@ -580,13 +580,13 @@ describe("malformed nested graphs", () => {
       },
       {
         spec: nestedSpec({ edges: [{ from: 5, to: "y" }, { from: "y", to: "END" }] }),
-        path: `${body}.edges.0`,
-        message: "node.spec.edges.0: Invalid input",
+        path: `${body}.edges.0.from`,
+        message: "node.spec.edges.0.from: Invalid input",
       },
       {
         spec: nestedSpec({ edges: [{ from: "START", to: 5 }, { from: "y", to: "END" }] }),
-        path: `${body}.edges.0`,
-        message: "node.spec.edges.0: Invalid input",
+        path: `${body}.edges.0.to`,
+        message: "node.spec.edges.0.to: Invalid input",
       },
       {
         spec: nestedSpec({

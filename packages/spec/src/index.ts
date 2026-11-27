@@ -98,8 +98,15 @@ export {
   InputFieldSchema,
   InputFieldTypeSchema,
   OutputFieldSchema,
+  ExtensionsSchema,
+  EXTENSION_KEY_PATTERN,
+  GraphRequiresSchema,
+  strictWith,
   isError,
 } from "./schema.js";
+
+export { engineRangeProblem, engineVersionProblem } from "./engine.js";
+export { strictObject, unionBy, keyedUnion, unknownKeysMessage } from "./strict.js";
 
 export {
   HOOK_EVENTS,
@@ -143,7 +150,7 @@ export type {
   LangChainVendor,
 } from "./schema.js";
 
-export { generateJsonSchema, zodToConfigJsonSchema } from "./json-schema.js";
+export { generateJsonSchema, zodToConfigJsonSchema, GRAPH_JSON_SCHEMA_ID, type JsonSchemaOptions } from "./json-schema.js";
 
 export {
   channelContractProblem,

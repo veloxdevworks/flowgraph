@@ -5,7 +5,7 @@
  * rewrites are idempotent so running twice produces no diff.
  */
 
-import { isAlias, isMap, isSeq, parseDocument, visit, type Document, type Node, type YAMLMap } from "yaml";
+import { isAlias, isMap, isScalar, isSeq, parseDocument, visit, type Document, type Node, type YAMLMap } from "yaml";
 import { migrateDataContracts } from "./migrate-data-contracts.js";
 
 export interface MigrateResult {
@@ -232,6 +232,37 @@ function rewriteContainer(
   return rewritten;
 }
 
+const keyOf = (pair: { key: unknown }): unknown => (isScalar(pair.key) ? pair.key.value : pair.key);
+
+/**
+ * Fields older engines read past without effect and the strict schema now rejects.
+ * Removing them keeps what the graph did: an edge with `to` and `branch` followed
+ * `to`, and `timeout` on a `deadline` wait was never applied.
+ */
+function dropIgnoredFields(doc: Document, notes: string[]): boolean {
+  let changed = false;
+  visit(doc, {
+    Pair(_key, pair) {
+      if (keyOf(pair) !== "edges" || !isSeq(pair.value)) return;
+      for (const [index, edge] of pair.value.items.entries()) {
+        if (!isMap(edge) || !edge.has("to") || !edge.has("branch")) continue;
+        edge.delete("branch");
+        notes.push(`edge ${index} from "${String(edge.get("from"))}": removed "branch" (it was ignored because the edge has "to")`);
+        changed = true;
+      }
+    },
+    Map(_key, map) {
+      if (map.get("type") !== "wait") return;
+      const withMap = map.get("with", true);
+      if (!isMap(withMap) || !withMap.has("deadline") || !withMap.has("timeout")) return;
+      withMap.delete("timeout");
+      notes.push(`node "${String(map.get("id") ?? "<unnamed>")}": removed with.timeout (it was ignored with a deadline wait)`);
+      changed = true;
+    },
+  });
+  return changed;
+}
+
 export function migrateSpec(raw: string): MigrateResult {
   let output = raw;
   const notes: string[] = [];
@@ -309,9 +340,9 @@ export function migrateSpec(raw: string): MigrateResult {
   // 7. type: webhook → type: http with once: true (and method: POST if absent)
   const doc = parseDocument(output);
   if (doc.errors.length === 0 && isMap(doc.contents)) {
-    if (rewriteContainer(doc, doc.contents, notes)) {
-      output = doc.toString();
-    }
+    const webhooks = rewriteContainer(doc, doc.contents, notes);
+    const shapes = dropIgnoredFields(doc, notes);
+    if (webhooks || shapes) output = doc.toString();
   }
 
   // 8. Data-contract and agent/router provider/model migrations

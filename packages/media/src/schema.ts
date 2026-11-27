@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { BaseWithSchema } from "@flowgraph/spec";
+import { strictObject, strictWith } from "@flowgraph/spec";
 
 /** Reference input(s): a template resolving to an Artifact, a file path, or a URL. */
 const MediaInputRefSchema = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
 
-const MediaCommonWithSchema = BaseWithSchema.extend({
+const mediaCommonFields = {
   model: z.string().min(1).optional().describe("Media model override; top-level node model takes precedence"),
   prompt: z.string().optional(),
   negativePrompt: z.string().optional(),
@@ -29,9 +29,10 @@ const MediaCommonWithSchema = BaseWithSchema.extend({
       });
     })
     .optional(),
-});
+};
 
-export const ImageWithSchema = MediaCommonWithSchema.extend({
+export const ImageWithSchema = strictWith({
+  ...mediaCommonFields,
   prompt: z.string().min(1, "image: prompt is required"),
   count: z.number().int().min(1).max(10).optional().default(1),
   size: z.string().optional().describe('Pixel size such as "1024x1024"'),
@@ -39,7 +40,8 @@ export const ImageWithSchema = MediaCommonWithSchema.extend({
   quality: z.string().optional(),
 });
 
-export const VideoWithSchema = MediaCommonWithSchema.extend({
+export const VideoWithSchema = strictWith({
+  ...mediaCommonFields,
   count: z.number().int().min(1).max(4).optional().default(1),
   duration: z.number().positive().optional().describe("Clip length in seconds"),
   aspectRatio: z.string().optional(),
@@ -52,7 +54,8 @@ export const VideoWithSchema = MediaCommonWithSchema.extend({
 
 export const Model3dFormatSchema = z.enum(["glb", "gltf", "fbx", "obj", "usdz", "stl", "3mf"]);
 
-export const Model3dWithSchema = MediaCommonWithSchema.extend({
+export const Model3dWithSchema = strictWith({
+  ...mediaCommonFields,
   mode: z
     .enum(["text", "image", "multiview"])
     .optional()
@@ -69,7 +72,8 @@ export const Model3dWithSchema = MediaCommonWithSchema.extend({
 
 export const AudioKindSchema = z.enum(["speech", "sfx", "music"]);
 
-export const AudioWithSchema = MediaCommonWithSchema.extend({
+export const AudioWithSchema = strictWith({
+  ...mediaCommonFields,
   kind: AudioKindSchema.describe(
     "speech = voice reading `text`; sfx = sound effect from `prompt`; music = song/score from `prompt` (and optional `text` lyrics)",
   ),
@@ -92,7 +96,7 @@ export const AudioWithSchema = MediaCommonWithSchema.extend({
   }
 });
 
-export const MediaProviderConfigSchema = z.object({
+export const MediaProviderConfigSchema = strictObject({
   kind: z.literal("media"),
   vendor: z.string().min(1),
   model: z.string().optional(),

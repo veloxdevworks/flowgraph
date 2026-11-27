@@ -1,16 +1,33 @@
 import { z } from "zod";
-import { BaseWithSchema, DurationSchema } from "@flowgraph/spec";
+import { DurationSchema, keyedUnion, strictObject, strictWith } from "@flowgraph/spec";
 
-export const ServiceReadySchema = z.union([
-  z.object({ port: z.union([z.number().int().positive(), z.string().min(1)]) }),
-  z.object({
-    url: z.string(),
-    status: z.array(z.number()).optional(),
-  }),
-  z.object({ log: z.string() }).describe("Regex matched against combined stdout+stderr"),
-]);
+export const ServiceReadySchema = keyedUnion(
+  "ready",
+  [
+    strictObject({ port: z.union([z.number().int().positive(), z.string().min(1)]) }),
+    strictObject({
+      url: z.string(),
+      status: z.array(z.number()).optional(),
+    }),
+    strictObject({ log: z.string() }).describe("Regex matched against combined stdout+stderr"),
+  ],
+  ["port", "url", "log"],
+);
 
-export const ServiceWithSchema = BaseWithSchema.extend({
+const START_ONLY_FIELDS = [
+  "command",
+  "args",
+  "cwd",
+  "env",
+  "ready",
+  "readyTimeout",
+  "readyInterval",
+  "stopSignal",
+  "stopTimeout",
+  "keepAlive",
+] as const;
+
+export const ServiceWithSchema = strictWith({
   name: z.string().min(1).describe("Stable service id within a run/thread"),
   action: z
     .union([
@@ -36,12 +53,24 @@ export const ServiceWithSchema = BaseWithSchema.extend({
     .describe("When true, skip auto-stop at run end regardless of runtime.services.terminateOnEnd"),
 }).superRefine((val, ctx) => {
   const action = val.action ?? "start";
-  if ((action === "start" || action === "restart") && !val.command?.trim()) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "service: command is required when action is start or restart",
-      path: ["command"],
-    });
+  if (action === "start" || action === "restart") {
+    if (!val.command?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "service: command is required when action is start or restart",
+        path: ["command"],
+      });
+    }
+    return;
+  }
+  for (const field of START_ONLY_FIELDS) {
+    if (val[field] !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field],
+        message: `service action: ${action} does not use ${field}; it only applies when a service is started or restarted`,
+      });
+    }
   }
 });
 

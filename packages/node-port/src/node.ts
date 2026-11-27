@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { BaseWithSchema } from "@flowgraph/spec";
+import { strictWith } from "@flowgraph/spec";
 import { renderDeep } from "@flowgraph/expr";
 import {
   applyOutput,
@@ -11,7 +11,7 @@ import {
 } from "@flowgraph/core";
 import { findFreePorts } from "./port.js";
 
-export const PortWithSchema = BaseWithSchema.extend({
+export const PortWithSchema = strictWith({
   count: z.number().int().positive().optional().default(1),
   preferred: z
     .union([z.number().int().positive(), z.array(z.number().int().positive())])

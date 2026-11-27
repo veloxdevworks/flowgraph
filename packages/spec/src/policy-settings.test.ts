@@ -42,8 +42,8 @@ describe("retry and timeout have one canonical place", () => {
     expect(d).toHaveLength(1);
     expect(d[0]).toMatchObject({
       severity: "error",
-      code: "SCHEMA_ERROR",
-      path: "config.defaults",
+      code: "UNKNOWN_FIELD",
+      path: "config.defaults.retry",
     });
     expect(d[0]!.message).toContain("retry");
   });
@@ -53,8 +53,8 @@ describe("retry and timeout have one canonical place", () => {
     expect(d).toHaveLength(1);
     expect(d[0]).toMatchObject({
       severity: "error",
-      code: "SCHEMA_ERROR",
-      path: "config.defaults",
+      code: "UNKNOWN_FIELD",
+      path: "config.defaults.timeout",
     });
     expect(d[0]!.message).toContain("timeout");
   });

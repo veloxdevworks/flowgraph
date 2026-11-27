@@ -1,10 +1,11 @@
 import { z } from "zod";
+import { strictObject } from "@flowgraph/spec";
 
 /**
  * Front-matter for a reusable agent definition (AGENT.md).
  * Prompt-only for v1 — the markdown body is the system prompt.
  */
-export const AgentFrontMatterSchema = z.object({
+export const AgentFrontMatterSchema = strictObject({
   apiVersion: z.literal("flowgraph/v1").optional(),
   kind: z.literal("Agent").optional(),
   name: z.string().min(1),

@@ -14,7 +14,7 @@ import type { Diagnostic, GraphSpec, NodeSpec, OutputMapping } from "@flowgraph/
 import { applyOutput } from "./runtime/apply-output.js";
 import {mkdir, realpath} from "node:fs/promises";
 import { walkNodes } from "./discover-skills.js";
-import { MapWithSchema } from "@flowgraph/spec";
+import { MapWithSchema, contractErrors } from "@flowgraph/spec";
 import { evalGuard, guardExpression, renderDeep } from "@flowgraph/expr";
 import { registry, type NodeFactory, type NodeRegistry } from "./registry.js";
 import { InputValidationError, resolveGraphInput } from "./inputs.js";
@@ -2007,6 +2007,13 @@ async function assembleCompiledLangGraph(
     if (!target) throw new Error(`node-as-tool: no node "${id}" in this graph.`);
     // Model-chosen arguments become the node's input (and a subgraph's input state).
     const toolArgs = withoutReservedKeys(args ?? {});
+    const toolInput = spec.nodes.find((n) => n.id === id)?.toolInput;
+    if (toolInput) {
+      const problem = contractErrors(toolArgs, toolInput);
+      if (problem) {
+        throw Object.assign(new Error(`node-as-tool "${id}": arguments do not match its toolInput schema: ${problem}`), { code: "TOOL_INPUT_INVALID" });
+      }
+    }
     const childCtx = {
       ...ctx,
       nodeId: id,

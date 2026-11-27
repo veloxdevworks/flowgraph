@@ -32,11 +32,38 @@ function assertUntrustedProvider(name: string, cfg: { vendor?: unknown; baseUrl?
   }
 }
 
+/**
+ * Every provider restriction for an untrusted author, checked before any adapter
+ * is built (or replaced by the mock provider for a dry run), so a graph is refused
+ * the same way whether or not it will call a model.
+ */
+function assertUntrustedProviders(spec: GraphSpec): void {
+  const langchain = new Set<string>();
+  for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
+    const kind = (cfg as { kind?: string }).kind;
+    if (kind === "media" || kind === "langchain") {
+      assertUntrustedProvider(name, cfg as Record<string, unknown>);
+      if (kind === "langchain") langchain.add(name);
+    } else if (kind === "plugin") {
+      throw new ServerRequestError(
+        403,
+        "PROVIDER_PLUGIN_BLOCKED",
+        `Provider "${name}": kind: plugin is not allowed for untrusted graph uploads.`,
+      );
+    }
+  }
+  const defaultName = spec.config?.defaults?.provider;
+  if (defaultName && !langchain.has(defaultName) && isKnownLangChainVendor(defaultName)) {
+    assertUntrustedProvider(defaultName, { vendor: defaultName });
+  }
+}
+
 export async function buildServerProviders(
   spec: GraphSpec,
   cwd = process.cwd(),
   opts: { dryRun?: boolean; untrusted?: boolean } = {},
 ): Promise<ProviderAdapter[]> {
+  if (opts.untrusted) assertUntrustedProviders(spec);
   if (opts.dryRun) {
     return [mockProvider];
   }
@@ -44,27 +71,15 @@ export async function buildServerProviders(
   const built = new Set<string>();
 
   for (const [name, cfg] of Object.entries(spec.providers ?? {})) {
-    if ((cfg as { kind?: string }).kind === "media") {
-      // Built by compileGraph (media providers are not agent providers), but
-      // an untrusted author's endpoint settings are still refused here.
-      if (opts.untrusted) assertUntrustedProvider(name, cfg as Record<string, unknown>);
-      continue;
-    }
+    // Built by compileGraph: media providers are not agent providers.
+    if ((cfg as { kind?: string }).kind === "media") continue;
     switch (cfg.kind) {
       case "langchain": {
-        if (opts.untrusted) assertUntrustedProvider(name, cfg);
         providers.push(await createLangChainProviderFromConfig(name, cfg, { cwd, secrets: spec.secrets }));
         built.add(name);
         break;
       }
       case "plugin": {
-        if (opts.untrusted) {
-          throw new ServerRequestError(
-            403,
-            "PROVIDER_PLUGIN_BLOCKED",
-            `Provider "${name}": kind: plugin is not allowed for untrusted graph uploads.`,
-          );
-        }
         // Resolved and options-validated per compile by compileGraph against server-registered plugins.
         break;
       }
@@ -84,7 +99,6 @@ export async function buildServerProviders(
 
   const defaultName = spec.config?.defaults?.provider;
   if (defaultName && !built.has(defaultName) && isKnownLangChainVendor(defaultName)) {
-    if (opts.untrusted) assertUntrustedProvider(defaultName, { vendor: defaultName });
     const model = spec.config?.defaults?.model;
     providers.push(
       await createLangChainProviderFromConfig(

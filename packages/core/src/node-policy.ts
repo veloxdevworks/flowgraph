@@ -23,7 +23,9 @@ export interface NodePolicy {
    * `capabilities.hostAccess === false`. Any other type (including newly
    * registered plugins or packages) is refused with NODE_TYPE_BLOCKED.
    * Also implies `blockHostExec` so node features such as workshop or hitl
-   * review git diffs cannot execute host programs.
+   * review git diffs cannot execute host programs, and `blockImports`: an
+   * imported plugin could otherwise register a node type that marks itself
+   * `hostAccess: false` and pass the allowlist.
    */
   requireSafeNodeTypes?: boolean | undefined;
   /** Refuse subgraph `uses` references, which load graph files from the host's disk. Inline `spec` is allowed. */
@@ -296,7 +298,7 @@ export function assertInboundWebhookAllowed(policy: NodePolicy | undefined, wher
  * before anything is loaded.
  */
 export function assertImportsAllowed(policy: NodePolicy | undefined, spec: unknown, where: string): void {
-  if (!policy?.blockImports) return;
+  if (!policy?.blockImports && !policy?.requireSafeNodeTypes) return;
   const visit = (graph: unknown, at: string, depth: number): void => {
     if (!graph || typeof graph !== "object" || depth > 32) return;
     const g = graph as { imports?: unknown; nodes?: unknown };

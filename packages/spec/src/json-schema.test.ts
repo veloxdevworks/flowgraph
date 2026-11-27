@@ -1,6 +1,7 @@
 import { Ajv } from "ajv";
 import { describe, expect, it, vi } from "vitest";
 import { generateJsonSchema, GraphSpecSchema, MapBodyNodeSchema } from "./index.js";
+import { AgentWithSchema, HttpWithSchema, McpWithSchema, ScriptWithSchema, ShellWithSchema, WaitWithSchema } from "./schema.js";
 import { GRAPH_JSON_SCHEMA_ID } from "./json-schema.js";
 
 const head = { apiVersion: "flowgraph/v1", kind: "Graph" } as const;
@@ -53,11 +54,12 @@ describe("published Graph JSON Schema", () => {
 
   it("uses recursive definitions for nodes, inline subgraph specs and map bodies", () => {
     const schema = generateJsonSchema() as { definitions: Record<string, { properties: Record<string, unknown> }> };
-    expect(Object.keys(schema.definitions).sort()).toEqual(["GraphSpec", "MapBodyNode", "NodeSpec"]);
+    expect(Object.keys(schema.definitions).filter((name) => !name.startsWith("With-")).sort()).toEqual(["GraphSpec", "MapBodyNode", "NodeSpec"]);
     expect(schema.definitions.GraphSpec!.properties.nodes).toEqual({ type: "array", items: { $ref: "#/definitions/NodeSpec" } });
     expect(schema.definitions.NodeSpec!.properties.spec).toMatchObject({ $ref: "#/definitions/GraphSpec" });
     expect(schema.definitions.MapBodyNode!.properties.spec).toMatchObject({ $ref: "#/definitions/GraphSpec" });
-    expect(JSON.stringify(schema.definitions.NodeSpec)).toContain('"$ref":"#/definitions/MapBodyNode"');
+    expect(schema.definitions["With-map"]!.properties.node).toMatchObject({ $ref: "#/definitions/MapBodyNode" });
+    expect(JSON.stringify(schema.definitions.NodeSpec)).toContain('"$ref":"#/definitions/With-map"');
   });
 
   it("drops relocated settings that the Zod schema rejects", () => {
@@ -103,6 +105,41 @@ describe("published Graph JSON Schema", () => {
       const zod = GraphSpecSchema.safeParse(sample).success;
       const nestedZod = zod && nestedBodiesParse(sample);
       expect({ name, json: validate(sample) }).toEqual({ name, json: nestedZod });
+    }
+  });
+
+  it("agrees with the Zod schemas on each node type's `with` block", () => {
+    const validate = compile();
+    const zodWith: Record<string, { safeParse: (value: unknown) => { success: boolean } }> = {
+      agent: AgentWithSchema,
+      http: HttpWithSchema,
+      mcp: McpWithSchema,
+      script: ScriptWithSchema,
+      shell: ShellWithSchema,
+      wait: WaitWithSchema,
+    };
+    const samples: Array<[string, string, Record<string, unknown> | undefined]> = [
+      ["shell", "shell", { command: "echo" }],
+      ["shell with a typo", "shell", { command: "echo", timeot: 3 }],
+      ["shell without a command", "shell", {}],
+      ["shell without a with", "shell", undefined],
+      ["agent", "agent", { prompt: "hi" }],
+      ["agent with a typo", "agent", { promt: "hi" }],
+      ["http", "http", { url: "https://example.com" }],
+      ["http with a typo", "http", { url: "https://example.com", mehtod: "GET" }],
+      ["wait on a deadline", "wait", { deadline: "5s" }],
+      ["wait with nothing", "wait", {}],
+      ["wait with two modes", "wait", { deadline: "5s", signal: "go" }],
+      ["mcp tool", "mcp", { server: "s", tool: "t" }],
+      ["mcp tool and resource", "mcp", { server: "s", tool: "t", resource: "r" }],
+      ["mcp neither", "mcp", { server: "s" }],
+      ["script with code", "script", { code: "1" }],
+      ["script with code and file", "script", { code: "1", file: "a.js" }],
+    ];
+    for (const [name, type, withBlock] of samples) {
+      const zod = zodWith[type]!.safeParse(withBlock ?? {}).success;
+      const node = { id: "n", type, ...(withBlock ? { with: withBlock } : {}) };
+      expect({ name, json: validate(graph([node])) }).toEqual({ name, json: zod });
     }
   });
 });

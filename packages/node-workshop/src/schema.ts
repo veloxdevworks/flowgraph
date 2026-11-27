@@ -1,28 +1,28 @@
 import { z } from "zod";
-import { BaseWithSchema, ContractSchemaSchema, FormUiSchema } from "@flowgraph/spec";
+import { ContractSchemaSchema, FormUiSchema, strictObject, strictWith } from "@flowgraph/spec";
 
 export const WorkshopAgendaItemSchema = z.union([
   z.string(),
-  z.object({
+  strictObject({
     id: z.string().optional(),
     title: z.string(),
     description: z.string().optional(),
   }),
 ]);
 
-export const WorkshopVoiceSchema = z.object({
+export const WorkshopVoiceSchema = strictObject({
   /** Voice provider key: xai | openai */
   provider: z.string().optional(),
   model: z.string().optional(),
   voice: z.string().optional(),
 });
 
-export const WorkshopLimitsSchema = z.object({
+export const WorkshopLimitsSchema = strictObject({
   maxMinutes: z.number().positive().optional(),
   maxTurns: z.number().int().positive().optional(),
 });
 
-export const WorkshopWithSchema = BaseWithSchema.extend({
+export const WorkshopWithSchema = strictWith({
   /** Interrupt reason / opening recap shown to the human. */
   message: z.string().optional(),
   /**
@@ -43,8 +43,7 @@ export const WorkshopWithSchema = BaseWithSchema.extend({
   facilitator: z.string().optional(),
   voice: WorkshopVoiceSchema.optional(),
   /** Optional git diff at interrupt time (same shape as hitl). */
-  diff: z
-    .object({
+  diff: strictObject({
       cwd: z.string().optional(),
       base: z.string().optional(),
       paths: z.array(z.string()).optional(),

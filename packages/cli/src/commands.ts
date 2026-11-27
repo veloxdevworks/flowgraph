@@ -3,8 +3,8 @@ import { Command } from "commander";
 import pc from "picocolors";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, hostSupportDiagnostics, compileGraph, consoleSink, loadGraphImports, readGraphImportAliases, withUnresolvedImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, decodeCliInput, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
-import { isError, generateJsonSchema, type Diagnostic } from "@flowgraph/spec";
+import { registry, graphEdges, loadGraph, readThreadWorkspace, resolveGraphWorkspace, validateSpec, memoryHostDiagnostics, hostSupportDiagnostics, compileGraph, consoleSink, loadGraphImports, readGraphImportAliases, withUnresolvedImports, preflightGraphSkills, preflightGraphAgents, preflightGraphRequires, closeWebhookServers, PlacementUnsatisfiedError, decodeCliInput, resolveGraphInput, isInputValidationError, type RunOptions, type ResumeOptions, type InterruptInfo, type RunResult } from "@flowgraph/core";
+import { isError, generateJsonSchema, type Diagnostic, type JsonSchemaOptions } from "@flowgraph/spec";
 import { buildRecoveryCommand } from "./recovery-command.js";
 import { buildMediaCommand } from "./media-command.js";
 import {buildReplayCommand} from "./replay-command.js";
@@ -753,7 +753,12 @@ program
   .description("Print the flowgraph Graph JSON Schema (for editor autocomplete)")
   .option("--out <file>", "Write to a file instead of stdout")
   .action(async (opts: { out?: string }) => {
-    const schema = generateJsonSchema();
+    const nodeTypes: NonNullable<JsonSchemaOptions["nodeTypes"]> = {};
+    for (const type of registry.types()) {
+      const configSchema = registry.get(type)?.configSchema;
+      if (configSchema) nodeTypes[type] = configSchema;
+    }
+    const schema = generateJsonSchema({ nodeTypes });
     const json = JSON.stringify(schema, null, 2);
     if (opts.out) {
       const dest = path.resolve(process.cwd(), opts.out);

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { BaseWithSchema, DurationSchema } from "@flowgraph/spec";
+import { DurationSchema, strictObject, strictWith } from "@flowgraph/spec";
 
 const DemoHttpMethodSchema = z.union([
   z.literal("GET"),
@@ -9,31 +9,30 @@ const DemoHttpMethodSchema = z.union([
   z.literal("DELETE"),
 ]);
 
-const DemoExpectSchema = z
-  .object({ status: z.array(z.number().int()).min(1) })
+const DemoExpectSchema = strictObject({ status: z.array(z.number().int()).min(1) })
   .optional()
   .describe("HTTP statuses that count as success (default: any status below 400)");
 
 export const DemoStatusSchema = z.enum(["passed", "failed", "inconclusive", "not_captured"]);
 
 const DemoStepCheckSchema = z.union([
-  z.object({ text: z.string().min(1).describe("This text is visible on the page") }).strict(),
-  z.object({ visible: z.string().min(1).describe("An element matching this selector is visible") }).strict(),
-  z.object({ url: z.string().min(1).describe("The page URL matches this glob") }).strict(),
-  z.object({ hidden: z.string().min(1).describe("No element matching this selector is visible") }).strict(),
+  strictObject({ text: z.string().min(1).describe("This text is visible on the page") }),
+  strictObject({ visible: z.string().min(1).describe("An element matching this selector is visible") }),
+  strictObject({ url: z.string().min(1).describe("The page URL matches this glob") }),
+  strictObject({ hidden: z.string().min(1).describe("No element matching this selector is visible") }),
 ]);
 
 export const DemoStepSchema = z.union([
-  z.object({ goto: z.string().min(1) }).strict(),
-  z.object({ click: z.string().min(1) }).strict(),
-  z.object({ fill: z.object({ selector: z.string().min(1), value: z.string() }).strict() }).strict(),
-  z.object({ press: z.string().min(1) }).strict(),
-  z.object({ wait: z.string().min(1).describe("CSS selector or a duration") }).strict(),
-  z.object({ screenshot: z.string().min(1).describe("Name of a screenshot to save") }).strict(),
-  z.object({ expect: DemoStepCheckSchema }).strict(),
+  strictObject({ goto: z.string().min(1) }),
+  strictObject({ click: z.string().min(1) }),
+  strictObject({ fill: strictObject({ selector: z.string().min(1), value: z.string() }) }),
+  strictObject({ press: z.string().min(1) }),
+  strictObject({ wait: z.string().min(1).describe("CSS selector or a duration") }),
+  strictObject({ screenshot: z.string().min(1).describe("Name of a screenshot to save") }),
+  strictObject({ expect: DemoStepCheckSchema }),
 ]);
 
-export const DemoWithSchema = BaseWithSchema.extend({
+export const DemoWithSchema = strictWith({
   strict: z
     .boolean()
     .optional()
@@ -44,13 +43,10 @@ export const DemoWithSchema = BaseWithSchema.extend({
     .min(1)
     .optional()
     .describe("The claim this capture is evidence for. Only `steps` with a positive assertion can reach `passed`"),
-  target: z
-    .object({
-      web: z
-        .object({
+  target: strictObject({
+      web: strictObject({
           url: z.string().min(1).describe("Where the flow starts"),
-          viewport: z
-            .object({
+          viewport: strictObject({
               width: z.number().int().positive(),
               height: z.number().int().positive(),
             })
@@ -58,10 +54,8 @@ export const DemoWithSchema = BaseWithSchema.extend({
           expect: DemoExpectSchema,
           timeout: DurationSchema.optional().describe("Limit for the whole flow (default 2m)"),
           stepTimeout: DurationSchema.optional().describe("Limit for each step (default 30s)"),
-        })
-        .strict(),
+        }),
     })
-    .strict()
     .optional()
     .describe("What `steps` run against"),
   steps: z
@@ -69,15 +63,12 @@ export const DemoWithSchema = BaseWithSchema.extend({
     .min(1)
     .optional()
     .describe("Scripted flow. Always recorded, and always ends with a screenshot"),
-  expect: z
-    .object({
+  expect: strictObject({
       noConsoleErrors: z.boolean().optional().describe("No console error or uncaught page error during the flow"),
     })
-    .strict()
     .optional()
     .describe("Checks over the whole `steps` flow"),
-  http: z
-    .object({
+  http: strictObject({
       method: DemoHttpMethodSchema.default("GET"),
       url: z.string(),
       headers: z.record(z.string()).optional(),
@@ -86,8 +77,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
       timeout: DurationSchema.optional().describe("Give up after this long (default 30s)"),
     })
     .optional(),
-  screenshot: z
-    .object({
+  screenshot: strictObject({
       url: z.string(),
       waitFor: z
         .union([z.string(), DurationSchema])
@@ -95,8 +85,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
         .describe("CSS selector or a duration to wait before capture"),
       video: z.boolean().optional(),
       expect: DemoExpectSchema,
-      viewport: z
-        .object({
+      viewport: strictObject({
           width: z.number().int().positive(),
           height: z.number().int().positive(),
         })
@@ -104,8 +93,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
       timeout: DurationSchema.optional(),
     })
     .optional(),
-  video: z
-    .object({
+  video: strictObject({
       url: z.string(),
       duration: DurationSchema.optional().describe("How long to keep recording after `waitFor` (default 5s)"),
       expect: DemoExpectSchema,
@@ -113,8 +101,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
         .union([z.string(), DurationSchema])
         .optional()
         .describe("CSS selector or a duration to wait before `duration` starts. The recording includes the page load and this wait"),
-      viewport: z
-        .object({
+      viewport: strictObject({
           width: z.number().int().positive(),
           height: z.number().int().positive(),
         })
@@ -123,8 +110,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
       scroll: z.boolean().optional().describe("Slow-scroll the page during recording"),
     })
     .optional(),
-  simulator: z
-    .object({
+  simulator: strictObject({
       platform: z.union([z.literal("ios"), z.literal("android")]),
       device: z.string().optional().describe("iOS: simulator name or UDID. Android: adb serial (e.g. emulator-5554) of a running device"),
       app: z.string().optional().describe("Bundle id / package to launch"),
@@ -136,8 +122,7 @@ export const DemoWithSchema = BaseWithSchema.extend({
       ),
     })
     .optional(),
-  file: z
-    .object({
+  file: strictObject({
       path: z.string(),
     })
     .optional(),

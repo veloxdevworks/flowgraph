@@ -109,7 +109,7 @@ it("uses separate media journals and artifact paths for two mapped nodes", async
     type: "map",
     with: {
       over: "{{ ['same'] }}",
-      node: { type: "image", with: { provider: "qa-media", prompt: "same" } },
+      node: { type: "image", provider: "qa-media", with: { prompt: "same" } },
       collect: { to: "results" },
     },
   });

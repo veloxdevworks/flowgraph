@@ -20,12 +20,11 @@ apiVersion: flowgraph/v1
 kind: Skill
 name: needs-secret
 version: 0.1.0
-kind_of: command
+kindOf: command
 command: ["echo", "ok"]
 env:
   vars:
     - name: FLOWGRAPH_TEST_REQUIRED_SECRET
-      required: true
 ---
 `,
   );

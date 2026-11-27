@@ -32,22 +32,21 @@ describe("skill kinds", () => {
     }
   });
 
-  it("validates timeout as a duration and omits removed unread fields", () => {
+  it("validates timeout as a duration and rejects removed unread fields", () => {
     expect(SkillFrontMatterSchema.safeParse({ ...base, timeout: "5s" }).success).toBe(true);
     expect(SkillFrontMatterSchema.safeParse({ ...base, timeout: "forever" }).success).toBe(false);
-    const parsed = SkillFrontMatterSchema.parse({
-      ...base,
-      sideEffecting: true,
-      permissions: ["fs:read"],
-      provider: "claude",
-      env: { network: true, packages: ["jq"], bin: [{ name: "git", minVersion: "2.0" }] },
-    });
-    expect("sideEffecting" in parsed).toBe(false);
-    expect("permissions" in parsed).toBe(false);
-    expect("provider" in parsed).toBe(false);
-    expect("network" in (parsed.env ?? {})).toBe(false);
-    expect("packages" in (parsed.env ?? {})).toBe(false);
-    expect("minVersion" in (parsed.env?.bin?.[0] ?? {})).toBe(false);
+    for (const removed of [
+      { sideEffecting: true },
+      { permissions: ["fs:read"] },
+      { provider: "claude" },
+      { env: { network: true } },
+      { env: { packages: ["jq"] } },
+      { env: { bin: [{ name: "git", minVersion: "2.0" }] } },
+    ]) {
+      const result = SkillFrontMatterSchema.safeParse({ ...base, ...removed });
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result.error?.issues)).toContain("Unknown field");
+    }
   });
 });
 

@@ -55,7 +55,7 @@ describe("output mapping forms", () => {
 
   it("keeps the general message for other invalid values", () => {
     expect(messages("nothing")[0]).toContain('expected "none"');
-    expect(messages({ map: { a: ["x"] } })[0]).toContain('expected "none"');
+    expect(messages({ map: { a: ["x"] } })[0]).toContain("Use an expression string");
   });
 });
 

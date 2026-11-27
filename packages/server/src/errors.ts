@@ -33,8 +33,13 @@ export function refusalOf(err: unknown): { status: number; code: string; diagnos
     };
   }
   if (err instanceof NodePolicyError) return { status: 403, code: err.code };
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && BAD_REQUEST_CODES.has(code)) return { status: 400, code };
   return undefined;
 }
+
+/** Engine errors that mean the submitted graph is wrong, not that the server failed. */
+const BAD_REQUEST_CODES: ReadonlySet<string> = new Set(["PROVIDER_PLUGIN_NOT_FOUND"]);
 
 /**
  * The graph store could not be written or read (disk full, permissions, an

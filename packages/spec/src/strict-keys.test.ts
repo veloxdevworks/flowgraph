@@ -86,12 +86,12 @@ describe("unknown keys are rejected (UNKNOWN_FIELD)", () => {
     expect(d[0]!.code).toBe("SCHEMA_ERROR");
   });
 
-  it("does not make metadata or with stricter", () => {
-    const spec = base({
-      metadata: { name: "g", extra: 1 },
-      nodes: [{ id: "n", type: "shell", with: { anything: 1 } }],
-    });
-    expect(GraphSpecSchema.safeParse(spec).success).toBe(true);
+  it("rejects unknown keys in metadata, with a suggestion", () => {
+    const d = diags(base({ metadata: { name: "g", descripton: "x" } }));
+    expect(d).toEqual([
+      expect.objectContaining({ code: "UNKNOWN_FIELD", path: "metadata.descripton" }),
+    ]);
+    expect(d[0]!.message).toContain('did you mean "description"?');
   });
 });
 
